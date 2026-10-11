@@ -467,6 +467,14 @@ struct RuleToml {
     /// ceiling — the rule's severity is whatever the floor/calibration pipeline produces.
     #[serde(default)]
     max_severity: Option<String>,
+    /// A FLOOR on the severity this rule may ever export, e.g. `"high"` — see
+    /// [`Rule::min_severity`]'s doc comment and W5-Q2's ruling
+    /// (`docs/plans/2026-10-09_audit-findings-tracker.md`: *"Floor, it's the minimum
+    /// rating."*). Same free-form lowercase severity vocabulary as `max_severity`, for the
+    /// same reason. `None` (the overwhelming majority of rules) means no floor — the rule's
+    /// severity is whatever the calibration pipeline produces.
+    #[serde(default)]
+    min_severity: Option<String>,
     /// A5.2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): the severity ceiling for a
     /// CONSISTENCY DEVIATION reported under this rule — see [`Rule::deviation_ceiling`]'s doc
     /// comment. Same free-form lowercase severity vocabulary as `max_severity`. `None` (the
@@ -726,6 +734,40 @@ pub struct Rule {
     /// `camerata_server::report_export::clamp_to_rule_max_severity`, which reuses that crate's
     /// own `severity_rank`/`normalize_severity` rather than duplicating the vocabulary here.
     pub max_severity: Option<String>,
+    /// A FLOOR on the severity this rule may ever export — the structured mirror of
+    /// [`Rule::max_severity`], and the whole of workstream W8.
+    ///
+    /// # Why this field exists (W5-Q2, ruled 2026-10-11)
+    ///
+    /// Roughly two dozen corpus rules state a severity for their own failure mode in prose
+    /// ("Flag as high severity: …", "emit a medium-severity finding", "Severity is High.").
+    /// W5 deliberately did not transcribe any of them into [`Rule::max_severity`], because
+    /// that phrasing is ambiguous between an upper bound and a minimum, and over-reach on a
+    /// ceiling silently caps real findings with nothing to catch it. The owner settled it:
+    ///
+    /// > **"Floor, it's the minimum rating."**
+    ///
+    /// So "Flag as high severity: …" means **at least high**, and calibration may still raise
+    /// it. Before this field the only floor in the engine was the D5
+    /// `ai_audit::severity_calibration_floor`, which decides severity by scanning the MODEL'S
+    /// ENGLISH PROSE against a phrase table (finding C7) — so these rules authored a minimum
+    /// the pipeline could not read, which is finding C8 restated for floors.
+    ///
+    /// # Semantics
+    ///
+    /// `report_export`'s severity pipeline RAISES a finding's severity up to this value when
+    /// the finding's own severity ranks below it; it never LOWERS a severity that already
+    /// ranks at or above it. `None` (the overwhelming majority of rules) means no floor. Same
+    /// free-form lowercase vocabulary as `max_severity`
+    /// (`"critical"`/`"high"`/`"medium"`/`"low"`/`"info"`); the raise itself is applied in
+    /// `camerata_server::report_export::raise_to_rule_min_severity`.
+    ///
+    /// Two asymmetries with the ceiling are deliberate and documented at the raise site:
+    /// the floor applies only to an ACCUSING [`FindingKind`](camerata_api_types) (defect /
+    /// deviation), never to an informational row and never to a row whose kind is absent; and
+    /// it is applied BEFORE every downstream integrity downgrade and ceiling, so neither the
+    /// null-location safety net nor `max_severity` can be defeated by an authored floor.
+    pub min_severity: Option<String>,
     /// A5.2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): the severity ceiling for a
     /// CONSISTENCY DEVIATION (`FindingKind::Deviation`) reported under this rule. Deviations
     /// cap at `"medium"` BY DEFAULT — the cost of inconsistency is forward drift on future
@@ -1046,6 +1088,7 @@ pub fn bare_rule(id: &str, domain: &str) -> Rule {
         extra_domains: Vec::new(),
         kind: None,
         max_severity: None,
+        min_severity: None,
         deviation_ceiling: None,
     }
 }
@@ -1100,6 +1143,7 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         extra_domains: Vec::new(),
         kind: None,
         max_severity: None,
+        min_severity: None,
         deviation_ceiling: None,
     };
     let mut set = RuleSet::default();
@@ -1361,6 +1405,7 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
         extra_domains: raw.extra_domains,
         kind: raw.kind,
         max_severity: raw.max_severity.filter(|s| !s.trim().is_empty()),
+        min_severity: raw.min_severity.filter(|s| !s.trim().is_empty()),
         deviation_ceiling: raw.deviation_ceiling.filter(|s| !s.trim().is_empty()),
     })
 }
@@ -1529,6 +1574,89 @@ pub fn rules_with_invalid_severity_ceiling(set: &RuleSet) -> Vec<String> {
     }
     offenders.sort();
     offenders
+}
+
+/// Every rule in `set` whose authored severity FLOOR ([`Rule::min_severity`]) is INVALID, as
+/// `"<id> (<field> = \"<value>\": <reason>)"`. Sorted for stable output. The W8 mirror of
+/// [`rules_with_invalid_severity_ceiling`], kept as its OWN function rather than folded into
+/// that one so the pre-existing ceiling gate and its positive-detection test keep asserting
+/// exactly what they asserted before. Two defect shapes:
+///
+/// 1. `min_severity` outside [`CEILING_SEVERITY_VOCABULARY`] (a typo, or an unknown severity
+///    name).
+/// 2. `min_severity` ranking MORE severe than the same rule's `max_severity`. That pair is
+///    UNSATISFIABLE, not merely odd: the floor demands at least X while the ceiling forbids
+///    anything above Y, with X above Y. Which one binds would then depend purely on the order
+///    the export pipeline happens to apply them in — exactly the kind of silent, positional
+///    surprise a build gate exists to prevent. (`min_severity == max_severity` is NOT an
+///    error: it pins the rule at one severity, which is what several rules' prose actually
+///    authors — e.g. "a high-severity finding for review, not an automatic critical".)
+///
+/// Why this has to be a BUILD gate, same argument as the ceiling's:
+/// `report_export::normalize_severity` maps every UNRECOGNIZED string to `"low"`. For a
+/// CEILING a typo silently becomes the harshest cap in the vocabulary; for a FLOOR it silently
+/// becomes the WEAKEST possible floor — `min_severity = "hgih"` does not error and does not
+/// no-op, it quietly evaporates (`"low"` ranks at or below everything, so the raise never
+/// fires). A floor that looks authored and does nothing is the inert-mechanism failure the
+/// whole severity effort exists to stop, so it fails the build here.
+///
+/// Note on the vocabulary's bottom: `report_export::severity_rank` ranks `"low"` and `"info"`
+/// identically, so `min_severity = "low"` or `"info"` is INERT by construction rather than
+/// invalid. It is not reported here (it states a true, if useless, intent and breaks nothing),
+/// but no corpus rule authors one, and none should — a rule whose prose caps itself at low
+/// wants [`Rule::max_severity`], not a floor.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn rules_with_invalid_severity_floor(set: &RuleSet) -> Vec<String> {
+    let mut offenders: Vec<String> = Vec::new();
+    for r in set.iter() {
+        let Some(raw_floor) = r.min_severity.as_deref() else {
+            continue;
+        };
+        let Some(floor_rank) = ceiling_rank(raw_floor) else {
+            offenders.push(format!(
+                "{} (min_severity = {raw_floor:?}: not a severity; valid values are {:?})",
+                r.id.0, CEILING_SEVERITY_VOCABULARY
+            ));
+            continue;
+        };
+        // An invalid max_severity is the ceiling gate's finding to report, not this one's —
+        // reporting it twice would make the two gates' output confusingly overlap.
+        if let Some(max_rank) = r.max_severity.as_deref().and_then(ceiling_rank) {
+            if floor_rank < max_rank {
+                offenders.push(format!(
+                    "{} (min_severity = {:?} ranks ABOVE max_severity = {:?}: unsatisfiable — \
+                     the floor demands at least the former while the ceiling forbids anything \
+                     above the latter)",
+                    r.id.0,
+                    raw_floor,
+                    r.max_severity.as_deref().unwrap_or_default(),
+                ));
+            }
+        }
+    }
+    offenders.sort();
+    offenders
+}
+
+/// Every rule in `set` that declares a [`Rule::min_severity`] floor, as `"<id> (<value>)"`.
+/// Sorted for stable output. The W8 anti-inertness gate
+/// (`req_w8_the_corpus_actually_declares_severity_floors`) asserts this is NON-EMPTY for the
+/// real shipped corpus.
+///
+/// This function exists because of what happened to the ceiling. `max_severity`,
+/// `clamp_to_rule_max_severity` and all four `req_e2_*` tests shipped GREEN against a corpus
+/// in which **not one rule of 417 declared a ceiling** — the mechanism was fully implemented,
+/// fully unit-tested, and completely inert. The floor is the same shape of mechanism and would
+/// fail the same way for free, so the gate is written at the same time as the field rather
+/// than after discovering the problem a second time.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn rules_declaring_min_severity(set: &RuleSet) -> Vec<String> {
+    let mut found: Vec<String> = set
+        .iter()
+        .filter_map(|r| r.min_severity.as_deref().map(|c| format!("{} ({c})", r.id.0)))
+        .collect();
+    found.sort();
+    found
 }
 
 /// Every rule in `set` that declares a [`Rule::max_severity`] ceiling, as `"<id> (<value>)"`.
@@ -1813,6 +1941,7 @@ mod tests {
             extra_domains: Vec::new(),
             kind: None,
             max_severity: None,
+            min_severity: None,
             deviation_ceiling: None,
         }
     }

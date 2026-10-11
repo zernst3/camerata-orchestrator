@@ -4734,6 +4734,7 @@ mod tests {
             extra_domains: Vec::new(),
             kind: None,
             max_severity: None,
+            min_severity: None,
             deviation_ceiling: None,
         }
     }
@@ -4778,6 +4779,7 @@ mod tests {
             extra_domains: Vec::new(),
             kind,
             max_severity: None,
+            min_severity: None,
             deviation_ceiling: None,
         }
     }
