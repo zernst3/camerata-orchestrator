@@ -191,6 +191,53 @@ mod tests {
         Arc::new(MemoryCredentialStore::new())
     }
 
+    /// Serializes every test that mutates `CAMERATA_GITHUB_TOKEN`.
+    ///
+    /// `std::env::set_var` mutates PROCESS-GLOBAL state and the Rust test harness runs tests in
+    /// parallel threads by default, so the three `resolve_*` tests below raced on one variable:
+    /// each passed in isolation and one would intermittently fail under `cargo test --workspace`.
+    ///
+    /// That flakiness mattered out of proportion to its size. This whole effort rests on build
+    /// gates — requirement traceability, row conservation, artifact parity, the integrity gate —
+    /// and a gate is worth nothing if a green run cannot be trusted. An intermittent failure in
+    /// unrelated code teaches everyone to re-run until green, which is precisely how a real
+    /// regression gets waved through.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Holds the lock and the variable's prior value, restoring it on drop.
+    ///
+    /// The restore happens in `Drop` rather than at the end of the test body so that a failing
+    /// assertion — which unwinds — cannot leave the variable set and cascade into the next test.
+    /// Poisoning is deliberately ignored for the same reason: one test's panic must not convert
+    /// its neighbours into failures that hide the original cause.
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvVarGuard {
+        /// `Some(v)` sets the variable, `None` removes it. Either way the prior value returns.
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = std::env::var(key).ok();
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+            Self { key, previous, _lock: lock }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     // ── mask_value ────────────────────────────────────────────────────────────
 
     #[test]
@@ -320,25 +367,23 @@ mod tests {
         let s = store();
         s.set(GITHUB_TOKEN, "keychain-token").unwrap();
         // Even with an env var set, the store value wins.
-        std::env::set_var("CAMERATA_GITHUB_TOKEN", "env-token");
+        let _env = EnvVarGuard::set("CAMERATA_GITHUB_TOKEN", Some("env-token"));
         let token = resolve(s.as_ref(), GITHUB_TOKEN, "CAMERATA_GITHUB_TOKEN");
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
         assert_eq!(token, Some("keychain-token".to_string()));
     }
 
     #[test]
     fn resolve_falls_back_to_env_when_store_empty() {
         let s = store();
-        std::env::set_var("CAMERATA_GITHUB_TOKEN", "env-only-token");
+        let _env = EnvVarGuard::set("CAMERATA_GITHUB_TOKEN", Some("env-only-token"));
         let token = resolve(s.as_ref(), GITHUB_TOKEN, "CAMERATA_GITHUB_TOKEN");
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
         assert_eq!(token, Some("env-only-token".to_string()));
     }
 
     #[test]
     fn resolve_returns_none_when_both_absent() {
         let s = store();
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = EnvVarGuard::set("CAMERATA_GITHUB_TOKEN", None);
         let token = resolve(s.as_ref(), GITHUB_TOKEN, "CAMERATA_GITHUB_TOKEN");
         assert_eq!(token, None);
     }
