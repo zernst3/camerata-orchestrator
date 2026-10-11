@@ -282,3 +282,73 @@ FailedPass) and no SELF-MEASUREMENT machinery.
 - Do NOT tune the evidence gate's six phrases; fixing A5 at the corpus demotes it to belt-and-braces.
 - Do NOT add `SERVICE_ROLE`/`KEY` to the credential list; the detector that matched the secret already
   KNOWS its identity and should emit it as a structured capture.
+
+---
+
+# PASS-1 IMPLEMENTATION LOG (2026-10-09 → 10-10)
+
+These are notes on what now has CODE behind it. **Nothing here closes a finding** — status marks above
+stay Zach's. Read this as "the mechanism exists and is tested"; read the rulings section below as
+"and here is what it cannot decide without you."
+
+## Landed
+
+| Workstream | Findings addressed | What exists now |
+|---|---|---|
+| W1 | B1, B2, B11, part of C2 | `SealedReport` newtype: post-seal row injection is a **compile error**. Evidence gate moved upstream of the seal. |
+| W2 | A5.1, A5.4, C8 (schema half) | `RuleKind` / `RuleOption::violates` / `Rule::max_severity` schema + corpus-load gate. The alternatives pass can no longer silence a rule. All 417 rules classified. |
+| W3 | A5.6, A5.2, A5.3, A5.5 | `FindingKind` on the wire — five kinds, internally tagged, flattened into every export row and reaching `findings.json`. Deviation carries structured numerator/denominator. Absent kind renders `"unspecified"`, never silently `Defect`. N "no convention" rows are structurally unreachable. |
+| W4 | A6, H1, A7, A8, A3, A4 | Every corpus domain reachable, **gated in the build**. `verification` can no longer disarm a rule everywhere. Tier family labels name the engine, not a rule family. Layer map inferred, so the four real `ARCH-*` analysers run on a brownfield repo with no `.camerata/architecture.toml`. |
+| W6 | I1, I2, C11 | In-repo synthetic parity harness (8 tests, ~1s, zero spend) + `camerata integrity-gate` with a three-way exit code. ESLint root cause fixed. |
+| Grader | the blocking item | `GRADER_PROMPT.md` v2: four axes + parity as its own verdict. `grade.py` kind-aware. |
+
+## Two findings corrected by implementation, worth recording
+
+**C5 is no longer a theory — it is measured.** W6's harness, on its first run, found the pipeline
+detects 3 sites, absorbs 2, and **exports 1**: singular headline, `also_matches: ""`, no
+`also_locations`. Both absorptions *are* ledger-recorded, so `unaccounted == 0` and conservation
+legitimately passes. The client is told there is one site. There are three. A red `#[ignore]`d test
+(`req_i1_c5_an_absorbed_row_must_be_observable_in_some_artifact`) names it and accepts any fix shape.
+This is the single clearest statement of why the mid-layer, not detection, is the problem.
+
+**C11's root cause was not an ESLint config problem.** `--format @microsoft/eslint-formatter-sarif`
+names an npm package that ESLint resolves against the **scanned repo**, not Camerata's workspace — so
+it failed on every repo, every run, and `run_capture_stdout` discarded the stderr that said so. The
+operator saw only a parse error about column 0 of an empty document. Three further defects each
+independently zeroed the pass, including a provisioning probe that asked only `--version` while 3 of 6
+packages were missing and the config was four months stale.
+
+**The E2 mechanism shipped inert.** `max_severity`, `clamp_to_rule_max_severity` and all the `req_e2_*`
+tests pass against a corpus where **zero rules author a ceiling**. W5 is transcribing the ceilings that
+were already authored in prose (C8). Recording this because it is precisely the failure Zach named:
+code that confidently thinks it is meeting the requirement while doing nothing.
+
+## OPEN RULINGS — waiting on Zach, nothing proceeds on these
+
+1. **[ ] The 58 rule classifications.** On hold at his request; grouped into five patterns (A5.7).
+2. **[ ] `deviation_ceiling` escalation (A5.2).** W3 built a per-rule authored ceiling; default caps
+   every deviation at medium. Question: should per-finding runtime escalation exist at all, or is
+   authoring-time the whole mechanism? Deliberately not built either way.
+3. **[ ] C5's representation.** `also_locations` to the exporters, a site count on the row, or a
+   pluralised headline. W7 will implement and recommend; the final call is his.
+4. **[ ] R1 — the repo-wide `cargo fmt` decision.** Recommendation: one deliberate commit.
+5. **[ ] R2 — the never-run-a-formatter directive as a Camerata custom rule** for Camerata's own repo.
+6. **[ ] `rules_not_run` is in the report JSON but no PDF template reference.** Deliberate or omission?
+   Note Pass 3 says the PDF is "already correct in shape; leave it alone", so this is propose-only.
+7. **[ ] Ledger "healthy" interaction.** `audit_repos` counts new informational rows in a rule's
+   `emitted`, so a convention-observed rule no longer appears under "What's healthy". W3 left it that
+   way deliberately: never-falsely-healthy is the safe direction. Confirm or reverse.
+8. **[ ] Should CI exercise the live ESLint binary?** The C11 test currently skips without a
+   provisioned workspace, so CI never runs the real thing.
+
+## Deliberately NOT done, with the reason
+
+- **C7** (D5 floor reads model prose) — deferred on Fable's judgement that after structured identity
+  and the severity ceiling land, "most layers become DELETABLE, not rewritable."
+- **C13** (paraphrase gate) — the right acceptance test *after* structured fields exist, "useless as a
+  first measurement."
+- **B6** (credential keyword list) — banned. The detector already knows the identity and must emit it
+  as a structured capture.
+- **B5** — under-evidenced by the independent review. "Do not build on it."
+- **C10** — STRUCK as wrong. The three criticals are three distinct rules in three distinct files.
+- **New rules for uncovered classes** — banned until the mid-layer stops eating existing recall.
