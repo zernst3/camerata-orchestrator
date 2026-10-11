@@ -5,6 +5,9 @@ domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
 kind = "decision"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity: 'Your
+# login ...'".
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over supabase/config.toml's `[auth] additional_redirect_urls` (and the dashboard-equivalent URL Configuration list) for an entry that is a bare wildcard (`*`), a wildcard occupying an entire host/domain segment (`https://*.example.com`), or a wildcard combined with a third-party or user-controllable hosting domain (a wildcard subdomain on a shared PaaS like `*.vercel.app`, `*.netlify.app`, `*.github.io`, where an attacker can register their own subdomain). Conformance holds when every redirect entry is an exact URL (or a narrowly-scoped path wildcard on a domain the project itself controls); it fails when any entry's wildcard scope includes hosts the project does not control."

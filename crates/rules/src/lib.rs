@@ -2024,6 +2024,7 @@ mod tests {
             extra_domains: raw.extra_domains,
             kind: raw.kind,
             max_severity: raw.max_severity.filter(|s| !s.trim().is_empty()),
+            min_severity: raw.min_severity.filter(|s| !s.trim().is_empty()),
             deviation_ceiling: raw.deviation_ceiling.filter(|s| !s.trim().is_empty()),
         }
     }
@@ -4444,6 +4445,407 @@ mod tests {
                 "{id}'s decision domain compounds forward drift (A5.2)"
             );
         }
+    }
+
+    // ── W8 / W5-Q2: severity FLOORS are AUTHORED, not merely implemented ───────────────────
+
+    /// req_w8 (anti-inertness gate): the REAL shipped corpus actually declares severity
+    /// FLOORS. This is the test E2 did not have and needed: `max_severity`,
+    /// `clamp_to_rule_max_severity` and all four `req_e2_*` tests shipped green against a
+    /// corpus where NOT ONE of 417 rules declared a ceiling, so the mechanism was fully
+    /// implemented, fully "tested", and completely inert. W8's mechanism is the same shape and
+    /// would have failed the same way for free.
+    ///
+    /// FAILS BEFORE THE FIX: verified on `55515b5` (floor mechanism landed, corpus untouched)
+    /// — `grep -rl '^min_severity' crates/rules/principles/ | wc -l` returned 0 of 417, so
+    /// `rules_declaring_min_severity` returned an EMPTY vec and this assertion failed. Re-
+    /// verified after transcription by `git checkout 55515b5 -- crates/rules/principles/`.
+    #[tokio::test]
+    async fn req_w8_the_corpus_actually_declares_severity_floors() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return; // skip without the bundled corpus checked out
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let declared = rules_declaring_min_severity(&set);
+        assert!(
+            !declared.is_empty(),
+            "W8 is INERT: not one corpus rule declares `min_severity`, so \
+             `report_export::raise_to_rule_min_severity` can never raise anything and every \
+             `req_w8_*` unit test passes vacuously. The ~23 rules whose PROSE authors a minimum \
+             severity (W5-Q2: \"Floor, it's the minimum rating\") must have it transcribed into \
+             the structured field."
+        );
+    }
+
+    /// req_w8 (corpus-load gate): every floor the real corpus declares is a VALID severity, and
+    /// no rule's `min_severity` ranks above its own `max_severity`. Same build-gate philosophy
+    /// as `req_e2_corpus_declares_only_valid_severity_ceilings`.
+    ///
+    /// Why it has teeth in the FLOOR direction: `report_export::normalize_severity` maps any
+    /// unrecognized string to `"low"`, and `"low"` ranks at or below everything, so a typo'd
+    /// `min_severity = "hgih"` neither errors nor no-ops — it silently EVAPORATES. A field that
+    /// looks authored and does nothing is exactly the inert-mechanism failure this whole
+    /// severity effort exists to stop.
+    #[tokio::test]
+    async fn req_w8_corpus_declares_only_valid_severity_floors() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let invalid = rules_with_invalid_severity_floor(&set);
+        assert!(
+            invalid.is_empty(),
+            "every authored `min_severity` must be a valid severity and must not rank above the \
+             same rule's `max_severity`: {invalid:?}"
+        );
+    }
+
+    /// req_w8 (positive detection): the floor gate actually FIRES on both defect shapes it
+    /// claims to catch — a typo'd `min_severity`, and a `min_severity` ranking ABOVE the rule's
+    /// own `max_severity` (unsatisfiable: the floor demands at least X while the ceiling forbids
+    /// anything above Y, with X above Y). Without this the corpus-level gate could pass
+    /// vacuously if the detector were ever weakened.
+    ///
+    /// Also pins the three shapes that must NOT be reported, because each is a real authoring
+    /// pattern: a coherent floor/ceiling pair, a floor with no ceiling at all, and a floor
+    /// EQUAL to the ceiling (which pins the rule at one severity — what several rules' prose
+    /// actually authors).
+    #[test]
+    fn req_w8_invalid_severity_floor_detector_fires_on_typos_and_unsatisfiable_pairs() {
+        let mut set = RuleSet::default();
+
+        let mut typo = bare_rule("TYPO-MIN-1", "rust");
+        typo.min_severity = Some("hgih".to_string());
+        set.push(typo);
+
+        let mut unsatisfiable = bare_rule("UNSATISFIABLE-1", "rust");
+        unsatisfiable.min_severity = Some("critical".to_string());
+        unsatisfiable.max_severity = Some("high".to_string());
+        set.push(unsatisfiable);
+
+        let mut ok_pair = bare_rule("OK-PAIR-1", "rust");
+        ok_pair.min_severity = Some("medium".to_string());
+        ok_pair.max_severity = Some("high".to_string());
+        set.push(ok_pair);
+        let mut ok_floor_only = bare_rule("OK-FLOOR-ONLY-1", "rust");
+        ok_floor_only.min_severity = Some("high".to_string());
+        set.push(ok_floor_only);
+        let mut ok_pinned = bare_rule("OK-PINNED-1", "rust");
+        ok_pinned.min_severity = Some("high".to_string());
+        ok_pinned.max_severity = Some("high".to_string());
+        set.push(ok_pinned);
+        set.push(bare_rule("OK-NONE-1", "rust"));
+
+        let offenders = rules_with_invalid_severity_floor(&set);
+        assert_eq!(
+            offenders.len(),
+            2,
+            "exactly the two defect shapes must be reported, got {offenders:?}"
+        );
+        assert!(
+            offenders.iter().any(|o| o.starts_with("TYPO-MIN-1 (")),
+            "a typo'd min_severity must be caught, not silently coerced to low: {offenders:?}"
+        );
+        assert!(
+            offenders.iter().any(|o| o.starts_with("UNSATISFIABLE-1 (")),
+            "a min_severity above max_severity is unsatisfiable: {offenders:?}"
+        );
+    }
+
+    /// req_w8: the authored floors parse out of the REAL corpus TOMLs with the exact values
+    /// their prose states — the transcription half of the requirement. Named rules rather than
+    /// a count, so a later edit that drops one fails here with the rule's own id.
+    ///
+    /// Each rule appears below ONLY because its own TOML states that severity for its own
+    /// flagged condition. Nothing here was chosen by what would help any repository score; the
+    /// grouping is by the severity the prose names, which is a property of the rule's domain.
+    ///
+    /// FAILS BEFORE THE FIX: every `min_severity` lookup below returned `None` on `55515b5` —
+    /// no corpus TOML carried the field.
+    #[tokio::test]
+    async fn req_w8_named_rules_carry_the_floors_their_prose_authored() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let floor = |id: &str| -> Option<String> {
+            set.iter()
+                .find(|r| r.id.0 == id)
+                .unwrap_or_else(|| panic!("{id} must exist in the corpus"))
+                .min_severity
+                .clone()
+        };
+
+        // "Flag as CRITICAL severity any such handler" / "Flag any match ... as a CRITICAL
+        // finding" / "Any match is a critical, unconditional finding" / "this is always
+        // SEVERITY_CRITICAL" / "emit a critical finding" / "Any match is a critical finding".
+        // Every one of these uses unconditional language ("any match", "always",
+        // "unconditional"), which is what makes a floor at the TOP of the vocabulary a
+        // transcription rather than an inference.
+        for id in [
+            "ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1",
+            "ARCH-NO-PAN-STORAGE-1",
+            "SUPABASE-AUTH-USERS-EXPOSED-1",
+            "SUPABASE-RLS-DISABLED-NOT-RESTORED-1",
+            "SUPABASE-RLS-POLICY-DISABLED-1",
+            "SUPABASE-RLS-USER-METADATA-1",
+        ] {
+            assert_eq!(
+                floor(id).as_deref(),
+                Some("critical"),
+                "{id}'s prose names critical, unconditionally, for its own flagged condition"
+            );
+        }
+
+        // "Flag as high severity: …" / "Report at high severity when …" / "Emit a
+        // high-severity finding" / "Severity is High." — one named severity, one failure mode.
+        for id in [
+            "ARCH-SERVER-COMPUTED-AMOUNT-1",
+            "SQL-FK-CASCADE-FINANCIAL-1",
+            "SQL-MONEY-FLOAT-1",
+            "SQL-PRIVILEGED-WRITE-AUDIT-1",
+            "SQL-SOFT-DELETE-PARTIAL-INDEX-1",
+            "SUPABASE-AUTH-ANON-SIGNIN-1",
+            "SUPABASE-AUTH-EMAIL-CONFIRMATION-1",
+            "SUPABASE-AUTH-GETSESSION-SERVER-1",
+            "SUPABASE-AUTH-MFA-PRIVILEGED-1",
+            "SUPABASE-AUTH-REDIRECT-ALLOWLIST-1",
+            "SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1",
+            "SUPABASE-AUTH-SESSION-LIFETIME-1",
+            "SUPABASE-EXPOSURE-MATVIEW-1",
+            "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1",
+            "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1",
+            "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1",
+            "SUPABASE-FUNC-SEARCH-PATH-1",
+            "SUPABASE-REALTIME-AUTHORIZATION-1",
+            "SUPABASE-REALTIME-CHANNEL-SCOPE-1",
+            "SUPABASE-REALTIME-PAYLOAD-EXPOSURE-1",
+            "SUPABASE-RLS-VIEW-INVOKER-1",
+            "SUPABASE-STORAGE-DOWNLOAD-OWNERSHIP-1",
+            "SUPABASE-STORAGE-KEY-SANITIZATION-1",
+            "SUPABASE-STORAGE-PUBLIC-BUCKET-1",
+            "SUPABASE-STORAGE-UPLOAD-CONSTRAINTS-1",
+        ] {
+            assert_eq!(
+                floor(id).as_deref(),
+                Some("high"),
+                "{id}'s prose names high for its own flagged condition"
+            );
+        }
+
+        // "Flag as medium severity: …" / "emit a medium-severity finding" / "it ships at
+        // medium severity".
+        for id in [
+            "SQL-ENUM-TEXT-CONSTRAINT-1",
+            "SQL-TIMESTAMPTZ-1",
+            "SUPABASE-EXPOSURE-SCHEMAS-1",
+            "SUPABASE-RLS-INITPLAN-1",
+            "SUPABASE-RLS-NO-POLICY-1",
+        ] {
+            assert_eq!(
+                floor(id).as_deref(),
+                Some("medium"),
+                "{id}'s prose names medium for its own flagged condition"
+            );
+        }
+
+        // MULTI-BRANCH rules: the prose names TWO severities for two branches, so the only
+        // coherent RULE-level floor is the LOWEST one named — the single value that cannot
+        // inflate either branch. Transcribing the higher one would silently raise the branch
+        // the author deliberately softened, which is the over-reach W5 refused and Zach
+        // endorsed refusing.
+        for (id, why) in [
+            // "Flag as high severity a minimum_password_length absent or below 8 … Flag as
+            // medium severity a password_requirements that is unset or digits-only."
+            ("SUPABASE-AUTH-PASSWORD-POLICY-1", "high + medium branches"),
+            // "Write-side matches … are high severity … SELECT-only with USING (true) …
+            // emit a medium-severity finding with needs_review."
+            ("SUPABASE-RLS-PERMISSIVE-TRUE-1", "high + medium branches"),
+            // "Write/delete matches are high severity; read-only unscoped policies are medium
+            // with needs_review."
+            ("SUPABASE-STORAGE-OBJECT-POLICY-1", "high + medium branches"),
+            // "Flag as medium-to-high severity (scaled by how sensitive the extra field is)"
+            // — an explicit RANGE, whose bottom is the floor and whose top is the ceiling
+            // W5 already transcribed.
+            ("SUPABASE-REALTIME-PRESENCE-IDENTITY-1", "medium-to-high range"),
+            // "a credential … is HIGH … regulated PII … is calibrated MEDIUM; treating it as
+            // HIGH would inflate it past genuinely credential-bearing findings."
+            ("SEC-NO-SENSITIVE-DATA-IN-LOGS-1", "high + medium branches"),
+        ] {
+            assert_eq!(
+                floor(id).as_deref(),
+                Some("medium"),
+                "{id} names two severities ({why}); the rule-level floor is the lower one"
+            );
+        }
+
+        // CONTROL (attribution): a rule whose prose caps itself at LOW must carry NO floor.
+        // Without this the suite would also pass if someone blanket-assigned a floor across
+        // the corpus, and the three observability rules are precisely where a floor would do
+        // the most damage — their whole authored intent is "never higher".
+        for id in [
+            "ARCH-OBSERVABILITY-SILENT-FAILURE-1",
+            "ARCH-OBSERVABILITY-LOG-CONSISTENCY-1",
+            "ARCH-OBSERVABILITY-CORRELATION-ID-1",
+        ] {
+            assert_eq!(
+                floor(id),
+                None,
+                "{id} is CAPPED LOW by owner directive; a floor here would contradict it"
+            );
+        }
+    }
+
+    /// HARD CONSTRAINT check (W8's mirror of
+    /// `req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling`): a rule on the owner's
+    /// 58-rule classification hold list may carry a `min_severity` ONLY when that floor was
+    /// transcribed verbatim from the rule's own prose.
+    ///
+    /// The distinction is the whole point of the hold. Transcribing a rule's own explicit
+    /// prose floor is the OWNER'S authored intent and is fine even for a held rule — exactly
+    /// the reasoning that let W5 transcribe `max_severity` onto held rules. INVENTING one
+    /// presumes the classification he paused. A plain "no floors on held rules" ban would have
+    /// been wrong (it would silently drop 12 of the 23 rules W5-Q2 is about, most of the
+    /// `SUPABASE-FUNC-*` and `SUPABASE-STORAGE-*` set among them), so the guard is an explicit
+    /// allow-list instead: a later agent cannot add a floor to a held rule without deliberately
+    /// editing this list, and the 58 ids are inlined here — not read from the plan doc — so the
+    /// hold survives any edit to that document.
+    #[tokio::test]
+    async fn req_w8_a_held_rule_carries_a_floor_only_if_its_own_prose_authored_one() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        // The 58 rules whose classification review is ON HOLD
+        // (`docs/plans/2026-10-09_rule-kind-classification.md`).
+        const HELD: [&str; 58] = [
+            "ARCH-OBSERVABILITY-CORRELATION-ID-1",
+            "ARCH-OBSERVABILITY-SILENT-FAILURE-1",
+            "ARCH-PARALLEL-INDEPENDENT-1",
+            "ARCH-SERVER-CLIENT-PROJECTION-1",
+            "ARCH-TRUNK-SYNC-1",
+            "CICD-BUILD-PROVENANCE-1",
+            "CICD-DEPENDENCY-AUDIT-1",
+            "CSHARP-TESTING-MOCK-AT-BOUNDARY-1",
+            "CSHARP-TESTING-SEPARATE-UNIT-PROJECT-1",
+            "GO-ACCEPT-INTERFACES-RETURN-STRUCTS-1",
+            "GO-HANDLER-SERVICE-REPOSITORY-1",
+            "GO-TESTING-COLOCATED-TEST-FILES-1",
+            "INTEGRATION-EVENT-WIRING-1",
+            "JAVA-TESTING-MOCK-BOUNDARIES-1",
+            "JAVASCRIPT-NEST-INTERCEPTORS-CROSS-CUTTING-1",
+            "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
+            "JAVASCRIPT-VUE-STORE-PINIA-SHARED-STATE-1",
+            "PROC-MIGRATION-ROLE-GRANTS-1",
+            "PROCESS-ADO-LINK-1",
+            "PROCESS-BRANCH-NAMING-1",
+            "PROCESS-COMMIT-DOC-1",
+            "PROCESS-CONVENTIONAL-COMMIT-1",
+            "PYTHON-DJANGO-FAT-MODEL-SERVICE-1",
+            "PYTHON-DJANGO-FORMS-SERIALIZERS-VALIDATE-1",
+            "PYTHON-FLASK-SERVICE-LAYER-1",
+            "PYTHON-SERVICE-LAYER-1",
+            "PYTHON-TESTING-MOCK-BOUNDARIES-1",
+            "RUBY-CONCERNS-JUDICIOUSLY-1",
+            "RUBY-FROZEN-STRING-LITERAL-1",
+            "RUBY-RAILS-SKINNY-CONTROLLERS-1",
+            "RUBY-TESTING-INTEGRATION-LOCATION-1",
+            "RUBY-TESTING-UNIT-FILE-LOCATION-1",
+            "RUST-SEAORM-RAW-SQL-ESCAPE-1",
+            "SEC-NO-COMMAND-INJECTION-1",
+            "SEC-NO-PRIVATE-KEY-1",
+            "SEC-NO-VENDOR-TOKEN-1",
+            "SPIRIT-ROBUSTNESS-1",
+            "SQL-PRIVILEGED-WRITE-AUDIT-1",
+            "SUPABASE-AUTH-EMAIL-CONFIRMATION-1",
+            "SUPABASE-AUTH-GETSESSION-SERVER-1",
+            "SUPABASE-AUTH-MFA-PRIVILEGED-1",
+            "SUPABASE-AUTH-REDIRECT-ALLOWLIST-1",
+            "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1",
+            "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1",
+            "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1",
+            "SUPABASE-FUNC-SEARCH-PATH-1",
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+            "SUPABASE-RLS-DISABLED-NOT-RESTORED-1",
+            "SUPABASE-RLS-INITPLAN-1",
+            "SUPABASE-RLS-NO-POLICY-1",
+            "SUPABASE-RLS-PERMISSIVE-TRUE-1",
+            "SUPABASE-RLS-USER-METADATA-1",
+            "SUPABASE-STORAGE-KEY-SANITIZATION-1",
+            "SUPABASE-STORAGE-OBJECT-POLICY-1",
+            "SUPABASE-STORAGE-SIGNED-URL-1",
+            "SUPABASE-STORAGE-UPLOAD-CONSTRAINTS-1",
+            "TESTING-AS-DOCUMENTATION-1",
+            "UI-QUERY-LIBRARY-1",
+        ];
+        // Held rules whose OWN prose names a severity for their OWN flagged condition, with the
+        // construction transcribed. Every entry is quoted in
+        // `req_w8_named_rules_carry_the_floors_their_prose_authored`'s comments.
+        const TRANSCRIBED_FROM_OWN_PROSE: [&str; 17] = [
+            "SQL-PRIVILEGED-WRITE-AUDIT-1",
+            "SUPABASE-AUTH-EMAIL-CONFIRMATION-1",
+            "SUPABASE-AUTH-GETSESSION-SERVER-1",
+            "SUPABASE-AUTH-MFA-PRIVILEGED-1",
+            "SUPABASE-AUTH-REDIRECT-ALLOWLIST-1",
+            "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1",
+            "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1",
+            "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1",
+            "SUPABASE-FUNC-SEARCH-PATH-1",
+            "SUPABASE-RLS-DISABLED-NOT-RESTORED-1",
+            "SUPABASE-RLS-INITPLAN-1",
+            "SUPABASE-RLS-NO-POLICY-1",
+            "SUPABASE-RLS-PERMISSIVE-TRUE-1",
+            "SUPABASE-RLS-USER-METADATA-1",
+            "SUPABASE-STORAGE-KEY-SANITIZATION-1",
+            "SUPABASE-STORAGE-OBJECT-POLICY-1",
+            "SUPABASE-STORAGE-UPLOAD-CONSTRAINTS-1",
+        ];
+        let set = load_corpus(path).await.expect("corpus loads");
+        let violations: Vec<String> = set
+            .iter()
+            .filter(|r| {
+                HELD.contains(&r.id.0.as_str())
+                    && r.min_severity.is_some()
+                    && !TRANSCRIBED_FROM_OWN_PROSE.contains(&r.id.0.as_str())
+            })
+            .map(|r| r.id.0.clone())
+            .collect();
+        assert!(
+            violations.is_empty(),
+            "a rule on the owner's 58-rule classification hold list may carry a `min_severity` \
+             only when it was transcribed from the rule's OWN prose; these were not on that \
+             list: {violations:?}"
+        );
+        // The allow-list must not rot into cover for rules that no longer carry a floor.
+        let stale: Vec<&str> = TRANSCRIBED_FROM_OWN_PROSE
+            .iter()
+            .copied()
+            .filter(|id| {
+                set.iter()
+                    .find(|r| r.id.0 == *id)
+                    .is_none_or(|r| r.min_severity.is_none())
+            })
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "these ids are allow-listed as held rules carrying a transcribed floor but no \
+             longer carry one — remove them from the list rather than leaving a blanket \
+             exemption behind: {stale:?}"
+        );
+        // And every allow-listed id must really be on the hold list, or the allow-list is
+        // quietly exempting rules the hold never covered.
+        let not_held: Vec<&str> = TRANSCRIBED_FROM_OWN_PROSE
+            .iter()
+            .copied()
+            .filter(|id| !HELD.contains(id))
+            .collect();
+        assert!(
+            not_held.is_empty(),
+            "the allow-list may only name rules that are actually on the hold list: {not_held:?}"
+        );
     }
 
     /// HARD CONSTRAINT check: no rule in the `NEEDS OWNER DECISION (58 rules)` hold list

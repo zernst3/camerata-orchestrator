@@ -5,6 +5,12 @@ domain = "universal"
 layer = "universal"
 enforcement = "mechanical"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2) -- a MULTI-BRANCH rule, so the
+# rule-level floor is the LOWEST severity its prose names: "A secret/credential reaching the
+# sink this way is a HIGH finding; a regulated-PII value reaching the sink this way is a
+# MEDIUM finding". The rule explicitly forbids the higher value for the PII branch --
+# "treating it as HIGH would inflate it past genuinely credential-bearing findings".
+min_severity = "medium"
 default = true
 verification = "grounded"
 

@@ -5,6 +5,9 @@ domain = "supabase:rls"
 layer = "platform"
 enforcement = "architectural"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "emit a critical finding distinct
+# from the bare SUPABASE-RLS-ENABLED-1" case.
+min_severity = "critical"
 default = true
 verification = "grounded"
 qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS-ENABLED-1: once a table's final RLS-enabled/disabled state and its final policy set are both known, this rule flags a table that has one or more CREATE POLICY statements in its history but whose replayed end-state has RLS disabled — the policies were authored but are silently inactive. Conformance holds when every table carrying at least one policy also has RLS enabled in the same end-state; it fails when policies exist over a table whose RLS is off. Carries the same repo-vs-production honesty caveat as SUPABASE-RLS-ENABLED-1."

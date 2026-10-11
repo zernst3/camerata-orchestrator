@@ -5,6 +5,9 @@ domain = "supabase:storage"
 layer = "platform"
 enforcement = "prose"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Report at high severity when no
+# such check is found: 'Anyone who changes the file id in ...'".
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Whether a download/signed-URL handler validates the caller's entitlement to the SPECIFIC object path it was asked for is a semantic judgment over the handler's control flow, not a pattern match — so this rule routes to the prose tier: the handler body and the object-path source (a client-supplied id/path from params/body/query) are fed to Claude as evidence. Conformance holds when the handler confirms the requesting user owns, or is otherwise entitled to, the exact object identified by the client-supplied path before calling createSignedUrl/download; it fails when the handler passes that client-supplied value straight into the storage call with no ownership/membership check of its own."

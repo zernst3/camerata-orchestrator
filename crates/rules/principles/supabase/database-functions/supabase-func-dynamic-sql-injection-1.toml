@@ -16,6 +16,10 @@ extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
 kind = "decision"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Severity is High by default;
+# Critical when the same function is GRANTed ...". The clearest floor construction in the
+# corpus: a named minimum plus a named escalation above it.
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a statement-splitter-aware scan over CREATE FUNCTION/PROCEDURE bodies: a dollar-quoted plpgsql body containing an EXECUTE statement whose assembled string uses `||` concatenation with a non-literal operand, or a format() call whose template uses the non-escaping %s placeholder alongside a non-literal argument, is flagged. This is deterministic once a function body is isolated as a whole (the EXECUTE statement and its string-building shape are both facts about the same statement), and the match-set has no known benign counter-example (format()'s own %L/%I escaping placeholders and EXECUTE ... USING's bound-argument form are both excluded by construction) — making this a floor-tier candidate on the same statement-splitter infrastructure SUPABASE-FUNC-SEARCH-PATH-1 already depends on. Severity is additionally keyed on a co-present GRANT EXECUTE ... TO anon/public/authenticated in the same scanned SQL corpus, which elevates the finding from High to Critical (an anonymous/public-facing caller can reach the injection directly). Conformance holds when every EXECUTE'd dynamic query is built with format()'s %L/%I or a bound USING argument instead of %s or ||."

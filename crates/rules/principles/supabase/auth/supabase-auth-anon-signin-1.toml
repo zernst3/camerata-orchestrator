@@ -5,6 +5,10 @@ domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "If NONE of them reference it,
+# flag at high severity: 'Anonymous sign-ins are enabled, but none of your access policies
+# distinguish a real account from a disposable one'".
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a two-part scan: (1) supabase/config.toml's `[auth] enable_anonymous_sign_ins = true` (or the equivalent dashboard-exported setting); when present, (2) scan CREATE POLICY statements granted `to authenticated` for any reference to `is_anonymous` anywhere in the predicate. Conformance holds when every policy that is semantically meant to gate a capability for permanent, identity-verified users (posting content under a real identity, financial actions, anything the product would not want a disposable session to perform) excludes anonymous sessions via `(auth.jwt()->>'is_anonymous')::boolean is false`; it fails when anonymous sign-ins are enabled and no policy in the corpus references is_anonymous at all, since every `to authenticated` policy is then silently also a policy for anonymous users."

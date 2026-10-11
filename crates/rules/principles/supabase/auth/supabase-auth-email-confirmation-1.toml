@@ -5,6 +5,9 @@ domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
 kind = "decision"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "flag at high severity: 'Email
+# confirmation is off ...'".
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over supabase/config.toml's `[auth.email] enable_confirmations` field, scoped to configs that are actually pushed to a linked remote project (`supabase config push` / `supabase db push` usage, or a non-local project_id) rather than the local-development config in isolation — the CLI's scaffolded default is `false` specifically so local development doesn't require a working mail server, which is a legitimate, out-of-scope value for a file that never leaves the developer's machine. Conformance holds when a config that is actually applied to a remote/production project sets `enable_confirmations = true`, or the repo shows no evidence either way (in which case this is `needs_review`, not asserted); it fails when a config demonstrably pushed to a remote project carries `enable_confirmations = false` forward with no sign it was a deliberate choice."

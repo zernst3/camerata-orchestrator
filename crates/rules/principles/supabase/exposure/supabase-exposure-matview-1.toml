@@ -8,6 +8,10 @@ kind = "defect"
 # E2 ceiling, transcribed from this rule's own prose (finding C8): "this ships as a
 # high-severity finding for review, not an automatic critical."
 max_severity = "high"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Emit a high-severity finding",
+# and "this ships as a high-severity finding for review, not an automatic critical". Floor
+# and ceiling are both high: the prose pins this rule at exactly high from both sides.
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a statement scan for CREATE MATERIALIZED VIEW targeting an API-exposed schema (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1's config parse). Postgres materialized views do not support Row Level Security at all — there is no policy mechanism to apply, so any exposed materialized view grants either full access to its contents or none. Conformance holds when materialized views are kept out of exposed schemas (moved to a non-exposed schema and accessed only through a RLS-capable wrapper, e.g. a security_invoker view or a function) or are deliberately, reviewably intended as fully public data."

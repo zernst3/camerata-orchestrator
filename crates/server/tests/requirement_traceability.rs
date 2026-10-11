@@ -127,6 +127,19 @@ const REGISTRY: &[(&str, Coverage)] = &[
                     (it would fail trivially today and teach nothing)'.")),
     // ── Owner-decided requirement groups ───────────────────────────────────────────────────────
     ("E2", Required(&["req_e2"])),
+    // W5-Q2, ruled 2026-10-11: "Floor, it's the minimum rating." E2's symmetric other half —
+    // rules may declare a MINIMUM severity, and no report may rank below it. Covered by W8's
+    // `req_w8_*` tests (the floor mechanism, the corpus-load gate, the anti-inertness gate, the
+    // held-rule allow-list, and `tests/real_corpus_severity_floor_e2e.rs` against the real
+    // corpus). Registered under the ruling's own id because the tracker has no requirement-group
+    // letter for floors; same recorded-indirection pattern as B1/B4 -> `req_d1`/`req_d2`.
+    ("W5-Q2", Required(&["req_w8"])),
+    // W5-Q4, ruled 2026-10-11: "yes, widen these tests." The pre-existing `req_e2_*` tests read
+    // only `curated_findings` and therefore panicked on, rather than asserting over, the rules
+    // whose severity bound is most emphatically authored. Fixed in place under test-discipline
+    // exception (a) — the widened tests keep their own `req_e2` ids, so this entry records the
+    // ruling rather than claiming a separate test prefix.
+    ("W5-Q4", Required(&["req_e2", "req_w8"])),
     // G3's tests carry W7's `req_g1`/`req_g1_g2` ids (the coverage-honesty group); the
     // conciseness half Zach specified is asserted directly — exactly ONE line per affected
     // tool, and never the notes' internal diagnostics. Same recorded-indirection pattern as

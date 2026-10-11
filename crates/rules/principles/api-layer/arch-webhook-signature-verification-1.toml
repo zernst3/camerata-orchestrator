@@ -5,6 +5,11 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as CRITICAL severity any
+# such handler with no call to the provider's signature-verification function ... before the
+# event's `type`/payload fields are read". One severity, named unconditionally for the one
+# flagged condition.
+min_severity = "critical"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over webhook route handlers (a route whose path or handler name matches a webhook/callback naming pattern, or whose body is parsed into a payment-provider event-shaped object) for a call to the provider's signature-verification helper (e.g. Stripe's `constructEvent` / `constructEventAsync`, a raw HMAC-SHA256 comparison against the provider's signing secret and a documented header) occurring BEFORE the event payload is used to drive any business logic (updating order/subscription state, crediting an account, triggering a refund). Conformance holds when every payment-webhook route's handler verifies the signature first and rejects on failure before any other code runs; it fails when the handler parses and acts on the JSON body with no signature check, or checks it only after already acting on the payload."

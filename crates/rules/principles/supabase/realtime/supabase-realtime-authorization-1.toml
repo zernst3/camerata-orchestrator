@@ -5,6 +5,11 @@ domain = "supabase:realtime"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity: 'Your
+# `<topic>` channel carries [private data] but is not marked private'", and the second clause
+# reinforces the same single severity: "flag a private channel with no such policy as equally
+# high severity".
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan mirroring SUPABASE-RLS-NO-POLICY-1's shape, retargeted at the `realtime.messages` table: does the migration timeline enable RLS on `realtime.messages` and declare at least one CREATE POLICY against it, AND does client code instantiating a channel set `config: { private: true }` for channels carrying anything beyond public broadcast data. Conformance holds when every channel the client marks (or should mark) private has a corresponding realtime.messages policy scoping who may join/broadcast/receive on that topic; it fails when a channel subscribes to or broadcasts non-public data with `private` unset (defaulting to public, no authorization check at all) or set but with no matching RLS policy, which Realtime's own authorization model treats as equivalent to no access being granted."

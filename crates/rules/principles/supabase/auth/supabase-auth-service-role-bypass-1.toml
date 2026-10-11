@@ -5,6 +5,9 @@ domain = "supabase:auth"
 layer = "platform"
 enforcement = "prose"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Report at high severity when"
+# the service-role path performs an action without checking the caller's entitlement.
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Whether a user-reachable handler that constructs a service_role client also performs an explicit authorization check is a semantic judgment — it requires reading the handler's control flow, not matching a pattern — so this rule routes to the prose tier: the handler body and the client-construction call site are fed to Claude as evidence. Conformance holds when every such handler validates that the calling user is entitled to the specific action/row being performed before delegating to the service_role client; it fails when the handler trusts the caller's request parameters directly, since service_role bypasses RLS entirely and no database-level backstop exists on that path."

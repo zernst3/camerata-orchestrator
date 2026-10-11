@@ -5,6 +5,10 @@ domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag
+# `enable_refresh_token_rotation = false` unconditionally at high severity". The JWT-expiry
+# side is explicitly scoped to `needs_review` and names no severity of its own.
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over supabase/config.toml's `[auth]` section for `jwt_expiry`, `enable_refresh_token_rotation`, and `refresh_token_reuse_interval`. `enable_refresh_token_rotation = false` is an unconditional finding (rotation off has no legitimate counter-example once the default is deliberately disabled). `jwt_expiry` set far beyond Supabase's own default (3600s / 1 hour) with no accompanying comment or justification is `needs_review`, since the right value genuinely depends on the application's sensitivity. Conformance holds when refresh-token rotation is enabled and the access-token lifetime is a deliberate, reviewable choice rather than an unexplained outlier."

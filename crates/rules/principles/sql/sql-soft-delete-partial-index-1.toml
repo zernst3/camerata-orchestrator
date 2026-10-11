@@ -5,6 +5,9 @@ domain = "sql"
 layer = "universal"
 enforcement = "structured"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "flag as high severity: 'Your
+# `<table>` table can't let a user reuse `<column>`'s value ...'".
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over tables carrying a soft-delete column (deleted_at, is_deleted, archived_at, and close variants) for two distinct facets: (1) a sibling UNIQUE constraint or unique index on that table with no `WHERE deleted_at IS NULL` (or equivalent) partial qualifier — crisp and near-mechanical, since a plain unique index plus a soft-delete column WILL eventually block re-creating a row with a previously-soft-deleted value; and (2) whether the table's normal read paths (application queries, or an RLS policy on a Supabase/Postgres-backed table) filter the soft-delete column by default rather than requiring every caller to remember the predicate — a more semantic judgment requiring the query/policy code as evidence. Conformance holds when every unique constraint on a soft-deletable table is partial and ordinary reads exclude soft-deleted rows without each caller having to opt in."

@@ -5,6 +5,10 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity any such
+# value whose data-flow path leads back to the request body, query string, or path parameters
+# with NO intervening server-side lookup".
+min_severity = "high"
 default = true
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: the predicate is 'a value that reaches a payment-provider charge/amount/total/price/quantity/discount field was READ from the inbound request body/query/path rather than computed from a server-side product, price, or coupon lookup,' which requires tracing data flow from the request-parsing boundary to the charge call site — an AST/taint-analysis CI gate wired with the project's own request-DTO and pricing-service shapes. The generic pattern exists (don't trust client input for a security-sensitive value) but the specific fields that count as 'amount-bearing' are project-specific, so this is a bespoke check, not a citable off-the-shelf rule. Conformance holds when that gate runs in CI and a charge-call argument traced back to raw request input (with no intervening server-side lookup) fails the build; it fails when no such trace exists and a request body field can reach a charge amount unchanged."
 verification = "grounded"

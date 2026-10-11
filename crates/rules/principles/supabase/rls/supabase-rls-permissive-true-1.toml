@@ -10,6 +10,12 @@ kind = "decision"
 # finding with no severity distinction", rejected because "a uniform critical severity would
 # flag intentional, benign patterns ... the fix is a severity split".
 max_severity = "high"
+# W8 floor, transcribed from this rule's own prose (W5-Q2) -- a MULTI-BRANCH rule, so the
+# rule-level floor is the LOWEST severity its prose names: "Write-side matches ... are high
+# severity ... SELECT-only with USING (true) and no WITH CHECK, emit a medium-severity finding
+# with `needs_review`." A floor of high would silently raise the read side the author
+# deliberately downgraded.
+min_severity = "medium"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a statement-granular scan of CREATE POLICY statements (once SQL is split into statements, this is regex-grade — no timeline replay required, since a `true` predicate is a per-statement fact): a policy whose USING or WITH CHECK clause is the literal boolean `true`, targeting `anon` or `public` (an absent TO clause defaults to `public`), is flagged. Write-side matches (INSERT/UPDATE/DELETE, or WITH CHECK (true)) are high severity; read-side matches (SELECT, or USING (true) with no WITH CHECK) are medium and carry `needs_review`, since public read access to reference/lookup data is a legitimate, common pattern. Conformance holds when no exposed-schema policy grants unconditional true access without an explicit, reviewed justification."

@@ -5,6 +5,9 @@ domain = "supabase:realtime"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity: 'Your
+# subscription to `<table>` changes sends the FULL row -- including `<column>` ...'".
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over Postgres Changes subscriptions (`.on('postgres_changes', { event, schema, table, ... })`) with no `select` column-list option set, on a table whose column shape includes a sensitive-looking name (email, phone, ssn, password_hash, address, dob, salary, and close variants), plus a scan over `broadcast` payload-construction call sites for the same sensitive-column heuristic being included in the payload object. Conformance holds when a subscribed table's sensitive columns are excluded via the `select` option (Postgres Changes) or simply never placed in the broadcast payload (Broadcast); a table/payload with no sensitive-looking column, or a `select` that already scopes to a safe subset, is conforming. Ambiguous column names are `needs_review`."

@@ -5,6 +5,10 @@ domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Any match is a critical,
+# unconditional finding", and the option's own why: "an unconditional critical with no
+# carve-out is the right severity".
+min_severity = "critical"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a statement-granular scan for SQL referencing auth.users inside a CREATE VIEW, CREATE MATERIALIZED VIEW, or GRANT statement whose target object lives in an API-exposed schema (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1). auth.users carries every account's email, phone number, and metadata; exposing any of it through PostgREST is a full account-directory leak. Conformance holds when no exposed-schema object selects from or grants access to auth.users directly — legitimate app-level user data belongs in an application-owned public.profiles-style table populated via trigger, never a direct view over auth.users."

@@ -5,6 +5,11 @@ domain = "sql"
 layer = "universal"
 enforcement = "structured"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity:
+# 'Deleting a row in `<referencing_table>` would permanently destroy ...'". The sibling
+# "ambiguous table-name matches are `needs_review`" clause names no severity -- needs_review
+# is a confidence/routing qualifier in this pipeline, not a second severity branch.
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over FOREIGN KEY declarations (REFERENCES clauses or the ORM's FK helper) for `ON DELETE CASCADE` where the REFERENCING table (the one holding the FK, deletion of whose row triggers the cascade) is a routine, user-mutable table (a session, a cart, a profile edit, anything a user or an automated job deletes in the ordinary course of the product) and the REFERENCED table's name or column shape suggests financial, audit, or historical semantics (invoices, payments, transactions, orders, ledger_entries, audit_log, charges, receipts, statements). Conformance holds when such a relationship uses `ON DELETE RESTRICT` (or `NO ACTION`, or a nullable FK with `ON DELETE SET NULL`) instead; a cascade whose target naming is ambiguous is `needs_review` rather than asserted."

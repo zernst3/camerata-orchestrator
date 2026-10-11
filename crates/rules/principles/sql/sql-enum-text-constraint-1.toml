@@ -5,6 +5,9 @@ domain = "sql"
 layer = "universal"
 enforcement = "structured"
 kind = "default_with_exceptions"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as medium severity: 'Your
+# <table>.<column> column ...'".
+min_severity = "medium"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over column declarations for a `text`/`varchar` column whose name suggests a closed set of values (status, state, role, type, kind, tier, category, and close variants) with no corresponding CHECK constraint, native ENUM type, or FK to a lookup table constraining it. Conformance holds when the column's valid values are constrained by one of the three mechanisms below; it fails when the column accepts any string and the 'closed set' exists only as a convention documented in application code (a TypeScript union, a constant list) with nothing enforcing it at the database. A column whose name is ambiguous (could be genuinely free-form text) is `needs_review`."

@@ -5,6 +5,10 @@ domain = "supabase:rls"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): a view without `security_invoker =
+# true` "is a high-severity finding: 'Your `<view>` view punches through the security on the
+# tables ...'".
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a statement-granular scan of CREATE VIEW statements in exposed schemas (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1's config parse): a view lacking the `security_invoker = true` WITH-option (available Postgres 15+) executes with its OWNER's privileges by default, which silently bypasses the RLS policies on its underlying base tables. Conformance holds when every view in an exposed schema explicitly sets security_invoker = true, or is a security-barrier view intentionally curated as a controlled, narrower surface over a locked-down base table (a legitimate exception the finding should name, not silently allow)."

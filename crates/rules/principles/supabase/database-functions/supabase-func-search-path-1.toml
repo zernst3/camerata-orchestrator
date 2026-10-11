@@ -15,6 +15,9 @@ extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
 kind = "decision"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "emit a high-severity finding:
+# 'One of your database functions runs ...'".
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a multi-line statement scan over CREATE FUNCTION bodies: a function declared SECURITY DEFINER (runs with its creator's privileges, not the caller's) without a corresponding SET search_path clause is flagged. This is deterministic once a CREATE FUNCTION statement is parsed as a whole (definer presence and search_path absence are both facts about the same statement), and the DEFINER subset of the match is near-zero-FP — making this a floor-port candidate once the statement-splitter infrastructure it depends on exists; until then it ships at the architectural tier. Conformance holds when every SECURITY DEFINER function pins search_path (to a trusted schema list ending in pg_temp, per Postgres's own recommendation)."

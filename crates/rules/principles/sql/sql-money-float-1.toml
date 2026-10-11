@@ -5,6 +5,9 @@ domain = "sql"
 layer = "universal"
 enforcement = "mechanical"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity: 'Your
+# `<table>.<column>` column stores a dollar amount as floating ...'".
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over CREATE TABLE / ALTER TABLE ADD COLUMN (and the ORM's equivalent column-type declaration) for a column whose name matches a money-shaped heuristic (amount, price, cost, fee, balance, total, subtotal, tax, charge, payout, salary, or a `_usd`/`_cents`-style currency suffix) typed as a floating-point representation (`real`, `float4`, `double precision`, `float8`, or an ORM's `Float`/`double` column type). Conformance holds when every such column uses `numeric`/`decimal` (or, for a well-understood integer-minor-units convention, an exact integer type representing cents/minor units) instead; it does not apply to columns that are genuinely non-monetary despite a superficially similar name (a `price_tier` enum-like integer, a `cost_estimate_confidence` ratio) — names this ambiguous are `needs_review`."

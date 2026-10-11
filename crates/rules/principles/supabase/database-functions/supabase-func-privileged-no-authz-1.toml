@@ -14,6 +14,10 @@ extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
 kind = "decision"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Severity is High." Same W5-Q1
+# reading as its folder sibling; this is a privileged write with no authorization check, so
+# no ceiling.
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a statement-splitter-aware scan over CREATE FUNCTION/PROCEDURE bodies correlated against GRANT EXECUTE statements anywhere in the same scanned SQL corpus (the same cross-file correlation SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1 already depends on): a function declared SECURITY DEFINER, whose body contains a standalone INSERT/UPDATE/DELETE/TRUNCATE/MERGE statement, that is GRANTed EXECUTE to anon/public/authenticated, and whose body contains none of the recognized authorization-predicate idioms (auth.uid()/auth.jwt()/current_user/session_user/a JWT-claims read, a role-or-ownership-check function CALL, or a shared-secret/signature comparison) is flagged. This is deterministic once a function body is isolated as a whole and its signature/grants are known facts about the same scanned corpus, and the match-set has a documented, bounded false-negative surface (a predicate's mere presence is accepted as evidence of gating, without verifying it actually guards the write) rather than an unbounded false-positive one — making this a floor-tier candidate on the same statement-splitter infrastructure its siblings already depend on. Conformance holds when every mutating SECURITY DEFINER function reachable by a broad grant checks the caller's identity, role, or ownership (or a shared-secret/signature) before writing."

@@ -5,6 +5,9 @@ domain = "sql"
 layer = "universal"
 enforcement = "structured"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as medium severity: 'Your
+# `<table>.<column>` column has no time zone ...'".
+min_severity = "medium"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over column type declarations for `timestamp` / `TIMESTAMP` with no `with time zone` qualifier (and the ORM-equivalent zone-less datetime type) on a column whose name suggests an EVENT instant (created_at, updated_at, occurred_at, started_at, completed_at, expires_at, and close variants) rather than a zone-agnostic wall-clock value (birth_date-as-timestamp, a recurring local daily time, a column explicitly documented as intentionally zone-less). Conformance holds when every event-instant column uses `timestamptz`; a column whose name plausibly represents a zone-agnostic local time is `needs_review` rather than asserted."

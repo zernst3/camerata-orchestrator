@@ -10,6 +10,10 @@ kind = "decision"
 # findings", rejected because it "conflates a performance optimization with a security defect
 # in a report whose entire credibility rests on precise severity framing".
 max_severity = "medium"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "When found, emit a
+# medium-severity, opt-in-only finding". Floor and ceiling are both medium: the prose pins
+# this performance rule at exactly medium.
+min_severity = "medium"
 default = true
 opt_in_only = true
 verification = "grounded"

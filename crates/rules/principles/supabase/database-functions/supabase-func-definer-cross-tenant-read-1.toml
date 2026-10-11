@@ -14,6 +14,11 @@ extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
 kind = "decision"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "Severity is High." Zach's W5-Q1
+# ruling made this explicit: a flat "Severity is High" is a floor of high with no escalation
+# NAMED, which does not forbid one -- and this rule is IDOR-in-the-database, genuinely
+# critical-class, so it deliberately carries NO ceiling.
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a statement-splitter-aware scan over CREATE FUNCTION/PROCEDURE bodies correlated against GRANT EXECUTE statements anywhere in the same scanned SQL corpus (the same cross-file correlation SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1 and SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1 already depend on): a function declared SECURITY DEFINER, with at least one declared parameter, whose body contains no standalone INSERT/UPDATE/DELETE/TRUNCATE/MERGE statement (the sibling SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1 owns that WRITE shape), that is GRANTed EXECUTE to anon/public/authenticated, whose body contains an equality comparison between a column and one of the function's OWN declared parameters, and whose body contains none of the recognized authorization-predicate idioms (auth.uid()/auth.jwt()/current_user/session_user/a JWT-claims read, a role-or-ownership-check function CALL, or a shared-secret/signature CALL-or-comparison) is flagged. This is deterministic once a function body is isolated as a whole and its signature/parameters/grants are known facts about the same scanned corpus, and the match-set has a documented, bounded false-negative surface (a predicate's mere presence anywhere in the body is accepted as evidence of gating, without verifying it actually guards the specific read; no attempt to infer whether the matched parameter is specifically a tenant/parent/owner id as opposed to some other caller-supplied filter) rather than an unbounded false-positive one — making this a floor-tier candidate on the same statement-splitter infrastructure its siblings already depend on. Conformance holds when every SECURITY DEFINER function that returns rows filtered by a caller-supplied parameter, reachable by a broad grant, also checks that parameter against the caller's own identity, role, or a shared secret before returning rows."

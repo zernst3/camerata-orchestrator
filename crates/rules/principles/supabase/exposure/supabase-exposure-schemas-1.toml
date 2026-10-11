@@ -5,6 +5,9 @@ domain = "supabase:exposure"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
+# W8 floor, transcribed from this rule's own prose (W5-Q2): "emit a medium-severity finding:
+# 'Your API quietly serves ...'".
+min_severity = "medium"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a config scan: the `[api] schemas = [...]` list in supabase/config.toml (default `[\"public\", \"storage\", \"graphql_public\"]`, per Supabase's own CLI config reference). Any schema named beyond the default set widens the tables reachable through PostgREST. This rule's parse result feeds every other supabase/rls/* and supabase/exposure/* rule's exposed-schema set — it is the source of truth for 'is this table/view/function API-reachable' rather than any rule hardcoding `public`. Conformance holds when the schemas list is either the default or every additional schema listed has been deliberately reviewed for RLS coverage on its tables."
