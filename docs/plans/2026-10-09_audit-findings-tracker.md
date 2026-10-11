@@ -121,10 +121,28 @@ alternatives pass treating a planted defect as the codebase's chosen convention 
 The LLM grader is instructed to override the scorer on this axis and say so, but a deterministic scorer
 biased in the engine's favour is not acceptable as the number of record.
 
-Fix is one small change, deliberately deferred: `grade.py` must read the kind field and emit a kind
-fault. **It is deferred only because W3 has not yet fixed the field's name**, and guessing it is how
-this codebase accumulated its lexical heuristics in the first place. Do this the moment W3 reports,
-and before any measured run.
+Fix was one small change, deliberately deferred until W3 fixed the field's name rather than guessed at
+it (guessing is how this codebase accumulated its lexical heuristics in the first place).
+
+### [x] CLOSED 2026-10-09 — `grade.py` is now kind-aware
+W3 fixed the wire contract as `"kind"` with snake_case tags, so the scorer was updated the same day:
+
+- `ACCUSING_KINDS` = {`defect`, `deviation`} vs `INFORMATIONAL_KINDS` = {`convention_observed`,
+  `no_convention`, `not_assessed`}. **Only an accusing row can detect a planted defect.**
+- A planted defect matched only by `convention_observed` / `no_convention` is a new verdict,
+  **`kind_fault`** — reported as "the engine told the client this is the codebase's chosen pattern."
+  Counted separately from `miss`, because it is worse than silence.
+- Matched only by `not_assessed` stays a `miss` but is flagged `missed_but_disclosed_as_not_assessed`.
+  Honest non-detection and silent non-detection must never be conflated.
+- A planted high/critical defect reported as a `deviation` is a `kind_undercall`: deviations cap at
+  medium by design, so it can never rank where it belongs. Reported without voiding the hit.
+- A `deviation` with no `assessed_sites` is counted as having no denominator.
+- **Decoys: informational rows no longer count as flagged.** A safe pattern described as a convention
+  the repo already follows is correct behaviour, and penalising it would punish the A5.5 feature.
+- Rows with no kind are counted as `unspecified_kind_rows` — an emission path never mapped to a kind.
+
+Still correctly absent from the scorer: parity and presentation. It reads only `findings.json`, so
+those remain the LLM grader's axes by design.
 
 ---
 
