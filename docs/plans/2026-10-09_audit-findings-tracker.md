@@ -575,3 +575,254 @@ pattern to follow. Routed to W8 (it holds `report_export.rs`).
 `rules_not_run` line), W7-Q2 (an owner for the C1 traceability collision in `scan_ledger.rs`), R1
 (repo-wide `cargo fmt`), R2 (formatter directive as a custom rule), and sign-off on the `crates/llm`
 credential-test edit (assertions byte-identical, only the env mutation serialized).
+
+---
+
+# W8 RESULT — the structured severity FLOOR, W5-Q3, W5-Q4, and the C7 verdict (2026-10-11)
+
+## The mechanism
+
+`Rule::min_severity`, built as the exact structural mirror of `max_severity` because that pattern is
+proven here: same free-form lowercase vocabulary, same `corpus_rule_for` resolution (so an
+external-tool finding carrying the tool's own id still reaches the grounded rule), same
+`severity_rank` comparison, opposite direction. Enforced by
+`report_export::raise_to_rule_min_severity` at **both** export choke-points, the PDF's
+`build_report_json` partition and the xlsx/`findings.json` `partition_rows`, so no artifact can
+disagree with another.
+
+**Where it sits relative to the ceiling: FIRST.** The floor runs ahead of the C4-R1 null-location
+downgrade and both ceilings, so `max_severity` keeps the last word and E2's "no report may exceed
+it" still holds absolutely. The corpus gate forbids an unsatisfiable pair, so floor-then-ceiling
+always lands inside `[min_severity, max_severity]`, and a property test asserts that for every rule
+authoring both.
+
+**Two preconditions a ceiling does not need.** A ceiling only lowers, so it is safe
+unconditionally. A floor raises, so an over-broad one is a false alarm shipped to a client:
+
+1. **An accusing `FindingKind`, explicitly present.** Defect/Deviation only. A
+   `ConventionObserved` row tells the client "your codebase already does this" and ships at `info`
+   by W3's design; raising it to high would both lie and, through `is_informational`'s severity
+   test, re-route a compliment into an action bucket. An ABSENT kind is excluded too, under W3's
+   standing rule that nothing may silently default to `Defect`.
+2. **A real location.** Empty `path` AND `line == 0` means nothing concrete was established to
+   rate. Declining there, rather than relying on running before C4-R1, makes the floor
+   order-independent with respect to that safety net: it cannot undo it from any position, in any
+   exporter, including the xlsx partition, which does not apply C4-R1 at all.
+
+## The corpus-load gate
+
+`rules_with_invalid_severity_floor` fails the BUILD on two shapes: a value outside the severity
+vocabulary, and a `min_severity` ranking above the same rule's `max_severity`. The second is
+genuinely unsatisfiable, and which side would bind depends purely on the order the pipeline applies
+them in, which is exactly the positional surprise a gate exists to prevent.
+`min_severity == max_severity` is deliberately LEGAL: ten rules' prose pins one exact severity from
+both sides, e.g. "a high-severity finding for review, not an automatic critical".
+
+The typo case has teeth in the floor direction for the mirror-image reason it does for ceilings.
+`normalize_severity` maps every unrecognized string to `"low"`, and `"low"` ranks at or below
+everything, so a typo'd floor does not error and does not no-op: **it silently evaporates.** A field
+that looks authored and does nothing is the inert-mechanism failure this whole effort exists to
+stop, so it fails the build.
+
+## Transcription
+
+| | count |
+|---|---|
+| Corpus rules whose prose names a severity (examined) | 53 |
+| Transcribed to `min_severity` | **41** |
+| Genuinely ambiguous, handed back below | 4 |
+| Deliberately not floors, reason recorded below | 8 |
+| Rule `kind` fields changed | **0** (the hold is intact) |
+
+Of the 41: 6 critical, 25 high, 5 medium, plus 5 multi-branch rules floored at the LOWEST severity
+their prose names. Every `min_severity` line in the corpus carries a comment quoting the sentence it
+came from. Authored by rule DOMAIN: no fixture or benchmark repository was read, and no value was
+chosen for what it would do to any repo's grade.
+
+**Discipline, mirroring W5's in the opposite direction.** `needs_review` and "ambiguous matches"
+clauses name no severity and are confidence/routing qualifiers in this pipeline, not severity
+branches, which `SUPABASE-STORAGE-PUBLIC-BUCKET-1`'s own "emit a high-severity `needs_review`
+finding" proves. Those do not block transcription. What DOES block it is a second branch the prose
+explicitly DENIES the named severity.
+
+**The anti-inertness gate E2 did not have.** `req_w8_the_corpus_actually_declares_severity_floors`
+fails the build if zero rules declare a floor, and it was verified RED at `55515b5` (0 of 417).
+Five of the six real-corpus e2e tests were verified red the same way, by
+`git checkout 55515b5 -- crates/rules/principles/`, re-running, then restoring. The sixth is the
+attribution control and passes in both states by design.
+
+**The hold guard is an allow-list, not a ban.** A plain "no floors on held rules" rule would have
+silently dropped 17 rules whose own prose authors a floor, most of the `SUPABASE-FUNC-*` and
+`SUPABASE-STORAGE-*` set among them. Instead
+`req_w8_a_held_rule_carries_a_floor_only_if_its_own_prose_authored_one` inlines the 58 held ids and
+the 17 allow-listed transcriptions, so the hold survives edits to the plan doc and a later agent
+cannot add a floor to a held rule without deliberately editing the list. It caught two rules on its
+first run.
+
+### [ ] W8-Q1 — 4 rules where the prose is genuinely ambiguous. Not authored.
+- **`SUPABASE-RLS-ENABLED-1`** names `critical` for an exposed-schema table but explicitly denies it
+  for the other branch: "A table in a non-exposed schema with no RLS is a demoted defense-in-depth
+  note, **not a critical finding**." No severity is named for the demoted branch, so there is no
+  rule-level floor that honours both sentences.
+- **`SUPABASE-AUTH-EDGE-JWT-1`** names "(high severity)" for one branch, and its own rationale
+  insists "only genuinely uncompensated functions get the high-severity framing". A rule-level high
+  floor would hand the softened branch the framing the prose withholds from it.
+- **`SUPABASE-STORAGE-SIGNED-URL-1`** names no absolute severity at all: "Flag as `needs_review` any
+  expiry at ..." and then "a distinct, **higher-severity** finding", which is relative to an
+  unnamed baseline.
+- **`RUST-DIOXUS-2-FUNCTIONAL-COMPONENTS`** says "a low-severity style note ... never as a
+  correctness or performance defect". That is an upper bound, so it is a `max_severity` candidate,
+  not a floor, and a `low` floor is inert anyway because `severity_rank` ranks `low` and `info`
+  identically.
+
+### Deliberately not floors (8), reason recorded
+The three `ARCH-OBSERVABILITY-*` rules say "a LOW finding (never higher)", which is a ceiling and is
+already transcribed as one; a test asserts they carry NO floor, so a blanket assignment fails.
+`CICD-DEPENDENCY-AUDIT-1`, `CICD-CODEQL-SECURITY-SCAN-1`, `CICD-SEMGREP-SECURITY-SCAN-1` and
+`CSHARP-NO-HARDCODED-SECRETS-1` name a severity belonging to an external tool's gate threshold or an
+option-level `escalation` spec, never the rule's own finding severity.
+`AGENTIC-NO-TEST-TAMPER-1`'s `severity = "hard-pause"` is an escalation action outside the severity
+vocabulary entirely.
+
+## W5-Q3 — the per-stack mirrors, matched one at a time
+
+16 mirrors inherited `deviation_ceiling = "high"`, each matched to the ONE spine rule it
+re-litigates and each carrying a comment naming it:
+
+| spine rule | mirrors |
+|---|---|
+| `ARCH-STRICT-LAYERING-1` | `JAVA-SPRING-LAYERED-ARCHITECTURE-1`, `JAVA-SPRING-THIN-CONTROLLERS-1`, `JAVASCRIPT-EXPRESS-THIN-CONTROLLERS-1`, `JAVASCRIPT-NEST-THIN-CONTROLLERS-DELEGATE-1`, `CSHARP-ASPNETCORE-THIN-CONTROLLERS-1`, `RUST-AXUM-HANDLERS-THIN-DELEGATE-1` |
+| `ARCH-SERVICE-DI-1` | `JAVA-SPRING-CONSTRUCTOR-INJECTION-1`, `JAVASCRIPT-NEST-MODULES-PROVIDERS-DI-1`, `RUST-AXUM-STATE-SHARED-DEPS-1` |
+| `ARCH-EXPLICIT-TX-1` | `JAVA-SPRING-TRANSACTIONAL-SERVICE-LAYER-1`, `RUST-DOMAIN-7`, `RUST-SEAORM-INTRA-AGGREGATE-TX-1` |
+| `ARCH-STRUCTURED-ERRORS-1` | `PYTHON-FLASK-ERROR-HANDLERS-1`, `JAVASCRIPT-EXPRESS-CENTRAL-ERROR-HANDLER-1`, `GO-WEB-STRUCTURED-ERROR-RESPONSES-1`, `RUST-AXUM-TYPED-ERROR-RESPONSE-1` |
+
+`req_w5_q3_every_per_stack_mirror_inherits_its_spine_rules_deviation_ceiling` asserts both sides of
+every pair, so a spine rule LOSING its ceiling fails too, plus a control over four same-folder rules
+that re-litigate none of the seven and must carry nothing. That control is what makes a
+blanket-by-folder assignment fail instead of pass.
+
+### [ ] W8-Q2 — three spine rules got no mirror, each for a stated reason
+- **`ARCH-FETCH-THEN-AUTHORIZE-1`.** The declarative-authorization rules
+  (`JAVA-SPRING-METHOD-SECURITY-1`, `CSHARP-ASPNETCORE-AUTHORIZE-ATTRIBUTE-1`,
+  `JAVASCRIPT-NEST-GUARDS-FOR-AUTH-1`, `PYTHON-FASTAPI-AUTH-DEPENDENCY-1`,
+  `PYTHON-FLASK-AUTH-ON-PROTECTED-ROUTES-1`) are about WHERE authorization is declared. The spine
+  rule is about its ORDER relative to the fetch, and its own `why` says a check that "runs before
+  the resource is loaded cannot see those facts, so it either under-checks ... or duplicates a
+  fetch". An annotation that fires before the method body is closer to the option the spine rule
+  REJECTS than to the one it adopts, so calling them mirrors would assert an equivalence the corpus
+  text contradicts. **Two of these were named as examples in W8's brief; this is a deliberate
+  disagreement with that, flagged rather than quietly dropped.** If Zach reads them as mirrors
+  anyway, it is one word and 5 TOML edits.
+- **`ARCH-REPO-RETURNS-DOMAIN-1`.** Its only real mirror, `RUST-SEAORM-RAW-SQL-ESCAPE-1`, is on the
+  58-rule hold. The DTO-boundary rules (`JAVA-SPRING-DTO-BOUNDARY-1`,
+  `PYTHON-FASTAPI-PYDANTIC-MODELS-1`) guard the HTTP boundary, not the repository boundary: a
+  different seam, so not a mirror.
+- **`RUST-DOMAIN-6`.** No cross-stack mirror exists. Its nearest neighbour, `RUST-DOMAIN-4`
+  ("errors via thiserror enums per crate"), is a same-stack sibling rather than a per-stack
+  re-litigation, so it falls outside the ruling as written. Worth a word.
+
+### [ ] W8-Q3 — five textbook layering mirrors are BLOCKED by the A5.7 hold
+`PYTHON-FLASK-SERVICE-LAYER-1`, `PYTHON-SERVICE-LAYER-1`, `PYTHON-DJANGO-FAT-MODEL-SERVICE-1`,
+`RUBY-RAILS-SKINNY-CONTROLLERS-1`, `GO-HANDLER-SERVICE-REPOSITORY-1`. Every one is an unambiguous
+`ARCH-STRICT-LAYERING-1` mirror by its own title, and W5-Q3 says they should match. But all five sit
+on the 58-rule classification hold, a `deviation_ceiling` presumes the deviation-producing
+classification that was paused, and `req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling`
+enforces exactly that. Two of his rulings point opposite ways here, so nothing was applied.
+
+Worth noting the shape of the gap this leaves: a Python or Ruby or Go repo with broken layering still
+caps at medium while Java, C#, JS and Rust now reach high. That is the same asymmetry W5-Q3 exists to
+remove, just relocated. One word unblocks all five.
+
+## [x] C7 ASSESSMENT — the D5 prose floor is NOT redundant, but its remaining job is now exactly the unsound part
+
+Asked and answered, nothing deleted. `ai_audit.rs` is byte-identical.
+
+**What is now redundant.** D5 has four branches: (A) unauthenticated / full-compromise to critical,
+(B) authenticated cross-tenant read to high, or critical with an escalating data class, (C) an
+exploit-precondition cap lowering a critical floor to high, (D) an RLS-hedge guard raising to high.
+For the 31 rules that now floor at high or critical, A and B's outcomes are structurally dead:
+25 already floor at high, and the 6 critical-floor rules cannot be raised further because critical
+is the top of the vocabulary. For `SUPABASE-RLS-NO-POLICY-1` and `SUPABASE-RLS-INITPLAN-1`, which
+author floor AND ceiling both at medium, a D5 raise is **entirely erased** at the export boundary
+by `clamp_to_rule_max_severity`: work that cannot survive.
+
+**What is NOT redundant, and this is the operative part.**
+1. **Scope.** `min_severity` reaches 41 of 417 rules, and only findings whose `rule_id` resolves to
+   a corpus rule. D5 scans every finding, including AI-advisory rows with no corpus rule at all and
+   external-tool preview rows.
+2. **Instance-level escalation is a live function the FLOOR ruling itself created.** W5-Q1's
+   resolution is that a flat "Severity is High." is a floor "with no escalation named, which does
+   not forbid one". For a deterministic-floor finding, which never sees the LLM calibration pass and
+   whose severity is set by the checker, D5 is today the ONLY mechanism that performs that
+   escalation. Delete it and `SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1` can never exceed high on a
+   deterministic detection, contradicting the stated reason for leaving it uncapped (IDOR in the
+   database, genuinely critical-class).
+3. **Branch D is rationale-shaped, not rule-shaped.** "Do not under-rate because the calibration
+   reasoning speculated RLS probably covers it" is a statement about the MODEL'S REASONING. No
+   per-rule structured field can express it. The real fix is for the model to emit a structured
+   mitigating-control capture, which is W7's structured-identity prescription applied one layer
+   over, not a deletion.
+4. Branch C corrects DOWNWARD, so an upward-only floor cannot subsume it at all.
+
+**New evidence, and it is worth more than the redundancy verdict.** The matcher is not merely
+polarity-blind as C7 states. It is blind to WORD BOUNDARIES. `READ_VERBS` and the data-class lists
+are bare `str::contains` tests, and several entries are substrings of extremely common English:
+
+| entry | ordinary words that match it |
+|---|---|
+| `read` | **already**, thread, spread, readonly, readme, breadcrumb |
+| `view` | **review**, **reviewed**, **preview**, interview, overview |
+| `see` | seen, seems, seed, oversee |
+| `list` | **allowlist**, denylist, checklist, listener |
+| `access` | accessible, accessed |
+
+`mentions_authenticated_cross_tenant_read` is "any cross-tenant phrase AND any read verb", over
+`detail + snippet + category`. So a finding whose text contains "another user's" and the word
+**"already"** floors to high. One containing "cross-tenant" and the word **"review"** floors to
+high, and `needs_review` prose is pervasive in this corpus, including in the rule details D5 scans.
+Add `mentions_escalating_data_class`, whose `CREDENTIAL_DATA_PHRASES` includes the bare word
+`"credential"`, and it floors to **critical**: "another tenant's credentials are already rotated
+correctly" is a critical finding today.
+
+The documented `UNAUTHENTICATED` example is the same class, not a separate one:
+`UNAUTHENTICATED_OR_FULL_COMPROMISE_PHRASES`' first entry is the bare substring `"unauthenticated"`,
+which matches the error-code token, `UnauthenticatedError`, and "rejects unauthenticated requests".
+Its own doc comment claims the list is "deliberately phrase-based (not a single keyword) ... every
+phrase here asserts the ABSENCE of auth". The first entry is a single keyword. The comment describes
+an intent the data does not implement.
+
+### [ ] W8-Q4 — recommended disposition for C7: NARROW it, do not delete and do not rewrite
+1. **Word-boundary matching instead of `contains`** for `READ_VERBS` and the data-class lists. Ten
+   lines, and it is literally the fix W7 already applied for B9: "the finding was '`e.g` is an
+   object'; the defect was 'the extractor reads English'." Same defect, one layer over.
+2. **Skip branches A and B for any finding whose rule declares a `min_severity` at or above what
+   the branch would produce.** Dead work today, and the only thing it can do there is mis-fire.
+3. **Keep C and D** until the model emits a structured mitigating-control capture. Neither is
+   expressible as a per-rule field.
+
+This is the "DELETABLE, not rewritable" prediction coming out half right: the floor's RAISE-to-high
+half is now deletable, and the part that remains is small, specific, and fixable in ten lines rather
+than rewritten.
+
+## W5-Q4 — the blind tests are widened
+
+Both pre-existing `req_e2_*` tests that read `json.curated_findings[0].sites[0]` now read through a
+shared `exported_site_severities` helper that scans `curated_findings` AND
+`held_for_review_findings`. Widened where they LOOK; nothing about what they ASSERT changed, both
+expected values are byte-identical, and the helper ADDS an assertion (exactly one exported site), so
+a silently dropped row can no longer read as a passing clamp. Test-discipline exception (a), stated
+in the commit. No widened test failed, so there was no hidden finding behind the blindness.
+
+## Verification
+
+`cargo test --workspace` in the foreground: **exit 0, 5489 passed, 0 failed, 7 ignored, across 110
+test binaries.** `./scripts/self-measurement.sh`: **exit 0, "SELF-MEASUREMENT: all green."**
+
+## Touched outside W8's file list, called out
+- `crates/server/src/xlsx_export.rs`: one import and one line, committed alone (`d94c463`). Without
+  it the floor would be a PDF-only correction and the two artifacts would disagree on every floored
+  rule, which is the parity-fault class the grader names as its own verdict.
+- `crates/server/src/onboard.rs` (+2) and `crates/server/src/scan_tools.rs` (+1): each constructs
+  `Rule` exhaustively in a `#[cfg(test)]` helper, so a new field needs one mechanical
+  `min_severity: None,` line. No behaviour, no assertions.
+- `crates/server/tests/requirement_traceability.rs`: registered W5-Q2, W5-Q3 and W5-Q4.
