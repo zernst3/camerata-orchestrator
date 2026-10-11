@@ -514,6 +514,78 @@ pub(crate) fn clamp_to_rule_max_severity(
     }
 }
 
+/// W8 / W5-Q2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): RAISE `severity` UP to
+/// `f`'s corpus-declared [`camerata_rules::Rule::min_severity`], when one is declared and
+/// `severity` currently ranks BELOW it. The exact structural mirror of
+/// [`clamp_to_rule_max_severity`], built because the owner ruled that a rule's prose statement
+/// of a single severity is a FLOOR:
+///
+/// > **"Floor, it's the minimum rating."**
+///
+/// Never LOWERS a severity that already ranks at or above the floor — this is a floor, not a
+/// ceiling. Absent corpus, absent rule, or absent `min_severity` all degrade to a no-op, which
+/// is the overwhelming majority of findings. `rule_id` is resolved through [`corpus_rule_for`]
+/// for the same reason the ceiling does it: an external-tool/preview finding carrying the
+/// TOOL's own id must still reach the grounded corpus rule that may carry a floor.
+///
+/// # Two preconditions, both deliberate — a floor is not as safe as a ceiling
+///
+/// A ceiling can only lower a severity, so it is safe to apply unconditionally. A floor RAISES
+/// one, so an over-broad floor is a false alarm shipped to a client. Two guards bound it:
+///
+/// 1. **An ACCUSING kind, explicitly present.** The floor applies only when
+///    [`camerata_api_types::audit::FindingKind`] is present and NOT informational — i.e.
+///    `Defect` or `Deviation`. A `ConventionObserved` / `NoConvention` / `NotAssessed` row says
+///    something is FINE (or was not evaluated) and "always ship at `info` severity" by W3's
+///    design; raising one to `high` would both lie to the client and, via
+///    [`is_informational`]'s severity test, re-route it into an action bucket. An ABSENT kind
+///    is excluded too, under W3's standing honesty rule that nothing may silently default to
+///    `Defect` — the same reason [`clamp_deviation_severity`] refuses to assume an unkinded row
+///    is a deviation.
+/// 2. **A real location.** A finding with BOTH an empty `path` and `line == 0` established
+///    nothing concrete to rate, and [`downgrade_unlocated_above_informational`] (C4-R1) exists
+///    to force exactly that shape to `info`. Declining the floor there, rather than relying on
+///    running before C4-R1, makes the floor ORDER-INDEPENDENT with respect to that safety net:
+///    it cannot undo it from any position, in any exporter, including the xlsx partition, which
+///    does not apply C4-R1 at all.
+///
+/// # Where this sits relative to the ceiling
+///
+/// Applied at the same export choke-points as the ceiling (the PDF's `build_report_json`
+/// partition, the xlsx/`findings.json` `partition_rows`), so every artifact agrees — but
+/// FIRST in that chain, so `max_severity` and the A5.2 deviation ceiling both still get the
+/// last word. The corpus-load gate (`camerata_rules::rules_with_invalid_severity_floor`)
+/// rejects a `min_severity` ranking above the same rule's `max_severity`, so the two can never
+/// state an unsatisfiable pair; with that guaranteed, floor-then-ceiling always lands inside
+/// `[min_severity, max_severity]`.
+pub(crate) fn raise_to_rule_min_severity(
+    severity: String,
+    f: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> String {
+    match &f.kind {
+        Some(kind) if !kind.is_informational() => {}
+        // Informational, or no kind at all — see precondition 1 above.
+        _ => return severity,
+    }
+    if f.path.is_empty() && f.line == 0 {
+        // Nothing concrete to rate — see precondition 2 above.
+        return severity;
+    }
+    let Some(rule) = corpus_rule_for(&f.rule_id, corpus) else {
+        return severity;
+    };
+    let Some(raw_floor) = rule.min_severity.as_deref() else {
+        return severity;
+    };
+    let floor = normalize_severity(raw_floor);
+    if severity_rank(&severity) > severity_rank(&floor) {
+        floor
+    } else {
+        severity
+    }
+}
+
 /// A5.2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): the severity ceiling for a
 /// CONSISTENCY DEVIATION. The default a deviation may never exceed, absent an authored
 /// per-rule escape hatch — the owner's driver is FORWARD DRIFT COST ("consistency issues
@@ -3566,6 +3638,11 @@ pub fn build_report_json(
         let disposition = classify(f, wire);
         let reason = wire.map(|d| d.reason.clone()).unwrap_or_default();
         let severity = normalize_severity(&f.severity);
+        // W8 (W5-Q2): the rule's own `min_severity` FLOOR, applied FIRST so every downstream
+        // integrity downgrade and both ceilings still get the last word — see
+        // `raise_to_rule_min_severity`'s doc comment for the kind/location preconditions that
+        // keep a floor from inflating an informational or unlocated row.
+        let severity = raise_to_rule_min_severity(severity, f, corpus);
         // C4-R1: the null-location safety net — see `downgrade_unlocated_above_informational`'s
         // doc comment. Applied here (once, alongside normalization) so every downstream section
         // — matrix bucketing, curated findings, the scorecard — sees the ALREADY-downgraded
