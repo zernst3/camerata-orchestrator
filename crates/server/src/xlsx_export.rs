@@ -1470,12 +1470,27 @@ fn coverage_summary_line(coverage_rows: &[CoverageRow], not_assessed: usize) -> 
         .filter(|r| r.findings_count > 0)
         .count();
     let clean = total.saturating_sub(with_findings);
-    let mut line = format!(
-        "We checked {total} rule{} against this codebase. {with_findings} found something to \
-         look at; the other {clean} {} checked and found clean.",
-        if total == 1 { "" } else { "s" },
-        if clean == 1 { "was" } else { "were" }
-    );
+    let rules = if total == 1 { "rule" } else { "rules" };
+    // Branched rather than one template, because the degenerate cases are the ones a client
+    // actually sees on a healthy codebase, and "0 found something to look at; the other 3
+    // were checked and found clean" is the sentence a template produces and a human never
+    // would. Caught by reading the rendered sheet, not by a test.
+    let mut line = if total == 0 {
+        "No rules were recorded as checked for this inspection.".to_string()
+    } else if with_findings == 0 {
+        format!("We checked {total} {rules} against this codebase; every one came back clean.")
+    } else if clean == 0 {
+        format!(
+            "We checked {total} {rules} against this codebase, and every one found something \
+             to look at."
+        )
+    } else {
+        format!(
+            "We checked {total} {rules} against this codebase. {with_findings} found something \
+             to look at; the other {clean} {} checked and found clean.",
+            if clean == 1 { "was" } else { "were" }
+        )
+    };
     if not_assessed > 0 {
         line.push_str(&format!(
             " A further {not_assessed} could not be evaluated this scan and {} named below, \
@@ -5084,6 +5099,67 @@ mod tests {
                  {coverage:#?}"
             );
         }
+    }
+
+    /// req_pass3 / req_g3: the Coverage summary reads like a sentence a human wrote, in every
+    /// case a client can actually hit — including the two that a single format template gets
+    /// wrong and that a healthy codebase sees most often.
+    ///
+    /// Found by RENDERING the sheet and reading it, not by a failing assertion: a template
+    /// produced "0 found something to look at; the other 3 were checked and found clean",
+    /// which is the exact register G3's ruling rules out ("a one-line summary, WRITTEN FOR A
+    /// CLIENT"). Pinned here so the branches cannot silently collapse back into one template.
+    ///
+    /// FAILS BEFORE THE CHANGE: `coverage_summary_line` did not exist — the Coverage sheet
+    /// had no summary of any kind.
+    #[test]
+    fn req_pass3_coverage_summary_reads_as_a_sentence_in_every_degenerate_case() {
+        let row = |findings_count: usize| CoverageRow {
+            rule_id: "R-1".to_string(),
+            title: "t".to_string(),
+            category: "c".to_string(),
+            citation_kind: "grounded".to_string(),
+            citation_label: "l".to_string(),
+            findings_count,
+        };
+
+        // Nothing checked at all: never a sentence with a 0 in it pretending to be a result.
+        assert_eq!(
+            coverage_summary_line(&[], 0),
+            "No rules were recorded as checked for this inspection."
+        );
+
+        // The healthy case: no "0 found something to look at".
+        let all_clean = coverage_summary_line(&[row(0), row(0), row(0)], 0);
+        assert_eq!(
+            all_clean,
+            "We checked 3 rules against this codebase; every one came back clean."
+        );
+        assert!(!all_clean.contains('0'), "no bare zero in the clean case: {all_clean:?}");
+
+        // Everything fired: no "the other 0 were checked and found clean".
+        let none_clean = coverage_summary_line(&[row(2), row(1)], 0);
+        assert_eq!(
+            none_clean,
+            "We checked 2 rules against this codebase, and every one found something to look at."
+        );
+
+        // Singulars agree, and the not-assessed clause is appended rather than replacing the
+        // summary — a rule that could not be evaluated is extra honesty, not a substitute for
+        // saying what WAS checked.
+        let one = coverage_summary_line(&[row(1)], 1);
+        assert!(
+            one.starts_with("We checked 1 rule against this codebase")
+                && one.contains("A further 1 could not be evaluated this scan and is named below"),
+            "{one:?}"
+        );
+        let mixed = coverage_summary_line(&[row(1), row(0), row(0)], 2);
+        assert_eq!(
+            mixed,
+            "We checked 3 rules against this codebase. 1 found something to look at; the other \
+             2 were checked and found clean. A further 2 could not be evaluated this scan and \
+             are named below, with the reason."
+        );
     }
 
     /// req_pass3 (C5 across the restructure): absorbed merge sites stay visible on the NEW
