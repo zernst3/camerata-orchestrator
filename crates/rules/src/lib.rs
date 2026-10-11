@@ -4710,11 +4710,7 @@ mod tests {
     ///
     /// The mapping is asserted per-mirror, never as a count or a folder pattern, because the
     /// ruling's own constraint is that a per-stack rule which does not correspond to one of the
-    /// seven spine rules gets NOTHING. Four spine rules have mirrors in the shipped corpus; two
-    /// (`ARCH-FETCH-THEN-AUTHORIZE-1`, `RUST-DOMAIN-6`) have none that is unambiguous, and
-    /// `ARCH-REPO-RETURNS-DOMAIN-1`'s only mirror is on the owner's classification hold list and
-    /// was NOT covered by his W9 direction — all three are recorded in the plan's report rather
-    /// than guessed at here.
+    /// seven spine rules gets NOTHING.
     ///
     /// W9, 2026-10-11 completed the mirror set across three spine concepts that were still
     /// internally inconsistent, on the owner's direction that *"they all must be consistent, so
@@ -4726,9 +4722,28 @@ mod tests {
     /// repo with broken layering still capped at `medium` while Java, C#, JS and Rust reached
     /// `high` — the exact asymmetry this requirement exists to remove, merely relocated.
     ///
+    /// W10, 2026-10-11 closed the loop across the WHOLE corpus, on this direction verbatim:
+    ///
+    /// > "Extend it. Consider this directive, get all the rules consistent in this sense, you
+    /// > have the green light for ALL instances of this."
+    ///
+    /// Three pairs were added, each found by reading the spine rule's decided axis and option
+    /// set and then sweeping for rules deciding that same axis in a stack-specific vocabulary —
+    /// never by name or folder, because both of those produce false positives and false
+    /// negatives here (`CSHARP-ASPNETCORE-MINIMAL-API-VS-CONTROLLERS-1` sounds like a layering
+    /// mirror and is not; `ARCH-STRUCTURED-ERRORS-1`'s four mirrors carry four different naming
+    /// conventions). `ARCH-REPO-RETURNS-DOMAIN-1` now has the mirror W9-Q2 recorded as missing,
+    /// so SIX of the seven spine concepts have a matched mirror set. The seventh,
+    /// `RUST-DOMAIN-6`, still has none, and `ARCH-FETCH-THEN-AUTHORIZE-1`'s nearest neighbours
+    /// are deliberately NOT mirrors (they decide where authorization is DECLARED; the spine
+    /// rule decides its ORDER relative to the fetch, and an annotation firing before the method
+    /// body is closer to the option the spine rule REJECTS). Both are recorded in the plan's
+    /// report rather than guessed at here.
+    ///
     /// FAILS BEFORE THE FIX: every lookup below returned `None` on `d94c463`; only the seven
     /// spine rules declared a `deviation_ceiling`. The ten pairs W9 added returned `None` on
-    /// `2d80e2f`, proved by reverting `crates/rules/principles/` to that commit and re-running.
+    /// `2d80e2f`, and the three W10 added returned `None` on `b814dd2` — each proved by
+    /// reverting `crates/rules/principles/` to that commit and re-running.
     #[tokio::test]
     async fn req_w5_q3_every_per_stack_mirror_inherits_its_spine_rules_deviation_ceiling() {
         let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
@@ -4746,7 +4761,7 @@ mod tests {
 
         // (spine rule, its per-stack mirrors). Both sides are asserted, so this also fails if
         // a spine rule ever LOSES its ceiling and the mirrors silently out-rank their origin.
-        const SPINE_AND_MIRRORS: [(&str, &[&str]); 4] = [
+        const SPINE_AND_MIRRORS: [(&str, &[&str]); 5] = [
             (
                 "ARCH-STRICT-LAYERING-1",
                 &[
@@ -4764,6 +4779,11 @@ mod tests {
                     "PYTHON-FLASK-SERVICE-LAYER-1",
                     "PYTHON-SERVICE-LAYER-1",
                     "RUBY-RAILS-SKINNY-CONTROLLERS-1",
+                    // W10: not held. The corpus asserts this equivalence itself — this rule's
+                    // own `why` says "The pattern parallels the Express backend rule: route
+                    // handlers delegate to a service layer; Angular components delegate to a
+                    // service layer", and the Express rule is already a matched mirror above.
+                    "JAVASCRIPT-ANGULAR-TYPED-HTTPCLIENT-1",
                 ],
             ),
             (
@@ -4800,7 +4820,21 @@ mod tests {
                     "JAVASCRIPT-EXPRESS-CENTRAL-ERROR-HANDLER-1",
                     "GO-WEB-STRUCTURED-ERROR-RESPONSES-1",
                     "RUST-AXUM-TYPED-ERROR-RESPONSE-1",
+                    // W10: not held. gRPC fixes the envelope at the protocol level, so the
+                    // status code IS the error contract; both of this rule's violating options
+                    // are spine-rejected positions (blanket INTERNAL with the detail in the
+                    // human message = plain-string errors; inconsistent per handler =
+                    // per-endpoint custom shapes). `kind = "defect"`, so the ceiling is inert
+                    // as shipped — see W9-Q1 and this rule's own TOML comment.
+                    "GO-GRPC-STATUS-CODES-CORRECT-1",
                 ],
+            ),
+            (
+                // W10 closed W9-Q2: this spine concept had no matched mirror at all, because
+                // its only one sits on the 58-rule classification hold. The owner's W10
+                // direction names it explicitly and he verified the mapping himself.
+                "ARCH-REPO-RETURNS-DOMAIN-1",
+                &["RUST-SEAORM-RAW-SQL-ESCAPE-1"],
             ),
         ];
         for (spine, mirrors) in SPINE_AND_MIRRORS {
@@ -4832,12 +4866,129 @@ mod tests {
             "RUST-AXUM-TIMEOUT-LIMITS-1",
             // Express, but about security headers.
             "JAVASCRIPT-EXPRESS-SECURITY-HEADERS-1",
+            // W10 added a mirror in each of these three folders, so each now needs its own
+            // same-folder control or a blanket-by-folder assignment would pass again.
+            // Angular, but about change-detection strategy.
+            "JAVASCRIPT-ANGULAR-ONPUSH-CHANGE-DETECTION-1",
+            // go/grpc, but about hand-editing generated code.
+            "GO-GRPC-PROTO-GENERATED-IMMUTABLE-1",
+            // rust/seaorm, but about declaring FK relations on both sides.
+            "RUST-ENTITIES-4",
         ] {
             assert_eq!(
                 ceiling(id),
                 None,
                 "{id} does not re-litigate any of the seven spine rules, so W5-Q3 gives it \
                  nothing; a ceiling here means the mirrors were blanket-assigned by folder"
+            );
+        }
+
+        // CONTROL (near-miss attribution), added by W10. Each of these decides an axis that
+        // READS like a spine concept and is not one, and each was ruled out on the text of its
+        // own TOML. They are pinned here so the ruling cannot be silently reversed: flipping
+        // one into a mirror now requires deliberately editing this list, and the reason it is
+        // not a mirror is stated beside it.
+        for (id, why_not) in [
+            // Sounds like ARCH-SERVICE-DI-1. Decides interface GRANULARITY by cohesion, and its
+            // own `why` explicitly disclaims the DI rationale ("not mockability"). No
+            // composition root, no abstraction-vs-locator axis.
+            (
+                "JAVA-SMALL-INTERFACES-1",
+                "interface granularity, not DI posture",
+            ),
+            // Sounds like ARCH-SERVICE-DI-1 (provide at the app root vs. global statics).
+            // Decides how cross-tree UI STATE propagates, judged on re-render scope; the thing
+            // provided is state, not a dependency abstraction.
+            (
+                "RUST-DIOXUS-4",
+                "cross-tree UI state propagation, not DI posture",
+            ),
+            // Sounds like ARCH-SERVICE-DI-1. All three options inject something through the
+            // constructor; the axis is whether config arrives as a typed startup-validated POCO
+            // or as string-keyed reads. Matches W9's PYTHON-FASTAPI-DI-SESSION-1 reasoning.
+            (
+                "CSHARP-ASPNETCORE-OPTIONS-PATTERN-1",
+                "config typing, not DI posture",
+            ),
+            // Sounds like ARCH-REPO-RETURNS-DOMAIN-1. Its directive and `why` are about the API
+            // serialization boundary ("forces every API response through an explicit DTO plus
+            // mapper"), which is ARCH-API-DTOS-1's axis — and that spine rule has no ceiling.
+            (
+                "RUST-ENTITIES-2",
+                "HTTP/serialization boundary, not the repository boundary",
+            ),
+            // Same reason, and this is W8-Q2's ruling preserved: both of these guard the HTTP
+            // boundary, so they mirror ARCH-API-DTOS-1, which carries no ceiling.
+            (
+                "JAVA-SPRING-DTO-BOUNDARY-1",
+                "HTTP boundary, not the repository boundary",
+            ),
+            (
+                "PYTHON-FASTAPI-PYDANTIC-MODELS-1",
+                "HTTP boundary, not the repository boundary",
+            ),
+            // Sounds like ARCH-STRUCTURED-ERRORS-1. Its own title says "regardless of the
+            // envelope shape" — the corpus text rules itself out.
+            (
+                "ARCH-NO-LEAKY-ERROR-DETAILS-1",
+                "leak-prevention, not the envelope contract",
+            ),
+            // Sounds like ARCH-STRICT-LAYERING-1. Decides responsibility distribution AMONG
+            // components; both options keep a service layer. The Angular layering mirror is
+            // JAVASCRIPT-ANGULAR-TYPED-HTTPCLIENT-1, matched above.
+            (
+                "JAVASCRIPT-ANGULAR-SMART-PRESENTATIONAL-PATTERN-1",
+                "component decomposition, not the data-access boundary",
+            ),
+            // W9's two rulings, preserved. `default = false` on the C# one: it authors no
+            // default position, and BOTH its legitimate options already require layering.
+            (
+                "CSHARP-ASPNETCORE-MINIMAL-API-VS-CONTROLLERS-1",
+                "routing style, not layering",
+            ),
+            (
+                "PYTHON-FASTAPI-DI-SESSION-1",
+                "resource lifecycle, not DI posture",
+            ),
+            // W8-Q2's ruling, preserved: these decide WHERE authorization is declared, while
+            // ARCH-FETCH-THEN-AUTHORIZE-1 decides its ORDER relative to the fetch. An
+            // annotation that fires before the method body is nearer the option the spine rule
+            // REJECTS than the one it adopts.
+            (
+                "JAVA-SPRING-METHOD-SECURITY-1",
+                "where authz is declared, not fetch/authz order",
+            ),
+            (
+                "CSHARP-ASPNETCORE-AUTHORIZE-ATTRIBUTE-1",
+                "where authz is declared, not fetch/authz order",
+            ),
+            (
+                "JAVASCRIPT-NEST-GUARDS-FOR-AUTH-1",
+                "where authn is declared, not fetch/authz order",
+            ),
+            (
+                "PYTHON-FASTAPI-AUTH-DEPENDENCY-1",
+                "where authn is declared, not fetch/authz order",
+            ),
+            (
+                "PYTHON-FLASK-AUTH-ON-PROTECTED-ROUTES-1",
+                "where authn is declared, not fetch/authz order",
+            ),
+            // Same-stack SIBLING of RUST-DOMAIN-6 rather than a per-stack re-litigation:
+            // RUST-DOMAIN-6's own `why` says it ASSUMES this rule's default and decides the
+            // narrower follow-on question. Capping it would extend the spine set, which is a
+            // different decision from "mirrors match their spine" — reported, not authored.
+            (
+                "RUST-DOMAIN-4",
+                "parent rule of the spine rule, not a per-stack mirror",
+            ),
+        ] {
+            assert_eq!(
+                ceiling(id),
+                None,
+                "{id} is a deliberate NEAR-MISS, ruled out because its decided axis is \
+                 {why_not}; a ceiling here means a later round matched by name or vibe instead \
+                 of by the axis the rule actually decides"
             );
         }
     }
@@ -5005,28 +5156,49 @@ mod tests {
     /// > place, you can make individual changes based on what I direct. In this case, I direct
     /// > that they all must be consistent, so make it so."
     ///
-    /// Read NARROWLY and on purpose. It authorizes the `deviation_ceiling` on the five textbook
-    /// `ARCH-STRICT-LAYERING-1` mirrors that W8-Q3 identified and then refused to author, and
-    /// nothing else. **The hold on `kind` is NOT lifted**: no held rule's `kind` was touched, and
-    /// `A5.7` therefore stays `Exempt` in the traceability registry.
+    /// It authorized the `deviation_ceiling` on the five textbook `ARCH-STRICT-LAYERING-1`
+    /// mirrors that W8-Q3 identified and then refused to author.
     ///
-    /// Why a ceiling on a held rule is safe where a `kind` edit would not be: all five ship as
+    /// W10, 2026-10-11 — the owner then closed the loop across the whole corpus, verbatim:
+    ///
+    /// > "Extend it. Consider this directive, get all the rules consistent in this sense, you
+    /// > have the green light for ALL instances of this."
+    ///
+    /// So the authorization is no longer those five ids: it is **every held rule that is a
+    /// genuine per-stack mirror of a spine rule carrying the ceiling**, and nothing else. Read
+    /// carefully, because the two halves of that sentence do different work:
+    ///
+    /// - The scope widened. W10's corpus-wide sweep found exactly one further held mirror,
+    ///   `RUST-SEAORM-RAW-SQL-ESCAPE-1` (`ARCH-REPO-RETURNS-DOMAIN-1`'s only per-stack
+    ///   re-litigation, the asymmetry W9-Q2 recorded and could not close). The owner named it
+    ///   explicitly and said he verified the mapping himself.
+    /// - **The hold on `kind` is NOT lifted**, by either direction. No held rule's `kind` was
+    ///   touched in W9 or W10, the classification review of the 58 stays paused, and `A5.7`
+    ///   therefore stays `Exempt` in the traceability registry.
+    ///
+    /// Why a ceiling on a held rule is safe where a `kind` edit would not be: all six ship as
     /// `kind = "decision"`, so they ALREADY emit deviation rows today, and a ceiling only BOUNDS
     /// rows that already exist. It presumes nothing about the paused classification. If the owner
     /// later reclassifies one as `defect`, the ceiling becomes dead config — a `defect`-kind rule
     /// never enters the alternatives pass ([`Rule::is_defect_kind`]) so it emits no deviations —
     /// rather than wrong behaviour.
     ///
-    /// The guard stays an explicit ALLOW-LIST rather than a loosened predicate, so it keeps doing
-    /// the one job it was built for: a ceiling cannot reach any OTHER held rule without a later
-    /// agent deliberately editing this list, which is a reviewable act rather than a silent one.
-    /// Three anti-rot assertions back it up — every allow-listed id must really be on the hold
-    /// list, must really carry a ceiling, and must carry the spine rule's own `high` — so the
-    /// list cannot decay into a blanket exemption at an arbitrary severity.
+    /// The guard stays an explicit ALLOW-LIST and was deliberately NOT loosened into a predicate
+    /// such as "any held rule may carry a ceiling", which the broader direction would have
+    /// superficially licensed and which would have made this test unable to fail. "Genuine
+    /// per-stack mirror" is a judgement about a rule's decided axis that no predicate over the
+    /// corpus can evaluate, so it is recorded here as ids, with the spine rule each one mirrors
+    /// named beside it. A ceiling cannot reach any OTHER held rule without a later agent
+    /// deliberately editing this list, which is a reviewable act rather than a silent one; the
+    /// 52 other held rules are still blocked. Three anti-rot assertions back it up — every
+    /// allow-listed id must really be on the hold list, must really carry a ceiling, and must
+    /// carry the spine rule's own `high` — so the list cannot decay into a blanket exemption at
+    /// an arbitrary severity.
     ///
-    /// FAILS BEFORE THE W9 CHANGE in the direction that matters: adding a `deviation_ceiling` to
-    /// any held rule outside `AUTHORIZED_BY_W9_DIRECTION` still reds this test. Proved by
-    /// temporarily authoring one on `SPIRIT-ROBUSTNESS-1` and observing the failure.
+    /// FAILS BEFORE THE CHANGE in the direction that matters: adding a `deviation_ceiling` to any
+    /// held rule outside `AUTHORIZED_BY_OWNER_DIRECTION` still reds this test. W9 proved it on
+    /// `SPIRIT-ROBUSTNESS-1`; W10 re-proved it after widening the list, on
+    /// `SUPABASE-STORAGE-SIGNED-URL-1` (held, unnamed, and not a mirror of anything).
     #[tokio::test]
     async fn req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling() {
         let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
@@ -5094,72 +5266,105 @@ mod tests {
             "TESTING-AS-DOCUMENTATION-1",
             "UI-QUERY-LIBRARY-1",
         ];
-        // The ONLY held rules the owner's W9 direction authorizes a `deviation_ceiling` on: the
-        // five `ARCH-STRICT-LAYERING-1` mirrors W8-Q3 named and then left unauthored. Each is an
-        // unambiguous re-litigation of that spine rule by its own title and directive, and each
-        // records the spine rule AND this authorization in a comment above its own
-        // `deviation_ceiling` line, so the TOML explains itself without this test.
+        // The ONLY held rules the owner's direction authorizes a `deviation_ceiling` on: held
+        // rules that are a genuine per-stack mirror of a spine rule carrying the ceiling. Each
+        // is an unambiguous re-litigation of its spine rule by its own title and directive, and
+        // each records the spine rule AND this authorization in a comment above its own
+        // `deviation_ceiling` line, so the TOML explains itself without this test. The spine
+        // rule is named here too, so the pairing is reviewable without opening six files.
         //
         // Adding an id here is the ONLY way to let a ceiling onto a held rule. Do not add one
-        // without a direction from the owner naming that rule, quoted at the point of the edit.
-        const AUTHORIZED_BY_W9_DIRECTION: [&str; 5] = [
-            "GO-HANDLER-SERVICE-REPOSITORY-1",
-            "PYTHON-DJANGO-FAT-MODEL-SERVICE-1",
-            "PYTHON-FLASK-SERVICE-LAYER-1",
-            "PYTHON-SERVICE-LAYER-1",
-            "RUBY-RAILS-SKINNY-CONTROLLERS-1",
+        // without (a) a direction from the owner, quoted at the point of the edit, and (b) the
+        // spine rule it mirrors, established from that rule's own decided axis and option set —
+        // never from its name or its folder. The 52 held rules absent from this list are still
+        // blocked, and that is the one job this test exists to do.
+        const AUTHORIZED_BY_OWNER_DIRECTION: [(&str, &str); 6] = [
+            // W9 — the five `ARCH-STRICT-LAYERING-1` mirrors W8-Q3 named and left unauthored.
+            ("GO-HANDLER-SERVICE-REPOSITORY-1", "ARCH-STRICT-LAYERING-1"),
+            (
+                "PYTHON-DJANGO-FAT-MODEL-SERVICE-1",
+                "ARCH-STRICT-LAYERING-1",
+            ),
+            ("PYTHON-FLASK-SERVICE-LAYER-1", "ARCH-STRICT-LAYERING-1"),
+            ("PYTHON-SERVICE-LAYER-1", "ARCH-STRICT-LAYERING-1"),
+            ("RUBY-RAILS-SKINNY-CONTROLLERS-1", "ARCH-STRICT-LAYERING-1"),
+            // W10 — the one further held mirror the corpus-wide sweep found. Its title names
+            // the seam ("... at the repository boundary") and its adopted directive states the
+            // spine rule's commitment verbatim: "only typed domain types cross the trait
+            // boundary". The owner named this rule and verified the mapping himself.
+            ("RUST-SEAORM-RAW-SQL-ESCAPE-1", "ARCH-REPO-RETURNS-DOMAIN-1"),
         ];
         let set = load_corpus(path).await.expect("corpus loads");
-        // The gate proper: every held rule OTHER than the five he named must still carry nothing.
+        let ceiling_of = |id: &str| -> Option<String> {
+            set.iter()
+                .find(|r| r.id.0 == id)
+                .unwrap_or_else(|| panic!("{id} must exist in the corpus"))
+                .deviation_ceiling
+                .clone()
+        };
+        // The gate proper: every held rule OTHER than the ones he named must still carry nothing.
         let violations: Vec<String> = set
             .iter()
             .filter(|r| {
                 HELD.contains(&r.id.0.as_str())
                     && r.deviation_ceiling.is_some()
-                    && !AUTHORIZED_BY_W9_DIRECTION.contains(&r.id.0.as_str())
+                    && !AUTHORIZED_BY_OWNER_DIRECTION
+                        .iter()
+                        .any(|(id, _)| *id == r.id.0.as_str())
             })
             .map(|r| r.id.0.clone())
             .collect();
         assert!(
             violations.is_empty(),
             "a rule on the owner's 58-rule classification hold list must not carry an inferred \
-             `deviation_ceiling` — only the ones his W9 direction named may carry one, and these \
-             were not among them: {violations:?}"
+             `deviation_ceiling` — only a held rule his direction named, and that is a genuine \
+             per-stack mirror of a spine rule, may carry one. These were not among them: \
+             {violations:?}"
         );
         // ANTI-ROT 1: the allow-list may only name rules that are actually on the hold list, or
         // it is quietly exempting rules the hold never covered in the first place.
-        let not_held: Vec<&str> = AUTHORIZED_BY_W9_DIRECTION
+        let not_held: Vec<&str> = AUTHORIZED_BY_OWNER_DIRECTION
             .iter()
-            .copied()
+            .map(|(id, _)| *id)
             .filter(|id| !HELD.contains(id))
             .collect();
         assert!(
             not_held.is_empty(),
-            "the W9 allow-list may only name rules that are actually on the hold list: \
-             {not_held:?}"
+            "the allow-list may only name rules that are actually on the hold list: {not_held:?}"
         );
         // ANTI-ROT 2 + 3: every allow-listed id must still carry a ceiling, and specifically the
-        // spine rule's own `high`. Without this the list could decay into a standing exemption at
-        // any severity for five rules nobody is still authoring.
-        let wrong: Vec<String> = AUTHORIZED_BY_W9_DIRECTION
+        // `high` its spine rule carries. Without this the list could decay into a standing
+        // exemption at any severity for rules nobody is still authoring.
+        let wrong: Vec<String> = AUTHORIZED_BY_OWNER_DIRECTION
             .iter()
-            .copied()
-            .filter_map(|id| {
-                let ceiling = set
-                    .iter()
-                    .find(|r| r.id.0 == id)
-                    .unwrap_or_else(|| panic!("{id} must exist in the corpus"))
-                    .deviation_ceiling
-                    .clone();
-                (ceiling.as_deref() != Some("high")).then(|| format!("{id} = {ceiling:?}"))
+            .filter_map(|(id, spine)| {
+                let ceiling = ceiling_of(id);
+                (ceiling.as_deref() != Some("high"))
+                    .then(|| format!("{id} (mirror of {spine}) = {ceiling:?}"))
             })
             .collect();
         assert!(
             wrong.is_empty(),
-            "the W9 direction was that the per-stack mirror set be CONSISTENT, so each \
-             allow-listed held rule must carry `ARCH-STRICT-LAYERING-1`'s own \
+            "the owner's direction was that the per-stack mirror set be CONSISTENT, so each \
+             allow-listed held rule must carry its spine rule's own \
              `deviation_ceiling = \"high\"`; remove the id from the allow-list rather than \
              leaving a blanket exemption behind: {wrong:?}"
+        );
+        // ANTI-ROT 4 (W10): the spine rule each exemption claims to inherit from must itself
+        // carry the ceiling. An exemption whose stated origin has no ceiling is not an
+        // inheritance, it is a bare exemption wearing a justification.
+        let originless: Vec<String> = AUTHORIZED_BY_OWNER_DIRECTION
+            .iter()
+            .filter_map(|(id, spine)| {
+                let ceiling = ceiling_of(spine);
+                (ceiling.as_deref() != Some("high"))
+                    .then(|| format!("{id} claims to inherit from {spine}, which has {ceiling:?}"))
+            })
+            .collect();
+        assert!(
+            originless.is_empty(),
+            "a held rule's ceiling is authorized only as INHERITANCE from a spine rule that \
+             carries the ceiling itself; these exemptions have no origin: {originless:?}"
         );
     }
 }
