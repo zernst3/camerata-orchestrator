@@ -721,17 +721,29 @@ blanket-by-folder assignment fail instead of pass.
   ("errors via thiserror enums per crate"), is a same-stack sibling rather than a per-stack
   re-litigation, so it falls outside the ruling as written. Worth a word.
 
-### [ ] W8-Q3 — five textbook layering mirrors are BLOCKED by the A5.7 hold
+### [x] W8-Q3 RESOLVED BY W9 — the five held layering mirrors are AUTHORIZED and authored
 `PYTHON-FLASK-SERVICE-LAYER-1`, `PYTHON-SERVICE-LAYER-1`, `PYTHON-DJANGO-FAT-MODEL-SERVICE-1`,
 `RUBY-RAILS-SKINNY-CONTROLLERS-1`, `GO-HANDLER-SERVICE-REPOSITORY-1`. Every one is an unambiguous
 `ARCH-STRICT-LAYERING-1` mirror by its own title, and W5-Q3 says they should match. But all five sit
 on the 58-rule classification hold, a `deviation_ceiling` presumes the deviation-producing
 classification that was paused, and `req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling`
-enforces exactly that. Two of his rulings point opposite ways here, so nothing was applied.
+enforces exactly that. Two of his rulings pointed opposite ways, so W8 applied nothing.
 
-Worth noting the shape of the gap this leaves: a Python or Ruby or Go repo with broken layering still
-caps at medium while Java, C#, JS and Rust now reach high. That is the same asymmetry W5-Q3 exists to
-remove, just relocated. One word unblocks all five.
+Zach, 2026-10-11: *"Lift the hold and ensure all are consistent here, regardless of any holds or
+locks in place, you can make individual changes based on what I direct. In this case, I direct that
+they all must be consistent, so make it so."*
+
+All five now carry `deviation_ceiling = "high"`. **The hold on `kind` is NOT lifted** — not one
+rule's `kind` was touched, the classification review of the 58 stays paused, and `A5.7` stays
+`Exempt` in the traceability registry. The authorization is recorded as an explicit five-id
+allow-list inside `req_a5_7_*`, with his words quoted in the doc comment, so every OTHER held rule
+is still blocked; proved by temporarily authoring a ceiling on `SPIRIT-ROBUSTNESS-1` and watching
+the test red.
+
+Why the ceiling was safe where a `kind` edit would not have been: all five ship as
+`kind = "decision"`, so they already emit deviation rows, and a ceiling only BOUNDS rows that exist
+today. It presumes nothing about the paused classification. Reclassify one as `defect` later and the
+ceiling becomes dead config, not wrong behaviour.
 
 ## [x] C7 ASSESSMENT — the D5 prose floor is NOT redundant, but its remaining job is now exactly the unsound part
 
@@ -826,3 +838,112 @@ test binaries.** `./scripts/self-measurement.sh`: **exit 0, "SELF-MEASUREMENT: a
   `Rule` exhaustively in a `#[cfg(test)]` helper, so a new field needs one mechanical
   `min_severity: None,` line. No behaviour, no assertions.
 - `crates/server/tests/requirement_traceability.rs`: registered W5-Q2, W5-Q3 and W5-Q4.
+
+---
+
+# W9 RESULT — the per-stack mirror set becomes internally consistent (2026-10-11)
+
+W5-Q3's defect was never that the mirrors were wrong; it was that the set was **incomplete across
+three spine concepts**, so severity was still decided by which rule happened to fire. A Python repo
+with broken layering reported lower than a Java repo with the identical problem. Ten mirrors now
+inherit their spine rule's `deviation_ceiling = "high"`, each matched to the ONE spine rule it
+re-litigates and each carrying a comment naming it. Total authored ceilings: **33** (7 spine +
+16 from W8 + 10 here).
+
+| spine rule | mirrors added by W9 | held? |
+|---|---|---|
+| `ARCH-STRICT-LAYERING-1` | `GO-HANDLER-SERVICE-REPOSITORY-1`, `PYTHON-DJANGO-FAT-MODEL-SERVICE-1`, `PYTHON-FLASK-SERVICE-LAYER-1`, `PYTHON-SERVICE-LAYER-1`, `RUBY-RAILS-SKINNY-CONTROLLERS-1` | yes — W8-Q3, authorized by W9 |
+| `ARCH-SERVICE-DI-1` | `CSHARP-DEPENDENCY-INJECTION-CONSTRUCTOR-1`, `JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1` | no — W8 never matched them |
+| `ARCH-EXPLICIT-TX-1` | `CSHARP-EFCORE-EXPLICIT-TRANSACTIONS-1`, `GO-GORM-TRANSACTIONS-MULTI-WRITE-1`, `RUST-SQLX-TRANSACTIONS-MULTI-WRITE-1` | no — W8 never matched them |
+
+The match was made from each rule's own TOML, not its name. The DI and TX pairs are the strongest
+kind of evidence available: each one names as its **violating** option the very option the spine rule
+rejects — the service locator, manual `new` past the container, the per-call short transaction.
+
+## [ ] W9-Q1 — two of the ten are INERT on arrival, and it is worth one word
+`JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1` and `RUST-SQLX-TRANSACTIONS-MULTI-WRITE-1` already
+ship as `kind = "defect"`. A `defect`-kind rule never enters the alternatives pass
+(`Rule::is_defect_kind`), so `assign_deviation_kinds` never reaches it and it emits **no deviation
+rows at all** — their ceilings are dead config as shipped. Authored anyway, because the owner's
+direction was that the set be consistent and because the bound is then already correct if either is
+ever reclassified; each says so in a comment above its own line. **But if the intent was a live
+behaviour change on those two stacks, the lever is the `kind`, not the ceiling** — and `kind` is
+exactly what nobody is touching while the 58-rule review is paused. Flagged rather than silently
+shipped as if it did something.
+
+## [ ] W9-Q2 — `ARCH-REPO-RETURNS-DOMAIN-1` is still asymmetric, and W9 did not fix it
+W8-Q2 recorded that this spine rule's only real mirror, `RUST-SEAORM-RAW-SQL-ESCAPE-1`, is on the
+58-rule hold. The W9 direction was given against W8-Q3, which names five layering rules; it did not
+name this one, so it stays unauthored and the narrow reading of the authorization was kept. The
+consequence is that one of the seven spine concepts still caps its only per-stack re-litigation at
+`medium`. **One word settles it, exactly as it did for the other five.**
+
+## Two judgement calls, assessed and deliberately NOT authored
+- **`PYTHON-FASTAPI-DI-SESSION-1` is not an `ARCH-SERVICE-DI-1` mirror.** Agreeing with the brief's
+  own reading. Its decided axis is the **lifecycle of a resource**, not the project's DI posture: its
+  two rejected options are "construct a session in the handler" (leaks the connection on early
+  return) and "share a module-level global session" (unsafe across concurrent requests). Neither is
+  "depend on a concrete instead of an abstraction". A `Session` is also not a repository abstraction;
+  it is the concrete handle the spine rule would have a service receive. `Depends` is the mechanism
+  here, not the decision.
+- **`CSHARP-ASPNETCORE-MINIMAL-API-VS-CONTROLLERS-1` is not an `ARCH-STRICT-LAYERING-1` mirror.**
+  Also agreeing. It is `default = false` — it authors no default position at all — and its question
+  is which routing style the project adopts. Decisively: **both** of its legitimate options already
+  require layering in their own directives ("endpoint handlers delegate to service-layer methods;
+  business logic does not live inline in the lambda" / the controller action calling "the same
+  service"). Layering is a shared *precondition* of both options, not the thing being decided. Its
+  only bad option is mixing the two styles arbitrarily, which is a complaint about maintaining two
+  programming models, not about layer boundaries.
+
+## [ ] W9-Q3 — a RULE-COVERAGE gap, not a ceiling gap: Java, C# and Ruby have no structured-error rule
+`ARCH-STRUCTURED-ERRORS-1` has mirrors for Python/Flask, JS/Express, Go/web and Rust/Axum. It has
+**none** for Java, C# or Ruby, and the reason is that no such rule exists to author a ceiling on.
+Searched by behaviour rather than by guessed name — a corpus-wide sweep for `problem+json`,
+`ProblemDetails`, `ControllerAdvice`, `ExceptionHandler`, `rescue_from`, "error envelope", "error
+response", "machine-readable code", "error code" — plus a full read of all 42 Java, C# and Ruby rule
+titles. Nothing in those three stacks governs the shape of an API error body. The near misses, and
+why each is not one:
+- `JAVA-EXCEPTION-HANDLING-1` / `CSHARP-NO-SWALLOWED-EXCEPTIONS-1` — both govern **internal** catch
+  blocks (never swallow; log, rethrow, or add context). Neither says anything about what the client
+  receives. Different seam.
+- `CSHARP-ASPNETCORE-MIDDLEWARE-ORDERING-1` — mentions `UseExceptionHandler`, but only as a position
+  in the registration order. The decision is ordering.
+- `CSHARP-ASPNETCORE-MODEL-VALIDATION-1` — its directive does mention an "RFC 7807 problem-details
+  400", but as a **consequence** of `[ApiController]`; the decided axis is automatic rejection vs.
+  manual `ModelState.IsValid` guards, scoped to validation 400s rather than the project's error
+  contract across every 4xx/5xx.
+- Ruby has nothing adjacent at all: no `rescue_from`, no `ActionController::API` error rule.
+
+**No rule was authored** — new rules are banned in this effort. Recorded here as the finding:
+`ARCH-STRUCTURED-ERRORS-1` is the one spine concept where three stacks have no per-stack
+re-litigation to inherit from, so a Java, C# or Ruby repo with per-endpoint ad-hoc error shapes is
+caught only by the universal rule, if at all. **Candidate for three new rules, Zach's call.**
+
+## The two guard tests, neither weakened
+- **`req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling`** gained an explicit five-id
+  `AUTHORIZED_BY_W9_DIRECTION` allow-list with Zach's words quoted verbatim in the doc comment, plus
+  the reasoning for why a ceiling is safe on a held rule where a `kind` edit is not. It was NOT
+  loosened into a predicate: every other held rule is still blocked, and **three anti-rot assertions
+  were added** — an allow-listed id must really be on the hold list, must really still carry a
+  ceiling, and must carry `high` specifically, so the list cannot decay into a standing exemption at
+  an arbitrary severity. Proved still live by temporarily authoring a ceiling on
+  `SPIRIT-ROBUSTNESS-1` (held, unnamed) and observing the red, then reverting.
+- **`req_w5_q3_every_per_stack_mirror_inherits_its_spine_rules_deviation_ceiling`** gained the ten
+  new pairs. It still asserts **both** sides of every pair, so a spine rule losing its ceiling fails
+  too, and the four same-folder control rules that re-litigate none of the seven and must carry
+  nothing are untouched — that control is still what makes a blanket-by-folder assignment fail.
+
+Test-discipline **exception (a)** for both: a deliberate data change they must adapt to. No other
+test was edited. Neither was weakened; both gained assertions.
+
+## Verification
+Both tests run RED against the real corpus first, by `git stash push -- crates/rules/principles/`
+and re-running at `2d80e2f`: `req_w5_q3_*` red on `GO-HANDLER-SERVICE-REPOSITORY-1`
+(`left: None, right: Some("high")`), `req_a5_7_*` red naming all five held ids as `None`, and a
+direct grep confirming all ten files carried zero `deviation_ceiling` lines at base.
+
+## Touched outside `crates/rules/**`
+- This document only: the W8-Q3 section was marked resolved (it read "nothing was applied", which is
+  now false and would mislead the next agent) and this section was added. No source file outside
+  `crates/rules/` was touched; `A5.7` stays `Exempt` in the traceability registry because the `kind`
+  hold is genuinely still in force.
