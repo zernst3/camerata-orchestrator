@@ -4638,6 +4638,20 @@ fn origin_rank(o: Origin) -> u8 {
     }
 }
 
+/// W7 (B9): whether a dotted run extracted from prose is shaped like a real IDENTIFIER
+/// (`schema.table`, `module.spec.ts`) rather than an English dotted abbreviation (`e.g`,
+/// `i.e`, `U.S`). The structural property of the abbreviation class is that EVERY dotted
+/// segment is too short to be an identifier component — so the test is "at least one
+/// alphabetic segment of 3+ characters", never a blacklist of observed tokens (the extractor
+/// was reading English; `e.g` alone caused 5 of 51 `objects_conflict` vetoes). A genuine
+/// short-alias run like `t.id` is also dropped — a two-character alias carries no cross-
+/// finding identity either, so losing it only returns the veto to its fail-open default.
+fn dotted_run_is_identifier(t: &str) -> bool {
+    t.contains('.')
+        && t.split('.')
+            .any(|seg| seg.len() >= 3 && seg.chars().any(|c| c.is_alphabetic()))
+}
+
 /// Extract the structural OBJECTS a finding names — dotted identifiers (`schema.table`) and
 /// quoted identifiers (`"policy name"`, `'table'`). Two findings that each name a non-empty,
 /// DISJOINT object set are about different things (different tables/policies) and must not
@@ -4652,21 +4666,22 @@ fn structural_objects(f: &Finding) -> std::collections::HashSet<String> {
     // ("...committed to the repository." must not register the bare word "repository" as a
     // dotted object just because a period follows it), not part of the identifier. A genuine
     // dotted identifier immediately followed by a sentence-ending period (e.g. "public.orders.")
-    // still keeps its real internal dot after trimming only the outer one.
+    // still keeps its real internal dot after trimming only the outer one. W7 (B9): the run
+    // must also be identifier-shaped — see `dotted_run_is_identifier`.
     let mut cur = String::new();
     for ch in text.chars() {
         if ch.is_alphanumeric() || ch == '_' || ch == '.' {
             cur.push(ch);
         } else {
             let trimmed = cur.trim_end_matches('.');
-            if trimmed.contains('.') && trimmed.chars().any(|c| c.is_alphabetic()) {
+            if dotted_run_is_identifier(trimmed) {
                 out.insert(trimmed.to_ascii_lowercase());
             }
             cur.clear();
         }
     }
     let trimmed = cur.trim_end_matches('.');
-    if trimmed.contains('.') && trimmed.chars().any(|c| c.is_alphabetic()) {
+    if dotted_run_is_identifier(trimmed) {
         out.insert(trimmed.to_ascii_lowercase());
     }
     // Quoted identifiers: "..." or '...' (policy names, quoted table names).
@@ -4691,15 +4706,77 @@ fn structural_objects(f: &Finding) -> std::collections::HashSet<String> {
     out
 }
 
-/// Two objectsets conflict when BOTH are non-empty and share no element — the findings name
-/// disjoint structural targets.
+/// W7 (C4): a finding's normalized detector-capture VALUES — the same normalization
+/// [`shared_captured_object`] applies (trimmed, lowercased, length-floored at
+/// [`MIN_SHARED_CAPTURE_LEN`] so a bare `id`/`ok` value proves nothing). The STRUCTURED
+/// identity a detector emitted when it matched, as opposed to whatever the prose happens to
+/// mention.
+fn normalized_capture_values(f: &Finding) -> std::collections::HashSet<String> {
+    f.captures
+        .values()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| v.len() >= MIN_SHARED_CAPTURE_LEN)
+        .collect()
+}
+
+/// Two findings name conflicting structural targets — the discrimination veto.
+///
+/// # W7 (C4): structured identity first, container-blind prose second
+///
+/// The pre-W7 form required the two PROSE object sets to be fully disjoint, which failed in
+/// both directions at once: a single shared container token (a schema prefix, a table
+/// namespace, a prose abbreviation — B9) made the sets non-disjoint and disabled the veto for
+/// any family whose sites sit inside one named container, while the prose sets themselves
+/// were the only identity signal even when the DETECTORS had already captured exactly which
+/// object each finding is about. Per the independent review ("structured identity, never
+/// keyword-list adjustment"), the veto now:
+///
+/// 1. Checks DETECTOR CAPTURES first: both sides carrying captured values with none in
+///    common is a structured different-things proof, independent of prose. (The matching
+///    positive signal, [`shared_captured_object`], already exempts a pair from this veto
+///    entirely before it is consulted — see [`semantic_pair_merges`].)
+/// 2. Falls back to prose objects, but discounts CONTAINER tokens: a shared object that is
+///    merely the parent of a more specific object on either side (`public` next to
+///    `public.orders`) is not identity evidence, and conflict is judged over the remaining
+///    discriminating objects. `public.orders` vs `public.profiles` now conflicts even when
+///    both sides also name their shared schema.
 fn objects_conflict(a: &Finding, b: &Finding) -> bool {
+    // 1. Structured identity: disjoint detector captures veto on their own.
+    let ca = normalized_capture_values(a);
+    let cb = normalized_capture_values(b);
+    if !ca.is_empty() && !cb.is_empty() && ca.is_disjoint(&cb) {
+        return true;
+    }
+    // 2. Prose objects, container-discounted.
     let oa = structural_objects(a);
     let ob = structural_objects(b);
     if oa.is_empty() || ob.is_empty() {
         return false;
     }
-    oa.is_disjoint(&ob)
+    // A token is a CONTAINER when a more specific object on either side extends it — either
+    // as a dotted prefix (`public` -> `public.orders`) or as a non-leaf segment of a longer
+    // dotted path (`db` inside `app.db.orders`).
+    let is_container = |s: &str| {
+        oa.iter().chain(ob.iter()).any(|o| {
+            o.as_str() != s
+                && (o.starts_with(&format!("{s}."))
+                    || {
+                        let segs: Vec<&str> = o.split('.').collect();
+                        segs.len() > 1 && segs[..segs.len() - 1].contains(&s)
+                    })
+        })
+    };
+    // A genuinely shared object (one that is NOT just a shared container) is identity
+    // evidence — no conflict.
+    if oa.intersection(&ob).any(|s| !is_container(s)) {
+        return false;
+    }
+    // Otherwise judge disjointness over each side's DISCRIMINATING objects only.
+    let da: std::collections::HashSet<&String> =
+        oa.iter().filter(|s| !is_container(s)).collect();
+    let db: std::collections::HashSet<&String> =
+        ob.iter().filter(|s| !is_container(s)).collect();
+    !da.is_empty() && !db.is_empty() && da.is_disjoint(&db)
 }
 
 /// Minimum length (characters, after trimming) for a shared `Finding::captures` VALUE to count
@@ -14248,6 +14325,124 @@ mod tests {
             2,
             "different severity + disjoint named objects must stay two rows: {out:?}"
         );
+    }
+
+    // ── Pass-1 W7: C4 (the veto that cannot veto) + B9 (prose abbreviations as objects) ──
+
+    /// req_b9: `structural_objects` must not register English dotted abbreviations ("e.g",
+    /// "i.e") as structural objects. The extractor was reading English: `e.g` was the sole
+    /// object on 5 rows and caused 5 of 51 `objects_conflict` vetoes. The fix is the CLASS
+    /// (a dotted run whose every segment is too short to be an identifier is prose, not an
+    /// object), never a blacklist of the one observed token.
+    #[test]
+    fn req_b9_prose_abbreviations_are_not_structural_objects() {
+        let mut f = site_finding("SEC-X-1", "a.rs", 1, "high", "");
+        f.detail = "Avoid string-built SQL, e.g. format! with user input, i.e. concatenation."
+            .to_string();
+        let objs = structural_objects(&f);
+        assert!(
+            !objs.contains("e.g") && !objs.contains("i.e"),
+            "prose abbreviations must not register as structural objects: {objs:?}"
+        );
+        // A genuine dotted identifier right next to the abbreviation still registers.
+        f.detail = "Avoid raw SQL, e.g. against public.orders directly.".to_string();
+        let objs = structural_objects(&f);
+        assert!(objs.contains("public.orders"), "{objs:?}");
+        assert!(!objs.contains("e.g"), "{objs:?}");
+    }
+
+    /// req_b9 / req_c4: two findings about DISJOINT tables whose prose happens to share an
+    /// abbreviation token ("e.g") must still conflict — before W7 the shared noise token
+    /// made the sets non-disjoint and disabled the veto entirely.
+    #[test]
+    fn req_b9_shared_abbreviation_token_does_not_disable_the_disjointness_veto() {
+        let mut a = site_finding("RLS-MISSING-1", "s.sql", 10, "medium", "db.orders");
+        a.detail = "db.orders has no RLS, e.g. anyone can read it.".to_string();
+        let mut b = site_finding("RLS-MISSING-1", "s.sql", 14, "medium", "db.profiles");
+        b.detail = "db.profiles has no RLS, e.g. anyone can read it.".to_string();
+        assert!(
+            objects_conflict(&a, &b),
+            "disjoint tables must conflict even when the prose shares an abbreviation: \
+             a={:?} b={:?}",
+            structural_objects(&a),
+            structural_objects(&b)
+        );
+    }
+
+    /// req_c4: a shared CONTAINER token (a schema prefix, a table namespace, any common
+    /// parent) must not defeat the veto. Before W7, `objects_conflict` required FULL
+    /// disjointness, so any family whose sites sit inside one named container had an inert
+    /// discrimination guard — the over-collapse half of the merge tension.
+    #[test]
+    fn req_c4_shared_container_token_does_not_defeat_the_disjointness_veto() {
+        let mut a = site_finding("RLS-MISSING-1", "s.sql", 10, "medium", "public.orders");
+        a.detail = "Table public.orders in the 'public' schema has no RLS policy.".to_string();
+        let mut b = site_finding("RLS-MISSING-1", "s.sql", 14, "medium", "public.profiles");
+        b.detail = "Table public.profiles in the 'public' schema has no RLS policy.".to_string();
+        // Sanity: both sides really do extract the shared container token, so this test
+        // exercises the defeat shape rather than accidentally testing full disjointness.
+        assert!(
+            structural_objects(&a).contains("public") && structural_objects(&b).contains("public"),
+            "fixture must name the shared container on both sides: a={:?} b={:?}",
+            structural_objects(&a),
+            structural_objects(&b)
+        );
+        assert!(
+            objects_conflict(&a, &b),
+            "a shared schema token is a container, not identity evidence — orders vs \
+             profiles must conflict"
+        );
+        // End to end: the same-rule/same-severity N-site collapse signal fires for this
+        // pair, and the (now working) veto must keep them two rows.
+        let out = merge_semantic_groups(vec![a, b], &[]);
+        assert_eq!(
+            out.len(),
+            2,
+            "two tables inside one shared container must stay two rows: {out:?}"
+        );
+    }
+
+    /// req_c4: structured identity — two findings whose DETECTORS each captured a concrete
+    /// object, with no value in common, are about different things and must conflict, with
+    /// no dependence on what their prose happens to mention. This is the review's
+    /// prescription verbatim: detector-populated captures as the identity signal, never
+    /// keyword/prose adjustment.
+    #[test]
+    fn req_c4_disjoint_detector_captures_veto_the_merge() {
+        let mut a = site_finding("RLS-MISSING-1", "s.sql", 10, "medium", "");
+        a.captures.insert("table".to_string(), "orders".to_string());
+        let mut b = site_finding("RLS-MISSING-1", "s.sql", 14, "medium", "");
+        b.captures.insert("table".to_string(), "profiles".to_string());
+        // No prose objects at all — before W7 the veto could not see the captures and the
+        // empty prose sets disabled it, so the same-rule-adjacent signal fused the pair.
+        assert!(structural_objects(&a).is_empty() && structural_objects(&b).is_empty());
+        assert!(
+            objects_conflict(&a, &b),
+            "disjoint detector captures are a structured different-things proof"
+        );
+        let out = merge_semantic_groups(vec![a, b], &[]);
+        assert_eq!(
+            out.len(),
+            2,
+            "two sites whose detectors captured different objects must stay two rows: {out:?}"
+        );
+    }
+
+    /// req_c4 (non-regression): a genuinely SHARED full object is still identity evidence —
+    /// the container discount must never split two findings that really do name the same
+    /// table, and a shared detector capture still merges as before.
+    #[test]
+    fn req_c4_genuinely_shared_object_still_merges() {
+        let mut a = site_finding("RLS-MISSING-1", "s.sql", 10, "medium", "public.orders");
+        a.detail = "public.orders has no RLS.".to_string();
+        let mut b = site_finding("RLS-MISSING-1", "s.sql", 14, "medium", "public.orders");
+        b.detail = "public.orders is writable with the anon key.".to_string();
+        assert!(
+            !objects_conflict(&a, &b),
+            "the identical table on both sides is shared identity, never a conflict"
+        );
+        let out = merge_semantic_groups(vec![a, b], &[]);
+        assert_eq!(out.len(), 1, "same rule, same table, 4 lines apart: one row: {out:?}");
     }
 
     // ── REG-5: split_into_sentences / strip_cross_reference_sentences must never insert a
