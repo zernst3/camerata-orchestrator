@@ -5445,6 +5445,37 @@ mod tests {
     // ── E2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): a rule's `max_severity`
     // ceiling, applied LAST — never exceeded by any report, never raising a lower severity ──
 
+    /// Every site severity a report actually exported, scanning BOTH top-level row sections.
+    ///
+    /// W5-Q4, ruled by Zach on 2026-10-11 (*"yes, widen these tests"*): a severity test that
+    /// reads only `curated_findings` is structurally BLIND to the rules whose severity bound is
+    /// most emphatically authored. `is_informational` routes the `ARCH-OBSERVABILITY-*` class
+    /// out of every action bucket by rule IDENTITY, so its group renders under
+    /// `held_for_review_findings` and `curated_findings[0]` *panics* rather than failing
+    /// cleanly. Every pre-existing `req_e2_*` test had that shape. This helper is the fix, and
+    /// it matches the one `tests/real_corpus_severity_ceiling_e2e.rs` already uses.
+    fn exported_site_severities(json: &AuditReportJson) -> Vec<String> {
+        json.curated_findings
+            .iter()
+            .chain(json.held_for_review_findings.iter())
+            .flat_map(|g| g.sites.iter())
+            .map(|s| s.severity.clone())
+            .collect()
+    }
+
+    /// [`exported_site_severities`] for the single-row case, asserting the row was exported
+    /// exactly once — so a silently DROPPED row can never read as a passing clamp or raise.
+    fn exported_site_severity(json: &AuditReportJson) -> String {
+        let severities = exported_site_severities(json);
+        assert_eq!(
+            severities.len(),
+            1,
+            "expected exactly one exported site; a dropped row is not a severity result: \
+             {severities:?}"
+        );
+        severities[0].clone()
+    }
+
     /// A single-rule corpus with `max_severity` set AND a real, authored default option — so
     /// the finding has a resolvable fix and is NOT diverted to the `held` bucket by the C5-8
     /// "action-tier row with no fix to show at all" gate, which would otherwise make
@@ -5492,8 +5523,11 @@ mod tests {
             Some(&corpus),
             &empty_opts(),
         );
+        // W5-Q4: both sections, via `exported_site_severities` — see its doc comment. The
+        // asserted value is unchanged.
         assert_eq!(
-            json.curated_findings[0].sites[0].severity, "high",
+            exported_site_severity(&json),
+            "high",
             "a max_severity=\"high\" rule must never export critical"
         );
         assert_eq!(json.scorecard.rows[0].critical, 0, "{:?}", json.scorecard);
@@ -5518,8 +5552,10 @@ mod tests {
             Some(&corpus),
             &empty_opts(),
         );
+        // W5-Q4: both sections — see `exported_site_severities`. Asserted value unchanged.
         assert_eq!(
-            json.curated_findings[0].sites[0].severity, "low",
+            exported_site_severity(&json),
+            "low",
             "max_severity must never RAISE a severity that already ranks below it"
         );
     }
@@ -5550,6 +5586,244 @@ mod tests {
         assert_eq!(
             clamp_to_rule_max_severity("critical".to_string(), "SOME-OTHER-RULE-1", Some(&set)),
             "critical"
+        );
+    }
+
+    // ── W8 / W5-Q2: a rule's `min_severity` FLOOR — the structured mirror of the ceiling.
+    // Zach, 2026-10-11: "Floor, it's the minimum rating." ──────────────────────────────────
+
+    /// [`ruleset_with_max_severity`]'s floor counterpart: a single-rule corpus authoring
+    /// `min_severity` (and optionally `max_severity`), with a real default option so the row
+    /// is not diverted by the C5-8 no-fix gate for reasons unrelated to severity.
+    fn ruleset_with_min_severity(
+        rule_id: &str,
+        min_severity: &str,
+        max_severity: Option<&str>,
+    ) -> camerata_rules::RuleSet {
+        let mut rule = camerata_rules::bare_rule(rule_id, "test-fixture");
+        rule.min_severity = Some(min_severity.to_string());
+        rule.max_severity = max_severity.map(str::to_string);
+        rule.default_option = Some("default".to_string());
+        rule.options = vec![camerata_rules::RuleOption {
+            id: "default".to_string(),
+            label: "Default".to_string(),
+            directive: "do the right thing".to_string(),
+            why: "because".to_string(),
+            remediation: Some("Fix the thing.".to_string()),
+            finding_headline: None,
+            finding_detail: None,
+            escalation: None,
+            effort: None,
+            violates: false,
+        }];
+        let mut set = camerata_rules::RuleSet::default();
+        set.push(rule);
+        set
+    }
+
+    /// A `Defect`-kind finding — what every accusing producer actually emits
+    /// (`ai_audit::parse_findings`, `apply_alternative_decision`, `dep_audit`, the
+    /// deterministic floor). The floor declines a row with NO kind by design, so a floor test
+    /// built on a bare `finding()` would be testing the decline path, not the raise.
+    fn defect_finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
+        let mut f = finding(rule_id, path, line, severity);
+        f.kind = Some(camerata_api_types::audit::FindingKind::Defect);
+        f
+    }
+
+    fn exported_with(corpus: &camerata_rules::RuleSet, f: Finding) -> AuditReportJson {
+        let rule_id = f.rule_id.clone();
+        let report = report_with(vec![f], vec![&rule_id]);
+        build_report_json(
+            &report.seal(),
+            &HashMap::new(),
+            Some(corpus),
+            &empty_opts(),
+        )
+    }
+
+    /// req_w8: a rule declaring `min_severity = "high"` never exports anything BELOW high —
+    /// the exact mirror of `req_e2_max_severity_clamps_a_critical_finding_down_to_the_declared_
+    /// ceiling`, in the opposite direction.
+    ///
+    /// FAILS BEFORE THE FIX: `Rule::min_severity` and `raise_to_rule_min_severity` did not
+    /// exist, so there was no corpus field to author a minimum in and a `low` finding exported
+    /// `low` unconditionally — the sibling
+    /// `req_e2_max_severity_never_raises_a_lower_severity_up_to_the_ceiling` pins exactly that
+    /// un-raised behaviour for a rule with no floor.
+    #[test]
+    fn req_w8_min_severity_raises_a_finding_up_to_the_declared_floor() {
+        let corpus = ruleset_with_min_severity("FLOOR-1", "high", None);
+        let json = exported_with(&corpus, defect_finding("FLOOR-1", "a.rs", 1, "low"));
+        assert_eq!(
+            exported_site_severity(&json),
+            "high",
+            "a min_severity=\"high\" rule must never export below high"
+        );
+    }
+
+    /// req_w8: the floor is a FLOOR, not a ceiling — a finding already ABOVE it is untouched.
+    /// The mirror of the ceiling's own never-raises test, and the assertion that stops a
+    /// mis-signed rank comparison from reading as a pass.
+    #[test]
+    fn req_w8_min_severity_never_lowers_a_severity_already_above_the_floor() {
+        let corpus = ruleset_with_min_severity("FLOOR-1", "medium", None);
+        let json = exported_with(&corpus, defect_finding("FLOOR-1", "a.rs", 1, "critical"));
+        assert_eq!(
+            exported_site_severity(&json),
+            "critical",
+            "min_severity must never LOWER a severity that already ranks above it"
+        );
+    }
+
+    /// req_w8: the floor NEVER touches an informational kind. A `ConventionObserved` row tells
+    /// the client "your codebase already does this"; raising it to `critical` would both lie
+    /// and, via `is_informational`'s severity test, re-route a compliment into an action
+    /// bucket. This is the single most dangerous thing a floor could do, so it is asserted on
+    /// the function directly rather than only through the export.
+    #[test]
+    fn req_w8_the_floor_never_applies_to_an_informational_kind() {
+        use camerata_api_types::audit::{
+            ConventionObservedKind, FindingKind, NotAssessedKind, NotAssessedReason,
+        };
+        let corpus = ruleset_with_min_severity("FLOOR-1", "critical", None);
+        let mut observed = finding("FLOOR-1", "a.rs", 1, "info");
+        observed.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
+            convention_option_id: "default".to_string(),
+            convention_label: "Default".to_string(),
+        }));
+        assert_eq!(
+            raise_to_rule_min_severity("info".to_string(), &observed, Some(&corpus)),
+            "info",
+            "a convention-observed row must never be raised by a defect floor"
+        );
+        let mut not_assessed = finding("FLOOR-1", "a.rs", 2, "info");
+        not_assessed.kind = Some(FindingKind::NotAssessed(NotAssessedKind {
+            reason: NotAssessedReason::ToolFailed,
+            reason_detail: "the tool failed".to_string(),
+        }));
+        assert_eq!(
+            raise_to_rule_min_severity("info".to_string(), &not_assessed, Some(&corpus)),
+            "info",
+            "an honesty row must never be raised by a defect floor"
+        );
+    }
+
+    /// req_w8: an ABSENT kind is excluded too. W3's standing rule is that nothing may silently
+    /// default to `Defect`; treating an unkinded legacy row as eligible for a defect floor
+    /// would be exactly that. Same decline `clamp_deviation_severity` makes for the same
+    /// reason.
+    #[test]
+    fn req_w8_the_floor_never_applies_to_a_row_with_no_kind() {
+        let corpus = ruleset_with_min_severity("FLOOR-1", "critical", None);
+        let legacy = finding("FLOOR-1", "a.rs", 1, "low");
+        assert_eq!(
+            raise_to_rule_min_severity("low".to_string(), &legacy, Some(&corpus)),
+            "low",
+            "an absent kind must not be assumed to be a Defect"
+        );
+    }
+
+    /// req_w8: the floor cannot defeat the C4-R1 null-location safety net. A finding with an
+    /// empty path AND `line == 0` established nothing concrete to rate, and
+    /// `downgrade_unlocated_above_informational` forces that shape to `info`. The floor
+    /// declines it at its own precondition, so the guarantee holds from ANY position in the
+    /// chain and in any exporter — including the xlsx partition, which does not apply C4-R1.
+    #[test]
+    fn req_w8_the_floor_cannot_defeat_the_unlocated_downgrade() {
+        let corpus = ruleset_with_min_severity("FLOOR-1", "critical", None);
+        let mut unlocated = defect_finding("FLOOR-1", "", 0, "low");
+        unlocated.path = String::new();
+        unlocated.line = 0;
+        assert_eq!(
+            raise_to_rule_min_severity("low".to_string(), &unlocated, Some(&corpus)),
+            "low",
+            "a floor must not manufacture a critical for a finding with no location"
+        );
+        let json = exported_with(&corpus, unlocated);
+        assert_eq!(
+            exported_site_severity(&json),
+            "info",
+            "C4-R1 must still demote the unlocated row to info"
+        );
+    }
+
+    /// req_w8: `min_severity` and `max_severity` set to the SAME value pin the rule at exactly
+    /// that severity from both sides — which is what several rules' prose actually authors
+    /// ("a high-severity finding for review, not an automatic critical"). The corpus-load gate
+    /// deliberately permits the equal case; this proves it behaves.
+    #[test]
+    fn req_w8_a_floor_equal_to_the_ceiling_pins_the_rule_from_both_sides() {
+        let corpus = ruleset_with_min_severity("PINNED-1", "high", Some("high"));
+        assert_eq!(
+            exported_site_severity(&exported_with(
+                &corpus,
+                defect_finding("PINNED-1", "a.rs", 1, "critical")
+            )),
+            "high",
+            "the ceiling must still clamp a critical down"
+        );
+        assert_eq!(
+            exported_site_severity(&exported_with(
+                &corpus,
+                defect_finding("PINNED-1", "b.rs", 2, "low")
+            )),
+            "high",
+            "the floor must still raise a low up"
+        );
+    }
+
+    /// req_w8: the A5.2 deviation ceiling still binds over a floor. A rule authoring
+    /// `min_severity = "high"` with no `deviation_ceiling` raises a `Deviation` row to high and
+    /// then caps it back at the `medium` default — deviations describe forward drift cost, and
+    /// A5.2's default is not overridable by a defect-oriented floor.
+    #[test]
+    fn req_w8_a_deviation_row_is_still_bounded_by_the_a5_2_deviation_ceiling() {
+        // `max_severity = "critical"` isolates the deviation clamp exactly as
+        // `ruleset_with_deviation_ceiling` does; the rule authors NO `deviation_ceiling`, so
+        // A5.2's `medium` default applies.
+        let corpus = ruleset_with_min_severity("DEV-FLOOR-1", "high", Some("critical"));
+        let dev = deviation_finding("DEV-FLOOR-1", "a.rs", 1, "low");
+        assert_eq!(
+            raise_to_rule_min_severity("low".to_string(), &dev, Some(&corpus)),
+            "high",
+            "a deviation is an accusing kind, so the floor does reach it"
+        );
+        let json = exported_with(&corpus, dev);
+        assert_eq!(
+            exported_site_severity(&json),
+            "medium",
+            "A5.2's default deviation ceiling must still cap the raised severity"
+        );
+    }
+
+    /// req_w8, pure unit coverage mirroring
+    /// `req_e2_clamp_to_rule_max_severity_degrades_gracefully_with_no_corpus_or_unknown_rule`:
+    /// absent corpus, unknown rule, and a rule with no floor all degrade to a no-op rather
+    /// than panicking or fabricating a floor.
+    #[test]
+    fn req_w8_raise_to_rule_min_severity_degrades_gracefully() {
+        let f = defect_finding("ANY-RULE-1", "a.rs", 1, "low");
+        assert_eq!(
+            raise_to_rule_min_severity("low".to_string(), &f, None),
+            "low",
+            "no corpus is a no-op"
+        );
+        let set = ruleset_with_min_severity("FLOOR-1", "high", None);
+        assert_eq!(
+            raise_to_rule_min_severity("low".to_string(), &f, Some(&set)),
+            "low",
+            "an unknown rule id is a no-op"
+        );
+        let no_floor = ruleset_with_max_severity("NO-FLOOR-1", "critical");
+        assert_eq!(
+            raise_to_rule_min_severity(
+                "low".to_string(),
+                &defect_finding("NO-FLOOR-1", "a.rs", 1, "low"),
+                Some(&no_floor)
+            ),
+            "low",
+            "a rule declaring no floor is a no-op"
         );
     }
 
