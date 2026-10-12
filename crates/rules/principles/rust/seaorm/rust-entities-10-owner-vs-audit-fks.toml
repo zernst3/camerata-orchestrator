@@ -24,6 +24,7 @@ why = "Audit-direction reverse traversal is rare in practice and would balloon t
 
 [[option]]
 id = "the-parent-entity-declares-a-reverse-has-many-va"
+violates = true
 label = "Reverse has_many variant for every audit FK"
 directive = "the parent entity declares a reverse has_many variant for every audit FK pointing at it, alongside the variant for the owner FK"
 why = "Bloats the parent entity file with near-identical declarations for traversal directions the project rarely needs, and the bloat compounds as new audit columns are added across entities; the macro's coherence rule also caps find_related at one variant per pair, so additional variants require via_rel disambiguation that adds complexity without proportional benefit."

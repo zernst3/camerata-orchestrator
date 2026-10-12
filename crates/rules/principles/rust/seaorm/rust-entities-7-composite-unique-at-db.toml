@@ -24,6 +24,7 @@ why = "A composite #[sea_orm(unique_key = \"...\")] annotation accurately docume
 
 [[option]]
 id = "one-column-on-the-entity-is-annotated-sea-orm-un"
+violates = true
 label = "#[sea_orm(unique)] annotation for a partial constraint"
 directive = "one column on the entity is annotated #[sea_orm(unique)] to communicate intent, even when the real uniqueness constraint in the database is partial, conditional, or deferrable rather than a plain unconditional constraint"
 why = "Misleads every reader and every consumer of the entity's derived metadata: the annotation implies an unconditional uniqueness that the database does not enforce, and downstream code that relies on the annotation as a contract produces incorrect business logic (existence checks that assume uniqueness the DB does not guarantee unconditionally)."

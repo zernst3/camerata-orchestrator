@@ -31,6 +31,7 @@ why = "Bypasses the framework's subscription system entirely: changes to the glo
 
 [[option]]
 id = "every-cross-tree-concern-lives-on-a-single-super"
+violates = true
 label = "Single super-context struct for all concerns"
 directive = "every cross-tree concern lives on a single super-context struct that components read by field, rather than each concern getting its own named context"
 why = "Forces every component that reads any field to re-render on every change to any field in the super-context, regardless of which concern actually moved; the render scope explodes as the super-context grows, and two orthogonal concerns (auth and modal state, for instance) cannot be tested or evolved independently."

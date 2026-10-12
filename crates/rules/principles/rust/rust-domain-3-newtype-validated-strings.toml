@@ -22,7 +22,6 @@ why = "All of these are ways to handle text that must satisfy a constraint, and 
 
 [[option]]
 id = "newtype-validated-strings-email-url-slug"
-violates = true
 label = "Newtype validated strings (Email, Url, Slug, …)"
 directive = "Constrained string types are newtypes with a fallible constructor (Email::try_new); the type itself is proof of validation. Free-form text stays as String."
 remediation = """

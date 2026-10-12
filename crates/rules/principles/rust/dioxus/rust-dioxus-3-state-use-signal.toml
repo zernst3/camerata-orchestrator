@@ -31,12 +31,14 @@ why = "Deprecated or removed in 0.7-era code: the APIs produce subtly different 
 
 [[option]]
 id = "local-component-state-is-held-in-a-lock-protecte"
+violates = true
 label = "Lock-protected state wrapped in props"
 directive = "local component state is held in a lock-protected value wrapped in a shared pointer (Arc/Mutex or equivalent) inside props, rather than in a signal"
 why = "Compiles fine but loses automatic subscription tracking: the framework cannot observe when the value changes, so manual change notification becomes a per-component burden at every read site that the signal primitive was specifically designed to remove."
 
 [[option]]
 id = "a-dummy-signal-is-incremented-manually-to-force"
+violates = true
 label = "Manually increment a dummy signal to re-render"
 directive = "a dummy signal is incremented manually to force a re-render whenever component state changes, rather than letting the signal primitive's automatic subscription tracking drive re-renders"
 why = "An anti-pattern that acknowledges the rule was not followed: it re-renders the entire component on every increment regardless of which actual state changed, defeating the fine-grained reactivity signals provide and adding error-prone manual plumbing to every state mutation."

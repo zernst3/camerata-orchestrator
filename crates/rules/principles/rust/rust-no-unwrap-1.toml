@@ -43,6 +43,7 @@ why = "Converts a convention into a per-build mechanical guarantee, so a reintro
 
 [[option]]
 id = "set-unwrap-used-to-warn-surfacing-without-blocki"
+violates = true
 label = "unwrap_used lint set to warn, not deny"
 directive = "The unwrap_used lint is set to warn rather than deny, so occurrences appear in clippy output but do not fail the build; the team is trusted to clean them up."
 why = "Surfaces occurrences but lets them accumulate: warnings are easy to ignore under deadline pressure, so the property the rule is meant to guarantee becomes a goal-post that contributors can move by ignoring the output, defeating the point of a lint entirely."

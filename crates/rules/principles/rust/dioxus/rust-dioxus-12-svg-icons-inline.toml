@@ -28,12 +28,14 @@ why = "Inline SVG is the smallest-bundle, fastest-first-paint approach."
 
 [[option]]
 id = "icons-come-from-a-rust-icon-library-crate-that-b"
+violates = true
 label = "Rust icon-library crate bundling full icon set"
 directive = "icons come from a Rust icon-library crate that bundles every icon from a popular icon set, and the application imports specific icons from that crate"
 why = "Grows the binary by the size of the full icon set regardless of how many icons the application actually uses, with no easy path to tree-shake unused icons out; the resulting binary is larger than necessary and the crate becomes a compile-time dependency that must be upgraded with the icon set."
 
 [[option]]
 id = "icons-are-rendered-as-glyphs-from-a-web-font-con"
+violates = true
 label = "Icon font glyphs via CSS class names"
 directive = "icons are rendered as glyphs from a web font containing the icon set, with the font fetched at runtime and the icons rendered through CSS class names"
 why = "Adds a runtime font fetch, produces a flash of invisible text on slow networks, and breaks the server-rendered first paint: none of those costs exist with inline SVG, and the glyph approach also limits icon customization to whatever the font file encodes."
