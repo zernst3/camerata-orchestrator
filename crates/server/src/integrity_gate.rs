@@ -48,7 +48,10 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::scan_ledger::{RuleTier, ScanLedger, NO_WIRED_DETECTOR_REASON};
+use crate::scan_ledger::{
+    RuleTier, ScanLedger, CORPUS_LOAD_FAILED_NOTE, CORPUS_LOAD_FAILED_REASON,
+    NO_WIRED_DETECTOR_REASON,
+};
 
 /// Why a rule did not run, reduced to the only question the gate asks: was the skip
 /// JUSTIFIED (correct behaviour, disclose and move on) or is it a DEFECT (something that
@@ -75,6 +78,21 @@ pub enum SkipClass {
     /// shape: eslint aborted on every repo and 8 rules fell to NOT RUN. A defect — the tool
     /// was supposed to run and did not.
     ToolFailed,
+    /// W13 — the rule's own CORPUS FILE could not be parsed
+    /// ([`CORPUS_LOAD_FAILED_REASON`]), so the rule never entered the scan at all.
+    ///
+    /// Its OWN class, not folded into [`Self::ToolFailed`] or [`Self::NoWiredDetector`],
+    /// because it is a different failure with a different fix and a different blast radius.
+    /// `ToolFailed` means an engine was invoked and broke. `NoWiredDetector` means the rule
+    /// loaded fine and nothing evaluates it. This one means the rule TEXT is unreadable: no
+    /// engine was ever selected, the rule is absent from every stack's universe, and the fix is
+    /// in the `.toml` rather than anywhere in the pipeline. Reusing a class that means
+    /// something else would send an operator to the wrong place.
+    ///
+    /// NEVER justified, under any profile. A corpus file that will not parse is neither a scope
+    /// choice nor stack-irrelevance; there is no repo for which an unparseable rule file is
+    /// correct behaviour.
+    CorpusLoadFailed,
     /// A skip reason this module does not recognise. A DEFECT by construction — see the
     /// module doc comment's fail-closed section.
     Unrecognised,
@@ -116,6 +134,13 @@ impl SkipClass {
         let lower = reason.to_ascii_lowercase();
 
         // ── Defect phrases first. See property 2 above. ──────────────────────────────────
+        // W13 is checked before every other phrase: a rule whose FILE would not parse has the
+        // most specific, least recoverable cause, and its reason text must never be shadowed by
+        // a broader phrase added later. Matched against the shared constant, never a retyped
+        // phrase, for the same reason `NO_WIRED_DETECTOR_REASON` is.
+        if lower.contains(&CORPUS_LOAD_FAILED_REASON.to_ascii_lowercase()) {
+            return SkipClass::CorpusLoadFailed;
+        }
         if lower.contains(&NO_WIRED_DETECTOR_REASON.to_ascii_lowercase()) {
             return SkipClass::NoWiredDetector;
         }
@@ -289,7 +314,7 @@ impl IntegrityVerdict {
 /// Pure: no I/O, no clock, no model call. Given the same ledger it returns the same verdict,
 /// so the gate itself can never be the flaky thing that blocks a run.
 ///
-/// Four failure families, each tied to a specific shipped defect:
+/// Five failure families, each tied to a specific shipped defect:
 ///
 /// 1. `empty_ledger` — a ledger with nothing in it. The scan did not happen, or did not
 ///    record that it happened; either way there is nothing to be confident about.
@@ -300,6 +325,12 @@ impl IntegrityVerdict {
 /// 4. `unaccounted_rows` — a pipeline stage whose rows do not reconcile. The merge-data-loss
 ///    defects: an over-merge is observationally identical to a detection miss, so the only
 ///    place it can be caught is the stage arithmetic.
+/// 5. `corpus_load_failure` (W13) — a rule whose own `.toml` would not parse. Every production
+///    corpus load was lenient AND threw the parse errors away (`let (corpus, _errs) = ...`), so
+///    a rule file with a typo'd enum value silently left the corpus and nothing anywhere said
+///    so. This gate could not see it even in principle, because a rule that never loaded is not
+///    a skip — it is absent from the ledger's universe. The fix makes it present; this family is
+///    what fails on it. See [`SkipClass::CorpusLoadFailed`].
 pub fn evaluate(ledger: &ScanLedger, opts: &IntegrityGateOptions) -> IntegrityVerdict {
     let mut failures: Vec<IntegrityFailure> = Vec::new();
     let mut justified_skips: BTreeMap<SkipClass, Vec<String>> = BTreeMap::new();
@@ -364,6 +395,29 @@ pub fn evaluate(ledger: &ScanLedger, opts: &IntegrityGateOptions) -> IntegrityVe
     // ── 3. Per-rule skip justification (H1). ─────────────────────────────────────────────
     for rule in ledger.rules() {
         if rule.ran {
+            // W13, case 3: a rule can RUN while its own corpus file is unparseable — the
+            // always-on content floor keys on hardcoded rule IDS, not on corpus content. There
+            // is no skip reason to classify here, so the gate reads the ADDITIVE
+            // `coverage_note` marker instead (see `CORPUS_LOAD_FAILED_NOTE`). It still fails:
+            // a rule evaluated without its authored directive, remediation, severity bounds or
+            // options produced a degraded report, and the fix is in the `.toml` either way.
+            if rule
+                .coverage_note
+                .as_deref()
+                .is_some_and(|n| n.contains(CORPUS_LOAD_FAILED_NOTE))
+            {
+                failures.push(IntegrityFailure {
+                    code: "corpus_load_failure".to_string(),
+                    detail: format!(
+                        "the rule file for {} could not be parsed. A hardcoded detector still \
+                         evaluated it, so it reads as RUN, but none of its authored text (no \
+                         directive, no remediation, no severity bounds, no options) was \
+                         available this scan. The file path and the parser's own message are \
+                         in the operator log",
+                        rule.rule_id,
+                    ),
+                });
+            }
             continue;
         }
         let class = SkipClass::classify(rule.skip_reason.as_deref());
@@ -375,6 +429,23 @@ pub fn evaluate(ledger: &ScanLedger, opts: &IntegrityGateOptions) -> IntegrityVe
                 .entry(class)
                 .or_default()
                 .push(rule.rule_id.clone());
+            continue;
+        }
+        // W13: its OWN failure family, never `unjustified_skip`. See
+        // `SkipClass::CorpusLoadFailed`'s doc comment — "this rule's file would not parse" and
+        // "this rule was skipped for an unjustified reason" send an operator to two different
+        // places, and a gate whose code does not distinguish them wastes the trip.
+        if class == SkipClass::CorpusLoadFailed {
+            failures.push(IntegrityFailure {
+                code: "corpus_load_failure".to_string(),
+                detail: format!(
+                    "the rule file for {} could not be parsed, so the rule never entered this \
+                     scan at all — it is not a skip, it is ABSENT from every stack's universe. \
+                     The file path and the parser's own message are in the operator log; a \
+                     client artifact deliberately carries neither",
+                    rule.rule_id,
+                ),
+            });
             continue;
         }
         failures.push(IntegrityFailure {
@@ -431,6 +502,7 @@ fn tier_key(tier: RuleTier) -> &'static str {
         RuleTier::Architectural => "architectural",
         RuleTier::ExternalTool => "external_tool",
         RuleTier::Semantic => "semantic",
+        RuleTier::Unloaded => "unloaded",
     }
 }
 
@@ -441,6 +513,7 @@ fn skip_class_key(class: SkipClass) -> &'static str {
         SkipClass::ScopedOut => "scoped_out",
         SkipClass::NoWiredDetector => "no_wired_detector",
         SkipClass::ToolFailed => "tool_failed",
+        SkipClass::CorpusLoadFailed => "corpus_load_failed",
         SkipClass::Unrecognised => "unrecognised",
     }
 }
@@ -975,5 +1048,253 @@ mod tests {
         let mut sorted = codes.clone();
         sorted.sort_unstable();
         assert_eq!(codes, sorted, "failures must be stably ordered: {codes:?}");
+    }
+
+    // ── req_w13: a rule whose CORPUS FILE would not parse ────────────────────────────────
+    //
+    // Every production corpus load was `let (corpus, _errs) = load_corpus_lenient(..)`. A rule
+    // file with a typo'd enum value therefore failed to parse, left the corpus, and NOTHING
+    // reported it. The gate could not see it even in principle: a rule that never loaded is
+    // not a skip, it is absent from the ledger's universe. These tests cover the gate half —
+    // that once the ledger carries it (W13's `ScanLedger::record_corpus_load_failure`), the
+    // gate fails on it, in its OWN family, under EVERY profile.
+
+    /// req_w13: the load-bearing requirement. A corpus file that would not parse fails
+    /// `camerata integrity-gate`, with exit code 1, in its own `corpus_load_failure` family.
+    ///
+    /// FAILS BEFORE THE FIX in two independent ways, both verified: (1) `SkipClass` had no
+    /// `CorpusLoadFailed` variant and no `corpus_load_failure` code existed, so this did not
+    /// compile; (2) more importantly, nothing ever put such an entry in a ledger, so even a
+    /// hand-written equivalent assertion could not fire on a real scan. See
+    /// `tests/corpus_load_failure_e2e.rs` for the end-to-end half.
+    #[test]
+    fn req_w13_a_rule_whose_corpus_file_failed_to_parse_fails_the_gate_in_its_own_family() {
+        let mut l = healthy_ledger();
+        l.record_corpus_load_failure("SEC-NO-SILENT-CORPUS-DROP-1");
+
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(
+            !verdict.passed(),
+            "an unparseable rule file must never pass the gate: {:#?}",
+            verdict.failures
+        );
+        assert_eq!(verdict.exit_code(), 1, "a failing verdict exits 1");
+
+        let hits: Vec<&IntegrityFailure> = verdict
+            .failures
+            .iter()
+            .filter(|f| f.code == "corpus_load_failure")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "exactly one `corpus_load_failure`, naming the rule: {:#?}",
+            verdict.failures
+        );
+        assert!(
+            hits[0].detail.contains("SEC-NO-SILENT-CORPUS-DROP-1"),
+            "the failure must name the rule so an operator can find the file: {}",
+            hits[0].detail
+        );
+
+        // Its OWN family, never borrowed from one that means something else. `unjustified_skip`
+        // means "it was skipped for a bad reason"; this rule was never even selectable, and the
+        // fix is in a `.toml` rather than in the pipeline.
+        assert!(
+            !verdict
+                .failures
+                .iter()
+                .any(|f| f.code == "unjustified_skip"),
+            "a corpus-load failure must not be reported as an unjustified skip: {:#?}",
+            verdict.failures
+        );
+        assert!(render(&verdict).contains("Do NOT spend a graded run"));
+    }
+
+    /// req_w13: NEVER justified, under EVERY profile — including the relaxed smoke profile a
+    /// cheap local scan uses. `IntegrityGateOptions::smoke()` legitimately tolerates a dark
+    /// tier and a scoped-out semantic tier; it may not tolerate a rule library that would not
+    /// load, because there is no repo for which an unparseable rule file is correct behaviour.
+    #[test]
+    fn req_w13_a_corpus_load_failure_is_never_justified_under_any_profile() {
+        let mut l = healthy_ledger();
+        l.record_corpus_load_failure("SEC-NO-SILENT-CORPUS-DROP-1");
+
+        for (label, opts) in [
+            ("graded", IntegrityGateOptions::default()),
+            ("smoke", IntegrityGateOptions::smoke()),
+        ] {
+            let verdict = evaluate(&l, &opts);
+            assert!(
+                verdict
+                    .failures
+                    .iter()
+                    .any(|f| f.code == "corpus_load_failure"),
+                "the {label} profile must fail on an unparseable rule file: {:#?}",
+                verdict.failures
+            );
+            assert!(
+                !verdict
+                    .justified_skips
+                    .contains_key(&SkipClass::CorpusLoadFailed),
+                "the {label} profile must never file this under justified skips: {:#?}",
+                verdict.justified_skips
+            );
+        }
+        assert!(
+            !SkipClass::CorpusLoadFailed.is_justified(),
+            "the class itself must report as unjustified"
+        );
+    }
+
+    /// req_w13: the classifier keys on the SHARED constant, not a retyped phrase — so a
+    /// wording edit at the recording site cannot silently decouple it from the gate (the W3
+    /// hardening `NO_WIRED_DETECTOR_REASON` exists for, applied to the new reason).
+    ///
+    /// Also pins the precedence: W13's phrase is checked BEFORE every other defect phrase, so a
+    /// reason that embeds both cannot be misfiled.
+    #[test]
+    fn req_w13_the_corpus_load_reason_is_classified_against_the_shared_constant() {
+        assert_eq!(
+            SkipClass::classify(Some(CORPUS_LOAD_FAILED_REASON)),
+            SkipClass::CorpusLoadFailed
+        );
+        assert_eq!(
+            SkipClass::classify(Some(&CORPUS_LOAD_FAILED_REASON.to_ascii_uppercase())),
+            SkipClass::CorpusLoadFailed,
+            "matching is case-insensitive, like every other class"
+        );
+        assert_eq!(
+            SkipClass::classify(Some(&format!(
+                "the eslint preview pass did not run: {CORPUS_LOAD_FAILED_REASON}"
+            ))),
+            SkipClass::CorpusLoadFailed,
+            "W13's phrase wins over a tool-failure phrase: a file that would not parse is the \
+             most specific and least recoverable cause, and must not be shadowed"
+        );
+        // And the entry a real recording site produces classifies the same way, so the
+        // producer and the gate are pinned to each other rather than to a literal.
+        let mut l = ScanLedger::new();
+        l.record_corpus_load_failure("SEC-NO-SILENT-CORPUS-DROP-1");
+        let entry = l.rule("SEC-NO-SILENT-CORPUS-DROP-1").expect("just recorded");
+        assert_eq!(
+            SkipClass::classify(entry.skip_reason.as_deref()),
+            SkipClass::CorpusLoadFailed
+        );
+    }
+
+    /// req_w13, CASE 3: a rule that RAN (a hardcoded floor detector keys on its id, not on its
+    /// corpus content) while its own `.toml` would not parse must STILL fail the gate. There is
+    /// no skip reason to classify in this case, so the gate reads the additive
+    /// `coverage_note` marker instead.
+    ///
+    /// Without this arm the fix would have a silent hole in exactly the shape it exists to
+    /// close: a rule evaluated without its authored directive, remediation, severity bounds or
+    /// options produced a degraded client report, and nothing would have said so.
+    #[test]
+    fn req_w13_a_rule_that_ran_with_an_unparseable_file_still_fails_the_gate() {
+        let mut l = healthy_ledger();
+        // `SEC-FLOOR-1` is already recorded as ran=true,findings=1 by `healthy_ledger`.
+        l.record_corpus_load_failure("SEC-FLOOR-1");
+        let entry = l.rule("SEC-FLOOR-1").expect("still recorded");
+        assert!(entry.ran, "precondition: this arm is about a rule that RAN");
+
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        let hits: Vec<&IntegrityFailure> = verdict
+            .failures
+            .iter()
+            .filter(|f| f.code == "corpus_load_failure")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "a rule that ran without its authored text must still fail: {:#?}",
+            verdict.failures
+        );
+        assert!(hits[0].detail.contains("SEC-FLOOR-1"), "{}", hits[0].detail);
+        assert_eq!(verdict.exit_code(), 1);
+    }
+
+    /// req_w13: the three cases produce EXACTLY ONE failure each, never two. The `!ran` cases
+    /// are reported by the skip loop and the `ran` case by the coverage-note loop; a rule must
+    /// not be double-counted by both, or the gate's own failure count stops being a count.
+    #[test]
+    fn req_w13_each_unloadable_rule_is_reported_exactly_once() {
+        let mut l = healthy_ledger();
+        // Case 1: no prior entry.
+        l.record_corpus_load_failure("NEW-RULE-1");
+        // Case 2: a prior not-run entry with an incidental reason.
+        l.record_rule(
+            "SCOPED-RULE-1",
+            RuleTier::Semantic,
+            false,
+            Some("AI/semantic review not requested this run".to_string()),
+            0,
+            0,
+        );
+        l.record_corpus_load_failure("SCOPED-RULE-1");
+        // Case 3: a prior entry that RAN.
+        l.record_corpus_load_failure("SEC-FLOOR-1");
+
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        let hits: Vec<&str> = verdict
+            .failures
+            .iter()
+            .filter(|f| f.code == "corpus_load_failure")
+            .map(|f| f.detail.as_str())
+            .collect();
+        assert_eq!(
+            hits.len(),
+            3,
+            "exactly one failure per unloadable rule, no duplicates: {:#?}",
+            verdict.failures
+        );
+        for id in ["NEW-RULE-1", "SCOPED-RULE-1", "SEC-FLOOR-1"] {
+            assert_eq!(
+                hits.iter().filter(|d| d.contains(id)).count(),
+                1,
+                "{id} must be reported exactly once: {hits:#?}"
+            );
+        }
+        // And none of them is misfiled as an unjustified skip.
+        assert!(
+            !verdict
+                .failures
+                .iter()
+                .any(|f| f.code == "unjustified_skip"),
+            "{:#?}",
+            verdict.failures
+        );
+    }
+
+    /// req_w13 + H1's other half: the gate must stay switched on. A scan whose rule library
+    /// loaded cleanly must NOT acquire a `corpus_load_failure`, and the new `Unloaded` tier
+    /// recording zero rules must not read as a dark or absent tier. A gate that cries wolf on
+    /// a correct scan gets disabled, which costs more than the defect it guarded.
+    #[test]
+    fn req_w13_a_scan_whose_rule_library_loaded_cleanly_is_not_flagged() {
+        let verdict = evaluate(&healthy_ledger(), &IntegrityGateOptions::default());
+        assert!(
+            verdict.passed(),
+            "a clean corpus load must stay a PASS: {:#?}",
+            verdict.failures
+        );
+        let unloaded = verdict
+            .tier_summary
+            .iter()
+            .find(|t| t.tier == RuleTier::Unloaded)
+            .expect("the Unloaded tier must appear in the summary even with nothing in it");
+        assert_eq!(
+            (unloaded.rules_recorded, unloaded.rules_ran),
+            (0, 0),
+            "on a healthy scan this tier reads zero, which IS the positive disclosure"
+        );
+        assert!(
+            !IntegrityGateOptions::default()
+                .required_tiers
+                .contains(&RuleTier::Unloaded),
+            "the Unloaded tier must never be a REQUIRED tier — requiring it would demand that \
+             every scan have a broken rule file"
+        );
     }
 }
