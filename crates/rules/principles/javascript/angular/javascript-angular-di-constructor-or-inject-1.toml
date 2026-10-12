@@ -52,7 +52,6 @@ why = "Both of this rule's own cited sources (Angular's DI guide and the Angular
 
 [[option]]
 id = "services-are-injected-via-constructor-or-inject"
-violates = true
 label = "Constructor-parameter injection"
 directive = "Dependencies are declared as constructor parameters, and Angular's DI system supplies the right instance (singleton, scoped, or factory-created as configured) when the class is constructed. Services are configured via the providers array (in a component's @Component decorator, in an NgModule, or in the providers array of a bootstrapApplication call) or via providedIn: 'root' in the @Injectable decorator. This remains valid for standard component/service classes, which always have a constructor to inject into, for teams with an established constructor-DI convention, or for codebases on Angular versions before inject() existed (pre-14). It does not work for functional guards, interceptors, or resolvers, which are plain functions with no constructor."
 why = "Constructor injection ensures the same singleton behavior, initialization, mocking for tests, and ability to swap implementations without code changes that inject() provides; the two share the same DI guarantees. It remains a legitimate OOP-style option, but both of this rule's cited sources recommend inject() as the primary mechanism, and inject() is required (not just preferred) in functional guards/interceptors/resolvers where no constructor exists."
