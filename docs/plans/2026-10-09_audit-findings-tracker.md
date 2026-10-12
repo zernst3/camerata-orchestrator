@@ -1364,3 +1364,64 @@ whether they should enter the alternatives pass at all, not a silence bug.
 does not survive checking — committed by me, in the analysis rather than the code. It was caught
 because the agent was told to decide from the rule's own text and to flag disagreement rather than
 comply. That instruction is why it surfaced, and it is worth keeping in every brief.
+
+---
+
+# CORRECTION 2 — "19 security rules could not report a violation" was overstated (2026-10-12)
+
+I told Zach that 19 security rules "cannot report a violation at all", and illustrated it with three
+examples: no RLS policy, a `service_role` key in client code, and dynamic SQL injection, each
+"reporting as a convention the codebase chose". I used that to escalate the item above everything else
+in his queue.
+
+**The defect was real but it affected 8 of the 19, and all three of my examples were in the other 11.**
+
+Only `Prose` and `Structured` enforcement tiers enter the alternatives pass. `EnforcementKind::is_ci_enforced`
+(`crates/rules/src/lib.rs:108`) excludes `Mechanical` and `Architectural` already. Measured:
+
+| rule I cited | enforcement | entered the alternatives pass? |
+|---|---|---|
+| `SUPABASE-RLS-NO-POLICY-1` | architectural | **no** |
+| `SUPABASE-KEY-SERVICE-ROLE-CLIENT-1` | mechanical | **no** |
+| `SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1` | architectural | **no** |
+| `SUPABASE-STORAGE-KEY-SANITIZATION-1` | structured | **yes** -- genuinely silent |
+
+Several of the 11 have live deterministic detectors in `crates/checks/src/supabase/*_checker.rs` and
+were emitting findings the whole time. W12 said this plainly in its report and chose a genuinely
+silent rule for its red-before proof rather than one of my headline examples.
+
+**What remains true:** for the 8 `prose`/`structured` rules the silence was exactly as described, and
+W12's measurement on one of them is unambiguous: no finding emitted, the vulnerability adopted as the
+project's effective directive, and a `ConventionObserved` row asserting the codebase consistently
+follows that "convention". For the other 11 the reclassification is a correctness fix that moves the
+exclusion onto the rule's own semantics instead of leaving it to depend incidentally on its
+enforcement tier. It does not by itself make them newly emit.
+
+## The pattern in my own three errors this session, and the fix
+
+1. `default = false` is a "contradiction" -- inferred from a doc comment, never traced to how the field
+   is used. Wrong; would have gated 13 legitimately opt-in rules.
+2. `deny_unknown_fields` "is now on" -- inferred from a grep count going 2 to 6, never read the matches.
+   All six were comments explaining why it is off.
+3. "19 rules could not report a violation" -- inferred from `kind` plus flag count, never checked the
+   enforcement tier that gates the pass.
+
+Each time I verified the **data** and skipped the **code path**. `docs/RULES_REFERENCE.md` exists
+precisely because that tracing is hard, and I did not use it on my own claims.
+
+**Standing correction to my own method: before asserting a behavioural consequence, trace the field to
+its consumer and cite `file.rs:line`, which is the standard every agent brief in this effort demands.**
+All three errors were caught by agents who were told to verify from source and flag disagreement rather
+than comply. That instruction is load-bearing and stays in every brief.
+
+### [ ] NEW — 9 detector-precision rules, not 5, and 5 of them invert the Defect definition
+W12 found 4 more beyond the 5 already known: `SUPABASE-RLS-NO-POLICY-1`, `SUPABASE-RLS-PERMISSIVE-TRUE-1`,
+`SUPABASE-RLS-DISABLED-NOT-RESTORED-1`, `SUPABASE-STORAGE-OBJECT-POLICY-1`.
+
+Sharper: in five of the nine (`RLS-PERMISSIVE-TRUE` and the four `FUNC-*`) the **rejected option is MORE
+aggressive than the correct one**. So `violates = true` there does not mean "this codebase is unsafe", it
+means "this scanner calibration is not an acceptable alternative" -- which contradicts the taxonomy's own
+definition of Defect ("every option other than the correct one describes the absence or a degenerate
+form"). No behavioural risk today, since defect-kind rules never enter the alternatives pass and the flag
+is inert. But the option text is product configuration in a client-facing costume and needs removing from
+the rule, not reclassifying.
