@@ -39,6 +39,7 @@ why = "Simpler to code; queries are not bounded by handler deadlines and may han
 
 [[option]]
 id = "context-sometimes"
+violates = true
 label = "Context is passed to some queries but not others"
 directive = "Some repository methods accept and use context; others ignore it. The pattern is inconsistent."
 why = "Common in transitional codebases; creates gaps in timeout enforcement and makes the codebase unpredictable."

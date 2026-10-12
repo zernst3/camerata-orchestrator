@@ -32,6 +32,7 @@ why = "Deadline propagation is gRPC's built-in timeout mechanism; respecting it 
 
 [[option]]
 id = "background-context-in-services"
+violates = true
 label = "Services use context.Background() for downstream calls; deadlines do not propagate"
 directive = "RPC implementations receive the deadline context but use context.Background() or context.TODO() when calling other services or databases, effectively ignoring the client's deadline."
 why = "Trades deadline propagation for service independence; service operations can complete even if the originating request times out. Requires explicit per-service timeout configuration."
