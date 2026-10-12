@@ -482,6 +482,52 @@ struct RuleToml {
     /// applies.
     #[serde(default)]
     deviation_ceiling: Option<String>,
+    /// W14 (gotcha 8): ACCEPTED BUT UNCONSUMED. `tag` is authored on all 417 corpus rules and
+    /// is read by NOTHING in this workspace — established 2026-10-11 by a workspace-wide search
+    /// (the only other TOML parsers are `checks/src/manifest.rs`,
+    /// `checks/src/architecture_config.rs` and `server/src/feature_flags.rs`, none of which
+    /// touch the principle corpus). It is declared here so it is part of the DOCUMENTED schema
+    /// rather than an unknown field, which is what lets
+    /// [`corpus_files_with_unknown_fields`] treat every OTHER unrecognized rule-level key as a
+    /// build failure. Measured value distribution on 2026-10-11: `"stack"` 388, `"universal"`
+    /// 28, `"process"` 1 — a 3-value coarse bucket, 93 percent one value, agreeing with the
+    /// folder-derived domain on only 21 of 417 rules. Whether it should be consumed or deleted
+    /// is the corpus owner's call; deleting a field from 417 hand-authored files is a
+    /// topology-level change, not a gate's business.
+    #[serde(default)]
+    #[allow(dead_code)]
+    tag: Option<String>,
+    /// W14 (gotcha 8): ACCEPTED BUT UNCONSUMED, same provenance and same reason as [`tag`]
+    /// above — authored on all 417 rules, read by nothing, established 2026-10-11.
+    ///
+    /// Unlike `tag`, `layer` carries information that is NOT derivable from the folder path, so
+    /// it is the more plausible latent feature of the two. Measured distribution on 2026-10-11:
+    /// `universal` 131, `framework` 113, `language` 90, `platform` 35, `library` 34,
+    /// `architecture` 7, `testing` 7. Eight folder families hold MORE THAN ONE layer value, so
+    /// the field genuinely sub-divides a domain rather than restating it (e.g. `go/` splits into
+    /// `architecture` x4 and `language` x7; `rust/` into `language` x9 and `library` x2;
+    /// `go:grpc` into `framework` x4 and `library` x1). It is also internally inconsistent in
+    /// at least two places, which is what a hand-authored, unread field drifts into:
+    /// `go:testing` is `layer = "testing"` while every other `<lang>:testing` folder is
+    /// `layer = "language"`, and `JAVASCRIPT-PUBLIC-ENV-PREFIX-SECRET-1` is `layer = "universal"`
+    /// while its three `javascript/` siblings are `layer = "language"`. Note also that
+    /// `layer = "universal"` does NOT mean `domain == "universal"` (131 vs 25) and does not
+    /// match any existing domain constant (`PIPELINE_SELECTED_DOMAINS`, `ALWAYS_ON_DOMAINS`,
+    /// `STANCE_LAYER_DOMAINS`), so nothing currently derived duplicates it.
+    #[serde(default)]
+    #[allow(dead_code)]
+    layer: Option<String>,
+    /// W14 (gotcha 8 / section 3.19): ACCEPTED BUT UNCONSUMED. The `[[emits]]` blocks
+    /// (`target =`/`scope =` keys) of the deprecated camerata-ai emit-partition format, present
+    /// on exactly 2 rules on 2026-10-11 (`rust/rust-domain-2-newtype-ids.toml`,
+    /// `universal/spirit-robustness-1.toml`) and parsed by nothing — the live
+    /// CONVENTIONS/AGENTS partitioning is done by `arm.rs` from `enforcement`. Typed as raw
+    /// [`toml::Value`] deliberately: declaring a concrete shape would assert a contract this
+    /// workspace does not honour, and would make a future key inside the block a parse error
+    /// for a block nothing reads.
+    #[serde(default, rename = "emits")]
+    #[allow(dead_code)]
+    emits: Vec<toml::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1491,6 +1537,463 @@ pub fn suspicious_default_with_exceptions_rules(set: &RuleSet) -> Vec<String> {
         .collect();
     offenders.sort();
     offenders
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// W14 corpus-load gates: flag/prose agreement, the decision-kind invariant, and
+// the schema-vocabulary gate (`docs/plans/2026-10-09_audit-findings-tracker.md`)
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Same build-time-gate philosophy as `rules_missing_kind` above and the same reason: these
+// fail the BUILD, never a scan. A scan must never refuse to run over corpus state, so none of
+// these is wired into `load_corpus`/`load_corpus_lenient` as a runtime refusal.
+
+/// The literal token a violating option's `why` is expected to OPEN with, per the corpus's
+/// strongest-performing authoring convention (`docs/RULES_REFERENCE.md` section 10.4).
+///
+/// Why this token specifically: all 17 flagged `supabase/` rules used it, and that folder
+/// scored 17 of 17 correct in the 244-rule `violates` audit while other folders ran as low as
+/// 59 percent. An author forced to begin the option's rationale with `Rejected:` cannot write
+/// it as a neutral alternative by accident, and the agreement between the prose and the flag
+/// becomes mechanically checkable — which is what
+/// [`options_with_rejected_prose_but_no_violates_flag`] does with it.
+pub const REJECTED_PROSE_TOKEN: &str = "Rejected:";
+
+/// Whether `why` opens with [`REJECTED_PROSE_TOKEN`]. Leading whitespace is trimmed because the
+/// corpus authors `why` as both an inline string and a `"""`-delimited block (which begins with
+/// a newline), and the two must be treated identically — a convention that depended on the
+/// quoting style would be a convention in name only.
+fn why_opens_with_rejected(why: &str) -> bool {
+    why.trim_start().starts_with(REJECTED_PROSE_TOKEN)
+}
+
+/// GATE 1 (W14). Every option whose `why` OPENS with [`REJECTED_PROSE_TOKEN`] but which does
+/// NOT carry `violates = true`, as `"<rule id> / <option id> (kind = <kind>)"`. Sorted for
+/// stable output. `req_w14_every_rejected_option_is_flagged_violates` asserts this is EMPTY for
+/// the real shipped corpus.
+///
+/// This is the direct gate against the 244-rule audit's DOMINANT error class: a MISSING
+/// `violates` flag, which leaves the engine silent on a fault its own rule describes in plain
+/// language. 76 of 244 flags (31 percent) were wrong, and the missing-flag shape is the one
+/// that turns a security requirement into "the convention this codebase chose".
+///
+/// **Why `decision`-kind rules are deliberately OUT OF SCOPE, and why that is a scoping rule
+/// rather than a carved exception.** The taxonomy forbids `violates` on a `decision`-kind rule
+/// outright (see [`RuleKind`]'s doc comment and [`decision_kind_rules_with_violates_flag`]). If
+/// this gate also demanded the flag on `decision` rules, the two W14 gates would contradict each
+/// other on the same option and no corpus could satisfy both. So the invariant splits cleanly in
+/// two along `kind`:
+///
+/// - on a rule whose kind PERMITS the flag (`defect`, `default_with_exceptions`, or an absent
+///   kind — which `rules_missing_kind` separately fails the build on), `Rejected:` prose MUST be
+///   paired with the flag, and that is this gate;
+/// - on a `decision`-kind rule, `Rejected:` prose is instead evidence that the KIND is wrong,
+///   which is [`decision_kind_rules_with_rejected_prose`]'s advisory finding.
+///
+/// Measured on all 417 corpus rules / 1124 options on 2026-10-11: 78 options open with the
+/// token. 70 carry the flag and 8 do not — and all 70 flagged sit on `defect` (65) or
+/// `default_with_exceptions` (5) rules while all 8 unflagged sit on `decision` rules. So within
+/// this gate's scope the prose/flag agreement is 70 out of 70, with zero counter-examples; the
+/// split is not a convenience, it is where the corpus's own data divides.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn options_with_rejected_prose_but_no_violates_flag(set: &RuleSet) -> Vec<String> {
+    let mut offenders: Vec<String> = Vec::new();
+    for r in set.iter() {
+        // A `decision`-kind rule cannot satisfy this gate and the no-flag invariant at once;
+        // its `Rejected:` options are reported by `decision_kind_rules_with_rejected_prose`.
+        if r.kind == Some(RuleKind::Decision) {
+            continue;
+        }
+        for o in &r.options {
+            if why_opens_with_rejected(&o.why) && !o.violates {
+                offenders.push(format!(
+                    "{} / {} (kind = {:?}): `why` opens with {REJECTED_PROSE_TOKEN:?} but \
+                     `violates` is not set — the rule names this option as the fault in prose \
+                     while the engine treats it as a genuine alternative",
+                    r.id.0, o.id, r.kind
+                ));
+            }
+        }
+    }
+    offenders.sort();
+    offenders
+}
+
+/// GATE 1b (W14), ADVISORY — deliberately NOT build-failing. Every `decision`-kind rule with at
+/// least one option whose `why` opens with [`REJECTED_PROSE_TOKEN`], as
+/// `"<rule id> / <option id>"` per offending option. Sorted for stable output.
+///
+/// A rule cannot simultaneously hold that its alternatives are of EQUAL WEIGHT (`kind =
+/// "decision"`, whose only reportable condition is cross-codebase inconsistency) and that one of
+/// them is `Rejected:`. One of the two is wrong, and in the 244-rule audit the authored prose was
+/// right about three times out of four — so this is evidence the rule's `kind` is wrong.
+///
+/// **Why advisory and not a build failure.** This is exactly the W12 defect shape (`kind =
+/// "decision"`, zero `violates` flags, 2 options, one opening `Rejected:`) that saw 19 security
+/// rules reclassified to `defect`. Resolving it means CHANGING a rule's `kind`, and 39 rules sit
+/// on the owner's paused A5.7 classification hold — 6 of the 7 rules this function reports are on
+/// that hold list (`docs/plans/2026-10-09_rule-kind-classification.md`, "NEEDS OWNER DECISION").
+/// Failing the build would force a reclassification the owner has explicitly paused. The
+/// requirement a gate can honestly carry here is that the population cannot GROW silently, which
+/// is what `req_w14_decision_kind_rules_with_rejected_prose_match_the_known_roster` pins.
+///
+/// Measured on 2026-10-11: 8 options across 7 rules. The roster and the per-rule reading live
+/// with the pinning test, in `crates/rules/tests/w14_corpus_schema_gates.rs`
+/// (`DECISION_KIND_RULES_WITH_REJECTED_PROSE`).
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn decision_kind_rules_with_rejected_prose(set: &RuleSet) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for r in set.iter() {
+        if r.kind != Some(RuleKind::Decision) {
+            continue;
+        }
+        for o in &r.options {
+            if why_opens_with_rejected(&o.why) {
+                found.push(format!("{} / {}", r.id.0, o.id));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// GATE 2 (W14). Every `decision`-kind rule in `set` carrying at least one `violates` option, as
+/// `"<rule id>: [<option ids>]"`. Sorted for stable output.
+/// `req_w14_no_decision_kind_rule_carries_a_violates_flag` asserts this is EMPTY for the real
+/// shipped corpus.
+///
+/// The invariant is [`RuleKind`]'s own stated rule: *"No option on a `decision`-kind rule should
+/// carry `violates = true`."* It was DOCUMENTED AND COMPLETELY UNENFORCED until W14. This
+/// function exists to move it into the corpus-load gate FAMILY (alongside
+/// [`rules_missing_kind`], [`rules_disarmed_by_verification`] and the severity gates) so it is a
+/// reusable gate callable by any build/integrity consumer, not only an assertion living inside
+/// one test file.
+///
+/// **The invariant is not cosmetic — the flag is LIVE at runtime on a decision rule.**
+/// `camerata_server::ai_audit::apply_alternative_decision` branches purely on
+/// `option.violates` and never consults the rule's `kind`, so a stray flag on a `decision` rule
+/// silently changes behaviour: if the alternatives pass decides that option, the pipeline emits a
+/// guaranteed high-severity `Defect` finding for a rule whose whole premise is that its options
+/// are equivalent. That is a wrong accusation against conforming code, which is the mirror image
+/// of the missing-flag class [`options_with_rejected_prose_but_no_violates_flag`] guards.
+///
+/// Prior coverage, stated plainly rather than duplicated silently: W11 already asserts this
+/// corpus-wide in `crates/rules/tests/w11_kind_taxonomy.rs::
+/// no_decision_kind_rule_in_the_corpus_carries_a_violates_flag`. That test is left exactly as
+/// written (it also pins W11's seven reclassified ids, which this function deliberately does not
+/// re-assert). What W14 adds is the gate-function form plus the vacuity guard below.
+///
+/// Measured on 2026-10-11: 156 `decision`-kind rules of 417, zero offenders.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn decision_kind_rules_with_violates_flag(set: &RuleSet) -> Vec<String> {
+    let mut offenders: Vec<String> = set
+        .iter()
+        .filter(|r| r.kind == Some(RuleKind::Decision))
+        .filter_map(|r| {
+            let flagged: Vec<&str> = r
+                .options
+                .iter()
+                .filter(|o| o.violates)
+                .map(|o| o.id.as_str())
+                .collect();
+            (!flagged.is_empty()).then(|| format!("{}: {:?}", r.id.0, flagged))
+        })
+        .collect();
+    offenders.sort();
+    offenders
+}
+
+/// How many rules in `set` are `decision`-kind. Exists so
+/// [`decision_kind_rules_with_violates_flag`]'s gate can prove it is not passing VACUOUSLY — an
+/// empty offender list means nothing if the predicate selected no rules at all, which is the
+/// exact failure mode (a complete, fully-tested, totally inert mechanism) that
+/// [`rules_declaring_max_severity`] was written in response to.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn decision_kind_rule_count(set: &RuleSet) -> usize {
+    set.iter()
+        .filter(|r| r.kind == Some(RuleKind::Decision))
+        .count()
+}
+
+// ── GATE 3: the schema-vocabulary gate (gotcha 9: a misspelled FIELD NAME vanishes) ──
+//
+// `RuleToml` deliberately does not set `serde(deny_unknown_fields)` (see its doc comment), so
+// `max_severety = "high"`, or `violates = true` typed as `voilates = true`, parses cleanly and
+// simply is not there. With three separate silent-no-op mechanisms already shipped in this
+// corpus, that default costs more than it saves.
+//
+// Gate 3 is implemented as a CORPUS-LOAD GATE over the raw TOML rather than as
+// `serde(deny_unknown_fields)` on the structs, for three reasons:
+//
+//  1. It is STRICTLY STRONGER. `deny_unknown_fields` on `RuleToml` would check rule-level keys
+//     only; a typo inside `[[option]]`, `[decision]`, `[[sources]]`, `[verified]`,
+//     `[[stack_exception]]` or an `escalation` inline table would still vanish. This gate walks
+//     every one of those levels.
+//  2. It keeps the gate a BUILD failure, never a runtime refusal — the house rule for every
+//     other gate in this section (`docs/RULES_REFERENCE.md` section 10.6: "a scan must never
+//     refuse to run over corpus state").
+//  3. Flipping the serde attribute is BLOCKED by files this workstream does not own.
+//     `crates/server/tests/onboarding_full_e2e.rs` (and its siblings) write tiny fixture
+//     corpora in the deprecated camerata-ai format, carrying RULE-LEVEL `directive` and
+//     `conformance` keys that `RuleToml` does not declare. With `deny_unknown_fields` on, every
+//     one of those fixture files fails to parse, `load_corpus_lenient` drops it, and those
+//     e2e tests break. Fixing them means editing `crates/server/**`, which W14 does not own, so
+//     the attribute stays off and this gate carries the requirement instead. See the report.
+//
+// The vocabularies below MUST mirror the structs they name. The failure direction if one drifts
+// is safe and loud: a field added to a struct but not to its vocabulary makes this gate reject
+// the corpus (a red build), never silently accept an unread key.
+
+/// Rule-level keys `RuleToml` declares, including the explicitly-accepted-but-unconsumed
+/// `tag`/`layer`/`emits` (see their doc comments on `RuleToml`). Mirrors `RuleToml`.
+const RULE_LEVEL_FIELDS: &[&str] = &[
+    "id",
+    "title",
+    "enforcement",
+    "domain",
+    "qualifies",
+    "decision",
+    "default",
+    "opt_in_only",
+    "layer3_only",
+    "option",
+    "verification",
+    "sources",
+    "verified",
+    "stack_exception",
+    "extra_domains",
+    "kind",
+    "max_severity",
+    "min_severity",
+    "deviation_ceiling",
+    // Accepted, unconsumed (gotcha 8), established 2026-10-11:
+    "tag",
+    "layer",
+    "emits",
+];
+
+/// `[[option]]` keys. Mirrors `OptionToml`. Measured 2026-10-11: zero unknown option-level keys
+/// across all 417 rules / 1124 options, so this level of the gate is clean from day one.
+const OPTION_LEVEL_FIELDS: &[&str] = &[
+    "id",
+    "label",
+    "directive",
+    "why",
+    "remediation",
+    "finding_headline",
+    "finding_detail",
+    "escalation",
+    "effort",
+    "violates",
+];
+
+/// `[decision]` keys. Mirrors `DecisionToml`.
+const DECISION_FIELDS: &[&str] = &["question", "why", "default"];
+
+/// `[[sources]]` keys. Mirrors [`RuleSource`] — PLUS `qualifies`, which is accepted here but is
+/// believed MISPLACED rather than intentional, and is reported separately by
+/// [`corpus_rules_with_qualifies_misplaced_into_sources`].
+///
+/// What happened: `qualifies` is a RULE-level field, but in 17 rules it is authored on a line
+/// that sits BELOW a `[[sources]]` header, so TOML scopes it into the source table and
+/// [`RuleSource`] discards it. 29 occurrences on 2026-10-11, every one of them in the `go/`
+/// family. For the 10 affected `go/*.toml` rules there is NO rule-level `qualifies` at all, so
+/// `Rule::summary` silently falls through to `[decision].why` instead of the authored text —
+/// gotcha 9 in the wild, and found by writing this gate.
+///
+/// It is accepted (not rejected) because the fix is to MOVE a line in 17 hand-authored corpus
+/// files, which changes those rules' derived `summary` and is therefore the corpus owner's call,
+/// not a gate's. `qualifies` is deliberately NOT added to [`RuleSource`] as a struct field: that
+/// struct has public fields and is literal-constructed in `crates/server/src/scan_tools.rs`, so
+/// adding one would be a breaking change to a crate W14 does not own.
+const SOURCE_FIELDS: &[&str] = &["url", "title", "linter", "qualifies"];
+
+/// `[verified]` keys. Mirrors [`VerifiedProvenance`].
+const VERIFIED_FIELDS: &[&str] = &["by", "at", "against"];
+
+/// `[[stack_exception]]` keys. Mirrors `StackExceptionToml`.
+const STACK_EXCEPTION_FIELDS: &[&str] = &["framework", "path_glob", "note"];
+
+/// `escalation = { ... }` inline-table keys. Mirrors [`EscalationSpec`].
+const ESCALATION_FIELDS: &[&str] = &["condition", "severity"];
+
+/// Push an offender line for every key of `table` that is not in `allowed`.
+fn collect_unknown_keys(
+    table: &toml::value::Table,
+    allowed: &[&str],
+    where_: &str,
+    file: &str,
+    out: &mut Vec<String>,
+) {
+    for key in table.keys() {
+        if !allowed.contains(&key.as_str()) {
+            out.push(format!(
+                "{file}: unknown field {key:?} at {where_} — not in the declared schema, so it \
+                 is parsed by nothing and vanishes silently (gotcha 9). Check the spelling \
+                 against `RuleToml`/`OptionToml`, or declare it as accepted-and-unconsumed."
+            ));
+        }
+    }
+}
+
+/// GATE 3 (W14). Every unknown FIELD NAME found anywhere in the TOML files under `corpus_dir`,
+/// as `"<relative path>: unknown field \"<key>\" at <location> — ..."`. Sorted for stable
+/// output. `req_w14_no_corpus_rule_carries_an_unknown_field` asserts this is EMPTY for the real
+/// shipped corpus.
+///
+/// Walks EVERY nesting level against the vocabularies above: rule-level, `[decision]`,
+/// `[[option]]` (and each option's `escalation` inline table), `[[sources]]`, `[verified]`, and
+/// `[[stack_exception]]`.
+///
+/// A file that fails to parse as TOML at all is NOT reported here — that is a different defect
+/// (gotcha 10) with a different owner: `load_corpus`'s own error, which the test suite's
+/// `errors.is_empty()` assertions already catch. Reporting it twice would make the two gates'
+/// output overlap confusingly, the same reasoning
+/// [`rules_with_invalid_severity_floor`] uses for an invalid `max_severity`.
+///
+/// Measured on all 417 corpus files on 2026-10-11: zero unknown fields, once `tag` (417),
+/// `layer` (417), `emits` (2) and `sources.qualifies` (29) are declared as
+/// accepted-and-unconsumed above. Those four were the ONLY unknown keys in the corpus; before
+/// declaring them this gate reported 865 offenders.
+#[cfg_attr(not(test), allow(dead_code))]
+pub async fn corpus_files_with_unknown_fields(
+    corpus_dir: &Path,
+) -> Result<Vec<String>, RulesError> {
+    let paths = collect_toml_paths(corpus_dir).await?;
+    let mut out: Vec<String> = Vec::new();
+
+    for path in paths {
+        let bytes = tokio::fs::read(&path).await.map_err(|e| RulesError::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        // A hard TOML syntax error is gotcha 10's finding, not this gate's — skip quietly.
+        let Ok(value) = text.parse::<toml::Value>() else {
+            continue;
+        };
+        let Some(root) = value.as_table() else {
+            continue;
+        };
+        let file = path
+            .strip_prefix(corpus_dir)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+
+        collect_unknown_keys(root, RULE_LEVEL_FIELDS, "rule level", &file, &mut out);
+
+        if let Some(decision) = root.get("decision").and_then(|v| v.as_table()) {
+            collect_unknown_keys(decision, DECISION_FIELDS, "[decision]", &file, &mut out);
+        }
+        if let Some(verified) = root.get("verified").and_then(|v| v.as_table()) {
+            collect_unknown_keys(verified, VERIFIED_FIELDS, "[verified]", &file, &mut out);
+        }
+        for (i, src) in array_tables(root, "sources").into_iter().enumerate() {
+            collect_unknown_keys(
+                src,
+                SOURCE_FIELDS,
+                &format!("[[sources]][{i}]"),
+                &file,
+                &mut out,
+            );
+        }
+        for (i, ex) in array_tables(root, "stack_exception")
+            .into_iter()
+            .enumerate()
+        {
+            collect_unknown_keys(
+                ex,
+                STACK_EXCEPTION_FIELDS,
+                &format!("[[stack_exception]][{i}]"),
+                &file,
+                &mut out,
+            );
+        }
+        for (i, opt) in array_tables(root, "option").into_iter().enumerate() {
+            let label = opt
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_owned())
+                .unwrap_or_else(|| format!("[{i}]"));
+            collect_unknown_keys(
+                opt,
+                OPTION_LEVEL_FIELDS,
+                &format!("[[option]] {label}"),
+                &file,
+                &mut out,
+            );
+            if let Some(esc) = opt.get("escalation").and_then(|v| v.as_table()) {
+                collect_unknown_keys(
+                    esc,
+                    ESCALATION_FIELDS,
+                    &format!("[[option]] {label}.escalation"),
+                    &file,
+                    &mut out,
+                );
+            }
+        }
+    }
+
+    out.sort();
+    Ok(out)
+}
+
+/// The tables of an array-of-tables field (`[[option]]`, `[[sources]]`, `[[stack_exception]]`),
+/// or empty when the key is absent or not an array of tables.
+fn array_tables<'a>(root: &'a toml::value::Table, key: &str) -> Vec<&'a toml::value::Table> {
+    root.get(key)
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_table()).collect())
+        .unwrap_or_default()
+}
+
+/// ADVISORY (W14). Every corpus rule that authors `qualifies` INSIDE a `[[sources]]` table, as
+/// `"<rule id> (sources[<i>], rule-level qualifies: present|ABSENT)"`. Sorted for stable output.
+///
+/// See [`SOURCE_FIELDS`] for the full story. This is reported rather than fixed because the fix
+/// is to move a line in 17 hand-authored corpus files, which changes each rule's derived
+/// `Rule::summary` — the corpus owner's call. The test
+/// `req_w14_the_misplaced_qualifies_roster_has_not_grown` pins the count so the mistake cannot
+/// spread silently while it waits for a ruling.
+#[cfg_attr(not(test), allow(dead_code))]
+pub async fn corpus_rules_with_qualifies_misplaced_into_sources(
+    corpus_dir: &Path,
+) -> Result<Vec<String>, RulesError> {
+    let paths = collect_toml_paths(corpus_dir).await?;
+    let mut out: Vec<String> = Vec::new();
+    for path in paths {
+        let bytes = tokio::fs::read(&path).await.map_err(|e| RulesError::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let Ok(value) = text.parse::<toml::Value>() else {
+            continue;
+        };
+        let Some(root) = value.as_table() else {
+            continue;
+        };
+        let id = root
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<no id>")
+            .to_owned();
+        let rule_level = if root.contains_key("qualifies") {
+            "present"
+        } else {
+            "ABSENT"
+        };
+        for (i, src) in array_tables(root, "sources").into_iter().enumerate() {
+            if src.contains_key("qualifies") {
+                out.push(format!(
+                    "{id} (sources[{i}], rule-level qualifies: {rule_level})"
+                ));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// The COMPLETE severity vocabulary a corpus-authored ceiling ([`Rule::max_severity`],
