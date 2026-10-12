@@ -23,6 +23,26 @@ guessed into `defect`/`default_with_exceptions`.
 - `decision` (ambiguous — forced conservative, **NEEDS OWNER DECISION**): 58
 - **Total: 417**
 
+> **Drift note, 2026-10-11 (docs pass). TREAT THE TALLY ABOVE AS A DATED SNAPSHOT, NOT A CURRENT
+> FACT.** It is the 2026-10-09 classification and the corpus has moved since. Reclassification is
+> ACTIVE as this note is written, so any number recorded here goes stale within hours; the
+> authoritative count is always the TOMLs themselves:
+>
+> ```
+> git grep -h '^kind = ' HEAD -- crates/rules/principles | sort | uniq -c
+> ```
+>
+> The total is still 417 rules. The commits that have moved a `kind` since the snapshot, newest
+> first: `bc6f013` (19 security rules to `defect` so they can report a fault), `3a9e3e6`
+> (`ARCH-HOT-READ-CACHE-1`), `509e17e` (five more to `decision`, plus the `violates` flags that
+> contradicted their own prose), `84088c9` (two to `decision`). A separate, parallel effort has been
+> correcting `violates` flags corpus-wide (`a0118da`, `ffee7b2`, `79ee0f2`, `330734b`, `aa003f3`,
+> `ece0d7d`, `bc9e78e`, `0ca0632`) without touching `kind`.
+>
+> What has NOT changed: the 58-rule hold list below, and the fact that the W8/W9/W10
+> severity-ceiling work touched zero `kind` fields by construction, enforced by
+> `req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling`.
+
 ---
 
 ## NEEDS OWNER DECISION (58 rules)

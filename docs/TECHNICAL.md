@@ -13,11 +13,11 @@
 
 ## 1. System overview and crate map
 
-Camerata is a single Rust workspace. The shipped app is 22 crates under
+Camerata is a single Rust workspace. The shipped app is 26 crates under
 `crates/` (plus one maintainer-only tool, `tools/corpus-verifier`, that is NOT a
-dependency of any app crate). All load-bearing code is Rust; the only optional
-non-Rust piece is a future TypeScript AST sidecar described in
-`docs/ARCHITECTURE.md` that does not exist yet.
+dependency of any app crate), so 27 workspace members in total. All load-bearing
+code is Rust; the only optional non-Rust piece is a future TypeScript AST sidecar
+described in `docs/ARCHITECTURE.md` that does not exist yet.
 
 ### Workspace members (`Cargo.toml`)
 
@@ -31,14 +31,18 @@ non-Rust piece is a future TypeScript AST sidecar described in
 | `camerata-intake` | lib | PO-mode intake form schema + LeadEngineer (architect-abstracted second level). |
 | `camerata-gateway` | lib + bin (`camerata-gateway`) | Layer-1 real-time governance gate. A Rust MCP server; also usable in-process. |
 | `camerata-agent` | lib | Agent runtime: drives `claude -p` subprocesses, parses stream-json. Implements `AgentDriver`. |
-| `camerata-rules` | lib | Rule corpus loader, `EnforcementKind` classifier, rule-subset selection. |
+| `camerata-rules` | lib | Rule corpus loader, rule-subset selection, and the corpus-load build gates. Carries two independent classification axes: `EnforcementKind` (prose / structured / mechanical / architectural - what kind of conformance check the rule needs) and, since 2026-10-09, `RuleKind` (defect / decision / default_with_exceptions - whether the rule can accuse a codebase of a fault at all). Also owns the authored severity bounds (`max_severity`, `min_severity`, `deviation_ceiling`) and the `Verification` provenance ladder. Field-by-field reference: `docs/RULES_REFERENCE.md`. |
+| `camerata-orchestrator-core` | lib | The confidence-dial engine: a pure effect-signature decision-CLASS classifier that never relies on a model's self-report. Named `-core` to avoid colliding with the repo and binary name `camerata-orchestrator`. |
+| `camerata-check` | lib + bin (`camerata-check`) | Layer-3 CI-parity: a standalone binary distributing the native architectural-checker registry (`camerata_checks::arch_checker`) so a CLIENT's own CI can run the same checks with no Camerata server or cockpit. Depends on `camerata-checks` + `camerata-rules` only, NEVER on `camerata-server`. See `crates/camerata-check/README.md`. |
+| `camerata-preview` | lib | Local-first `dx serve` live-preview adapter: status parser, process manager, and the edit-verify fallback. See `crates/preview/README.md`. |
+| `camerata-scaffold` | lib | Rust-fullstack PWA scaffolder: the vetted Dioxus-fullstack skeleton (templates under `crates/scaffold/templates/skeleton/`, including the `AGENTS.md` / `CONVENTIONS.md` the scaffolded project starts with) plus the `ScaffoldStrategy` fit-check seam. |
 | `camerata-persistence` | lib | SQLite state store (`sqlx`) + JSON provenance, plus the `governance_events` audit-trail table (`GovernanceLog`). |
 | `camerata-checks` | lib | Layer-2 post-task gate: `CheckRunner` + `cargo fmt`/`cargo clippy`/`cargo test` subprocess runners (plus the polyglot and cross-agent integration runners, §3/§3a). |
 | `camerata-fleet` | lib | Reusable governed-fleet build logic, shared by CLI and UI. |
 | `camerata-server` | lib + bin | Axum HTTP/WS BFF the cockpit talks to. As of the 2026-07-08 adapter-ladder batch, `camerata-ui` reaches it by spawning it as a subprocess, not by embedding it in-process. Contains the onboarding scan pipeline, arm/emit, workspace/git controls, the WorkItem/UoW layer, all HTTP routes, and re-export shims for the DTOs/provider stack relocated to `api-types`/`llm`. |
 | `camerata-client` | lib | Typed async HTTP client over the BFF's `/api/*` routes (base URL from `CAMERATA_BFF_URL`, default `http://127.0.0.1:8787`). Shared plumbing under the MCP and CLI adapters. Depends only on `camerata-api-types` plus generic HTTP/serde crates. |
 | `camerata-mcp` | lib + bin (`camerata-mcp`) | First MCP adapter rung: an `rmcp` 1.7 stdio server exposing Camerata verbs (`list_stories`/`get_run`/`list_uows`/`assign_work_item`/`start_run`/`run_events`/`recent_events`) as MCP tools, each delegating to `camerata-client`. |
-| `camerata-cli` | bin (`camerata`) | CLI binary entry point. Reworked into an HTTP adapter over `camerata-client` (clap-based: `stories`/`run`/`uows`/`assign`/`start-run`/`events`/`recent-events`), in addition to its existing in-process demo subcommands (`live-demo`, `po-demo`, etc). Still depends on `camerata-server`, but only for the `eval` subcommand. |
+| `camerata-cli` | bin (`camerata`) | CLI binary entry point, now FOUR families of subcommand: (1) the in-process demo/eval harness (`live-demo`, `po-demo`, …); (2) HTTP-adapter subcommands over `camerata-client` (`stories`/`run`/`uows`/`assign`/`start-run`/`events`/`recent-events`); (3) `inspect` - the headless Codebase Inspection product command, which runs the whole pipeline in-process with no BFF and no UI and writes the product-export ZIP (§6a); (4) `integrity-gate` - the pre-flight scan-integrity verdict with its own three-value exit contract (§6b). Still depends on `camerata-server` for `eval` and `inspect`. |
 | `camerata-ui` | bin (`camerata-ui`) | Dioxus desktop cockpit. SPAWNS `camerata-server` as a subprocess (runtime binary resolution, health-poll readiness, reuse-if-already-healthy, kill-on-exit watchdog) rather than embedding it; no crate dependency on `camerata-server`. Talks to the BFF over localhost HTTP/WS (currently via raw `reqwest`, not yet via `camerata-client`). |
 | `camerata-worktracker` | lib | `WorkItemProvider` port: canonical story shapes, sync policy, native provider, and adapters for GitHub Issues, GitHub Projects v2, Jira Cloud, Azure DevOps Boards. |
 | `camerata-maintenance` | lib | Tier-2 standing post-publish ops agent (dependency upgrades, security patches, secret rotation). |
@@ -1488,16 +1492,33 @@ Key corollaries:
 
 Every rule carries a `verification` field:
 
-| Value | Meaning |
-|---|---|
-| `draft` | AI-generated rule; no supporting citation was found. Advisory only; never auto-recommended during onboarding. |
-| `grounded` | The onboarding agents found at least one citation from a trusted source (language docs, style guides, real linter rule ids). Linter-id existence is validated by `crates/linter-registry/`. |
-| `verified` | A human has checked the cited findings and approved the rule. **No agent may set this, by design.** This is a deliberate trust boundary: the machine can ground a claim, only a human certifies it. |
-| `needs_recheck` | A rule that WAS `verified`, but the cited source or linter it was verified against has since drifted (e.g. a version bump moved the rule id). Still backed by a citation and usable, but no longer carries the strongest assertion until a human re-checks it. |
+| Value | Meaning | Grounded? | Auto-recommended at onboarding? |
+|---|---|---|---|
+| `draft` | AI-generated rule; no supporting citation was found, and nobody has reviewed it. The absent-field default. | No | **No** - unreviewed AI output carries unreduced AI risk, so it wants an explicit opt-in. |
+| `policy` | A deliberate project or team decision that cites NO external authority. Any source it does cite is internal (a Camerata doc citing Camerata), not a published standard or a real linter rule. | No | **Yes** |
+| `grounded` | At least one citation from a trusted source (language docs, style guides, real linter rule ids). Linter-id existence is validated by `crates/linter-registry/`. | Yes | Yes |
+| `verified` | A human has checked the cited findings and approved the rule. **No agent may set this, by design.** A deliberate trust boundary: the machine can ground a claim, only a human certifies it. | Yes | Yes |
+| `needs_recheck` | A rule that WAS `verified`, but the cited source or linter has since drifted (e.g. a version bump moved the rule id). Still backed by a citation and usable. | Yes | **No** - the human confirmation is known-stale and wants re-confirming. |
 
-(`Verification` in `crates/rules/src/lib.rs` has these four variants. `grounded`,
-`verified`, and `needs_recheck` are all "backed by a citation"; only `draft` is
-not.)
+`Verification` in `crates/rules/src/lib.rs` has these **five** variants. Two
+properties are deliberately separate and are the thing to get right:
+
+- **`is_grounded()` / `is_shippable()`** answer a PROVENANCE question: does this
+  rule cite an external authority? True for `grounded`, `verified` and
+  `needs_recheck`; false for `draft` and `policy`.
+- **`is_auto_recommended()`** answers an ARMING question: is this rule pre-checked
+  in the onboarding proposal? True for `grounded`, `verified` and **`policy`**;
+  false for `draft` and `needs_recheck`.
+
+**`policy` used to disarm a rule, and that was a defect (fixed 2026-10-09,
+finding A8).** `policy` is a statement about where a rule came from and says
+nothing about whether the rule is correct or checkable, so using it as an arming
+switch conflated the two axes and silently disarmed 17 shipped rules - among them
+every `PROC-*` governance rule the product is explicitly about. A build gate now
+holds the line: `rules_disarmed_by_verification` must be empty against the real
+corpus (`req_h1_no_corpus_rule_is_disarmed_by_its_verification_value`), so a rule
+that could never arm for ANY stack is a build failure rather than a silent note.
+`draft` and `needs_recheck` still disarm, by design, for the reasons in the table.
 
 Current state (honest): the mechanical rules in the corpus are grounded (each maps to a real linter rule). Zero are `verified` yet — that is a human-only step the maintainer has not yet completed. Grounded is the shippable baseline. Verified is the gold standard for citing a rule in a compliance context. The app surfaces these as read-only badges; the maintainer-side verifier tool is the only write path to `verified`.
 
@@ -1766,11 +1787,55 @@ them, taking the **conservative** outcome on disagreement (covered by
 (the pre-scan estimate the UI shows reflects this).
 
 **Dedup and merge:** findings are deduplicated by `(path, line, rule_id)` then
-`merge_by_location` collapses all findings at the same `(path, line)` into one
-row. The primary is the adopted corpus rule id (over an invented `AI-` id); the
-others become `also_matches`. Line 0 (file-level/uncited) findings are never
-merged. Verbatim snippet-based line resolution (`resolve_finding_lines`) corrects
-the model's approximate line estimates to actual line numbers from the code.
+`merge_by_location` collapses findings at the same `(path, line)` into one row,
+and `merge_semantic_groups` clusters same-rule findings that describe one problem.
+The primary is chosen by `primary_rank` (the adopted corpus rule id beats an
+invented `AI-` id, a deterministic tier beats an AI tier); the absorbed rule ids
+become `also_matches`. Line 0 (file-level/uncited) findings are never merged.
+Verbatim snippet-based line resolution (`resolve_finding_lines`) corrects the
+model's approximate line estimates to actual line numbers from the code.
+
+The merge is the hardest part of this pipeline, because its two failure modes are
+observationally identical from outside: an over-merge (three real sites collapsed
+into one row) looks exactly like a detection miss. Five guarantees were added on
+2026-10-10 and 2026-10-11, and they are the reason the merge is now auditable:
+
+- **Every absorbed site reaches every artifact** (finding C5). The merge always
+  recorded absorbed sites in `Finding::also_locations`, and no exporter read the
+  field - on a three-site fixture the pipeline detected 3, absorbed 2, and
+  exported ONE row with no trace of the other two. Rows now carry
+  `also_locations` (verbatim `MergedLocation` entries) and `site_count`
+  (`1 + absorbed`) into `findings.json`, the workbook ("Sites" and "Also found at"
+  columns) and the PDF's data. Note that `also_matches` ALONE is not a complete
+  record: an absorbed row sharing the primary's rule id leaves no `also_matches`
+  entry, so `also_locations` is the field to read.
+- **The merge is KIND-AWARE** (W7). `primary_rank` was not, so a deterministic
+  `ConventionObserved` row could outrank an AI-tier `Defect` and absorb it: a real
+  violation deleted into a compliment. `kinds_merge_compatible` now forbids an
+  informational kind (`ConventionObserved` / `NoConvention` / `NotAssessed`) from
+  ever fusing with an actionable one (`Defect` / `Deviation` / a legacy
+  unspecified row), `merge_by_location` keeps informational rows solo, and
+  `kind_actionability_rank` is the FIRST key in `primary_rank` behind those guards.
+- **Identity discrimination is structured, not lexical** (C4 / B9).
+  `objects_conflict` used to require full prose-set disjointness, so a single
+  shared container token - a schema prefix, a namespace, or the abbreviation "e.g"
+  - disabled the veto for any family inside one named container. It now consults
+  DETECTOR CAPTURES first (two sides carrying captured values with none in common
+  is a structured proof they are different things, independent of prose), and the
+  prose fallback discounts container tokens. "e.g" stopped registering as an
+  object because a dotted run only counts as an object when it is
+  identifier-shaped, which is a fix to the CLASS rather than a blacklist entry.
+- **Brace-free files get a construct** (B7). `same_construct` returned false for
+  all brace-free content, so `.env` / `.sql` / `.toml` / `.yaml` could never
+  satisfy an in-construct merge signal - a blind spot over exactly the file types
+  config and migration defects live in. For content with no braces at all the
+  blank-line-delimited stanza is now the construct; brace-bearing files keep the
+  old semantics exactly.
+- **Clustering joins on any member, not the seed** (B8). `merge_semantic_groups`
+  compared each finding against the group SEED only, which made grouping
+  non-transitive and order-dependent. A finding now joins a group when it
+  pair-merges with ANY member; every wrong-fusion guard still applies per pair,
+  and group formation stays deterministic (greedy, first-seen order).
 
 **Suppression (the baseline ratchet):** a finding is suppressed when it matches an
 accepted-debt record; only `Active` findings drive gate enforcement. `suppression.rs`
@@ -1844,16 +1909,24 @@ version-controlled and auditable; future scans read it from the default branch
 
 ### Mechanical and architectural rules in the scan
 
-**Mechanical rules** are re-tiered OUT of the AI code-only audit.
-`split_scannable_rules` (`lib.rs`, both audit handlers) drops
-`EnforcementKind::Mechanical` rules from the AI pass. Mechanical rules are
-enforced in CI from build/runtime/DB context (query-plan inspection,
-migration/index audit, AST lint) — e.g. `SQL-DB-INDEX-2`, whose `qualifies`
-defines it as an `EXPLAIN`/`pg_stat_statements` check on a live DB. Judging those
-from a static code digest yields only weak, low-confidence findings, so the scan
-skips them and they ride the deterministic preview instead (below). The excluded
-ids are surfaced on `ScanReport.excluded_mechanical_rules` (shown in the scan
-header).
+**Mechanical rules are NO LONGER withheld from the AI pass.** This changed in
+Pass-1 W4 (2026-10-09) and the old behaviour is worth stating because it was the
+cause of a real coverage hole: `split_scannable_rules` (`lib.rs`, both audit
+handlers) used to drop every `EnforcementKind::Mechanical` rule from the semantic
+pass, on the theory that a CI-tier rule judged from a static code digest yields
+only weak findings. The effect was that a mechanical rule with no wired detector
+was enforced by nothing at all - withheld from the semantic tier for being
+mechanical, and absent from the mechanical tier for having no detector.
+
+`split_scannable_rules` now partitions on one thing only: whether a rule is
+PREVIEW-runnable (`enforcement.is_ci_enforced() && !is_layer3_only()`). Its
+`scannable` output is the whole selected set, and its excluded list is always
+empty, so `ScanReport.excluded_mechanical_rules` is now a vestigial field that is
+populated by nothing - do not read it as a coverage statement.
+`onboard::semantic_rule_ids_for_repo` likewise filters on nothing but per-repo
+applicability. Preview-runnable rules still ALSO ride the deterministic preview
+(below); the two tiers now overlap rather than partition, and the ledger records
+which one actually produced the credit.
 
 **Architectural rules** are excluded from the deterministic preview entirely.
 `group_by_tool` checks `rule.enforcement == EnforcementKind::Mechanical`
@@ -1893,10 +1966,45 @@ Mechanism:
    runs each tool ONCE with a Camerata-supplied selector: clippy
    `-W clippy::<lint>`, ruff `--select <codes>`, eslint with the bundled config,
    semgrep `--sarif --config <bundled-rules>`.
-3. **parse.** SARIF preferred where the tool emits it (`parse_sarif` — semgrep
-   native, eslint via `@microsoft/eslint-formatter-sarif`), per-tool JSON
-   otherwise (`parse_ruff_json`, `parse_clippy_json`), all into the existing
-   `Finding` shape. clippy / ruff / eslint / semgrep are driven end-to-end.
+3. **parse.** Per tool: `parse_sarif` for semgrep (SARIF is native there),
+   `parse_eslint_json` for eslint, `parse_ruff_json` and `parse_clippy_json` for
+   the rest, all into the existing `Finding` shape. clippy / ruff / eslint /
+   semgrep are driven end-to-end.
+
+> **The eslint tier delivered ZERO coverage until 2026-10-09 (finding C11).** It
+> is worth recording because the failure was silent and deterministic, and because
+> an earlier version of this document described the broken wiring as if it worked.
+> eslint was invoked with `--format @microsoft/eslint-formatter-sarif`, which names
+> an npm PACKAGE; eslint resolves a non-built-in `--format` relative to the
+> **scanned repo's** working directory, not Camerata's tooling workspace, which is
+> the only place that package was installed. Resolution failed on every repo, every
+> run; eslint exited 2 having written the explanation to stderr and nothing at all
+> to stdout; and `run_capture_stdout` discarded stderr, so the only evidence an
+> operator ever saw was `EOF while parsing a value at line 1 column 0` - a parse
+> error about column 0 of an empty document, with the real explanation thrown away
+> one frame below.
+>
+> Three further defects found in the same reproduction, each independently able to
+> zero the pass: a plugin-namespaced `--rule` whose plugin is not registered is a
+> FATAL eslint config error that aborts the whole invocation (so one missing plugin
+> silently zeroed every other selected eslint rule, core rules included); the
+> bundled config computed the TypeScript parser path with `new URL("../node_modules/…",
+> import.meta.url).pathname`, which is wrong twice over (`../` from a file AT the
+> workspace root resolves to the workspace's PARENT, and `.pathname` percent-encodes
+> the space in macOS's `Application Support`); and the provisioning health probe
+> asked only whether the eslint binary answered `--version`, which made the
+> workspace effectively write-once.
+>
+> The fix removes the failure CLASS rather than working around it: `--format json`
+> is one of eslint's BUILT-IN formatters, shipped inside the eslint package, so it
+> needs no module resolution from any cwd. `run_capture_stdout` now returns stderr
+> on both the buffered and streaming paths and refuses to report an empty stdout as
+> a parse position; `partition_eslint_selectors` withholds a selector whose plugin
+> package is absent and discloses it as its own `CoverageNote`, so a missing plugin
+> costs that one rule instead of the entire run; `EslintRunShape::read_nothing()`
+> detects "parsed zero of the N files it read", a zero-coverage run otherwise
+> indistinguishable from a clean one; and the bundled config loads the parser and
+> every plugin by BARE SPECIFIER, which cannot express either path mistake.
 
 **Auto-provisioning (semgrep and eslint).** `crates/server/src/tool_provisioning.rs`
 auto-provisions semgrep and eslint into `<dirs::data_dir()>/camerata/tooling/` on
@@ -1906,8 +2014,21 @@ first scan use:
   (`<tooling>/semgrep-venv/`), installs via pip. Health probe: `semgrep
   --version` exit 0. Idempotent (probe short-circuits on subsequent calls).
 - **eslint** — requires `npm` on PATH; creates `<tooling>/eslint/` with a minimal
-  `package.json`; installs `eslint @typescript-eslint/parser
-  @microsoft/eslint-formatter-sarif`; copies the bundled config.
+  `package.json`; installs every package in `ESLINT_NPM_PACKAGES` (`eslint`,
+  `@typescript-eslint/parser`, `@typescript-eslint/eslint-plugin`,
+  `eslint-plugin-react-hooks`, `eslint-plugin-jest` - no formatter package, since
+  the scan uses eslint's built-in `json` formatter); copies the bundled config.
+  **The health probe covers the whole provisioned state, not just the binary:**
+  `eslint_is_provisioned` requires that the binary answers, that EVERY required
+  package is present (probed by its own `package.json`, so a half-removed package
+  reads as absent), and that the workspace's flat config is byte-identical to the
+  bundled asset (a content comparison, because the asset ships inside the binary
+  and its on-disk mtime says nothing about which build wrote the workspace copy).
+  Anything else re-provisions. The cost of a false negative is one
+  `npm install --prefer-offline`; the cost of a false positive is a silently dead
+  tool tier, which is exactly what the old binary-only probe produced. An
+  unreadable bundled asset reads as "current" so a packaging problem cannot cause
+  a re-install loop.
 
 The **semgrep ruleset is bundled offline** at
 `crates/server/assets/semgrep-rules/security.yml` (10 rules covering hardcoded
@@ -1935,8 +2056,9 @@ CI story still has to wire the rule for the gate to block on it.
 **Graceful, never a false clean.** A missing tool or unparseable output yields a
 `CoverageNote` ("Could not preview X — enforces once wired"), NOT a finding row.
 **CodeQL and paid cloud tiers never preview** — they are `layer3_only`;
-`split_scannable_rules` filters them before the pass and `group_by_tool` defends
-against them too.
+`split_scannable_rules` filters them out of its PREVIEW partition (that is the
+only thing that function partitions on any more, see "Mechanical and architectural
+rules in the scan" above) and `group_by_tool` defends against them too.
 
 **Floor / semgrep dedup.** Both the deterministic floor (`audit_content`) and
 semgrep run over the same repo. Two of the ten bundled semgrep rules
@@ -2044,6 +2166,436 @@ the wiring stories instruct wiring each check into the repo's **canonical check 
 picks it up automatically (it runs the repo's lint/test), layer 4 runs the same command on every
 PR (catching non-Camerata changes too). See
 `docs/decisions/2026-06-22_ci_wiring_both_layers_and_layer2_bootstrap_bypass.md`.
+
+---
+
+## 6a. Finding kinds, the report seal, and the client deliverable
+
+> Status note, 2026-10-11. Every MECHANISM in this section has code and tests behind
+> it today. The corpus DATA those mechanisms read is a different matter and is
+> actively moving as this is written: rules are being reclassified by `kind`, and a
+> corpus-wide audit of the per-option `violates` flags is in progress and has already
+> corrected a large number of them. So treat any specific count of rules or flags
+> below as a dated snapshot rather than a current fact, and read the TOMLs when an
+> exact number matters. The live state of that work is tracked in
+> `docs/plans/2026-10-09_audit-findings-tracker.md` and
+> `docs/plans/2026-10-09_rule-kind-classification.md`. None of it changes the
+> mechanisms described here.
+>
+> **Division of authority with `docs/RULES_REFERENCE.md`.** That document is the
+> authoritative, field-by-field reference for the rule schema: every field, every
+> flag, every accepted value, plus the known gotchas and inert fields. This section
+> describes the PIPELINE those fields feed and the finding data model that comes out
+> of it. Where the two disagree about a rule field, `docs/RULES_REFERENCE.md` is
+> right and this section is stale.
+
+### The five-kind taxonomy
+
+The post-inspection data model used to be binary: a row was a violation or it was
+not. The practical consequence was that a codebase which consistently followed the
+degenerate form of a requirement reported ZERO findings, because the alternatives
+pass picked the option the repo followed, rewrote the rule's effective directive to
+match it, and then judged the repo against its own already-adopted defect.
+Conformance was perfect. "Consistently incorrect" read as "compliant".
+
+`FindingKind` (`crates/api-types/src/audit.rs`) replaces that premise with five
+first-class statements. It is internally tagged on `"kind"` and designed to be
+`#[serde(flatten)]`ed into a findings row, so every exported row carries one flat
+discriminator plus the variant's own payload fields as siblings:
+
+| Variant | Wire tag | What it asserts | Grain |
+|---|---|---|---|
+| `Defect` | `defect` | An objective fault at a site. Arises from a `kind = "defect"` rule, from a `decision` / `default_with_exceptions` rule whose decided option is flagged `violates`, or from any deterministic producer whose whole vocabulary is faults (the content floor, external-tool previews, the dependency audit, the architectural checkers, the model's advisory pass). Carries no payload: provenance is already a structured axis on the row. | Per site |
+| `Deviation(DeviationKind)` | `deviation` | A consistency violation against the convention the codebase itself predominantly follows. Carries `deviating_sites` (numerator), `assessed_sites` (optional honest denominator), and the observed majority convention as corpus identity (`convention_option_id` + the AUTHORED `convention_label`). | One row per deviating site, with group-level numbers repeated verbatim on each |
+| `ConventionObserved(..)` | `convention_observed` | The codebase consistently follows a convention and there are zero violations. Informational, and it SHIPS in the product: the inspection derives the decision set, governance later enforces it. | One row per rule |
+| `NoConvention(..)` | `no_convention` | No convention has been adopted; the codebase is inconsistent with no clear majority. Carries the observed per-option split. | Exactly one row per rule, never N |
+| `NotAssessed(..)` | `not_assessed` | The rule was armed but could not be evaluated. Closed reason vocabulary (`pass_failed` / `no_files_matched` / `tool_failed` / `model_declined`) plus verbatim detail. An honesty row, structurally distinguishable from "assessed and clean". | One row per rule |
+
+Every count on a `Deviation` is GROUP-level and computed STRUCTURALLY - rows under
+the rule plus each row's absorbed merge sites - never model-counted and never
+parsed back out of prose. The denominator comes from the recommendation pass's own
+structured `sites_total` field and is dropped to `None` when it falls below the
+counted numerator, so a nonsense "3 of 2 sites" is unrepresentable rather than
+merely unlikely. A renderer with `assessed_sites: None` shows the numerator alone;
+it never fabricates a denominator and never prints a bare `0`.
+
+**The honesty rule for an absent kind.** The owning field is
+`Option<FindingKind>` with `#[serde(default, flatten)]`, so reports persisted
+before the field existed still deserialize (verified: legacy JSON with no `kind`
+key, and legacy JSON with an unknown sibling key, both load as `None`). `None` is
+**not** a synonym for `Defect`. `KindOnWire` is the exporters' always-present
+rendering: a known kind serialises as itself, an absent kind serialises as the
+explicit `{"kind": "unspecified"}`. The `kind` key is therefore present on every
+exported row, and an unmapped emission path surfaces as a visible gap rather than
+being silently counted as an accusation. `UNSPECIFIED_KIND_TAG` is deliberately
+not a `FindingKind` variant: no producer may ever emit it.
+
+Every pre-existing emission path was mapped onto a kind explicitly rather than
+being allowed to default - the content-rule floor and the reason-less-waiver row to
+`Defect`, the dependency audit to `Defect`, external-tool preview rows to `Defect`,
+`scan_tools::note_finding` ("the tool could not run") to
+`NotAssessed { reason: tool_failed }`, and the architectural checkers to `Defect`.
+
+### Where the kinds are produced
+
+`ai_audit.rs` stamps model-reported faults as `Defect` at parse time; a later
+`audit_repo` post-pass reclassifies once the per-rule recommendation is known:
+
+- `assign_deviation_kinds` moves every row judged under a multi-option rule's
+  decided, non-`violates` option from `Defect` to `Deviation`. Rows under a
+  `violates` option stay `Defect` - that is the guard described above.
+- `no_convention_findings` synthesises exactly one informational row per rule,
+  keyed and deduped so N rows are structurally impossible. The no-convention
+  outcome is honoured only for a `Decision`-kind rule with a validated per-option
+  breakdown or real evidence; anything else is corrected visibly as a
+  hallucinated flag, and the evidence gate still runs first.
+- `conventions_observed_findings` ships one row per decided non-`violates` rule
+  with zero trace of a violation: no own row, no `also_matches` demotion, no
+  absorbed site.
+- `run_routed_passes` reports every armed rule whose routing group matched zero
+  files, and `audit_repo` synthesises one `NotAssessed` row each. The Batch path
+  applies no routing, so it cannot skip a rule this way.
+
+Each synthesised emission records its own ADDITION-side ledger stage
+(`convention-observed-emission`, `no-convention-emission`,
+`not-assessed-emission`), so rows that appear are accounted exactly as rows that
+disappear in a merge already are.
+
+### Severity: an authored floor and two ceilings, not just a heuristic
+
+Severity used to be decided by the model, then adjusted by the calibration pass,
+then nudged by `ai_audit.rs`'s D5 prose-scanning floor. The corpus had the answer
+all along, in prose the pipeline could not read ("high … not an automatic
+critical", "capped low (owner directive)"). Three structured bounds now resolve at
+the single export choke-point that both exporters already share, so no artifact
+can disagree with another:
+
+| Order | Function | Direction | Preconditions |
+|---|---|---|---|
+| 1 | `normalize_severity` | Fixes casing. An UNRECOGNISED string becomes `"low"`, which is why a typo'd bound is a build failure rather than a no-op | None |
+| 2 | `raise_to_rule_min_severity` | Raises to the rule's authored `min_severity`, never lowers | Requires an ACCUSING kind, explicitly present (`Defect` / `Deviation` only), and a real location (not empty path AND line 0). An absent kind is excluded under the standing rule that nothing may silently default to `Defect` |
+| 3 | `downgrade_unlocated_above_informational` (C4-R1) | Sends a row with an empty path AND line 0 to `info` | PDF/JSON partition only. The xlsx partition does not apply it, a documented asymmetry; the floor declines on an unlocated row at its own precondition, so it cannot inflate one from any position in any exporter |
+| 4 | `clamp_to_rule_max_severity` | Clamps to the rule's authored `max_severity`, never raises | None. It wins over everything upstream, so "no report may exceed it" holds absolutely |
+| 5 | `clamp_deviation_severity` | Caps a `Deviation` row at `DEVIATION_DEFAULT_CEILING` (`medium`) unless its rule authors `deviation_ceiling = "high"` | Kind-gated: a `Defect` under the same rule, and a legacy row with no kind, are untouched. It runs after the `max_severity` clamp but can only lower, and a corpus-load gate forbids a `deviation_ceiling` ranking above the same rule's `max_severity`, so the ceiling still binds |
+
+`docs/RULES_REFERENCE.md` section 7 documents this same chain from the
+rule-authoring side, including the upstream `ai_audit` passes that run before the
+export partition. Where that document and this one disagree about a FIELD, that
+document is authoritative.
+
+The default deviation ceiling is `medium` because the cost of inconsistency is
+forward drift on future features rather than present risk. The escape hatch is an
+authored, per-rule corpus field - an authoring-time judgment about the rule's
+decision domain - deliberately NOT a runtime prose-scanning heuristic.
+
+A named single severity in a rule's prose is a **FLOOR**, not a ceiling (ruled by
+the owner on 2026-10-11: "Floor, it's the minimum rating"), which is why
+`min_severity` exists at all. As of 2026-10-11 the corpus declares 41 floors, 11
+ceilings and 36 deviation ceilings, each transcribed from an explicit construction
+in the rule's own prose with the quoted sentence left as a comment at the
+authoring site, so the provenance is auditable where the value is written. Those
+counts move as transcription continues; read the TOMLs rather than this number.
+Field semantics live in `docs/RULES_REFERENCE.md`.
+
+Two things about this are worth internalising because both have already bitten:
+
+- **A mechanism with no data is inert, and a green test suite will not tell you.**
+  `max_severity`, its clamp, and all four `req_e2_*` unit tests shipped against a
+  corpus in which ZERO of 417 rules declared a ceiling. Every test passed and the
+  feature did nothing. The fix is the anti-inertness gate:
+  `rules_declaring_max_severity` / `rules_declaring_min_severity` /
+  `rules_declaring_deviation_ceiling` must be NON-empty for the real corpus, so a
+  regression to inert fails the build.
+- **A typo'd bound does not error and does not no-op.**
+  `report_export::normalize_severity`'s fall-through arm maps every unrecognised
+  string to `low`. So `max_severity = "critcal"` silently becomes the harshest
+  ceiling in the vocabulary and caps every finding of that rule at `low`, while a
+  typo'd floor silently evaporates. Both are now corpus-load build failures
+  (`rules_with_invalid_severity_ceiling`, `rules_with_invalid_severity_floor`),
+  and so is a `deviation_ceiling` ranking above the same rule's `max_severity`,
+  which is unreachable by construction.
+
+### The report seal
+
+`ScanReport::seal()` returns a `SealedReport` - a `Deref`-only newtype over
+`ScanReport` with no `DerefMut` and no public mutable accessor. All three exporters
+(`report_export::build_report_json`, `xlsx_export::build_workbook`,
+`xlsx_export::build_findings_export`) take `&SealedReport`, never `&ScanReport`.
+
+This is a type-level guarantee rather than a convention, and it exists because of a
+specific shipped defect. `apply_evidence_gate` used to run INSIDE
+`build_report_json`, against a CLONED report which then shadowed that function's
+own parameter. The PDF's JSON saw the synthetic rows; `build_workbook` and
+`build_findings_export` read the original, un-injected report and never did. The
+visible symptom was `findings.json` whose own `summary` described `N+K` rows while
+its `findings` array held `N`.
+
+The fix was a POSITION fix, not a logic fix: the evidence gate is now part of the
+SCAN pipeline, runs exactly once after every other row-adding pass, and strictly
+BEFORE the seal. Every exporter then reads the same already-sealed row set. Because
+the type has no mutable path, a future attempt to inject a row into an exporter's
+input fails to compile instead of silently reintroducing the divergence. When the
+self-measurement harness tried to reintroduce that defect to prove its own
+assertion could go red, it could not - both sides simply agreed, which is itself
+evidence the seal holds.
+
+`seal()` must be called as the LAST step of a scan pipeline. The exact ordering of
+the row-adding passes is documented on `ScanReport::seal`'s own doc comment and is
+observable at the call sites in `lib.rs`'s `onboard_audit` / `onboard_audit_start`
+and `camerata-cli`'s `run_inspect_with_key_presence`.
+
+One more pre-seal gate runs alongside the evidence gate:
+`apply_sites_vs_rows_check` reconciles, for every rule whose rows carry a
+`Deviation` payload, the group-level `deviating_sites` numerator against the sites
+actually represented at export (rows under the rule plus absorbed
+`also_locations`). A shortfall becomes ONE held, needs-review row stating both
+numbers, accounted as its own `sites-vs-rows-gate` ledger stage. It is idempotent,
+and it is deliberately never an aborted export: a shortfall is disclosed, not
+refused.
+
+### The client deliverable
+
+`camerata inspect` runs the whole pipeline in-process - no BFF, no cockpit - and
+writes the same product-export ZIP the UI's export button produces:
+
+```
+cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip>
+```
+
+Flags: `--backend cli|api` (the same compliance-safety setting a project's
+`backend` field carries; `cli` is the default), `--batch` (the Anthropic Message
+Batches path, roughly 50% cheaper, latency not returned until the whole batch
+completes, requires `--backend api`), `--model` and `--calibration-model`
+overrides, `--full` to ignore the on-disk incremental-scan cache, and `--verbose`
+to print the ledger's per-rule detail alongside the default concise summary.
+
+The ZIP holds four entries, and they are deliberately not three views of the same
+thing:
+
+- **The PDF** is the SUMMARY. It does not need every row, and omitting rows is not
+  a PDF fault. `report_export::build_report_json` produces `AuditReportJson`;
+  `compile_pdf` shells `typst compile` over
+  `crates/server/templates/audit_report.typ`. No model call is made in the export
+  path, so it is deterministic and reproducible.
+- **`findings.xlsx`** is the DETAIL surface, and a missing row there IS a fault.
+- **`findings.json`** is the machine-readable data structure. It carries the WHOLE
+  non-false-positive row set, every kind included, with `provenance` and `summary`
+  reused verbatim from the PDF's own `AuditReportJson` rather than re-derived.
+- **`README.txt`**, the orientation note.
+
+**The workbook is partitioned by finding KIND**, which replaced a single flat
+findings sheet on 2026-10-11. A row renders where its own columns mean something,
+and in exactly one place. Worksheets, in the order `build_workbook` adds them:
+
+| Sheet | Carries | Why it is its own sheet |
+|---|---|---|
+| **Index** | Cover, provenance legend, the category matrix, the disposition summary, and a "Statement types" block counting the five kinds and naming the tab each lives on | `Unclassified` is shown ONLY when non-zero, so when it appears it means something |
+| **All Findings** | `Defect`, `Deviation`, and any row with an ABSENT kind | Something is wrong at a site. An absent kind lands here deliberately: an unmapped emission path must surface among the accusing rows, never be filed away in an informational tab |
+| **Deviations** | One row per RULE, not per site | The deviation payload is group-level by construction, so per-site rendering repeats the same two numbers down N rows. At rule grain, "2 of 47 sites deviate from URI-versioned endpoints" is three adjacent columns with no prose to parse. An unknown denominator renders "not counted", never a fabricated 0 |
+| **Conventions** | `ConventionObserved` and `NoConvention` | Nothing is wrong at a site. This is the derived decision set a client reads to see what their codebase already does well and consistently |
+| per-area sheets | Views of the FINDINGS set only | So an area tab no longer mixes "you consistently use cursor pagination" into a list with a critical injection |
+| **Dependencies** | The dependency-audit rows + the `osv-scanner` coverage notes | |
+| **False Positives** | Rows dispositioned as false positives | |
+| **Coverage** | What was checked and with what result, the tool-coverage notes, "Rules not run this scan", and `NotAssessed` rows in their own "checks we could not complete" section | "Armed but not evaluable" is a coverage statement; giving it equal billing with a defect both overstates it and buries the defects |
+
+`live_rows` deliberately remains the whole non-false-positive set for the Index's
+matrix and disposition summary, which reconcile against the PDF's executive
+summary. It is the SHEETS that partition, not the counts.
+
+Three coverage-honesty properties are easy to lose and are each pinned by a test:
+
+- **A rule that fired and was merged away never renders clean.**
+  `build_coverage_rows` counted surviving primary rows alone, so a rule whose id
+  was demoted to `also_matches` rendered 0 - green, "clean". A rule that found
+  something and lost it read exactly like a rule that found nothing. It now counts
+  primaries plus absorbed `also_locations` sites under the rule, and falls back to
+  same-location `also_matches` demotions when the rule left no site record at all.
+- **Non-dependency tool gaps reach the client.** Only `osv-scanner` coverage notes
+  were ever exported, so the whole eslint tier could fail and a client's artifacts
+  said nothing. `tool_coverage_disclosures` emits ONE concise client-facing line
+  per affected tool, routed through the existing `failed_passes` channel, which
+  the PDF template already renders in both the executive summary and the
+  methodology. `findings.json` inherits it via the embedded executive summary.
+- **The Coverage sheet does not leak internal vocabulary.** "How we checked it"
+  replaced a raw `citation_kind` cell that was putting `grounded` / `preview` /
+  `advisory` in front of a client, and the Result column reads "Clean - nothing
+  found" / "N sites found" rather than a bare integer. The summary line branches
+  on the four cases a client can actually hit, with singular-plural agreement,
+  because the single-template version produced "0 found something to look at; the
+  other 3 were checked and found clean" on exactly the healthy-codebase case a
+  client sees most often.
+
+## 6b. Self-measurement: the integrity gate and the in-repo harness
+
+The question none of the audits asked was why only an external graded run ever
+caught these defects. The answer is that the in-repo suite could not see them by
+construction: the engine had elaborate HONESTY machinery (`ScanLedger`,
+`FailedPass`) and no SELF-MEASUREMENT machinery. The ledger recorded everything
+needed to notice a degraded scan, and then a human read the summary and eyeballed
+it. A graded sweep of four repos costs roughly $26 and four hours of wall clock.
+
+### The pipeline-integrity ledger, and its persistence
+
+`ScanLedger` (`crates/server/src/scan_ledger.rs`) records, per rule, whether it
+ran, what it evaluated, how many findings it produced, and why it was skipped if
+it was. `RuleTier` is its ENGINE axis - which thing evaluated this rule - with
+four families:
+
+| Variant | Family label |
+|---|---|
+| `Deterministic` | Deterministic platform/floor checks |
+| `Architectural` | Deterministic static-analysis / migration-replay checkers |
+| `ExternalTool` | External-tool / taint (Semgrep, etc.) |
+| `Semantic` | Semantic / advisory tier |
+
+`Architectural` used to be labelled "Architectural checks", which any reader takes
+as "the `ARCH-*` rules". It is not: membership is decided purely by
+`mechanical_gate::detector_channel` resolving to `arch_checker` or
+`gateway_rule_registry`. On every benchmark repo that resolved to eight Supabase
+migration-replay rules which an external grader scores as *security* findings,
+while the four genuine `ARCH-*` static analysers were switched off for want of a
+`.camerata/architecture.toml`. The family header claimed an architecture-coverage
+story its rows could not support. The gate against a recurrence is
+`req_a3_no_tier_family_label_borrows_a_corpus_rule_family_name`: no word in any
+tier label may be, or begin with, a corpus rule-id family prefix.
+
+`ScanLedger` also models **"judged not applicable"** as its own outcome.
+A rule the alternatives pass judged not applicable (positive evidence the concern
+is absent from this codebase - no pagination anywhere, say) always records
+`findings_emitted == 0`, which previously made `verified_clean()` read it as "ran,
+genuinely looked, found nothing" - indistinguishable from a true clean bill of
+health. `not_applicable` is now excluded from `verified_clean()` and
+`healthy_rule_ids()`, and has its own bucket via `not_applicable_rule_ids()`.
+
+A ledger used to live only in memory: `render_ledger_summary` printed a digest and
+the ledger was dropped with the process, so the one artifact recording whether
+everything that was supposed to run actually ran could not be re-examined, diffed
+against a previous scan, or checked by anything but a person watching it scroll
+past. `camerata inspect` now writes `<repo>/.camerata-scan-ledger.json` at the
+exact point the summary is computed - fully reconciled, before sealing - so the
+gate evaluates precisely the facts that run's summary describes. The write is
+best-effort and never fails the inspection.
+
+### `camerata integrity-gate`
+
+```
+cargo run -p camerata -- integrity-gate --ledger <PATH> [--profile graded|smoke]
+```
+
+Three exit codes, and the third is the whole point:
+
+| Exit | Meaning |
+|---|---|
+| 0 | Every required engine ran, every skip is justified, every stage reconciles |
+| 1 | The scan is degraded - do not spend a graded run on it |
+| 2 | The GATE could not run (ledger missing or unreadable) |
+
+Conflating 2 with 0 would reintroduce the silent degradation the gate exists to
+catch, one level up, inside the gate itself: a wrapper script that reads "the gate
+could not run" as "the gate passed" is the same class of bug as a scan that reads
+"the tool did not run" as "the rule is clean". So a missing ledger is an `Err` and
+exits 2, never a pass, and `--profile` REJECTS an unrecognised value rather than
+defaulting, because a typo must never silently relax the gate to the permissive
+profile.
+
+It is a separate command rather than a flag on `inspect` so the verdict can be
+re-derived later, on another machine, or in CI, without re-running the scan. A
+ledger is a few kB of JSON; the scan that produced it is dollars and hours.
+
+**The hard part is honouring H1**: every rule must be CAPABLE of running, a rule
+that does not run because it is irrelevant to the scanned stack is CORRECT, and a
+rule that could never run for ANY stack is a DEFECT. So "did not run" alone can
+never be the trigger - the skip must be JUSTIFIED. `SkipClass::classify` draws
+that line on the `skip_reason` the pipeline ALREADY writes, so the gate adds no
+new recording obligation; a gate that needs new instrumentation to work is a gate
+that silently passes until someone remembers to instrument.
+
+`SkipClass` **fails closed on the unrecognised case**, which is the module's most
+important property and deliberately the inconvenient direction: an unclassifiable
+skip reason is a DEFECT, not a pass, so a new skip reason added anywhere in the
+pipeline fails this gate until someone classifies it. A false alarm costs one
+classification; a false pass costs a graded sweep.
+
+Four failure families, each tied to a defect it would have caught:
+
+| Family | The defect |
+|---|---|
+| `dark_tier` / `tier_absent` | A 41-rule Semgrep taint layer that never ran for any repo in any code path while nothing said a word |
+| `unjustified_skip` | The eslint wholesale abort (§6, finding C11) and the no-wired-detector rules |
+| `unaccounted_rows` | The merge data-loss bugs, in BOTH directions - an over-merge is observationally identical to a detection miss, so stage arithmetic is the only place it is visible |
+| `empty_ledger` | A gate that green-lights "no evidence a scan happened" manufactures confidence, which is worse than no gate |
+
+`Architectural` is deliberately NOT a required tier by default: that would violate
+H1 one level up, since its membership is dominated by stack-specific checkers a
+Rust-only repo legitimately records zero of. A gate that cries wolf on correct
+scans gets disabled, which costs more than the defect it guarded. The module is
+pure - no I/O, no clock, no model call, stably ordered output - so the gate can
+never be the flaky thing that blocks a run.
+
+### `./scripts/self-measurement.sh`
+
+```
+./scripts/self-measurement.sh                      # the gate: ~2 seconds
+./scripts/self-measurement.sh --include-known-red  # also run deliberately-red measurements
+./scripts/self-measurement.sh --help
+```
+
+Roughly 52 tests, deterministic, no network, no model calls - nothing in it can
+cost money. It runs three suites:
+
+1. **The golden-fixture parity harness** (`cargo test -p camerata-server --test
+   self_measurement_parity_e2e`). Two SYNTHETIC fixture repos, invented for this
+   harness, drive the REAL production entry points on disk: `audit_repos` →
+   `apply_evidence_gate` → `seal` → all three exporters. Before it existed, no
+   integration test built all three artifacts from one real scan and compared row
+   sets, and none exercised `apply_evidence_gate` at all. The fixtures are
+   synthetic on purpose: a benchmark repo is a sealed external measurement
+   surface, and reusing one would both destroy its value and reduce the harness to
+   "this one repo passes". Each fixture carries a shape tied to a shipped defect -
+   a multi-site violation, a finding family sharing one container token, brace-free
+   file types, a repo where a tool tier legitimately does not apply, and a
+   genuinely clean file so verified-clean stays distinguishable from never-ran.
+   Its first test asserts the fixtures are LOAD-BEARING (non-empty sealed row set,
+   non-empty ledger, instrumented stages, the planted rule actually fired) before
+   any invariant is asserted, because the pre-existing export-invariants gate's
+   own fixture leaves `recommendations` empty, which makes `apply_evidence_gate`
+   return early - that gate was asserting over a fixture in which the feature it
+   guards could not fire.
+2. **The integrity gate's own suites**, engine and CLI
+   (`--lib integrity_gate`, `--lib integrity_gate_cmd`).
+3. **The eslint regression suite** (`--lib req_c11`).
+
+The harness and the gate suites already run inside `cargo test --workspace`, so
+this script is deliberate duplication. The point is that the signal is NAMED and
+FIRST rather than buried among thousands of other tests: these are the checks whose
+failures are the expensive kind, and a developer who has just changed the merge or
+an exporter should be able to ask the one question that matters in two seconds. It
+runs in CI as its own named step, ahead of the full test gate
+(`.github/workflows/ci.yml`).
+
+`--include-known-red` exists for the next deliberately-`#[ignore]`d measurement.
+There are none today: the one it was created for (an absorbed merge site
+observable in no artifact) was fixed, and its assertion now runs green by default.
+
+### The requirement-traceability gate
+
+`crates/server/tests/requirement_traceability.rs` fails the build if any product
+requirement has zero tests referencing it. Each registry entry pairs a requirement
+id with one of four coverage categories:
+
+| Category | Behaviour |
+|---|---|
+| `Required(&[prefixes])` | At least one test function whose name starts with one of these prefixes must exist. Boundary-checked, so `req_a5_1` cannot satisfy `req_a5_11` |
+| `InFlight(reason)` | Owned-but-unlanded, or not yet owned by any workstream. Reported loudly on every run but does not fail the build. A separate assertion FAILS if an `InFlight` requirement acquires tests without being promoted, so the list stays a visible countdown rather than rotting into a permanent allowlist |
+| `Exempt(reason)` | Not a code requirement, or deliberately not done, with the reason cited inline so the exemption is auditable |
+| `Collision(reason)` | Traceability is ACTIVELY BROKEN: the requirement's natural test prefix is already occupied by tests measuring something else, so a prefix-matching gate would report it as covered when it is not. Strictly worse than zero tests, because zero tests is at least honest. The fix is always to rename the offending tests, never to widen the registry |
+
+The gate is honest about its own limit, and the limit matters: it proves a
+requirement is REFERENCED, not that the test is ADEQUATE. The cautionary case is
+the inert severity ceiling described in §6a - every `req_e2_*` test passed green
+against a corpus where zero rules authored a ceiling, so the mechanism was
+completely inert while fully traced. Adequacy is enforced by the
+fail-before-the-fix discipline, not by this gate.
 
 ---
 
@@ -3483,6 +4035,24 @@ The workspace has three tiers of automated tests, all run by `cargo test` and al
     scan → propose → apply → mark onboarded → development gate → suppressions registry, asserting
     the arm-file set matches the emit-partitioning contract and that a prose-only apply omits the
     CI-tier files.
+
+Two cross-cutting GATES sit alongside those three tiers rather than inside them. Both are described
+in full in section 6b and are only summarised here so this section is not misleading by omission:
+
+- **The self-measurement gate** (`./scripts/self-measurement.sh`): the golden-fixture artifact-parity
+  harness, the integrity gate's own suites, and the eslint regression suite. Roughly 52 tests, about
+  two seconds, no network and no model calls. Its contents also run under plain
+  `cargo test --workspace`; the script exists so the signal is NAMED and FIRST rather than buried,
+  and it runs in CI as its own step ahead of the full test gate.
+- **The requirement-traceability gate** (`crates/server/tests/requirement_traceability.rs`): fails
+  the build when a product requirement has zero tests referencing it, with four auditable coverage
+  categories (`Required` / `InFlight` / `Exempt` / `Collision`).
+
+**The discipline these gates do NOT replace, and cannot.** A test must fail BEFORE the fix and pass
+after. A test that passes against unfixed code proves nothing, and neither gate can detect that: a
+requirement can be fully traced by tests that are all vacuous. The documented cautionary case is the
+severity ceiling in section 6a, where four green tests guarded a mechanism that was completely inert
+because no corpus rule authored a ceiling for them to clamp.
 
 ---
 

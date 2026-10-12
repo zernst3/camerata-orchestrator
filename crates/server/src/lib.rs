@@ -5,13 +5,31 @@
 //! runs locally behind the desktop shell today and in the cloud later. The UI
 //! stops calling the backend crates directly and calls this instead.
 //!
-//! Phase 1 (this module) exposes the cockpit's READ contracts:
-//!   - `GET /api/health`  -> liveness.
-//!   - `GET /api/rules`   -> the gate's enforced rules (the inspector's data).
-//!   - `GET /api/stories` -> the canonical story spine (the left rail).
+//! HISTORICAL NOTE, corrected 2026-10-11: this header used to describe a "Phase 1"
+//! read-only router (`GET /api/health` / `/api/rules` / `/api/stories`) and promise
+//! execution endpoints "in later phases". Those phases landed long ago. The crate is
+//! now the composition root for most of the backend, and the module list below is the
+//! accurate map. The subsystems a reader most often comes here for:
 //!
-//! Execution endpoints (run a governed fleet on a story) and a live-status stream
-//! land in later phases, behind the same router.
+//! - **The inspection pipeline.** [`onboard`] (deterministic floor, stack detection,
+//!   rule proposal, the `Finding` / `ScanReport` / `SealedReport` data model),
+//!   [`ai_audit`] (the semantic/LLM tier, the alternatives pass, the finding-kind
+//!   assignment passes), [`scan_tools`] (the external-tool preview tier),
+//!   [`dep_audit`], `mechanical_gate` (private) and [`suppression`].
+//! - **The client deliverable.** [`report_export`] builds the PDF's JSON and owns the
+//!   severity choke-point; [`xlsx_export`] builds the kind-partitioned workbook and
+//!   `findings.json`. Both take `&onboard::SealedReport`, never `&ScanReport`, so the
+//!   row set cannot be mutated after sealing. See `docs/TECHNICAL.md` section 6a.
+//! - **Self-measurement.** [`scan_ledger`] records what actually ran;
+//!   [`integrity_gate`] turns that into a verdict with an exit code. See
+//!   `docs/TECHNICAL.md` section 6b.
+//! - **The governed dev loop.** [`uow`], [`dev_implement_run`] (which owns the
+//!   cross-agent integration gate bundle), [`jobs`], [`test_tamper`],
+//!   [`enforcement_ledger`].
+//!
+//! Every UI-facing contract is still an HTTP endpoint registered in this module's
+//! router, which is the property the first paragraph above describes and which has
+//! not changed.
 
 pub mod ai_audit;
 pub mod api_agent_driver;

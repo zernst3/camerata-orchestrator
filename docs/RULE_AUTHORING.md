@@ -5,6 +5,12 @@
 > a rule to the SHIPPED corpus, what do I have to consider BEYOND writing the TOML, because for some
 > rule kinds the TOML alone does nothing.
 
+> **Field reference lives elsewhere.** `docs/RULES_REFERENCE.md` is the authoritative,
+> field-by-field reference for the rule schema: every field, every flag, every accepted value.
+> This document is the *workflow* guide and deliberately does not restate the schema, so there
+> is exactly one place to change when a field is added. The snippets below are orientation,
+> not a specification; where they disagree with `docs/RULES_REFERENCE.md`, that file is right.
+
 ## The one idea to internalize
 
 **The TOML's `enforcement` field is a CLASSIFICATION, not the enforcement.** Writing
@@ -31,19 +37,33 @@ id = "DOMAIN-SHORT-NAME-N"     # stable, traceable, UPPER-KEBAB + trailing -N
 title = "One-line human title"
 enforcement = "prose" | "structured" | "mechanical" | "architectural"
 domain = "agentic"             # also derived from the folder; keep them agreed
+kind = "…"                     # REQUIRED since 2026-10-09; see docs/RULES_REFERENCE.md
 ```
 
 - **`id` is forever.** It is referenced by selections, grounding, role subsets, code, and the user's
   saved project config. Renaming an id silently breaks existing projects. Don't.
 - **`enforcement`** classifies the rule (see channels above). Pick honestly; it drives emission +
   preview, not magic enforcement.
+- **`kind` is mandatory and the build enforces it.** A rule with no `kind` fails the corpus-load
+  gate `rules_missing_kind` in `crates/rules/src/lib.rs`, which is asserted empty against the real
+  corpus by `req_a5_1_every_corpus_rule_declares_a_kind`. There is deliberately **no permissive
+  default** on an absent field: the field decides whether this rule can ever accuse a codebase of a
+  fault, so defaulting it would let a classification nobody made produce a finding. For which value
+  to pick, and what each one makes the engine do, read `docs/RULES_REFERENCE.md` - that is the
+  single source of truth for the taxonomy and should not be restated here.
+- **Two more corpus-load gates will fail your build** if a severity bound is malformed:
+  `rules_with_invalid_severity_ceiling` and `rules_with_invalid_severity_floor`. Both exist because
+  `report_export::normalize_severity` maps every unrecognised severity string to `low`, so a typo in
+  a bound does not error and does not no-op; it silently becomes the harshest possible ceiling, or
+  silently evaporates as a floor. Again: the fields and their accepted values are documented in
+  `docs/RULES_REFERENCE.md`.
 
 ## What a rule CAN have
 
 ```toml
 default = true                 # ships an adopted default option (else the architect MUST choose)
 qualifies = "…"                # the summary / when-it-applies prose (falls back to decision.why, then title)
-verification = "draft" | "policy" | "grounded" | "verified"   # the provenance ladder (absent -> draft)
+verification = "draft" | "policy" | "grounded" | "verified" | "needs_recheck"  # absent -> draft
 opt_in_only = true             # never auto-recommended / pre-checked at onboarding
 layer3_only = true             # CI-tier only; never run at layer-2 or scan time
 
@@ -71,13 +91,30 @@ linter = "…"                   # optional, the tool that enforces it externall
 
 Notes:
 - **Option ids are forever too** (same reason as rule ids).
-- **`verification`**: a `draft` rule is grounded-but-unproven. `policy` is the honest label for a rule
-  that encodes deliberate project/team policy with NO external authority — any cited source is
-  internal (a Camerata doc citing Camerata, e.g.), not a published standard or real linter rule.
-  `policy` is NOT grounded: like `draft`, it is kept out of the armed ruleset, but it is labeled
-  honestly instead of being mismarked `grounded` just because it cites *something*. Use `policy`
-  instead of `grounded` whenever you can't point at a real external authority. `grounded` rules are
-  eligible for auto-recommend at onboarding (unless `opt_in_only`). `verified` carries human provenance.
+- **`verification`** answers a PROVENANCE question and nothing else. `draft` is unreviewed AI output.
+  `policy` is the honest label for a rule that encodes deliberate project or team policy with NO
+  external authority: any cited source is internal (a Camerata doc citing Camerata, say), not a
+  published standard or a real linter rule. Use `policy` rather than `grounded` whenever you cannot
+  point at a real external authority; inventing a citation to reach `grounded` is worse than the
+  honest label. `verified` carries human provenance and no agent may set it. `needs_recheck` was
+  `verified` until its cited source drifted.
+
+  **Correction, 2026-10-09 (finding A8).** An earlier version of this guide said `policy` "is kept
+  out of the armed ruleset, like `draft`". That was true and it was a defect. `policy` says nothing
+  about whether a rule is correct or checkable, so using it as an arming switch conflated provenance
+  with armability and silently disarmed 17 shipped rules, among them every `PROC-*` governance rule
+  the product is explicitly about. `Verification::Policy` is now auto-recommended
+  (`is_auto_recommended()` matches `Grounded | Verified | Policy`), while `is_grounded()` and
+  `is_shippable()` still return false for it, because the provenance answer has not changed. `draft`
+  and `needs_recheck` still disarm, deliberately: unreviewed AI output and known-stale human
+  confirmation both want an explicit opt-in.
+
+  **A rule that cannot arm for ANY stack is now a build failure.** The gate is
+  `rules_disarmed_by_verification`, asserted empty against the real corpus by
+  `req_h1_no_corpus_rule_is_disarmed_by_its_verification_value`. Omitting `verification` entirely is
+  the trap that caused this: the field defaults to `draft`, so four rules with shipped deterministic
+  detectors never armed anywhere. Set it explicitly. See `docs/TECHNICAL.md` section 5a, "The
+  verification ladder", for the full table of which statuses arm and which ground.
 
 ---
 
@@ -171,7 +208,12 @@ specifically "a human decides."
 
 ## The checklist for adding a rule
 
-1. **Id + title + domain + enforcement** filled, id is new + stable, domain agrees with the folder.
+1. **Id + title + domain + enforcement + `kind`** filled, id is new + stable, domain agrees with the
+   folder. The build fails without `kind`; pick its value from `docs/RULES_REFERENCE.md`.
+1b. **If the rule's prose names a severity, author it as a structured bound** rather than leaving it
+   in prose the pipeline cannot read. The corpus went through a transcription pass for exactly this
+   reason: the bounds had been authored all along, in sentences no code could parse. Which field,
+   and which direction a named severity binds in, is in `docs/RULES_REFERENCE.md`.
 2. **Decide the channel:**
    - Guidance only → prose/structured, write the TOML, done (channel A).
    - Must be mechanically blocked → write + wire a layer-1/2 detector (channel B). The TOML alone does

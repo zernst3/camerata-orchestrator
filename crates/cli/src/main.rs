@@ -1,6 +1,6 @@
 //! camerata orchestrator binary.
 //!
-//! Three families of subcommand:
+//! Four families of subcommand:
 //! - The original in-process demo/eval harness (`acceptance`, `gate-probe`, `eval`,
 //!   `*-demo`, `*-live`) — each calls a backend crate directly in-process (no HTTP).
 //! - The HTTP-adapter subcommands (`stories`, `run`, `uows`, `assign`, `start-run`;
@@ -13,6 +13,14 @@
 //!   brownfield inspection pipeline and writes the same product-export ZIP the cockpit's
 //!   UI produces, with no BFF/UI involved. See `camerata::inspect_cmd`'s module doc comment
 //!   for the pipeline and which server functions it reuses.
+//! - `integrity-gate` - the PRE-FLIGHT scan-integrity verdict (W6 / I2). Reads the ledger
+//!   `inspect` persists to `<repo>/.camerata-scan-ledger.json` and exits 0 (every required
+//!   engine ran, every skip justified, every stage reconciles), 1 (the scan is degraded; do
+//!   not pay to grade it) or 2 (the GATE itself could not run). 2 is deliberately NOT a
+//!   pass: a wrapper reading "the gate could not run" as "the gate passed" would be the same
+//!   class of bug as a scan reading "the tool did not run" as "the rule is clean". Neither a
+//!   demo, nor an HTTP delegation, nor part of the `inspect` pipeline, which is why it is its
+//!   own family. See `camerata::integrity_gate_cmd`'s module doc comment.
 //!
 //! `acceptance` in particular: run the in-process, no-network planted-violation
 //! acceptance scenario and print the gate's verdict. Exit 0 if the gate denied the

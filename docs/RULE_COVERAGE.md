@@ -58,9 +58,24 @@ language.
 
 ## Where rules live
 
-The corpus is the sibling [`camerata-ai`](../../camerata-ai) repo (the rule corpus +
-conventions engine). New language / framework rules are authored there; the gateway's
-enforced arms (Layer 1) and the `CheckRunner` implementations (Layer 2) consume them.
+**Corrected 2026-10-11.** This document was written on 2026-06-15, one day before the corpus was
+vendored into this repo, and said rules are authored in the sibling `camerata-ai` repo. They are
+not, and have not been for months.
+
+The corpus lives **in this repo** at `crates/rules/principles/` (417 TOML files as of 2026-10-11).
+That is what `camerata_rules::DEFAULT_CORPUS_PATH` resolves to and what the server loads; override
+it with `CAMERATA_CORPUS_PATH`. New language and framework rules are authored there. The sibling
+[`camerata-ai`](../../camerata-ai) repo is where the corpus FORMAT originates and is not the corpus
+this build reads.
+
+The gateway's enforced arms (Layer 1) and the `CheckRunner` implementations (Layer 2) consume them.
+
+**Two things the authoring checklist above predates, and both will fail your build if you skip
+them.** A rule now also needs a `kind` (the build gate `rules_missing_kind` fails on an absent one,
+with no permissive default), and if its prose names a severity, that severity belongs in a
+structured bound rather than in prose the pipeline cannot read. The authoring workflow is
+[`RULE_AUTHORING.md`](RULE_AUTHORING.md); the field-by-field schema reference is
+[`RULES_REFERENCE.md`](RULES_REFERENCE.md). Neither is restated here, deliberately.
 
 ## Dependency on Layer 2
 

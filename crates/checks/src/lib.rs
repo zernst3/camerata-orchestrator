@@ -1,4 +1,10 @@
-//! camerata-checks: layer-2 post-task gate.
+//! camerata-checks: the layer-2 post-task gate AND the deterministic
+//! architectural-checker engine.
+//!
+//! The crate grew a second responsibility and this header used to describe only the
+//! first, so take both halves as the map.
+//!
+//! # Half one: the layer-2 toolchain gate
 //!
 //! Implements [`camerata_core::CheckRunner`] for Rust worktrees. Three concrete
 //! runners, composed by [`RustCheckRunner`]:
@@ -12,7 +18,38 @@
 //!
 //! The subprocess invocation layer ([`subprocess`]) and the output-to-RuleId
 //! mapping layer ([`parse`]) are kept separate so the mapping logic can be
-//! unit-tested without spawning real subprocesses.
+//! unit-tested without spawning real subprocesses. [`multilang`] carries the
+//! cross-language runners and the worktree selector; [`manifest`] /
+//! [`manifest_runner`] drive a repo's own `.camerata/checks.toml`.
+//!
+//! # Half two: the deterministic architectural checkers
+//!
+//! [`arch_checker`] is the `ArchChecker` trait, `RepoView`, `ArchViolation` and the
+//! checker registry (`all_checkers`); [`arch_check_runner`] drives it as a check.
+//! [`extract`] is the AST extractor layer the checkers read through, so a checker
+//! reasons over extracted structure rather than over text. The individual checkers
+//! live in their own modules ([`import_boundary_checker`],
+//! [`handler_no_db_checker`], [`strict_layering_call_checker`],
+//! [`resource_lifecycle_checker`], [`weak_randomness_checker`],
+//! [`query_grammar_injection_checker`], and others).
+//!
+//! [`architecture_config`] is the layer/boundary map these checkers need. It is read
+//! from a repo's authored `.camerata/architecture.toml` when one exists, and
+//! otherwise **INFERRED from the repo** by `infer_architecture_config` (added
+//! 2026-10-09, finding A4). Inference matters because the config gate used to
+//! silence the import-boundary and strict-layering checkers on every brownfield
+//! repo: an operator will never write Camerata's config format before an audit they
+//! have not yet bought, so gating the product's architecture analysis on that file
+//! gated it on nothing happening. Inference is conservative by construction -- it
+//! returns `None` unless at least two distinct canonical layers each own a file the
+//! extractor understands, its segment vocabulary excludes every overloaded directory
+//! name, its inferred import map denies only UPWARD edges, and findings from an
+//! inferred map are `medium` rather than `high` and say in their own message that
+//! the map was inferred and from which globs.
+//!
+//! This crate is deliberately free of any `camerata-server` dependency, which is
+//! what lets `camerata-check` ship the architectural registry as a standalone
+//! binary for a client's own CI.
 
 /// The deterministic architectural-rule executor seam: the `ArchChecker` trait, `RepoView`,
 /// `ArchViolation`, and the checker registry (`all_checkers`). See

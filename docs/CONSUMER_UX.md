@@ -466,40 +466,23 @@ hosting (a later direction, VISION).
    open-ended form (not budget-specific, not domain-specific) exists precisely to
    make this possible.
 
-## UI status
+## UI status: RETIRED, and this section used to claim otherwise
 
-The consumer UI prototype lives in `crates/ui` (`camerata-ui`).
+**There is no consumer UI in the repo.** Everything this section previously
+described in the present tense has been removed, and the removal is already
+stated at the top of this document: `crates/ui` (`camerata-ui`) is now the
+engine-spine cockpit, a thin HTTP client of the BFF, not the consumer
+app-builder. Neither `crates/ui/src/screens/` nor `crates/ui/src/data.rs`
+exists.
 
-**Screens that exist** (one Dioxus view per stop of the journey, in
-`crates/ui/src/screens/`):
+What it used to say, kept only as a record of what was built and then deleted:
+six mocked Dioxus desktop screens (Intake, Clarify, Build, Qa, Bug, Live) driven
+entirely by static fixtures, with the Build screen's progress a timed
+`tokio::time::sleep` dwell rather than a live fleet stream. No engine wiring ever
+landed behind them. Navigation was a single `Screen` enum plus one signal, styled
+by a hand-written global stylesheet.
 
-- **Intake** — the open-ended onboarding document form.
-- **Clarify** — the refinement session (the hero screen): editable story list,
-  confidence score, product suggestions, clarification transcript.
-- **Build** — governed-construction narrative with stage-by-stage progress beats.
-- **Qa** — the user tests their own draft app.
-- **Bug** — the structured "report a problem" form (a side loop off Qa).
-- **Live** — publish / out-of-draft.
-
-**Stack / target.** Dioxus 0.7.9, **desktop** target (chosen over web to avoid
-the wasm toolchain for a build-it/run-it/screen-record-it artifact; matches the
-family version used by rust-portfolio and rust-chorale). Navigation is a single
-`Screen` enum plus one signal. Styling is a hand-written global stylesheet
-(`style.rs`); no component kit.
-
-**Run command (desktop app):**
-
-```bash
-cargo run -p camerata-ui
-```
-
-(Optionally `dx serve` from `crates/ui` if you have the Dioxus CLI and want
-hot-reload; the plain `cargo run` needs no extra tooling.)
-
-**Wired vs. mocked.** Everything is **mocked**. All screen content comes from
-the static fixtures in `crates/ui/src/data.rs`; the Build screen's progress is a
-timed dwell (`tokio::time::sleep` inside `use_future`), not a live fleet stream.
-No engine wiring yet: Intake does not yet produce a typed `IntakeForm`, the
-refinement session does not call the real multi-turn `LeadEngineer` loop, Build does
-not drive the `FleetCoordinator`, and Live does not deploy. The goal of this pass is
-the look, the motion, and the flow; wiring follows the build order above.
+The rest of this document remains a useful SPEC for the consumer journey, which
+is what the header says it is. Read it as a design argument, not as a description
+of running code. The data-and-flow spine it specifies does exist and is tested;
+the screens do not.

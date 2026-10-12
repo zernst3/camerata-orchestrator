@@ -1143,6 +1143,16 @@ architectural faults. Nothing about it is dangerous today (the rule is `defect`,
 deviation rows), but if it is ever reclassified it will report a project following the universal spine
 rule as violating the stack rule.
 
+> **Factual correction, 2026-10-11 (docs pass, status mark untouched and still yours).** The Class B
+> item you flagged as "a genuine coherence bug" has been fixed. `ece0d7d` removed `violates = true`
+> from `JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1`'s constructor-parameter-injection option, on
+> that rule's own evidence (its option `why` calls it "a legitimate OOP-style option" and the rule's
+> `why` says "Constructor injection remains valid for standard component/service classes" while "The
+> rule's forbidden pattern ... is manual instantiation"). Only "Manual instantiation with new"
+> remains flagged, so the corpus no longer calls the same practice correct in Java and C# and a
+> violation in Angular. `kind` was not touched on that rule or any other, so the `kind` disagreement
+> this item is actually about is unchanged and the item stays open.
+
 ## [ ] W10-Q2 — `RUST-DOMAIN-4` is the spine rule's PARENT, and that is the one asymmetry left
 
 `RUST-DOMAIN-6`'s own `why` says it "assumes `rust-domain-4-errors-via-thiserror`'s default ... and
@@ -1178,6 +1188,19 @@ ceiling authored on this rule is bounding the wrong rows.** The same class exist
 (`RUST-DOMAIN-3` flags "Newtype validated strings", its own adopted position; `ARCH-CURSOR-PAGINATION-1`
 flags "paginate by opaque cursor"), so this is worth a dedicated polarity audit rather than three
 one-off fixes. **Highest-value finding in W10 after the sweep itself.**
+
+> **Factual correction, 2026-10-11 (docs pass, status mark untouched and still yours).** "Not fixed"
+> above is no longer accurate, and the recommended polarity audit happened: W11 audited the
+> `violates` flags corpus-wide against each rule's own `why` / `directive` / `remediation` /
+> `title`, and all three rules named in this item have landed flag corrections. `RUST-DOMAIN-6`'s
+> wholesale inversion was reversed in `330734b` (flags moved off both legitimate organizations and
+> onto the three the rule calls boundary failures); `RUST-DOMAIN-3`'s half-inversion in the same
+> commit; `ARCH-CURSOR-PAGINATION-1` in `79ee0f2`. The wider sweep is `a0118da`, `ffee7b2`,
+> `79ee0f2`, `330734b`, `aa003f3`, `ece0d7d`, `bc9e78e`, `0ca0632`. Flags only in all of them: no
+> `kind`, no severity, no `deviation_ceiling`, no rule added or removed. The consequence you note
+> about this rule's ceiling bounding the wrong rows is therefore also resolved. The item is left
+> open and unmarked because closing a finding is yours, and because W11 is a flag audit rather than
+> an answer to the question of whether the polarity audit is now complete.
 
 ## [ ] W10-Q4 — three per-stack COVERAGE gaps, same class as W9-Q3
 

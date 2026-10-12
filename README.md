@@ -34,7 +34,8 @@ The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a
     ▸ CONSOLIDATED SETTINGS: one Settings nav item covering cross-project
       credentials (keychain-backed, masked) + Bombe animation controls, and
       per-project model configuration. The Rules page is rules-only.
-    ▸ 22-crate Rust workspace · ~3,350 tests · governs its OWN source in CI.
+    ▸ 27-crate Rust workspace (26 app crates + one maintainer-only tool) ·
+      ~5,500 tests · governs its OWN source in CI.
     ▸ ADAPTER LADDER: a typed `camerata-client`, a first `camerata-mcp` server (stdio),
       and `camerata-cli` as a real HTTP adapter all drive the same BFF surface the
       cockpit does. `camerata-ui` now spawns `camerata-server` as a subprocess instead
@@ -57,17 +58,37 @@ The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a
 
 Point Camerata at one or more existing GitHub repositories and it runs the full onboarding flow, in-app, front to back:
 
-- **Per-repo stack detection** (languages and frameworks) and a **per-repo proposed ruleset** drawn from a corpus of **350+ rules across many language and framework stacks** (Rust/Axum/SeaORM/Dioxus, Python/Django/Flask/FastAPI, Go, JS/TS/React/Vue/Angular/Next/Nest, Java/Spring, C#/ASP.NET, Ruby/Rails, SQL, fullstack, plus the always-on security floor and the agentic governance rules). Each repo is scanned against its own selected rules plus an always-on deterministic security floor.
-- **A two-tier audit:** a deterministic mechanical scan (hardcoded secrets, raw-SQL concatenation, path escapes, plus clippy/ruff/semgrep/osv preview) and an AI architectural audit (missing auth on a write path, a service bypassing the repository layer, N+1, cross-boundary imports, and the like), with severity/authority calibration, cross-rule dedup, and snippet-to-line resolution. CI/runtime-context rules are deliberately routed to CI, where they can actually be checked.
-- **Alternative recommendation, built into that same audit:** for every rule that carries more than one adopted alternative, the audit also picks the option it judges best fitting for this codebase (with reasoning you can inspect) and reports violations against that option, not against every option at once. A rule with no default no longer blocks you from proceeding, it is just a hint that the audit will pick for you. Disagree with any recommendation and you can override it and rescan just the rules you changed, then accept the final selections into the ruleset.
+- **Per-repo stack detection** (languages and frameworks) and a **per-repo proposed ruleset** drawn from a corpus of **417 rules across many language and framework stacks** (Rust/Axum/SeaORM/Dioxus/sqlx/Tokio, Python/Django/Flask/FastAPI, Go/GORM/gRPC, JS/TS/React/Vue/Angular/Next/Nest, Java/Spring, C#/ASP.NET/EF Core, Ruby/Rails, SQL, Supabase, fullstack, plus the always-on security floor, the process rules and the agentic governance rules). Each repo is scanned against its own selected rules plus an always-on deterministic security floor. The domain-to-stack mapping is declarative data with a computable union, and a build gate (`req_h1_every_corpus_domain_is_emittable_by_some_stack`) fails the build if a corpus folder exists that no stack could ever select from, so a rule cannot sit in the corpus permanently unreachable.
+- **A two-tier audit:** a deterministic mechanical scan (hardcoded secrets, raw-SQL concatenation, path escapes, plus clippy/ruff/eslint/semgrep/osv preview) and an AI architectural audit (missing auth on a write path, a service bypassing the repository layer, N+1, cross-boundary imports, and the like), with severity/authority calibration, cross-rule dedup, and snippet-to-line resolution.
+- **Alternative recommendation, built into that same audit:** for every rule that carries more than one adopted alternative, the audit also picks the option it judges best fitting for this codebase (with reasoning you can inspect) and assesses the codebase against that option, not against every option at once. There is one hard exception, and it is load-bearing: if the option the repo actually follows is the one the rule itself names as its own degenerate or absent form (`violates = true` on that option), the rule's directive is **not** rewritten to match, and a finding is emitted instead. Without that guard, a codebase that is consistently incorrect reads as compliant, which is the single worst failure this engine has had. A rule with no default no longer blocks you from proceeding, it is just a hint that the audit will pick for you. Disagree with any recommendation and you can override it and rescan just the rules you changed, then accept the final selections into the ruleset.
 - **Three triage tables** (Unresolved / Ignored / Tech debt) with free re-bucketing, then a **Process** step that turns each disposition into a durable artifact: ignores become reasoned baseline waivers, and every tech-debt item is filed as a real **GitHub issue** (the story).
 - **Apply:** the chosen governance files (`AGENTS.md`, `CONVENTIONS.md`, a CI workflow for the mechanical rules, and `.camerata/baseline.json`) are written to a governance branch and pushed, with the PR opened as a separate, deliberate step.
 
 The honest boundary: this has been run on **small fixture repositories, not yet on a large real-world codebase**, so the AI audit's precision and recall at scale are not yet proven. Onboarding's design principle is that it **emits stories and never does the development work itself** — a "resolve now" finding and up to two CI-wiring tasks (mechanical rules → off-the-shelf linters; architectural rules → custom checkers) each become a GitHub issue the development layer picks up. Walked screen by screen in [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md); mechanics in [`docs/TECHNICAL.md`](docs/TECHNICAL.md).
 
+### What a finding IS: five kinds, not a yes/no
+
+Until 2026-10-09 the post-inspection data model was binary: a row was a violation or it was not.
+It is not binary any more. Every exported row now carries an explicit `kind`, and the five kinds
+are different statements about the codebase, not five severities:
+
+| Kind | What it says | Ships at |
+|---|---|---|
+| `defect` | An objective fault at a site. | Its calibrated severity, bounded by the rule's authored floor and ceiling. |
+| `deviation` | A consistency violation against the convention this codebase itself predominantly follows: "2 of your 47 assessed endpoints do not use URI versioning." Numerator, denominator and the observed convention are structured fields, never prose to parse. | Capped at `medium` by default, because the cost of inconsistency is forward drift on future features rather than present risk. A rule may author `deviation_ceiling = "high"` where the domain genuinely compounds. |
+| `convention_observed` | The codebase consistently follows a convention and there are zero violations. This ships in the product: the inspection derives the decision set, governance later enforces it. | `info`, one row per rule. |
+| `no_convention` | No convention has been adopted; the codebase is inconsistent with no clear majority. | `info`, exactly one row per rule, never N. |
+| `not_assessed` | The rule was armed but could not be evaluated (tool failed, no files matched, the model declined). An honesty row, structurally distinguishable from "assessed and clean". | `info`. |
+
+A row whose producer never assigned a kind exports as the explicit tag `unspecified`. It is
+deliberately **never** rendered as `defect`: an unmapped emission path has to be visible as a gap
+rather than silently counted as an accusation. The taxonomy is defined once, in
+`crates/api-types/src/audit.rs`, and the same discriminator reaches the PDF, the workbook and
+`findings.json`. Mechanics in [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6a.
+
 ### Report everything, enforce the delta
 
-The audit shows **every** existing violation, but onboarding does **not** freeze your team on day one: arming snapshots the current violations into a committed `.camerata/baseline.json` as accepted pre-existing debt, and the gate then enforces only on **new or changed** code (the eslint/ruff/sonar baseline model). The match is by rule id plus a content fingerprint, so touching a baselined line un-baselines it: fix it or waive it. Suppression has two homes by intent — a per-line inline `// camerata:allow <RULE> -- reason` (reviewable in the diff, attributed by `git blame`) and the central `.camerata/baseline.json` for bulk/legacy/policy. Three rules always hold: a **reason is mandatory**, **everything is indexed centrally**, and **stale waivers are surfaced** for removal.
+The audit shows **every** fault it found, but onboarding does **not** freeze your team on day one: arming snapshots the current violations into a committed `.camerata/baseline.json` as accepted pre-existing debt, and the gate then enforces only on **new or changed** code (the eslint/ruff/sonar baseline model). The match is by rule id plus a content fingerprint, so touching a baselined line un-baselines it: fix it or waive it. Suppression has two homes by intent - a per-line inline `// camerata:allow <RULE> -- reason` (reviewable in the diff, attributed by `git blame`) and the central `.camerata/baseline.json` for bulk/legacy/policy. Three rules always hold: a **reason is mandatory**, **everything is indexed centrally**, and **stale waivers are surfaced** for removal.
 
 ## The governed development console
 
@@ -125,7 +146,7 @@ A compiling, tested, all-Rust workspace, not a design folder.
 
 **Verified at runtime (you can reproduce it):**
 
-- A **22-crate workspace, ~3,350 passing tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)).
+- A **27-crate workspace** (26 app crates plus the maintainer-only `tools/corpus-verifier`) with **~5,500 passing tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)). A named **self-measurement gate** (`./scripts/self-measurement.sh`) runs ahead of the full suite; see [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6b.
 - **Brownfield onboarding, end to end** on fixture repos: per-repo detection and rule proposal, the two-tier audit with calibration and dedup, the triage tables, Process emitting baseline waivers and GitHub issues, and Apply writing the governance branch.
 - **The gate denies a real agent (standalone)** via `camerata -- live-demo`, with the gateway's verdict + jail tests covered by `cargo test`.
 - **The governed development console** — issue pull + Epic/sub-issue tree, UoW creation and the full lifecycle UI, the project-aware chat assistant, and the deterministic gate self-check — wired and unit-tested in-app.
@@ -161,6 +182,37 @@ cargo run -p camerata -- stories            # CLI HTTP adapter: list stories ove
 cargo run -p camerata -- run <RUN_ID>       # (also: uows / assign / start-run / events / recent-events)
 cargo run -p camerata-mcp                   # MCP server over stdio: the same verbs as MCP tools for any MCP host
 ```
+
+### The Codebase Inspection deliverable, headless
+
+`camerata inspect` runs the whole inspection pipeline in-process with no server and no UI, and
+writes the same product-export ZIP the cockpit's export button produces. This costs real model
+tokens, so the two commands below are a pair: run the gate before you pay for anything.
+
+```
+cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip>
+                                            # the ZIP holds: the PDF summary, findings.xlsx,
+                                            # findings.json, README.txt. Also writes
+                                            # <repo>/.camerata-scan-ledger.json.
+cargo run -p camerata -- integrity-gate --ledger <PATH>/.camerata-scan-ledger.json
+                                            # exit 0 = every required engine ran, every skip was
+                                            # justified, every pipeline stage reconciles
+                                            # exit 1 = the scan is degraded; do not grade it
+                                            # exit 2 = the GATE could not run (ledger missing or
+                                            #          unreadable) - deliberately NOT a pass
+./scripts/self-measurement.sh               # the in-repo self-measurement gate: seconds,
+                                            # deterministic, no network, no model calls
+```
+
+The workbook is partitioned by finding kind rather than being one flat sheet: **Index**,
+**All Findings** (defects, deviations and any unclassified row), **Deviations** (one row per rule,
+at the grain the deviation numbers are actually computed), **Conventions** (what this codebase
+already does well and consistently), the per-area sheets, **Dependencies**, **False Positives**,
+and **Coverage** (what was checked, what could not be, and which rules did not run). The PDF is the
+summary and deliberately does not carry every row; `findings.json` carries the whole non-false-positive
+row set, every kind included. Exit code 2 on the gate is the point of the design: a wrapper that read
+"the gate could not run" as "the gate passed" would be the same class of bug as a scan that reads
+"the tool did not run" as "the rule is clean".
 
 ## Read in this order
 
@@ -280,7 +332,7 @@ The orchestrator makes zero model calls; it prepares a session and spawns an age
 
 ## Family
 
-- [camerata-ai](../camerata-ai): the conventions engine the corpus format originates from. The corpus is vendored into this repo at `crates/rules/principles/` (350+ TOML rules), so the workspace is self-contained; override with `CAMERATA_CORPUS_PATH`.
+- [camerata-ai](../camerata-ai): the conventions engine the corpus format originates from. The corpus is vendored into this repo at `crates/rules/principles/` (417 TOML rules as of 2026-10-11), so the workspace is self-contained; override with `CAMERATA_CORPUS_PATH`. Field-by-field reference for the rule schema: [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md); the authoring workflow is [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md).
 - [rust-chorale](../rust-chorale): the headless, virtualized Dioxus / Leptos table library used for tabular surfaces.
 - this repo: the conductor that leads the ensemble.
 

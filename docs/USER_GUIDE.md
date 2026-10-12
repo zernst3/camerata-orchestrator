@@ -245,7 +245,19 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    review is off (the deep tier is itself an LLM pass). The scan-mode picker below (Parallel /
    Sequential / Background / Batch) is unchanged.
 
-   **Three kinds of finding, and the difference matters:**
+   **Two different axes, and conflating them is the usual confusion.** A finding row carries both,
+   and they answer different questions:
+
+   - **WHO produced it, and how much authority does it carry** (enforced / preview / advisory). That
+     is the three-way split immediately below, and it is what the triage table's **Authority** column
+     filters on.
+   - **WHAT the row asserts about your codebase** (defect / deviation / convention observed / no
+     convention / not assessed). That is the finding `kind`, added 2026-10-09, and it is what the
+     exported artifacts partition on. A row is no longer simply "a violation or not": three of the
+     five kinds assert that nothing is wrong. See **"What the five finding kinds mean"** further down
+     this section.
+
+   **Three kinds of finding by AUTHORITY, and the difference matters:**
    - **Deterministic floor** (`SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`,
      `ARCH-NO-SECRETS-IN-URL-1`, `SEC-NO-PRIVATE-KEY-1`, `SEC-NO-VENDOR-TOKEN-1`,
      `SEC-NO-SECRET-FILE-1`, `SEC-NO-DISABLED-TLS-1`) — pure regex/logic, no LLM. **Repeatable**
@@ -317,6 +329,26 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      (seconds to minutes, up to 24h on very large scans). Best when latency is acceptable in
      exchange for cost.
 
+   **What the five finding kinds mean.** Every row carries a `kind`, and it tells you what sort of
+   statement the row is making. This replaced a binary model in which a row was a violation or it was
+   not, and the change matters because three of the five kinds say nothing is wrong:
+
+   | Kind | What it is telling you | Where it lands in the Excel workbook |
+   |---|---|---|
+   | **Defect** | An objective fault at this site. Act on it. | All Findings |
+   | **Deviation** | A consistency violation against the convention your own codebase predominantly follows: "2 of your 47 assessed endpoints do not use URI versioning". You get the numerator, the denominator (when it could be counted honestly) and the convention's own name as separate fields, not prose to read. | All Findings (per site) and Deviations (one row per rule) |
+   | **Convention observed** | Your codebase consistently follows this convention and there are zero violations. This is not filler: it is the decision set the inspection derived from your code, and it is what governance will later enforce. | Conventions |
+   | **No convention** | No convention has been adopted here; your codebase is inconsistent with no clear majority. Exactly one row per rule, never one per site. | Conventions |
+   | **Not assessed** | The rule was armed but could not be evaluated: a tool failed, no files matched, or the model declined. An honesty row, deliberately distinguishable from "we checked and it was clean". | Coverage, under "checks we could not complete" |
+
+   A row whose producer never assigned a kind shows as **Unclassified**, and the Index sheet's
+   "Statement types" block shows that count only when it is non-zero. It is never silently rendered
+   as a defect: an unclassified row is a gap in Camerata, and it has to be visible as one.
+
+   A **deviation caps at medium severity by default**, because the cost of inconsistency is paid on
+   future features rather than on existing code. Individual rules can author a higher ceiling where
+   the inconsistency genuinely compounds (layering boundaries, error-contract shape, auth patterns).
+
    **Thorough calibration (opt-in checkbox).** Off by default. When ticked, the calibration pass
    that recalibrates AI-suggested severities runs as a **multi-vote consensus** instead of a single
    pass: each finding is judged several times and the **conservative** verdict wins on disagreement
@@ -325,6 +357,15 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    (~3× the calibration portion)** the moment you tick it. Leave it off for a quick pass; turn it on
    when you want the audit's severities to be trustworthy enough to act on directly. It never drops
    findings either way — it only re-ranks and flags.
+
+   **Calibration is not the last word on severity.** A rule can declare, in the corpus, a minimum
+   severity (a floor) and a maximum severity (a ceiling); both are applied when the report is
+   exported, after the model and after calibration. So a rule whose author wrote "always critical"
+   cannot be talked down, and a rule whose author wrote "high, not an automatic critical" cannot be
+   inflated past high no matter what any model proposes. The floor only ever applies to a row that is
+   accusing you of something (a defect or a deviation) and only when the row has a real file and
+   line; the ceiling always gets the last word. See `docs/TECHNICAL.md` section 6a for the exact
+   resolution order and `docs/RULES_REFERENCE.md` for the fields themselves.
    Findings land in three tables you switch between: **Unresolved · Ignored · Tech debt** — select and
    **Ignore (with reason)** or **Save as tech debt**, re-bucket freely. A **Needs-review** column shows
    the calibration pass's flag + reason (and the Test badge for test-scope findings). In the Tech-debt
@@ -476,7 +517,7 @@ Two tables:
 - **Project rules** — the rules the project has selected, in one table, **filterable by repo** (a repo
   single-select), with project-level rules shown too. Click a rule to switch its chosen option; remove
   a rule from a repo. Edits persist to the project's ruleset.
-- **All rules** — the full corpus (**350+ rules across many language and framework stacks**: Rust,
+- **All rules** - the full corpus (**417 rules across many language and framework stacks** as of 2026-10-11: Rust,
   Python, Go, JS/TS and its frameworks, Java/Spring, C#/ASP.NET, Ruby/Rails, SQL, fullstack, plus the
   always-on security floor and the agentic governance rules), viewable even when unassigned. Each row
   shows **which repos it's applied to**, with **"Add to repo"** (add a rule to any repo it's not yet
@@ -1090,11 +1131,25 @@ local clones, not whether its verification is still trustworthy.
 Every rule carries a provenance badge. These are **read-only in the app**: the `verified` tier is set only
 by the maintainer-side verifier tool, never from the product.
 
-| Badge | Meaning |
-|---|---|
-| ✓ **Verified** (green) | A human explicitly approved this rule, via the maintainer verifier tool. The gold standard. |
-| **Grounded** (blue) | Rule is cited in a corpus source (linter, doc, framework best practice). The cited source(s) are listed in the rule's **detail panel**: open the rule and read the **Sources** section (a rule may cite several). |
-| **Draft** (gray, italic) | AI-generated rule, not yet grounded. Advisory only, and never auto-recommended during onboarding. |
+There are **five** tiers, not three. The two the older version of this table omitted are the ones
+most likely to surprise you, so they are called out below the table.
+
+| Badge | Meaning | Pre-checked at onboarding? |
+|---|---|---|
+| ✓ **Verified** (green) | A human explicitly approved this rule, via the maintainer verifier tool. The gold standard. | Yes |
+| **Grounded** (blue) | Rule is cited in a corpus source (linter, doc, framework best practice). The cited source(s) are listed in the rule's **detail panel**: open the rule and read the **Sources** section (a rule may cite several). | Yes |
+| **Policy** | A deliberate project or team decision that cites no external authority. Any source it does cite is internal, not a published standard or a real linter rule. | **Yes** |
+| **Needs recheck** | Was `verified`, but the cited source or linter has since drifted (a version bump moved a rule id, say). Still backed by a citation and usable. | **No** |
+| **Draft** (gray, italic) | AI-generated rule, nobody has reviewed it, no citation found. Advisory only. | No |
+
+**`Policy` is armed, and that is deliberate.** "Grounded" and "pre-checked" are two different
+questions. `policy` answers the first one with a no (it cites no external authority) and the second
+with a yes (it is still a correct, checkable rule the project decided on). Treating `policy` as
+disarming was a defect, fixed 2026-10-09: it had silently switched off 17 shipped rules, including
+every `PROC-*` governance rule the product is explicitly about.
+
+**`Needs recheck` is grounded but not pre-checked.** The citation is still there; the human
+confirmation behind it is known-stale, so it wants re-confirming before you lean on it.
 
 Re-verification is a deliberate maintainer act, done with the repo-side verifier tool (which lands as a
 reviewed PR), not from inside the app.
@@ -1172,6 +1227,80 @@ The export is markdown, so you can **paste it into a GitHub issue, a team wiki, 
 ### Important: the SOC-2 output is advisory
 
 The SOC-2 lens produces a **gap analysis** — a conversation-starter about what controls may be underimplemented, not an audit-grade report. For true SOC-2 compliance work, pair Camerata's gap analysis with a real readiness review and, if aiming for certification, an accredited assessor. Camerata is a **governance tool**, not a compliance tool.
+
+---
+
+## 11a. The Codebase Inspection deliverable (PDF + Excel + JSON)
+
+This is a different artifact from the deep-report Markdown above. The **product export** is the
+client-facing deliverable: a ZIP holding a PDF, an Excel workbook, `findings.json`, and a
+`README.txt`. Export it from the cockpit's export button after a scan, or produce the identical ZIP
+from the command line with no server and no UI at all:
+
+```
+cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip>
+```
+
+Useful flags: `--backend cli|api` (the same CLI-vs-API compliance setting a project carries; `cli` is
+the default), `--batch` (the Anthropic Message Batches path, roughly half the token cost, results
+arrive asynchronously, needs `--backend api`), `--model` / `--calibration-model`, `--full` to ignore
+the incremental-scan cache and rescan every file, and `--verbose` to print the per-rule coverage
+ledger rather than the concise summary.
+
+### The three artifacts have three different jobs
+
+- **The PDF is the summary.** It is written to be read by a person who will not open a spreadsheet.
+  It deliberately does not carry every row, and that is not a gap.
+- **The Excel workbook is the detail surface.** Every row that exists lands on exactly one sheet. A
+  row missing here IS a problem.
+- **`findings.json` is the data.** It carries the whole set, every kind included, for anything
+  programmatic downstream.
+
+### The workbook's sheets
+
+Restructured on 2026-10-11 from a single flat findings sheet into one sheet per kind of statement, so
+a row sits where its own columns mean something:
+
+| Sheet | What is on it |
+|---|---|
+| **Index** | The cover, the provenance legend, the category matrix, the disposition summary, and a "Statement types" block counting the five finding kinds and naming the tab each lives on. |
+| **All Findings** | Defects and deviations: something is wrong at a site. An **Unclassified** row lands here too, deliberately, so a gap in Camerata shows up among the accusing rows rather than being filed away in an informational tab. |
+| **Deviations** | One row per RULE, not per site, because the deviation numbers are computed per rule. "2 of 47 sites deviate from URI-versioned endpoints" is three adjacent columns. When the denominator could not be established honestly the cell reads "not counted" - never a fabricated 0. |
+| **Conventions** | Conventions your codebase already follows consistently, plus the rules where no convention has been adopted. Nothing is wrong at a site here. This is the derived decision set. |
+| per-area sheets | One per finding category, as views of the findings set only, so an area tab never mixes "you consistently use cursor pagination" into a list with a critical injection. |
+| **Dependencies** | The dependency audit, plus the dependency scanner's own coverage notes. |
+| **False Positives** | Everything you dispositioned as a false positive, kept rather than deleted. |
+| **Coverage** | What was checked and with what result, which tools could not run, which rules did not run this scan, and the "not assessed" rows in their own "checks we could not complete" section. |
+
+The Coverage sheet opens with one plain summary sentence written for a client, and the Result column
+reads "Clean — nothing found" or "N sites found" rather than a bare integer. Two coverage honesty
+properties are worth knowing because they were both once wrong: a rule that found something and then
+had its row merged into another rule's row **never** renders as clean, and a whole tool tier failing
+is disclosed in your artifacts rather than only in Camerata's internal log.
+
+### Check the scan before you pay to grade it
+
+A scan costs real model tokens. `camerata inspect` writes a coverage ledger to
+`<repo>/.camerata-scan-ledger.json`, and a second command turns that ledger into a verdict:
+
+```
+cargo run -p camerata -- integrity-gate --ledger <PATH>/.camerata-scan-ledger.json
+```
+
+| Exit code | What it means | What to do |
+|---|---|---|
+| 0 | Every engine that had to run did run, every skip was justified, and the row counts reconcile at every pipeline stage. | Proceed. |
+| 1 | The scan is degraded. | Do not act on it or pay to grade it; read the gate's output, which names the engine or stage at fault. |
+| 2 | The gate itself could not run (the ledger is missing or unreadable). | Fix that first. This is deliberately **not** a pass. |
+
+`--profile graded` (the default) requires every engine that must run for any repo to have actually
+run. `--profile smoke` checks structural integrity only and **cannot** catch a whole tier that
+silently never ran, so it is the weaker question. An unrecognised `--profile` value is rejected
+rather than defaulted, so a typo can never quietly relax the gate.
+
+The gate deliberately does not complain that a Python rule did not run against a Rust repo: a rule
+that does not run because it is irrelevant to the stack is correct behaviour. What it will not
+tolerate is a skip it cannot classify, which it treats as a defect rather than a pass.
 
 ---
 
@@ -1305,13 +1434,19 @@ graduates out of the advisory tier.
 
 Every rule also carries a `verification` badge (shown in the Rules view):
 
-| Badge | Meaning |
-|---|---|
-| **Verified** | A human explicitly checked the rule and its cited sources. No agent may set this. |
-| **Grounded** | The onboarding agents found and cited at least one real source (linter rule id, language spec, framework best practice). |
-| **Draft** | AI-generated, not yet grounded. Advisory only; never auto-recommended during onboarding. |
+| Badge | Meaning | Pre-checked at onboarding? |
+|---|---|---|
+| **Verified** | A human explicitly checked the rule and its cited sources. No agent may set this. | Yes |
+| **Grounded** | The onboarding agents found and cited at least one real source (linter rule id, language spec, framework best practice). | Yes |
+| **Policy** | A deliberate project or team decision with no external authority to cite. | Yes |
+| **Needs recheck** | Was verified; the cited source has since drifted. Still backed by a citation. | No |
+| **Draft** | AI-generated, nobody reviewed it, no citation found. Advisory only. | No |
 
-The mechanical rules in the current corpus are grounded (each maps to a real, named linter rule that was validated to exist). None are verified yet — that is a deliberate human-only step the maintainer keeps. Grounded is the baseline for a shippable rule; verified is the gold standard you can cite to an auditor.
+The full five-tier table, and why `policy` is armed while `needs_recheck` is not, is in §9
+"Verification badges". The mechanical rules in the current corpus are grounded (each maps to a real,
+named linter rule that was validated to exist). None are verified yet - that is a deliberate
+human-only step the maintainer keeps. Grounded is the baseline for a shippable rule; verified is the
+gold standard you can cite to an auditor.
 
 ---
 
