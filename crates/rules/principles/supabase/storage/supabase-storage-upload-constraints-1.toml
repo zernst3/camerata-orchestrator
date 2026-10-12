@@ -4,7 +4,7 @@ tag = "stack"
 domain = "supabase:storage"
 layer = "platform"
 enforcement = "structured"
-kind = "decision"
+kind = "defect"
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity any such
 # bucket missing `fileSizeLimit`/`file_size_limit` ...".
 min_severity = "high"
@@ -68,6 +68,7 @@ why = "Both constraints are declared once at the bucket level and then enforced 
 
 [[option]]
 id = "validate-size-and-type-in-application-code-only"
+violates = true
 label = "Validate file size and content type only in application code before calling upload(), without bucket-level constraints"
 directive = "Rely entirely on a pre-upload check in the application's own request handler (reading Content-Length and Content-Type headers, or inspecting the File object client-side) to reject oversized or disallowed uploads, leaving the bucket's own fileSizeLimit/allowedMimeTypes unset."
 why = "Rejected: an application-layer check only runs for the specific call site that implements it. The Storage API itself still accepts anything once called directly — a different endpoint, an admin script, a bulk-import job, or simply a future developer who adds a new upload path without copying the same validation, bypasses the constraint entirely. A client-side-only check is also trivially bypassed by any direct API call that skips the browser altogether. The bucket-level fields exist precisely so the constraint is a property of the bucket, enforced once, rather than a duty every future call site has to remember to re-implement correctly."

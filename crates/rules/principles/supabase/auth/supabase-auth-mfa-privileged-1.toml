@@ -4,7 +4,7 @@ tag = "stack"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "prose"
-kind = "decision"
+kind = "defect"
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Report at high severity when no
 # such check is found: 'This privileged action can be performed by ...'".
 min_severity = "high"
@@ -68,6 +68,7 @@ why = "Supabase exposes the aal claim specifically so sensitive actions can requ
 
 [[option]]
 id = "treat-mfa-enrollment-as-sufficient-without-enforcement"
+violates = true
 label = "Offer MFA enrollment but do not require aal2 anywhere; treat enrollment alone as sufficient hardening"
 directive = "Support MFA enrollment for users who opt in, but do not add any aal2 check to privileged roles, actions, or policies — an enrolled user's unverified (aal1) session is treated identically to a verified (aal2) one."
 why = "Rejected: an MFA factor that is enrolled but never REQUIRED provides no protection against the scenario MFA exists to defend — a password-only session (stolen password, successful phishing) still reaches every privileged action exactly as if MFA did not exist, because nothing ever checks whether the second factor was actually verified for this session. Enrollment without enforcement is security theater for the specific threat model MFA is meant to close."

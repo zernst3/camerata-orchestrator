@@ -4,7 +4,7 @@ tag = "stack"
 domain = "supabase:storage"
 layer = "platform"
 enforcement = "prose"
-kind = "decision"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Prose check. Mechanical evidence feeds the judgment cheaply: the literal `expiresIn` seconds argument at every `createSignedUrl(path, expiresIn)` call site is a plain number to extract, and a subsequent write of the returned `signedUrl` value into a database column (an INSERT/UPDATE whose value expression is the variable the `createSignedUrl` call assigned) is detectable from the same file's control flow. Whether a given expiry is EXCESSIVE for the content being shared is a judgment call relative to the use case (a one-time invoice download and a long-lived public-facing asset link have legitimately different needs), so this routes to prose with both the expiry value and the call site's surrounding code as evidence. Conformance holds when the expiry is scoped to the actual viewing window the feature needs and the URL string itself is never written to a column read back later; it fails when the expiry is day-or-longer-scale with no stated reason, or when the signed URL is stored for reuse rather than re-signed on each access."
@@ -66,6 +66,7 @@ why = "Re-signing on read instead of persisting the URL removes an entire durabl
 
 [[option]]
 id = "cache-the-signed-url-in-a-column-for-reuse"
+violates = true
 label = "Generate the signed URL once and persist it in a column so later reads can skip re-signing"
 directive = "Call createSignedUrl once (typically at upload or first-request time), write the resulting URL string into a database column, and serve that stored value on subsequent requests instead of calling createSignedUrl again."
 why = "Rejected: persisting the signed URL creates a durable secondary copy of a bearer credential in a location — a table column — that was not designed as a secret store. Its exposure now depends on the table's own RLS policy, backups, replicas, and any export path, none of which the expiry value accounts for. Engineers choosing this pattern also tend to pick an unusually long expiresIn specifically so the cached value doesn't go stale, which compounds the problem: the one mechanism that bounds a signed URL's lifetime (its expiry) gets weakened at exactly the call site whose output is about to be copied somewhere durable."

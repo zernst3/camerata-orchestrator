@@ -13,7 +13,7 @@ domain = "supabase:database-functions"
 extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
-kind = "decision"
+kind = "defect"
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Severity is High." Zach's W5-Q1
 # ruling made this explicit: a flat "Severity is High" is a floor of high with no escalation
 # NAMED, which does not forbid one -- and this rule is IDOR-in-the-database, genuinely
@@ -102,6 +102,7 @@ why = "Postgres already has the primitives this fix needs (auth.uid()/current_us
 
 [[option]]
 id = "flag-every-security-definer-read-regardless-of-grant-or-body"
+violates = true
 label = "Flag every SECURITY DEFINER read-only function, regardless of grants, parameters, or body contents"
 directive = "Treat the mere presence of a SECURITY DEFINER read as report-worthy, without checking whether it filters by a caller-supplied parameter, is broadly granted, or already contains an authorization check."
 why = "Rejected: most SECURITY DEFINER read-only functions take no caller-supplied filtering parameter at all, are not granted to a broad role, or already check the caller's identity — flagging all of them indiscriminately would bury the small number of genuinely cross-tenant-reachable functions in noise, training the reader to ignore this rule's findings entirely. The caller-controlled-key shape (a parameter equated against a result column, with no identity check) is the actual CWE-639 vulnerability condition, not SECURITY DEFINER or even a WHERE-filtered read by itself."

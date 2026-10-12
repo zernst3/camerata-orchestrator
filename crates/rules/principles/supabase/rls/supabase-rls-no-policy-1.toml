@@ -4,7 +4,7 @@ tag = "stack"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "architectural"
-kind = "decision"
+kind = "defect"
 # E2 ceiling, transcribed from this rule's own prose: "Medium severity — this is an
 # availability/architecture smell, not a direct exposure, so it is a lower severity than the
 # missing-RLS and policy-disabled findings."
@@ -66,6 +66,7 @@ why = "The finding is a genuine repo-detectable signal (deny-by-default RLS) but
 
 [[option]]
 id = "treat-zero-policy-as-non-finding"
+violates = true
 label = "Do not flag zero-policy RLS-enabled tables at all (assume intentional lockdown)"
 directive = "Skip tables with RLS enabled and no policies; treat the deny-by-default state as an intentional, already-secure configuration requiring no report entry."
 why = "Rejected: a zero-policy table is exactly the shape a vibe-coded app produces when the developer enabled RLS (perhaps prompted by Supabase's dashboard nudge) and then gave up on writing policies, routing all access through the service_role key instead — which is a real architectural risk this report exists to surface, not a state to stay silent about. Silence here would mean the report misses the single clearest signal that a service_role bypass is in play."

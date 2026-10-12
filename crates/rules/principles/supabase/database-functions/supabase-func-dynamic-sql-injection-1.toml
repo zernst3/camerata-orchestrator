@@ -15,7 +15,7 @@ domain = "supabase:database-functions"
 extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
-kind = "decision"
+kind = "defect"
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Severity is High by default;
 # Critical when the same function is GRANTed ...". The clearest floor construction in the
 # corpus: a named minimum plus a named escalation above it.
@@ -94,6 +94,7 @@ why = "Postgres's own format() function already ships the correct safe primitive
 
 [[option]]
 id = "flag-every-execute-regardless-of-interpolation-shape"
+violates = true
 label = "Flag every EXECUTE statement in a function body, regardless of how its string was assembled"
 directive = "Treat the mere presence of a dynamic EXECUTE as report-worthy, without checking whether the string was built via an escaping/bound channel."
 why = "Rejected: EXECUTE with a fully static string, EXECUTE ... USING a bound argument, and format() using only %L/%I are all the Postgres-documented SAFE patterns for dynamic SQL, not residual risk — flagging them anyway would produce a finding with no actionable remediation (the function is already doing the right thing) and would train the reader to distrust the report's other dynamic-SQL findings. The non-escaping channel (|| concatenation, format()'s %s) is the actual vulnerability condition, not EXECUTE by itself."

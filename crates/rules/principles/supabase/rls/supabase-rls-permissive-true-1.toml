@@ -4,7 +4,7 @@ tag = "stack"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "structured"
-kind = "decision"
+kind = "defect"
 # E2 ceiling, transcribed from this rule's own prose: the worst branch is "unconditionally
 # high severity, there is no legitimate [case]"; the rejected option is an "automatic critical
 # finding with no severity distinction", rejected because "a uniform critical severity would
@@ -78,6 +78,7 @@ why = "Write access under an unconditional true predicate has no legitimate just
 
 [[option]]
 id = "flag-all-true-predicates-uniformly-critical"
+violates = true
 label = "Flag every true-predicate anon/public policy as critical, regardless of read vs write"
 directive = "Treat any USING (true) or WITH CHECK (true) policy targeting anon/public as an automatic critical finding with no severity distinction between read and write access."
 why = "Rejected: a uniform critical severity would flag intentional, benign patterns (a public products table, a published-posts feed) at the same alarm level as an open write path to `orders` or `payments`. That erodes the report's credibility on exactly the finding class most likely to appear in legitimate vibe-coded apps — the fix is a severity split with `needs_review` on the read side, not silence and not uniform alarm."

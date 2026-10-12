@@ -14,7 +14,7 @@ domain = "supabase:database-functions"
 extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
-kind = "decision"
+kind = "defect"
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "emit a high-severity finding:
 # 'One of your database functions runs ...'".
 min_severity = "high"
@@ -87,6 +87,7 @@ why = "search_path hijacking against a SECURITY DEFINER function is a well-docum
 
 [[option]]
 id = "flag-all-security-definer-functions-regardless-of-search-path"
+violates = true
 label = "Flag every SECURITY DEFINER function as a finding, regardless of whether search_path is already set"
 directive = "Treat the mere presence of SECURITY DEFINER as report-worthy, without checking whether SET search_path is already present."
 why = "Rejected: SECURITY DEFINER with a correctly pinned search_path is the Postgres-documented SAFE pattern, not a residual risk — flagging it anyway would produce a finding with no actionable remediation (the function is already doing the right thing) and would train the reader to distrust the report's other DEFINER-related findings. The absence of search_path is the actual vulnerability condition, not DEFINER by itself."

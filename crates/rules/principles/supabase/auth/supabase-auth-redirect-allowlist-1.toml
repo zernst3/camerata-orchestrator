@@ -4,7 +4,7 @@ tag = "stack"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
-kind = "decision"
+kind = "defect"
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity: 'Your
 # login ...'".
 min_severity = "high"
@@ -63,6 +63,7 @@ why = "A redirect allowlist entry that matches hosts the project does not contro
 
 [[option]]
 id = "wildcard-redirect-for-convenience-across-all-previews"
+violates = true
 label = "Use a bare or shared-hosting-domain wildcard to cover every preview/staging deployment without restriction"
 directive = "additional_redirect_urls includes a bare `*` or a wildcard scoped to an entire shared hosting provider's domain, accepted for convenience so every preview deploy URL works without maintaining an allowlist."
 why = "Rejected: the convenience of not maintaining an allowlist is bought by accepting that anyone who can register a subdomain on the same shared hosting provider — which in most cases means anyone with a free account on that platform — can stand up a page the redirect allowlist treats as trusted. Combined with the OAuth/magic-link handoff being exactly where a session gets created, this is not a cosmetic open redirect; it is a session-token exfiltration path, which is a categorically worse outcome than the maintenance cost of a project-scoped wildcard or an exact-URL list."

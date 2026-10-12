@@ -4,7 +4,7 @@ tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "mechanical"
-kind = "decision"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -79,6 +79,7 @@ why = "Vendor tokens in source are immediately exposed on push. Automated scanni
 
 [[option]]
 id = "commit-vendor-tokens-as-test-fixtures"
+violates = true
 label = "Commit vendor token shapes as test fixtures"
 directive = "Vendor token shapes that match real prefixes are committed for test assertions, clearly documented as non-functional fixtures"
 why = "Rejected: the gate cannot verify a token is non-functional without calling the vendor API. A 'non-functional fixture' that is accidentally a real token is undetectable at commit time. Use a dedicated fake-token shape (e.g. a prefix not used by any vendor) for unit-test assertions."

@@ -4,7 +4,7 @@ tag = "stack"
 domain = "supabase:storage"
 layer = "platform"
 enforcement = "structured"
-kind = "decision"
+kind = "defect"
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity: 'Your
 # upload path is the ...'".
 min_severity = "high"
@@ -65,6 +65,7 @@ why = "A server-generated key removes both failure modes (traversal and collisio
 
 [[option]]
 id = "sanitize-but-keep-client-filename-as-the-key"
+violates = true
 label = "Strip only `../` sequences from the client filename but keep it as the object key"
 directive = "Apply a blocklist filter that strips or rejects `../` sequences from the client-supplied filename, then use the remaining string as the storage object key unchanged."
 why = "Rejected: a blocklist against one traversal spelling is an incomplete defense (URL-encoded traversal, backslash variants on some storage backends, or simply a null byte can still slip through a hand-rolled filter), and even a perfectly sanitized filename is still the client's own string — two uploads of `report.pdf` from two different users still collide or overwrite, and a predictable filename is still trivially enumerable. Sanitizing in place treats only the traversal symptom while leaving the underlying trust-the-client-string problem, and the collision/enumeration risk, fully intact."

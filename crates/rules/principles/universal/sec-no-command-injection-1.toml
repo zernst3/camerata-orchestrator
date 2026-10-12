@@ -4,7 +4,7 @@ tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "mechanical"
-kind = "decision"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -64,6 +64,7 @@ why = "A fixed argument list removes the shell's re-parsing step entirely, so no
 
 [[option]]
 id = "shell-with-escaping"
+violates = true
 label = "Escape shell metacharacters, then pass the command through a shell as before"
 directive = "a value the function did not construct itself is escaped (shell metacharacters neutralized) before being embedded in a shell-interpreted command string, rather than invoking the target directly with a separate argument list"
 why = "Rejected: shell-escaping is a per-shell, per-platform correctness problem (POSIX sh vs bash vs PowerShell quote differently), and a single missed metacharacter or an unusual encoding reopens the hole. Invoking the target directly with a separate argument list makes the shell's re-parsing step structurally absent instead of relying on escaping every call site correctly."

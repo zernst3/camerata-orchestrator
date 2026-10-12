@@ -4,7 +4,7 @@ tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "prose"
-kind = "decision"
+kind = "defect"
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Report at ... high severity when
 # no such record is found: 'This privileged action changes `<table>` with no durable record
 # of who ...'".
@@ -68,6 +68,7 @@ why = "A privileged action's row-level audit columns (last modified by/when) onl
 
 [[option]]
 id = "rely-on-audit-columns-and-application-logs-for-privileged-actions"
+violates = true
 label = "Rely on the row's own audit columns (modified_by/modified_on) and best-effort application logging for privileged actions"
 directive = "Do not add a dedicated append-only audit-log table for privileged writes; rely on the mutated row's own created_by/modified_by columns plus whatever the application's general-purpose logging framework happens to emit for the request."
 why = "Rejected: audit columns on the row itself are overwritten by the NEXT write to that row — they cannot answer 'what was this value before the last three changes' or 'who performed the change that was later reverted.' Application logs are typically rotated, are not transactionally tied to the database write (a log line can be emitted even if the transaction later rolls back, or dropped even if the transaction commits), and are not queryable with the same guarantees as a table the database itself enforces append-only-ness on. Neither substitute provides the durable, query-ready, transactionally-consistent record a privileged-action investigation actually needs."

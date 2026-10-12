@@ -4,7 +4,7 @@ tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "mechanical"
-kind = "decision"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -37,6 +37,7 @@ why = "Git history is permanent: a committed private key is immediately mirrored
 
 [[option]]
 id = "commit-keys-for-tests"
+violates = true
 label = "Commit fake private keys for test fixtures"
 directive = "Test fixture private keys are committed alongside the tests that use them, clearly marked as non-production values"
 why = "Rejected: even clearly-labelled 'fake' PEM blocks trigger automated secret-scanning and CI failures, normalize the pattern of key material in the repo, and are occasionally real keys mislabelled as fake. Runtime generation eliminates the cost with no upside loss."

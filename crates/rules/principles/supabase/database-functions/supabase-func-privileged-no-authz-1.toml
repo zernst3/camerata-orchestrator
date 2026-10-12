@@ -13,7 +13,7 @@ domain = "supabase:database-functions"
 extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
-kind = "decision"
+kind = "defect"
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Severity is High." Same W5-Q1
 # reading as its folder sibling; this is a privileged write with no authorization check, so
 # no ceiling.
@@ -101,6 +101,7 @@ why = "Postgres already has the primitives this fix needs (auth.uid()/current_us
 
 [[option]]
 id = "flag-every-security-definer-function-regardless-of-grant-or-body"
+violates = true
 label = "Flag every SECURITY DEFINER function, regardless of grants or body contents"
 directive = "Treat the mere presence of SECURITY DEFINER as report-worthy, without checking whether the function writes, is broadly granted, or already contains an authorization check."
 why = "Rejected: SECURITY DEFINER is Postgres's documented mechanism for intentionally elevating privileges for a specific, audited reason (the search-path-pinning rule SUPABASE-FUNC-SEARCH-PATH-1 already covers its OWN distinct defect) — most SECURITY DEFINER functions are read-only, not granted to a broad role, or already properly guarded, and flagging all of them indiscriminately would bury the small number of genuinely unauthorized, broadly-reachable, mutating functions in noise, training the reader to ignore this rule's findings entirely."

@@ -4,7 +4,7 @@ tag = "stack"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "mechanical"
-kind = "decision"
+kind = "defect"
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Any match is a critical finding,
 # phrased as: 'Your admin check reads a ...'". Unconditional ("any match").
 min_severity = "critical"
@@ -66,6 +66,7 @@ why = "user_metadata / raw_user_meta_data are user-writable by design; using eit
 
 [[option]]
 id = "allow-with-additional-server-side-validation"
+violates = true
 label = "Allow user_metadata in policies if the app also validates the claim server-side before granting privileged actions"
 directive = "Permit policies to read user_metadata / raw_user_meta_data for authorization when the application layer performs an additional server-side check before treating the user as privileged."
 why = "Rejected: RLS is the database's OWN access-control layer specifically so that no code path — including one that forgets or gets the extra check wrong — can bypass it. Requiring a compensating server-side check to make an unsafe policy predicate 'safe' reintroduces exactly the footgun RLS exists to remove, and a static scan cannot verify the compensating check exists, is complete, or survives the next refactor. The safe alternative (app_metadata or a dedicated roles table) provides the same capability with no such fragility."

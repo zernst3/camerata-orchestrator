@@ -15,7 +15,7 @@ domain = "supabase:rls"
 extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
-kind = "decision"
+kind = "defect"
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "this is always SEVERITY_CRITICAL,
 # because a deliberate-but-unrestored disable" is its own defect, and "emit a CRITICAL finding
 # naming the table". Deliberately NO ceiling -- W5 recorded this rule as the control case for
@@ -106,6 +106,7 @@ why = "An explicit disable that is never restored is a distinct, higher-signal a
 
 [[option]]
 id = "fold-into-bare-missing-rls-finding"
+violates = true
 label = "Do not distinguish explicit-disable-not-restored from bare missing-RLS; report both as one finding type"
 directive = "Report any table with RLS disabled in its end-state as a single undifferentiated 'missing RLS' finding, whether or not an explicit disable was ever issued or restored."
 why = "Rejected: collapsing the two cases loses the highest-value signal — that something deliberately turned protection off and the restore was dropped or mistargeted, versus a table where access control was simply never considered. The distinction changes the remediation instructions (restore forward vs. add RLS for the first time) and, in the wrong-table-re-enable shape, names a concrete copy-paste defect a bare missing-RLS finding cannot describe at all."
