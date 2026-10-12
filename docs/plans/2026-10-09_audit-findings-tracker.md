@@ -1321,3 +1321,46 @@ invisible route, and it slips under the integrity gate that exists to make silen
 impossible. Compounding it: `deny_unknown_fields` is off for the rule struct, so a **misspelled field
 name vanishes without complaint**, and `tag` and `layer` are authored on all 417 rules while being
 parsed by nothing at all.
+
+---
+
+# CORRECTION — my `default = false` "contradiction" claim was WRONG (2026-10-11)
+
+I told Zach, and recorded above, that `kind = "default_with_exceptions"` together with `default = false`
+is "a genuine contradiction: the kind name asserts a default exists, the field says none does." I also
+recommended it as a build gate. **The mechanism I described is wrong and the gate would have been a
+false-positive generator.** Retracting both.
+
+**What `default` actually governs.** `docs/RULE_AUTHORING.md` lists it under "What a rule CAN have":
+`default = true  # ships an adopted default option (else the architect MUST choose)`. And
+`crates/rules/src/lib.rs:3446` is explicit:
+
+> "A rule can ALSO legitimately ship with no adopted default (`default = false`, typically paired with
+> `opt_in_only = true` — e.g. a rule whose right answer depends on project-specific infrastructure the
+> architect must consciously choose)."
+
+So `default` governs **onboarding adoption** and `kind` governs **option semantics**. They are
+orthogonal. `default = false` is a first-class, documented authoring choice, not a defect.
+
+**Blast radius of the gate I proposed:** 13 rules declare `opt_in_only = true`. Any of those that are
+`default_with_exceptions` would have failed the build for being authored exactly as the guide
+prescribes. `INTEGRATION-API-CONTRACT-1` and `INTEGRATION-AUTH-SEAM-1` both declare `opt_in_only = true`
+with an inline comment saying so, and were false positives of my framing.
+
+**What WAS true, and worth keeping.** The correlation was real and predictive even though my
+explanation of it was wrong: of the 11 rules I flagged, **7 were genuinely mislabeled** and were
+reclassified to `decision`, and 1 (`ARCH-HOT-READ-CACHE-1`) had a genuinely wrong `default` field. So
+it was a useful heuristic resting on a false theory. That distinction matters for gate design: the
+signal belongs in a **report**, never in a build failure.
+
+**A second correction, to W11's own report.** It described the two integration rules as "textbook
+`Defect`, not `default_with_exceptions`", and noted `INTEGRATION-AUTH-SEAM-1` cites OWASP A01 while
+sitting outside the security sweep — implying it might be silent like the 19 were. **It is not.** Both
+rules carry exactly one `violates` flag and therefore do emit. The `defect` vs
+`default_with_exceptions` question for them is a real but much smaller classification point about
+whether they should enter the alternatives pass at all, not a silence bug.
+
+**Process note.** This is the same failure this whole effort has been hunting — a confident claim that
+does not survive checking — committed by me, in the analysis rather than the code. It was caught
+because the agent was told to decide from the rule's own text and to flag disagreement rather than
+comply. That instruction is why it surfaced, and it is worth keeping in every brief.
