@@ -53,6 +53,24 @@ pub enum RuleTier {
     ExternalTool,
     /// The LLM-judged semantic audit tier.
     Semantic,
+    /// W13 — the ONE member of this enum that is not an engine: a corpus file that did not
+    /// PARSE, so no engine was ever chosen for it.
+    ///
+    /// # Why this is its own member rather than folded into one of the four engines
+    ///
+    /// Every other variant answers "which thing evaluated this rule". A rule file that failed
+    /// to load was evaluated by nothing, and there is no way to find out which engine it would
+    /// have belonged to: the tier is derived from the rule's `enforcement` field, which is
+    /// exactly the content the loader could not read. Recording it under
+    /// [`RuleTier::Deterministic`] (or any other) would be a false claim about an engine, which
+    /// is the A3 lesson one level down — see [`RuleTier::family_label`]'s doc comment on why a
+    /// label that promises membership the tier does not control is a defect in itself.
+    ///
+    /// It is deliberately LAST in [`RuleTier::all`], so every existing display order is
+    /// unchanged and the new line appears at the bottom of a coverage summary. On a healthy
+    /// scan that line reads `recorded=0 ran=0`, which is the POSITIVE disclosure "no rule file
+    /// failed to load this scan" — the one tier for which recording nothing is the good state.
+    Unloaded,
 }
 
 impl RuleTier {
@@ -85,18 +103,21 @@ impl RuleTier {
             RuleTier::Architectural => "Deterministic static-analysis / migration-replay checkers",
             RuleTier::ExternalTool => "External-tool / taint (Semgrep, etc.)",
             RuleTier::Semantic => "Semantic / advisory tier",
+            RuleTier::Unloaded => "Rule files that failed to load",
         }
     }
 
     /// Every family, in the fixed display order the ledger summary renders them — so a family
     /// with ZERO recorded rules still gets its own line instead of being silently omitted (see
     /// `render_ledger_summary`'s doc comment).
-    pub fn all() -> [RuleTier; 4] {
+    pub fn all() -> [RuleTier; 5] {
         [
             RuleTier::Deterministic,
             RuleTier::Architectural,
             RuleTier::ExternalTool,
             RuleTier::Semantic,
+            // W13, deliberately last — see `RuleTier::Unloaded`'s doc comment.
+            RuleTier::Unloaded,
         ]
     }
 }
@@ -408,6 +429,96 @@ impl ScanLedger {
         self.rules.get(&rule_id).expect("just inserted")
     }
 
+    /// W13 — record a rule whose CORPUS FILE could not be parsed, so the rule never entered
+    /// this scan's universe at all.
+    ///
+    /// # The defect this closes
+    ///
+    /// `camerata_rules::load_corpus_lenient` returns `(RuleSet, Vec<(PathBuf, RulesError)>)` and
+    /// every production call site bound the second element to `_errs`. A rule file with a
+    /// typo'd enum value therefore failed to parse, vanished from every scan, and NOTHING
+    /// reported it: not this ledger, not the coverage sheet, not `camerata integrity-gate`, not
+    /// a log line. That is a second route to the H1 outcome the mechanical build gate exists to
+    /// prevent ("a rule that could never run for ANY stack is a DEFECT"), and it is strictly
+    /// worse than the first, because a rule that never LOADED is not even a skip — it is absent
+    /// from the ledger's universe, so the gate could not see it even in principle.
+    ///
+    /// This method is the fix's entry point into the ledger: it makes the absent rule PRESENT
+    /// as `ran = false` with [`CORPUS_LOAD_FAILED_REASON`], using the ledger's own existing
+    /// vocabulary rather than a parallel channel. Everything downstream then works unchanged:
+    /// [`Self::excluded_rules`] lists it (so both the report JSON and the workbook disclose it),
+    /// [`Self::healthy_rule_ids`] excludes it (it can never read as verified-clean), and
+    /// [`crate::integrity_gate::SkipClass::classify`] maps the reason to its own
+    /// `corpus_load_failed` class, which fails the gate.
+    ///
+    /// `rule_id` is derived from the file STEM by the caller
+    /// (`camerata_server::rule_id_from_corpus_path`) — the id inside the file is unreadable by
+    /// definition, and in this corpus the stem IS the lowercased rule id for every file.
+    ///
+    /// # Why this is NOT just a [`Self::record_rule`] call
+    ///
+    /// It was, in the first cut, and the e2e harness caught it immediately. `record_rule`
+    /// ACCUMULATES: it keeps the `skip_reason` from the FIRST not-run observation. By the time
+    /// this runs, `audit_repos` has usually already recorded every SELECTED rule — and a
+    /// selection can still name a rule whose file has since broken (selections are persisted
+    /// per project; the corpus moves underneath them). So the ledger already held
+    /// `skip_reason: "AI/semantic review not requested this run"`, and `record_rule` dropped
+    /// the real reason on the floor. That is worse than the defect being fixed: the ledger
+    /// AFFIRMATIVELY CLAIMED a justified scope choice for a rule that did not exist, which
+    /// classifies as [`crate::integrity_gate::SkipClass::ScopedOut`] and PASSES the gate.
+    ///
+    /// Three cases, each handled by what is actually true rather than by one blanket rule:
+    ///
+    /// 1. **No prior entry** (the dominant production shape — the selection is derived FROM the
+    ///    corpus, so a rule missing from the corpus is normally never selected). Insert at
+    ///    [`RuleTier::Unloaded`] with [`CORPUS_LOAD_FAILED_REASON`].
+    /// 2. **A prior entry that did NOT run.** The corpus-load reason WINS: any other recorded
+    ///    reason is incidental (derived from a selection list, not from the corpus) while "its
+    ///    file would not parse" is the dominant, root cause. `tier` and the counters are
+    ///    PRESERVED, deliberately — retiering would silently move the rule out of whichever
+    ///    engine's bucket the gate's `dark_tier` / `tier_absent` arithmetic counted it in.
+    /// 3. **A prior entry that DID run.** Reachable: the always-on content floor
+    ///    (`onboard::AUDIT_RULES`) keys on hardcoded rule IDS, not on corpus content, so its
+    ///    detector can genuinely evaluate a rule whose `.toml` is broken. `ran`, the counters
+    ///    and `skip_reason` are left EXACTLY as they stand — walking `ran` back to `false`
+    ///    would be a false claim, and zeroing `findings_emitted` would erase real findings from
+    ///    the ledger's own accounting.
+    ///
+    /// In all three cases [`RuleLedgerEntry::coverage_note`] is set to
+    /// [`CORPUS_LOAD_FAILED_NOTE`]. That field exists for precisely this shape — an "honest,
+    /// ADDITIVE disclosure that survives regardless of `ran`/`skip_reason`" — and it gives the
+    /// integrity gate ONE uniform trigger that works in case 3, where there is no skip reason
+    /// to classify. A rule that ran without its authored text still produced a degraded report
+    /// (no authored remediation, no severity bounds, no options), so it must still fail the
+    /// gate.
+    pub fn record_corpus_load_failure(&mut self, rule_id: impl Into<String>) -> &RuleLedgerEntry {
+        let rule_id = rule_id.into();
+        match self.rules.get_mut(&rule_id) {
+            Some(existing) => {
+                if !existing.ran {
+                    existing.skip_reason = Some(CORPUS_LOAD_FAILED_REASON.to_string());
+                }
+                existing.coverage_note = Some(CORPUS_LOAD_FAILED_NOTE.to_string());
+            }
+            None => {
+                self.rules.insert(
+                    rule_id.clone(),
+                    RuleLedgerEntry {
+                        rule_id: rule_id.clone(),
+                        tier: RuleTier::Unloaded,
+                        ran: false,
+                        skip_reason: Some(CORPUS_LOAD_FAILED_REASON.to_string()),
+                        files_evaluated: 0,
+                        findings_emitted: 0,
+                        coverage_note: Some(CORPUS_LOAD_FAILED_NOTE.to_string()),
+                        not_applicable: false,
+                    },
+                );
+            }
+        }
+        self.rules.get(&rule_id).expect("just recorded")
+    }
+
     /// Record one stage's row accounting, computing `unaccounted` as the remainder NOT
     /// explained by `accounting`, in WHICHEVER direction `rows_in`/`rows_out` actually moved:
     /// `rows_in > rows_out` (a stage that shrank the row set) reconciles against
@@ -646,6 +757,47 @@ pub fn stage_disclosure(
 /// "no detector" skip reason MUST embed this constant verbatim (not retype the phrase), and
 /// `rule_disclosure` checks against the SAME constant, so the two can never drift apart.
 pub const NO_WIRED_DETECTOR_REASON: &str = "no wired detector";
+
+/// W13 — the exact `skip_reason` recorded for a rule whose CORPUS FILE could not be parsed,
+/// and the substring [`crate::integrity_gate::SkipClass::classify`] keys on to recognise that
+/// shape. Same producer/checker-share-one-constant discipline as
+/// [`NO_WIRED_DETECTOR_REASON`]: every producer must embed this constant verbatim rather than
+/// retype the phrase, so a wording edit cannot silently decouple the recording site from the
+/// gate that fails on it.
+///
+/// # Why the wording is this bare
+///
+/// This string is CLIENT-FACING. A `skip_reason` flows straight into the report JSON's
+/// `rules_not_run` section and the workbook's "Rules not run this scan" sheet, so it may never
+/// carry the thing an operator actually needs — the file path and the parser's own message.
+/// Those live in the `tracing::error!` line and the internal [`crate::onboard::CoverageNote`]
+/// that `camerata_server::record_corpus_load_failures` writes alongside this entry; neither
+/// reaches a client artifact (only `osv-scanner` notes are exported, see
+/// `report_export::build_report_json`'s `dep_coverage_notes`). This is the W6 precedent held
+/// the right way round: the detail is KEPT, just not in the deliverable.
+pub const CORPUS_LOAD_FAILED_REASON: &str = "rule file could not be loaded";
+
+/// W13 — the ADDITIVE [`RuleLedgerEntry::coverage_note`] text set on every rule whose corpus
+/// file would not parse, and the marker [`crate::integrity_gate`] keys on to fail the gate.
+///
+/// Why a second constant rather than only [`CORPUS_LOAD_FAILED_REASON`]: `skip_reason` only
+/// ever means "why this rule did NOT run", and the content floor
+/// (`crate::onboard::AUDIT_RULES`) keys on hardcoded rule IDS rather than corpus content, so a
+/// rule with a broken `.toml` can still genuinely RUN. In that case there is no skip reason to
+/// classify, and `coverage_note` is the field designed to survive regardless of `ran` — so the
+/// gate reads THIS, giving it one uniform trigger across all three cases
+/// [`ScanLedger::record_corpus_load_failure`] documents.
+///
+/// Unlike `CORPUS_LOAD_FAILED_REASON` this is OPERATOR-facing (a `coverage_note` reaches the
+/// persisted ledger and the UI, never a client artifact — only `skip_reason` is exported), so
+/// it may explain the consequence. It still carries no PATH: the ledger is diffed across
+/// machines, and the path belongs in the `tracing::error!` line and the per-file
+/// `crate::onboard::CoverageNote`.
+pub const CORPUS_LOAD_FAILED_NOTE: &str =
+    "rule file could not be loaded: this rule's corpus file failed to parse, so none of its \
+     authored text was available this scan (no directive, no remediation, no severity bounds, \
+     no options). Any evaluation recorded for it came from a hardcoded detector, never from \
+     the rule as authored.";
 
 /// The honest [`RuleLedgerEntry::coverage_note`] text for a CI-tier rule whose registered
 /// architectural checker is CONFIG-GATED and could not produce a deterministic verdict for
@@ -1438,5 +1590,204 @@ mod tests {
             .fired_rule_ids()
             .contains("ARCH-RESOURCE-LIFECYCLE-1"));
         assert!(ledger.excluded_rules().is_empty());
+    }
+
+    // ── req_w13: a rule whose CORPUS FILE would not parse ────────────────────────────────
+    //
+    // The ledger half. Every production corpus load discarded `load_corpus_lenient`'s error
+    // list, so a rule file with a typo'd enum value vanished from the scan and the ledger —
+    // the honest record of what ran — had no entry for it at all. Absent is strictly worse
+    // than skipped: a skip is at least visible to `excluded_rules()` and the integrity gate.
+
+    /// req_w13: an unloadable rule is recorded as NOT RUN, can never read as verified clean,
+    /// and reaches the "rules not run this scan" surface every artifact renders from.
+    #[test]
+    fn req_w13_a_corpus_load_failure_is_recorded_as_not_run_and_never_verified_clean() {
+        let mut ledger = ScanLedger::new();
+        // A healthy rule beside it, so this is not passing merely because nothing is credited.
+        ledger.record_rule("SEC-NO-RAW-SQL-CONCAT-1", RuleTier::Deterministic, true, None, 3, 0);
+        ledger.record_corpus_load_failure("SEC-NO-SILENT-CORPUS-DROP-1");
+
+        let entry = ledger
+            .rule("SEC-NO-SILENT-CORPUS-DROP-1")
+            .expect("the ledger must carry an entry for a rule file that would not parse — \
+                    ABSENT is the defect");
+        assert!(!entry.ran, "a rule that never loaded never ran");
+        assert!(
+            !entry.verified_clean(),
+            "an unloadable rule must never read as verified clean"
+        );
+        assert_eq!(entry.tier, RuleTier::Unloaded);
+        assert_eq!(entry.findings_emitted, 0);
+        assert_eq!(entry.files_evaluated, 0);
+
+        assert!(
+            !ledger
+                .healthy_rule_ids()
+                .contains(&"SEC-NO-SILENT-CORPUS-DROP-1".to_string()),
+            "it must be excluded from What's healthy: {:?}",
+            ledger.healthy_rule_ids()
+        );
+        assert!(
+            ledger
+                .healthy_rule_ids()
+                .contains(&"SEC-NO-RAW-SQL-CONCAT-1".to_string()),
+            "anti-vacuity: the genuinely clean rule is still credited"
+        );
+
+        let excluded = ledger.excluded_rules();
+        let hit = excluded
+            .iter()
+            .find(|(id, _)| *id == "SEC-NO-SILENT-CORPUS-DROP-1")
+            .expect("it must appear in `excluded_rules()`, which is what the report JSON's \
+                    `rules_not_run` and the workbook's coverage sheet both render from");
+        assert_eq!(
+            hit.1, CORPUS_LOAD_FAILED_REASON,
+            "the reason must be the shared constant verbatim, so the gate's classifier cannot \
+             decouple from this producer"
+        );
+    }
+
+    /// req_w13: the recorded reason is CLIENT-SAFE. It flows straight into the report JSON's
+    /// `rules_not_run` and the workbook's "Rules not run this scan" sheet, so it may not carry
+    /// a filesystem path, a file extension, or TOML/parser vocabulary. The operator detail
+    /// lives in the `tracing::error!` line and the internal `CoverageNote` instead — the W6
+    /// precedent (`run_capture_stdout` discarding stderr) held the right way round: the detail
+    /// is KEPT, just not in the deliverable.
+    #[test]
+    fn req_w13_the_recorded_reason_is_client_safe_and_carries_no_operator_detail() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_corpus_load_failure("SEC-NO-SILENT-CORPUS-DROP-1");
+        let reason = ledger
+            .rule("SEC-NO-SILENT-CORPUS-DROP-1")
+            .and_then(|e| e.skip_reason.clone())
+            .expect("a reason must be recorded");
+
+        for leak in [".toml", "/", "\\", "TOML", "toml", "parse error", "expected"] {
+            assert!(
+                !reason.contains(leak),
+                "the client-facing reason must not contain {leak:?}: {reason}"
+            );
+        }
+        assert!(
+            reason.len() < 60,
+            "G3 concision: this is a cell in a client's coverage sheet, not a diagnostic dump \
+             ({} chars): {reason}",
+            reason.len()
+        );
+        // And it is one line, never a multi-line error rendering.
+        assert_eq!(reason.lines().count(), 1, "exactly one line: {reason}");
+    }
+
+    /// req_w13, CASE 2 — the one the e2e harness caught in the first cut of this fix. When the
+    /// ledger ALREADY holds a not-run entry for the rule (a persisted project selection can
+    /// still name a rule whose file has since broken), the corpus-load reason must WIN.
+    ///
+    /// `record_rule`'s accumulate semantics keep the FIRST not-run reason, so a naive
+    /// implementation left `skip_reason: "AI/semantic review not requested this run"` in
+    /// place — which is WORSE than the defect being fixed. That reason classifies as
+    /// `ScopedOut`, i.e. JUSTIFIED, so the ledger affirmatively claimed a legitimate scope
+    /// choice for a rule that did not exist, and the gate PASSED.
+    #[test]
+    fn req_w13_the_corpus_load_reason_overrides_an_incidental_skip_reason() {
+        let mut ledger = ScanLedger::new();
+        // Exactly what `audit_repos` records for a selected rule on a no-AI-review scan.
+        ledger.record_rule(
+            "SUPABASE-RLS-ENABLED-1",
+            RuleTier::Semantic,
+            false,
+            Some("AI/semantic review not requested this run".to_string()),
+            0,
+            0,
+        );
+        ledger.record_corpus_load_failure("SUPABASE-RLS-ENABLED-1");
+
+        let entry = ledger.rule("SUPABASE-RLS-ENABLED-1").unwrap();
+        assert_eq!(
+            entry.skip_reason.as_deref(),
+            Some(CORPUS_LOAD_FAILED_REASON),
+            "the ROOT cause must win over the incidental one — otherwise the ledger claims a \
+             justified scope choice for a rule that does not exist"
+        );
+        assert_eq!(
+            entry.coverage_note.as_deref(),
+            Some(CORPUS_LOAD_FAILED_NOTE)
+        );
+        assert_eq!(
+            entry.tier,
+            RuleTier::Semantic,
+            "the tier is PRESERVED: retiering would move the rule out of the bucket the gate's \
+             dark_tier / tier_absent arithmetic already counted it in"
+        );
+    }
+
+    /// req_w13, CASE 3 — a rule can RUN while its own corpus file is unparseable, because the
+    /// always-on content floor (`onboard::AUDIT_RULES`) keys on hardcoded rule IDS rather than
+    /// on corpus content. Its execution facts must be left alone (walking `ran` back to
+    /// `false` would be a false claim; zeroing `findings_emitted` would erase real findings
+    /// from the ledger's own accounting), and the disclosure must ride the ADDITIVE
+    /// `coverage_note` instead — which is what the gate reads in this case.
+    #[test]
+    fn req_w13_a_rule_that_ran_despite_a_broken_file_keeps_its_execution_facts() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            RuleTier::Deterministic,
+            true,
+            None,
+            7,
+            3,
+        );
+        ledger.record_corpus_load_failure("SEC-NO-RAW-SQL-CONCAT-1");
+
+        let entry = ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
+        assert!(entry.ran, "a rule that genuinely ran must not be downgraded");
+        assert_eq!(entry.findings_emitted, 3, "real findings must not be erased");
+        assert_eq!(entry.files_evaluated, 7);
+        assert_eq!(entry.tier, RuleTier::Deterministic);
+        assert!(
+            entry.skip_reason.is_none(),
+            "`skip_reason` only ever means 'why it did NOT run'; this rule ran"
+        );
+        assert_eq!(
+            entry.coverage_note.as_deref(),
+            Some(CORPUS_LOAD_FAILED_NOTE),
+            "the additive disclosure is the ONLY honest channel here, and is what the gate \
+             reads for this case"
+        );
+        // Still credited as fired, so no accounting elsewhere silently shifts.
+        assert!(ledger.fired_rule_ids().contains("SEC-NO-RAW-SQL-CONCAT-1"));
+    }
+
+    /// req_w13: the `Unloaded` tier is the one member of `RuleTier` that is not an engine, so
+    /// pin the two properties that keep it honest — it is LAST in `all()` (every pre-existing
+    /// display order is unchanged) and its label still obeys the A3 rule that no tier label may
+    /// borrow a corpus rule-id family name. The A3 gate itself
+    /// (`req_a3_no_tier_family_label_borrows_a_corpus_rule_family_name`) covers the label
+    /// against the real corpus; this pins the ordering the A3 gate cannot see.
+    #[test]
+    fn req_w13_the_unloaded_tier_is_last_and_does_not_disturb_the_existing_display_order() {
+        let all = RuleTier::all();
+        assert_eq!(
+            all.last().copied(),
+            Some(RuleTier::Unloaded),
+            "Unloaded must be last so no existing coverage summary reorders"
+        );
+        assert_eq!(
+            &all[..4],
+            &[
+                RuleTier::Deterministic,
+                RuleTier::Architectural,
+                RuleTier::ExternalTool,
+                RuleTier::Semantic,
+            ],
+            "the four ENGINE tiers keep their order and their positions"
+        );
+        assert_eq!(
+            RuleTier::Unloaded.family_label(),
+            "Rule files that failed to load",
+            "pinned: this label is rendered into `camerata inspect`'s coverage summary and the \
+             integrity gate's report"
+        );
     }
 }
