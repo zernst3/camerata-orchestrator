@@ -15,6 +15,13 @@
 #      the once-#[ignore]d C5 observability assertion runs here by DEFAULT and must be green.
 #   2. I2 — the pre-flight integrity gate's own unit suite, both halves (engine + CLI).
 #   3. The C11 eslint regression suite.
+#   4. W13 — the corpus-load integrity harness. "No silent non-execution" (I1's INV-3) had a
+#      hole: it asserted that every rule the LEDGER says did not run is named in an artifact,
+#      and a rule whose own `.toml` failed to parse produced no ledger entry at all, so it was
+#      outside the invariant's reach entirely. This block scans a synthetic repo with a
+#      synthetic corpus containing one deliberately malformed rule file, and asserts the rule
+#      is recorded, disclosed, and FAILS the integrity gate — plus a control proving the same
+#      scan over an intact corpus still passes, so the gate stays switched on.
 #
 # `--include-known-red` is kept for the next deliberately-red measurement; today there are no
 # #[ignore]d tests in the harness, so it adds nothing.
@@ -44,6 +51,11 @@ cargo test -p camerata --lib integrity_gate_cmd
 echo
 echo "── C11: eslint preview regression suite ───────────────────────────────────────"
 cargo test -p camerata-server --lib req_c11
+
+echo
+echo "── W13: corpus-load integrity (a rule file that would not parse) ──────────────"
+cargo test -p camerata-server --test corpus_load_failure_e2e
+cargo test -p camerata-server --lib req_w13
 
 if [ "$INCLUDE_KNOWN_RED" -eq 1 ]; then
   echo

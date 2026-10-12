@@ -154,6 +154,16 @@ const REGISTRY: &[(&str, Coverage)] = &[
     ("H1", Required(&["req_h1", "req_a6"])),
     ("I1", Required(&["req_i1"])),
     ("I2", Required(&["req_i2"])),
+    // W13, found 2026-10-11: every PRODUCTION corpus load was lenient AND discarded the parse
+    // errors (`let (corpus, _errs) = load_corpus_lenient(..)`), while several test files bound
+    // and asserted on them. So a rule file with a typo'd enum value failed to parse, vanished
+    // from every scan, and nothing reported it — not the ledger, not the coverage sheet, not
+    // `camerata integrity-gate`, not a log line. A second route to the H1 outcome, and one that
+    // walks under the gate built to stop it: a rule that never loaded is not a skip, it is
+    // absent from the ledger's universe. Registered under its workstream id because the tracker
+    // has no requirement letter for corpus-load integrity; same recorded-indirection pattern as
+    // B1/B4 -> `req_d1`/`req_d2` and W5-Q2 -> `req_w8`.
+    ("W13", Required(&["req_w13"])),
     // ── Pass 3 — CLIENT DELIVERABLES ───────────────────────────────────────────────────────────
     // Zach's three-pass sequence: "PDF = the summary ... Excel = the meat and potatoes. Needs
     // rethinking: separate worksheets for findings, conventions, deviations, coverage ... JSON =
