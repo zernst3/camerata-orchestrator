@@ -366,7 +366,12 @@ pub async fn run_inspect_with_key_presence(
     // the FULL curated `selected` — it needs every id both to arm the deterministic
     // architectural engine (`repo_selected_ids`) and to build its own semantic/AI prompt,
     // which now includes every selected, code-auditable rule (CI-tier or not).
-    let (_ai_scannable_only, excluded_mechanical, preview_rules, corpus) =
+    // W13: the fifth element is the corpus-load failure list this function used to discard.
+    // It MUST be consumed — see `record_corpus_load_failures` below. This matters most here
+    // of all three scan entry points, because `camerata inspect` is what WRITES the ledger
+    // `camerata integrity-gate` later evaluates: dropping it here would leave the gate
+    // evaluating a ledger from which the unloadable rules are absent.
+    let (_ai_scannable_only, excluded_mechanical, preview_rules, corpus, corpus_load_failures) =
         camerata_server::split_scannable_rules(selected.clone()).await;
 
     // ── Backend resolution + the process-local usage ledger ────────────────────────────
@@ -419,6 +424,12 @@ pub async fn run_inspect_with_key_presence(
 
     save_manifest(&args.repo, &manifest);
     report.excluded_mechanical_rules = excluded_mechanical;
+    // W13: mirrors `onboard_audit`/`onboard_audit_start`'s own call site in
+    // `camerata_server::lib` exactly — every corpus file that would not parse is disclosed
+    // into `report.ledger` (and so into the ledger `save_ledger` persists below, which is
+    // what `camerata integrity-gate` reads), into one concise client-facing coverage line,
+    // and into the operator log with its full path and parser message.
+    camerata_server::record_corpus_load_failures(&mut report, &corpus_load_failures);
 
     // ── Phase 4: the SAME scan-time preview-linter + dep-audit passes `onboard_audit` runs ──
     camerata_server::merge_scan_preview(
@@ -564,6 +575,32 @@ pub fn render_ledger_summary(
         let skipped = rules.len() - ran;
         let findings: usize = rules.iter().map(|r| r.findings_emitted).sum();
 
+        // W13: `RuleTier::Unloaded` is the ONE member of this enum that is not an engine — it
+        // holds rules whose own corpus file would not parse (see its doc comment). For it, and
+        // only for it, ZERO recorded rules is the GOOD state, so the `!!` alarm polarity is
+        // inverted: an empty bucket is a positive disclosure ("the rule library loaded
+        // cleanly") and a NON-empty one is the alarm. Printing "this family never ran at all"
+        // here would be the gate-cries-wolf failure mode on every single correct scan.
+        if tier == RuleTier::Unloaded {
+            if rules.is_empty() {
+                writeln!(
+                    out,
+                    "  {:<40} none — the rule library loaded cleanly",
+                    tier.family_label(),
+                )
+                .ok();
+            } else {
+                writeln!(
+                    out,
+                    "  {:<40} !! {} rule file(s) FAILED TO PARSE — those rules did not enter \
+                     this scan at all; see NOT RUN below and the operator log for each path",
+                    tier.family_label(),
+                    rules.len(),
+                )
+                .ok();
+            }
+            continue;
+        }
         if rules.is_empty() {
             writeln!(
                 out,
@@ -942,6 +979,53 @@ mod tests {
         assert!(
             !text.contains("!!"),
             "a clean ledger must raise no alarm markers: {text}"
+        );
+    }
+
+    /// req_w13: the `Unloaded` family's alarm polarity is INVERTED, and this is the one place
+    /// in the summary where that is true.
+    ///
+    /// It is not an engine — it holds rules whose own corpus file would not parse — so an
+    /// empty bucket means "the rule library loaded cleanly" and a non-empty one is the alarm.
+    /// The generic "ZERO RULES RECORDED — this family never ran at all" line would otherwise
+    /// fire on EVERY correct scan, which is the cries-wolf failure mode that gets a gate
+    /// switched off (it did fire, on
+    /// `render_ledger_summary_clean_ledger_has_no_alarms`, the moment the tier was added).
+    #[test]
+    fn req_w13_the_unloaded_family_alarms_on_a_broken_rule_file_not_on_an_empty_bucket() {
+        // Empty bucket: a positive disclosure, no alarm.
+        let mut clean = ScanLedger::new();
+        clean.record_rule("SEC-NO-RAW-SQL-CONCAT-1", RuleTier::Deterministic, true, None, 4, 0);
+        let clean_text = render_ledger_summary(&clean, &[], false);
+        let clean_line = clean_text
+            .lines()
+            .find(|l| l.contains(RuleTier::Unloaded.family_label()))
+            .expect("the family must always get its own line, never silent omission");
+        assert!(
+            !clean_line.contains("!!"),
+            "an empty Unloaded bucket is the GOOD state: {clean_line}"
+        );
+        assert!(
+            clean_line.contains("the rule library loaded cleanly"),
+            "and it must say so positively rather than printing a bare zero: {clean_line}"
+        );
+
+        // A broken rule file: the alarm.
+        let mut broken = clean.clone();
+        broken.record_corpus_load_failure("SUPABASE-RLS-ENABLED-1");
+        let broken_text = render_ledger_summary(&broken, &[], false);
+        let broken_line = broken_text
+            .lines()
+            .find(|l| l.contains(RuleTier::Unloaded.family_label()))
+            .expect("the family line must still be present");
+        assert!(
+            broken_line.contains("!!") && broken_line.contains("FAILED TO PARSE"),
+            "a rule file that would not parse must raise the loud marker: {broken_line}"
+        );
+        // And the rule itself is named in NOT RUN, so a reader gets the id, not just a count.
+        assert!(
+            broken_text.contains("SUPABASE-RLS-ENABLED-1"),
+            "the NOT RUN section must name it: {broken_text}"
         );
     }
 

@@ -1339,23 +1339,39 @@ pub const AUDIT_REPORT_DISCLAIMER: &str =
 /// repetition). The full per-note detail stays where it already lives: the UI and the ledger.
 /// Rendered via the existing `failed_passes` channel (executive summary + methodology in the
 /// PDF/JSON — no template change) and as the Coverage sheet's "Tool coverage notes" section.
+///
+/// W13 adds a third arm for [`crate::RULE_CORPUS_COVERAGE_TOOL`] — a rule whose own `.toml`
+/// would not parse, so the rule never entered the scan. It gets ONE line for the whole scan
+/// (with a count, because "how much of the rule library was missing" is the only quantity a
+/// client can act on) and it deliberately carries NEITHER the file path NOR the `RulesError`
+/// text: both name the reviewer's filesystem and TOML internals, and both stay in the note's
+/// own `message` plus the `tracing::error!` line, which no client artifact reads.
 pub(crate) fn tool_coverage_disclosures(
     notes: &[crate::onboard::CoverageNote],
 ) -> Vec<String> {
-    let tools: std::collections::BTreeSet<&str> = notes
-        .iter()
-        .filter(|n| n.tool != "osv-scanner")
-        .map(|n| n.tool.as_str())
-        .collect();
-    tools
+    // Counted per tool, not merely collected: the W13 arm states HOW MANY rules were missing
+    // from the library, which one deduplicated tool name cannot express.
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for note in notes.iter().filter(|n| n.tool != "osv-scanner") {
+        *counts.entry(note.tool.as_str()).or_insert(0) += 1;
+    }
+    counts
         .into_iter()
-        .map(|tool| {
+        .map(|(tool, count)| {
             if tool == "unrouted" {
                 // Not a tool name a client would recognize: these notes mean "a selected
                 // check had no scan-time tool available at all".
                 "Some selected checks had no scan-time preview tool available this run; \
                  they are not reflected in this report and enforce once wired into CI."
                     .to_string()
+            } else if tool == crate::RULE_CORPUS_COVERAGE_TOOL {
+                // Also not a tool name: these notes mean "a rule file in the library could
+                // not be read, so that rule was never applied".
+                format!(
+                    "{} in the rule library could not be loaded this scan and did not run; \
+                     anything they would have reported is not reflected in this report.",
+                    noun(count, "rule", "rules"),
+                )
             } else {
                 format!(
                     "The {tool} static-analysis checks did not fully run this scan; \
@@ -9110,6 +9126,99 @@ mod tests {
                 .iter()
                 .any(|n| n.contains("osv-scanner")),
             "osv-scanner notes belong to the dependency snapshot, not the tool lines: {:?}",
+            json.executive_summary.failed_passes
+        );
+    }
+
+    /// req_w13 (G3): a rule whose own corpus file would not parse gets ONE concise,
+    /// client-facing line — with a count, because "how much of the rule library was missing"
+    /// is the only quantity a client can act on — and NEVER the file path or the `RulesError`
+    /// text, both of which name the reviewer's filesystem and TOML internals.
+    ///
+    /// FAILS BEFORE THE FIX: `tool_coverage_disclosures` had no arm for
+    /// `RULE_CORPUS_COVERAGE_TOOL`, so two such notes rendered as "The rule-corpus
+    /// static-analysis checks did not fully run this scan" — a sentence that names a tool the
+    /// client does not have, says nothing about how many rules were missing, and reads as a
+    /// tool failure rather than a rule-library gap. (And upstream of that, nothing produced
+    /// the notes at all: the whole channel is W13's.)
+    #[test]
+    fn req_w13_the_client_facing_corpus_load_line_is_one_concise_line_with_a_count() {
+        let mut report = report_with(vec![], vec![]);
+        report.coverage_notes = vec![
+            CoverageNote {
+                tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
+                message: "/Users/someone/corpus/supabase/rls/a.toml did not parse, so rule \
+                          SUPABASE-RLS-ENABLED-1 was not loaded and did not run: TOML parse \
+                          error in a.toml: unknown variant `architectual`"
+                    .to_string(),
+            },
+            CoverageNote {
+                tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
+                message: "/Users/someone/corpus/universal/b.toml did not parse, so rule \
+                          SEC-NO-RAW-SQL-CONCAT-1 was not loaded and did not run: TOML parse \
+                          error in b.toml: expected a value"
+                    .to_string(),
+            },
+        ];
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        let lines: Vec<&String> = json
+            .executive_summary
+            .failed_passes
+            .iter()
+            .filter(|n| n.contains("rule library"))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "G3: exactly ONE line for the whole scan, never one per broken file: {:?}",
+            json.executive_summary.failed_passes
+        );
+        let line = lines[0];
+        assert_eq!(
+            line,
+            "2 rules in the rule library could not be loaded this scan and did not run; \
+             anything they would have reported is not reflected in this report.",
+            "the exact client-facing wording is pinned: it ships in a client PDF"
+        );
+        // The same line, verbatim, in the methodology — a reader must hit the identical
+        // statement wherever they look, which is the W7 shape this reuses.
+        assert!(json.methodology.failed_passes.contains(line));
+
+        // G3's prohibition: never the raw diagnostics.
+        for leak in [
+            "/Users/someone",
+            ".toml",
+            "TOML parse error",
+            "architectual",
+            "unknown variant",
+            "rule-corpus",
+        ] {
+            assert!(
+                !line.contains(leak),
+                "the client line must not carry {leak:?}: {line}"
+            );
+        }
+        // No em/en dash (house style for this deliverable — see `AUDIT_REPORT_DISCLAIMER`).
+        assert!(!line.contains('\u{2014}') && !line.contains('\u{2013}'), "{line}");
+    }
+
+    /// req_w13: the line pluralizes honestly. One broken rule file is "1 rule", not
+    /// "1 rule(s)" — the same real-pluralization bar the rest of this report holds (S8).
+    #[test]
+    fn req_w13_the_client_facing_corpus_load_line_pluralizes_correctly() {
+        let mut report = report_with(vec![], vec![]);
+        report.coverage_notes = vec![CoverageNote {
+            tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
+            message: "x.toml did not parse".to_string(),
+        }];
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert!(
+            json.executive_summary
+                .failed_passes
+                .iter()
+                .any(|n| n.starts_with("1 rule in the rule library")),
+            "expected singular '1 rule', got: {:?}",
             json.executive_summary.failed_passes
         );
     }

@@ -5105,8 +5105,17 @@ const SCAN_AUDIT_KEY: &str = "scan-audit";
 /// preview). The loaded `corpus` is returned so the caller can resolve each rule's linter source
 /// without re-loading it.
 ///
-/// Returns `(scannable, excluded_ci_tier_ids, preview_rules, corpus)` — shape kept stable for
-/// every existing caller; `excluded_ci_tier_ids` is now always `Vec::new()`.
+/// Returns `(scannable, excluded_ci_tier_ids, preview_rules, corpus, corpus_load_failures)`.
+/// `excluded_ci_tier_ids` is now always `Vec::new()`.
+///
+/// # W13: the fifth element is NOT optional to consume
+///
+/// This used to be a 4-tuple that dropped `load_corpus_lenient`'s error list on the floor
+/// (`load_corpus_lenient(&corpus_path).await.0`). A rule file with a typo'd enum value failed to
+/// parse, left the corpus, and nothing reported it — not the ledger, not the coverage sheet, not
+/// `camerata integrity-gate`, not a log line. Every caller that goes on to run a SCAN must pass
+/// the fifth element to [`record_corpus_load_failures`] once its `ScanReport` exists; see that
+/// function's doc comment for where the information then goes.
 ///
 /// `pub`: also called directly by `camerata inspect` (the headless CLI, mirroring
 /// `onboard_audit`'s own pipeline so the two never drift — see
@@ -5118,13 +5127,29 @@ pub async fn split_scannable_rules(
     Vec<String>,
     Vec<crate::onboard::SelectedRule>,
     Option<camerata_rules::RuleSet>,
+    Vec<CorpusLoadFailure>,
 ) {
-    let corpus_path = camerata_rules::corpus_path();
-    let set = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
-    } else {
-        None
-    };
+    split_scannable_rules_from(&camerata_rules::corpus_path(), selected).await
+}
+
+/// [`split_scannable_rules`] against an EXPLICIT corpus directory.
+///
+/// The seam exists for one reason: `camerata_rules::corpus_path()` reads the process-global
+/// `CAMERATA_CORPUS_PATH` env var, so a test that wanted to drive this function over a
+/// deliberately-malformed synthetic corpus could only do it by mutating process state and
+/// racing every other test in the binary. With the path as a parameter, the W13 tests point at
+/// a `tempfile` corpus directly and nothing global moves.
+pub async fn split_scannable_rules_from(
+    corpus_dir: &std::path::Path,
+    selected: Vec<crate::onboard::SelectedRule>,
+) -> (
+    Vec<crate::onboard::SelectedRule>,
+    Vec<String>,
+    Vec<crate::onboard::SelectedRule>,
+    Option<camerata_rules::RuleSet>,
+    Vec<CorpusLoadFailure>,
+) {
+    let (set, load_failures) = load_corpus_for_scan(corpus_dir).await;
     // A CI-tier mechanical rule is PREVIEW-runnable unless it is layer3_only. This is the ONLY
     // thing this function still partitions on — see the doc comment above for why AI-scannability
     // no longer depends on CI-tier at all.
@@ -5142,7 +5167,144 @@ pub async fn split_scannable_rules(
     // Every selected rule reaches the semantic pass now — no CI-tier exclusion.
     let scannable = selected;
     let excluded: Vec<String> = Vec::new();
-    (scannable, excluded, preview, set)
+    (scannable, excluded, preview, set, load_failures)
+}
+
+/// W13 — ONE rule file the corpus loader could not parse, kept rather than discarded.
+///
+/// The three fields are deliberately split by AUDIENCE, because conflating them is how this
+/// defect's sibling (W6's `run_capture_stdout` dropping stderr) wasted an operator's time:
+///
+/// - [`Self::rule_id`] is the only CLIENT-SAFE field. It is a plain rule id, which a client
+///   already sees throughout the deliverable.
+/// - [`Self::path`] and [`Self::error`] are OPERATOR-ONLY. The path names the reviewer's own
+///   filesystem layout and the error names TOML internals; neither belongs in a client
+///   artifact, and [`record_corpus_load_failures`] keeps both out of one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorpusLoadFailure {
+    /// The rule id, derived from the file STEM by [`rule_id_from_corpus_path`] — the id
+    /// declared INSIDE the file is unreadable by definition here.
+    pub rule_id: String,
+    /// Full path to the offending file. Operator-only; never exported.
+    pub path: std::path::PathBuf,
+    /// The loader's own message (`RulesError`'s `Display`), naming the TOML problem.
+    /// Operator-only; never exported.
+    pub error: String,
+}
+
+/// Derive the rule id for an unparseable corpus file from its FILE STEM, uppercased.
+///
+/// In this corpus the stem IS the lowercased rule id for every single file
+/// (`principles/api-layer/arch-handler-no-db-1.toml` declares `id = "ARCH-HANDLER-NO-DB-1"`),
+/// so the stem is the most faithful handle available — and the id inside the file cannot be
+/// read, because failing to read the file is the whole problem.
+///
+/// `load_corpus_lenient` has one error shape that is NOT a per-file parse failure: when the
+/// recursive walk itself fails it returns `(corpus_dir, err)`, i.e. a DIRECTORY. A directory's
+/// stem is not a rule id, so that case gets the explicit sentinel `RULE-CORPUS` rather than a
+/// plausible-looking lie (a line reading `API-LAYER: rule file could not be loaded` would send
+/// a reader hunting for a rule that does not exist).
+pub fn rule_id_from_corpus_path(path: &std::path::Path) -> String {
+    let is_toml_file = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
+    if !is_toml_file {
+        return "RULE-CORPUS".to_string();
+    }
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_uppercase())
+        .unwrap_or_else(|| "RULE-CORPUS".to_string())
+}
+
+/// W13 — load the rule corpus for a scan: the rules that parsed, PLUS an honest record of
+/// every file that did not.
+///
+/// This is the replacement for the `load_corpus_lenient(&p).await.0` idiom on the scan path.
+/// `None` for the corpus means the directory does not exist at all (the pre-existing
+/// degrade-soft contract every corpus-optional join in this codebase already has); an EMPTY
+/// failure list means every `.toml` under it parsed.
+///
+/// Deliberately NOT `camerata_rules::load_corpus` (the strict, `Result`-returning loader). It
+/// exists, but switching production to it would mean one malformed rule file fails an entire
+/// client scan — trading an invisible failure for a brittle one. The corpus still loads
+/// leniently; what changes is that the errors now go somewhere.
+pub async fn load_corpus_for_scan(
+    corpus_dir: &std::path::Path,
+) -> (Option<camerata_rules::RuleSet>, Vec<CorpusLoadFailure>) {
+    if !corpus_dir.exists() {
+        return (None, Vec::new());
+    }
+    let (set, errors) = camerata_rules::load_corpus_lenient(corpus_dir).await;
+    let failures = errors
+        .into_iter()
+        .map(|(path, error)| CorpusLoadFailure {
+            rule_id: rule_id_from_corpus_path(&path),
+            path,
+            error: error.to_string(),
+        })
+        .collect();
+    (Some(set), failures)
+}
+
+/// The [`crate::onboard::CoverageNote::tool`] value W13's corpus-load failures register under.
+///
+/// Not a real tool name, exactly like the pre-existing `"unrouted"` sentinel — it is the key
+/// `report_export::tool_coverage_disclosures` matches to render the one concise client-facing
+/// line. Kept here next to its only producer, and read by `report_export` through this
+/// constant rather than a retyped literal so the two cannot drift.
+pub const RULE_CORPUS_COVERAGE_TOOL: &str = "rule-corpus";
+
+/// W13 — route a scan's corpus-load failures to the four places built for exactly this, so a
+/// rule that never parsed can no longer disappear.
+///
+/// Called by every scan entry point (`onboard_audit`, `onboard_audit_start`, and `camerata
+/// inspect`) right after `onboard::audit_repos` returns, i.e. as soon as a `ScanReport` with a
+/// `ScanLedger` exists to record into.
+///
+/// Each failure lands in all four, split strictly by audience:
+///
+/// 1. **The ledger** — `ran = false` with [`crate::scan_ledger::CORPUS_LOAD_FAILED_REASON`].
+///    From there `excluded_rules()` carries it into the report JSON's `rules_not_run` and the
+///    workbook's "Rules not run this scan" sheet, and `healthy_rule_ids()` can never call it
+///    verified-clean.
+/// 2. **`camerata integrity-gate`** — the ledger entry classifies as
+///    [`crate::integrity_gate::SkipClass::CorpusLoadFailed`], which is never justified under
+///    any profile and fails the gate with its own `corpus_load_failure` code.
+/// 3. **The client, concisely (G3)** — ONE [`crate::onboard::CoverageNote`] per failure under
+///    [`RULE_CORPUS_COVERAGE_TOOL`], which `report_export::tool_coverage_disclosures` collapses
+///    into a single sentence for the PDF/JSON `failed_passes` and the workbook's Coverage
+///    sheet. The note's own `message` carries the operator detail and is NEVER exported: only
+///    `osv-scanner` notes have their raw message exported (see `build_report_json`'s
+///    `dep_coverage_notes`), and every other tool's note is replaced by that one written line.
+/// 4. **The operator log** — `tracing::error!` with the full path and the parser's own message.
+///    `error!`, not `warn!`: a rule silently leaving the corpus degrades the engine a client is
+///    paying to have run.
+pub fn record_corpus_load_failures(
+    report: &mut crate::onboard::ScanReport,
+    failures: &[CorpusLoadFailure],
+) {
+    for failure in failures {
+        tracing::error!(
+            rule_id = %failure.rule_id,
+            path = %failure.path.display(),
+            error = %failure.error,
+            "a rule corpus file failed to load; the rule did not run this scan and is \
+             disclosed as not-run in the report, the ledger and the integrity gate",
+        );
+        report.ledger.record_corpus_load_failure(&failure.rule_id);
+        report.coverage_notes.push(crate::onboard::CoverageNote {
+            tool: RULE_CORPUS_COVERAGE_TOOL.to_string(),
+            // Operator-facing detail. See this function's doc comment, point 3, for why this
+            // text reaches the UI and the ledger but never a client artifact.
+            message: format!(
+                "{} did not parse, so rule {} was not loaded and did not run: {}",
+                failure.path.display(),
+                failure.rule_id,
+                failure.error,
+            ),
+        });
+    }
 }
 
 /// Extract a human-readable message from a caught panic payload (`std::panic::catch_unwind`
@@ -5246,7 +5408,9 @@ async fn onboard_audit(
     // before) — it needs every id, CI-tier included, both to arm the deterministic
     // architectural engine (`repo_selected_ids`) and, as of W4, to build its own semantic/AI
     // prompt (every selected, code-auditable rule now reaches the model).
-    let (_ai_scannable_only, excluded_mechanical, preview_rules, corpus) =
+    // W13: `corpus_load_failures` is the fifth element and MUST be consumed — see
+    // `record_corpus_load_failures`'s call below and `split_scannable_rules`'s doc comment.
+    let (_ai_scannable_only, excluded_mechanical, preview_rules, corpus, corpus_load_failures) =
         split_scannable_rules(selected.clone()).await;
     // Audit + calibration are UI-PICKED non-fleet steps: an explicit request model wins;
     // otherwise the active project's per-step default applies (DEFAULT_MODEL floor only with
@@ -5326,6 +5490,11 @@ async fn onboard_audit(
             state.scan_cache.put(id, manifest);
         }
         report.excluded_mechanical_rules = excluded_mechanical;
+        // W13: as soon as a ScanReport (and therefore a ScanLedger) exists, disclose every
+        // corpus file that would not parse — into the ledger, the integrity gate, one concise
+        // client line and the operator log. Before this, those errors were discarded at the
+        // load site and a rule with a typo'd enum value vanished from the scan silently.
+        record_corpus_load_failures(&mut report, &corpus_load_failures);
         // SCAN-TIME deterministic PREVIEW pass: run the selected mechanical rules' own tools
         // and fold their findings into triage as preview findings (advisory, not enforced).
         // Gated on the deterministic selection — deselecting deterministic scans skips it too.
@@ -6259,7 +6428,9 @@ async fn onboard_audit_start(
     // subset for the SCAN-TIME PREVIEW below). `audit_repos` gets the FULL `selected` — it
     // needs every id both to arm the deterministic architectural engine and to build its own
     // semantic/AI prompt, which now includes every selected, code-auditable rule.
-    let (_ai_scannable_only, excluded_mechanical, preview_rules, corpus) =
+    // W13: `corpus_load_failures` is the fifth element and MUST be consumed — see
+    // `record_corpus_load_failures`'s call below and `split_scannable_rules`'s doc comment.
+    let (_ai_scannable_only, excluded_mechanical, preview_rules, corpus, corpus_load_failures) =
         split_scannable_rules(selected.clone()).await;
     // Audit + calibration are UI-PICKED non-fleet steps: an explicit request model wins;
     // otherwise the active project's per-step default applies (DEFAULT_MODEL floor only with
@@ -6413,6 +6584,10 @@ async fn onboard_audit_start(
                 scan_cache.put(id, manifest);
             }
             report.excluded_mechanical_rules = excluded_mechanical;
+            // W13: see the sync `onboard_audit` handler's identical call — disclose every
+            // corpus file that would not parse into the ledger, the integrity gate, one
+            // concise client line and the operator log.
+            record_corpus_load_failures(&mut report, &corpus_load_failures);
             // SCAN-TIME deterministic PREVIEW pass (advisory; not enforced until wired). Gated on
             // the deterministic selection; reports per-tool progress into the job so the cockpit's
             // deterministic progress view shows each preview tool start/run/done live.
@@ -23642,7 +23817,10 @@ mod tests {
             !crate::onboard::AUDIT_RULES.contains(&"SEC-NO-COMMAND-INJECTION-1"),
             "precondition: this id must have NO always-on content-floor detector either"
         );
-        let (_scannable, excluded_mechanical, preview_rules, _set) =
+        // W13 added `split_scannable_rules`'s fifth element (the corpus-load failures the
+        // function used to discard). This test asserts nothing about it — the real corpus
+        // loads cleanly — so it is destructured away explicitly.
+        let (_scannable, excluded_mechanical, preview_rules, _set, _corpus_load_failures) =
             split_scannable_rules(selected.clone()).await;
         assert!(
             preview_rules
@@ -27180,5 +27358,230 @@ mod tests {
         assert_eq!(report.ai_error.as_deref(), Some("boom"));
         assert_eq!(report.message.as_deref(), Some("boom"));
         assert!(report.findings.is_empty());
+    }
+
+    // ── req_w13: the corpus-load failures production used to throw away ──────────────────
+    //
+    // Every production corpus load was `let (corpus, _errs) = load_corpus_lenient(..)` or
+    // `.await.0`. A rule file with a typo'd enum value failed to parse, left the corpus, and
+    // nothing reported it: not the ledger, not the coverage sheet, not `camerata
+    // integrity-gate`, not a log line. These tests cover the PLUMBING half (the loader keeps
+    // the errors and the recording helper routes them); the end-to-end proof over a real scan
+    // is `tests/corpus_load_failure_e2e.rs`, and the gate/ledger halves live in
+    // `integrity_gate.rs` / `scan_ledger.rs`.
+
+    /// A synthetic corpus directory: `good` real rule files copied verbatim out of the bundled
+    /// corpus, plus one real rule file whose `enforcement` value has been TYPO'D so it no
+    /// longer parses. Returns the temp dir (keep it alive) — nothing global is mutated, because
+    /// `split_scannable_rules_from` / `load_corpus_for_scan` take the path as a parameter.
+    ///
+    /// Copied rather than hand-written on purpose: a hand-written "rule" proves the loader
+    /// rejects a file the real corpus never contains. Taking a REAL file and breaking ONE
+    /// character reproduces the actual reported shape.
+    fn synthetic_corpus_with_one_malformed_rule(
+        good: &[&str],
+        malformed: &str,
+    ) -> Option<tempfile::TempDir> {
+        let real = camerata_rules::corpus_path();
+        if !real.exists() {
+            return None;
+        }
+        let find = |rule_id: &str| -> Option<(String, String)> {
+            let mut stack = vec![real.clone()];
+            while let Some(dir) = stack.pop() {
+                for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if p.extension().is_some_and(|e| e == "toml") {
+                        let body = std::fs::read_to_string(&p).ok()?;
+                        if body.contains(&format!("id = \"{rule_id}\"")) {
+                            let name = p.file_name()?.to_str()?.to_string();
+                            return Some((name, body));
+                        }
+                    }
+                }
+            }
+            None
+        };
+
+        let dir = tempfile::TempDir::new().ok()?;
+        for id in good {
+            let (name, body) = find(id)?;
+            std::fs::write(dir.path().join(name), body).ok()?;
+        }
+        let (name, body) = find(malformed)?;
+        // THE PLANTED DEFECT: a typo'd enum value, exactly the reported shape. `enforcement`
+        // deserializes into an enum, so an unknown variant is a TOML deserialize error and the
+        // whole file is skipped by `load_corpus_lenient`.
+        let broken = body
+            .replacen("enforcement = \"architectural\"", "enforcement = \"architectual\"", 1)
+            .replacen("enforcement = \"mechanical\"", "enforcement = \"mechanicle\"", 1)
+            .replacen("enforcement = \"prose\"", "enforcement = \"proze\"", 1)
+            .replacen("enforcement = \"structured\"", "enforcement = \"structered\"", 1);
+        assert_ne!(
+            broken, body,
+            "the fixture builder must actually have broken something — a malformed-corpus test \
+             over an intact file would pass vacuously"
+        );
+        std::fs::write(dir.path().join(name), broken).ok()?;
+        Some(dir)
+    }
+
+    /// req_w13: `load_corpus_for_scan` keeps what `load_corpus_lenient`'s callers discarded.
+    /// The good rules still load (so one bad file does NOT fail a whole client scan — the
+    /// explicit non-goal: we are not switching production to the strict loader), and the bad
+    /// one comes back as a named failure instead of vanishing.
+    #[tokio::test]
+    async fn req_w13_the_scan_corpus_loader_keeps_the_errors_instead_of_discarding_them() {
+        let Some(dir) = synthetic_corpus_with_one_malformed_rule(
+            &["SEC-NO-RAW-SQL-CONCAT-1", "SEC-NO-HARDCODED-SECRETS-1"],
+            "SUPABASE-RLS-ENABLED-1",
+        ) else {
+            eprintln!("corpus unavailable; skipping req_w13 corpus-loader test");
+            return;
+        };
+
+        let (corpus, failures) = load_corpus_for_scan(dir.path()).await;
+        let corpus = corpus.expect("the directory exists, so a RuleSet must come back");
+
+        // Lenient, still: the two intact rules loaded.
+        assert!(corpus.get_by_id("SEC-NO-RAW-SQL-CONCAT-1").is_some());
+        assert!(corpus.get_by_id("SEC-NO-HARDCODED-SECRETS-1").is_some());
+        // THE DEFECT: the malformed rule is gone from the corpus.
+        assert!(
+            corpus.get_by_id("SUPABASE-RLS-ENABLED-1").is_none(),
+            "precondition: a file that does not parse really does leave the corpus"
+        );
+        // THE FIX: and it is now REPORTED rather than silently absent.
+        assert_eq!(failures.len(), 1, "{failures:#?}");
+        assert_eq!(failures[0].rule_id, "SUPABASE-RLS-ENABLED-1");
+        assert!(
+            failures[0].path.ends_with("supabase-rls-enabled-1.toml"),
+            "the operator-facing path must name the actual file: {:?}",
+            failures[0].path
+        );
+        assert!(
+            !failures[0].error.is_empty(),
+            "the parser's own message must survive, for the operator log"
+        );
+    }
+
+    /// req_w13: the same thing through the function the SCAN path actually calls. Before the
+    /// fix `split_scannable_rules` returned a 4-tuple whose corpus came from
+    /// `load_corpus_lenient(..).await.0`, so this information had no channel at all.
+    #[tokio::test]
+    async fn req_w13_the_scan_rule_split_reports_corpus_load_failures_to_its_caller() {
+        let Some(dir) = synthetic_corpus_with_one_malformed_rule(
+            &["SEC-NO-RAW-SQL-CONCAT-1"],
+            "SUPABASE-RLS-ENABLED-1",
+        ) else {
+            eprintln!("corpus unavailable; skipping req_w13 rule-split test");
+            return;
+        };
+        let selected = vec![crate::onboard::SelectedRule {
+            id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+            directive: "no raw SQL built by string concatenation".to_string(),
+            repos: Vec::new(),
+        }];
+
+        let (_scannable, _excluded, _preview, corpus, load_failures) =
+            split_scannable_rules_from(dir.path(), selected).await;
+
+        assert!(corpus.is_some(), "the partition still gets its corpus");
+        assert_eq!(
+            load_failures
+                .iter()
+                .map(|f| f.rule_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["SUPABASE-RLS-ENABLED-1"],
+            "the scan path's own loader must hand the failures to its caller"
+        );
+    }
+
+    /// req_w13: `record_corpus_load_failures` routes each failure to all four destinations, and
+    /// keeps the operator detail (path, parser message) OUT of the ledger's client-facing
+    /// `skip_reason` while keeping it available on the internal coverage note.
+    #[test]
+    fn req_w13_recording_a_failure_discloses_it_without_leaking_operator_detail_to_the_client() {
+        // `ScanReport` has no public `Default`/`empty`; `gated` is simply the cheapest
+        // constructor that yields a report with a fresh `ScanLedger` and empty
+        // `coverage_notes`, which is all this test reads. Nothing here asserts over the
+        // gated-ness itself.
+        let mut report = crate::onboard::ScanReport::gated(&["me/api".to_string()]);
+        let failures = vec![CorpusLoadFailure {
+            rule_id: "SUPABASE-RLS-ENABLED-1".to_string(),
+            path: std::path::PathBuf::from("/Users/someone/corpus/supabase/rls/x.toml"),
+            error: "TOML parse error in x.toml: unknown variant `architectual`".to_string(),
+        }];
+
+        record_corpus_load_failures(&mut report, &failures);
+
+        // 1. the ledger
+        let entry = report
+            .ledger
+            .rule("SUPABASE-RLS-ENABLED-1")
+            .expect("the ledger must record it");
+        assert!(!entry.ran);
+        assert_eq!(
+            entry.skip_reason.as_deref(),
+            Some(crate::scan_ledger::CORPUS_LOAD_FAILED_REASON)
+        );
+
+        // 2. the gate
+        let verdict = crate::integrity_gate::evaluate(
+            &report.ledger,
+            &crate::integrity_gate::IntegrityGateOptions::smoke(),
+        );
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|f| f.code == "corpus_load_failure"),
+            "{:#?}",
+            verdict.failures
+        );
+
+        // 3. the client line, via the coverage-note channel
+        assert_eq!(report.coverage_notes.len(), 1);
+        assert_eq!(report.coverage_notes[0].tool, RULE_CORPUS_COVERAGE_TOOL);
+
+        // 4. the operator detail: on the note (UI + ledger), never in the ledger's reason.
+        let note = &report.coverage_notes[0].message;
+        assert!(
+            note.contains("/Users/someone/corpus/supabase/rls/x.toml")
+                && note.contains("architectual"),
+            "the operator must be able to find the file and the parse error: {note}"
+        );
+        let reason = entry.skip_reason.clone().unwrap_or_default();
+        assert!(
+            !reason.contains("/Users/someone") && !reason.contains("architectual"),
+            "the client-facing reason must carry NEITHER the path nor the parser text: {reason}"
+        );
+    }
+
+    /// req_w13: the rule id for an unparseable file comes from its STEM, because the id
+    /// declared inside the file is unreadable by definition. The one error shape that is not a
+    /// per-file parse failure (the recursive walk itself failing, which reports the corpus
+    /// DIRECTORY) gets an explicit sentinel rather than a directory name dressed up as a rule.
+    #[test]
+    fn req_w13_the_rule_id_for_an_unparseable_file_comes_from_its_stem() {
+        use std::path::Path;
+        assert_eq!(
+            rule_id_from_corpus_path(Path::new("/c/supabase/rls/supabase-rls-enabled-1.toml")),
+            "SUPABASE-RLS-ENABLED-1"
+        );
+        assert_eq!(
+            rule_id_from_corpus_path(Path::new("/c/universal/SEC-NO-RAW-SQL-CONCAT-1.TOML")),
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "the extension check is case-insensitive"
+        );
+        for not_a_rule_file in ["/c/principles", "/c/principles/api-layer", "/c/notes.md"] {
+            assert_eq!(
+                rule_id_from_corpus_path(Path::new(not_a_rule_file)),
+                "RULE-CORPUS",
+                "a non-`.toml` path must not be dressed up as a rule id ({not_a_rule_file})"
+            );
+        }
     }
 }
