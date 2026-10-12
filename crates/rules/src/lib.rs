@@ -4139,6 +4139,127 @@ mod tests {
         );
     }
 
+    /// The nineteen SECURITY rules reclassified from `kind = "decision"` to `kind = "defect"`
+    /// in W12. Every one shared one identical shape before the change: `kind = "decision"`,
+    /// ZERO `violates` flags, exactly two `[[option]]` blocks, and exactly one option whose
+    /// `why` opens with the literal token `Rejected:`. Two options, one of which the rule's own
+    /// author explicitly marked `Rejected:`, is not a decision under any reading — it is a
+    /// defect and its degenerate form, and leaving it classified `decision` with no `violates`
+    /// flag is what made a missing RLS policy, a `service_role` key in client code, a dynamic
+    /// SQL injection and a committed private key each report as "the convention this codebase
+    /// chose" instead of as a fault.
+    ///
+    /// Hardcoded deliberately rather than derived from the corpus: a derived list would move
+    /// with the corpus and could not catch a rule being quietly reclassified back to
+    /// `decision`, which is exactly the regression this roster exists to prevent.
+    #[cfg(test)]
+    const W12_SECURITY_DEFECT_RULE_IDS: &[&str] = &[
+        "SEC-NO-COMMAND-INJECTION-1",
+        "SEC-NO-PRIVATE-KEY-1",
+        "SEC-NO-VENDOR-TOKEN-1",
+        "SUPABASE-RLS-NO-POLICY-1",
+        "SUPABASE-RLS-PERMISSIVE-TRUE-1",
+        "SUPABASE-RLS-USER-METADATA-1",
+        "SUPABASE-RLS-DISABLED-NOT-RESTORED-1",
+        "SUPABASE-STORAGE-KEY-SANITIZATION-1",
+        "SUPABASE-STORAGE-OBJECT-POLICY-1",
+        "SUPABASE-STORAGE-SIGNED-URL-1",
+        "SUPABASE-STORAGE-UPLOAD-CONSTRAINTS-1",
+        "SUPABASE-AUTH-REDIRECT-ALLOWLIST-1",
+        "SUPABASE-AUTH-MFA-PRIVILEGED-1",
+        "SQL-PRIVILEGED-WRITE-AUDIT-1",
+        "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+        "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1",
+        "SUPABASE-FUNC-SEARCH-PATH-1",
+        "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1",
+        "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1",
+    ];
+
+    /// req_w12: every rule in [`W12_SECURITY_DEFECT_RULE_IDS`] is classified
+    /// [`RuleKind::Defect`] and carries EXACTLY ONE `violates` option — the one whose `why`
+    /// opens with `Rejected:`, i.e. the degenerate/absent form its own author named.
+    ///
+    /// Three separate things are asserted per rule, because each has its own failure mode and
+    /// a weaker test would let two of them regress silently:
+    ///
+    /// 1. `kind == Defect` — a `decision`-kind rule cannot report a violation at all (the
+    ///    alternatives pass just records whichever option the repo follows), which is the
+    ///    original defect.
+    /// 2. EXACTLY ONE `violates` option — zero means the rule is still silent; two means the
+    ///    correct option is flagged too, so conforming code would be reported as a fault.
+    /// 3. The flag sits on the `Rejected:` option SPECIFICALLY — direction, not just count.
+    ///    The 244-rule audit that preceded this work found 76 wrong flags, including ones
+    ///    sitting on the SAFE option, so "one flag somewhere" is not a sufficient invariant.
+    ///
+    /// FAILS BEFORE THE FIX: all nineteen were `kind = "decision"` with zero `violates`
+    /// options, so assertion 1 failed on all nineteen and assertion 2 failed on all nineteen.
+    #[tokio::test]
+    async fn req_w12_security_rules_are_defect_kind_with_exactly_one_violates_option() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return; // skip without the bundled corpus checked out
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+
+        let mut problems: Vec<String> = Vec::new();
+        for id in W12_SECURITY_DEFECT_RULE_IDS {
+            let Some(rule) = set.get_by_id(id) else {
+                problems.push(format!("{id}: not present in the corpus at all"));
+                continue;
+            };
+
+            if rule.kind() != Some(RuleKind::Defect) {
+                problems.push(format!(
+                    "{id}: kind is {:?}, must be Defect — a `decision`-kind rule with no \
+                     `violates` flag cannot report a violation at all",
+                    rule.kind()
+                ));
+            }
+
+            let flagged: Vec<&RuleOption> =
+                rule.options.iter().filter(|o| o.violates).collect();
+            if flagged.len() != 1 {
+                problems.push(format!(
+                    "{id}: {} options marked `violates`, must be exactly 1 (flagged: {:?})",
+                    flagged.len(),
+                    flagged.iter().map(|o| &o.id).collect::<Vec<_>>()
+                ));
+                continue;
+            }
+
+            // Direction: the single flag must sit on the option the author marked `Rejected:`,
+            // never on the correct one.
+            let rejected: Vec<&RuleOption> = rule
+                .options
+                .iter()
+                .filter(|o| o.why.trim_start().starts_with("Rejected:"))
+                .collect();
+            if rejected.len() != 1 {
+                problems.push(format!(
+                    "{id}: {} options open their `why` with `Rejected:`, expected exactly 1 — \
+                     this rule's shape no longer matches the W12 set and its flag direction \
+                     cannot be checked automatically",
+                    rejected.len()
+                ));
+                continue;
+            }
+            if flagged[0].id != rejected[0].id {
+                problems.push(format!(
+                    "{id}: `violates` sits on `{}` but the `Rejected:` option is `{}` — the \
+                     flag is on the SAFE option, which would report conforming code as a fault",
+                    flagged[0].id, rejected[0].id
+                ));
+            }
+        }
+
+        assert!(
+            problems.is_empty(),
+            "the W12 security rules must each be `defect`-kind with exactly one `violates` \
+             option, on the `Rejected:` option:\n  {}",
+            problems.join("\n  ")
+        );
+    }
+
     /// req_h1 (Pass-1 W4, `docs/plans/2026-10-09_audit-findings-tracker.md`): no rule in the
     /// REAL shipped corpus may sit at a [`Verification`] value that makes it unselectable on
     /// every repo. A `verification` value is repo-independent, so a rule disarmed by it is

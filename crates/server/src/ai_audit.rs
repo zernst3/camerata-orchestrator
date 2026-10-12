@@ -12595,6 +12595,154 @@ mod tests {
         assert!(f.located);
     }
 
+    /// req_w12: a REAL security rule from the shipped corpus, given a codebase that matches
+    /// the degenerate option its own author marked `Rejected:`, must REPORT that as a defect —
+    /// never record it as "the convention this codebase chose".
+    ///
+    /// This is the end-to-end proof of the W12 defect, driven through the real corpus and the
+    /// real alternatives-pass code path rather than a synthetic fixture.
+    /// `SUPABASE-STORAGE-KEY-SANITIZATION-1` is the exemplar because it is `structured`-tier
+    /// and not gate-armed, so it genuinely ENTERED the alternatives pass before this change
+    /// (the `mechanical`/`architectural` members of the W12 set were already excluded from
+    /// that pass by `EnforcementKind::is_ci_enforced`, so their silence had a different
+    /// cause), and because its rejected option describes a real, unsafe CODEBASE state —
+    /// keeping the visitor's own filename as the storage object key behind a `../` blocklist.
+    ///
+    /// Three things are asserted, which together are the whole claim:
+    ///
+    /// 1. The rule is no longer ELIGIBLE for the alternatives pass at all
+    ///    (`is_semantic_multi_option_rule`), because a `defect`-kind rule has nothing to
+    ///    decide among — so its directive can never be replaced by its own degenerate option.
+    /// 2. Fed that degenerate option through the alternatives-decision chokepoint anyway, it
+    ///    EMITS a `FindingKind::Defect` and leaves the effective directive untouched.
+    /// 3. It produces NO `ConventionObserved` row — the literal "reported as a consistently
+    ///    wrong thing in the code" surface the owner named.
+    ///
+    /// FAILS BEFORE THE FIX: the rule was `kind = "decision"` with ZERO `violates` options, so
+    /// (1) it WAS eligible for the alternatives pass, (2) `apply_alternative_decision` took
+    /// its `!option.violates` branch — returning `None` (no finding) and REWRITING the
+    /// effective directive to "strip only `../` and keep the client filename", i.e. adopting
+    /// the vulnerability as the project's directive — and (3) with no violation trace left to
+    /// find, `conventions_observed_findings` emitted a `ConventionObserved` row asserting the
+    /// codebase consistently follows this "convention". All three assertions failed.
+    #[tokio::test]
+    async fn req_w12_corpus_security_rule_reports_its_rejected_option_instead_of_recording_a_convention(
+    ) {
+        const RULE_ID: &str = "SUPABASE-STORAGE-KEY-SANITIZATION-1";
+
+        let corpus_dir = camerata_rules::corpus_path();
+        if !corpus_dir.exists() {
+            return; // skip without the bundled corpus checked out
+        }
+        let corpus = camerata_rules::load_corpus(&corpus_dir)
+            .await
+            .expect("corpus loads");
+        let rule = corpus
+            .get_by_id(RULE_ID)
+            .expect("the W12 exemplar rule must exist in the shipped corpus");
+
+        // (1) A defect-kind rule is never offered to the model as a choice.
+        assert!(
+            !crate::onboard::is_semantic_multi_option_rule(rule),
+            "{RULE_ID} must be excluded from the alternatives pass — a defect-kind rule has no \
+             acceptable alternative to decide among, so its directive must never be \
+             replaceable by its own degenerate option"
+        );
+
+        // The option this rule's own author marked `Rejected:` — located from the corpus text,
+        // not hardcoded, so the test tracks the rule rather than a snapshot of it.
+        let rejected = rule
+            .options
+            .iter()
+            .find(|o| o.why.trim_start().starts_with("Rejected:"))
+            .expect("the W12 exemplar must still carry exactly one `Rejected:` option");
+        assert!(
+            rejected.violates,
+            "the `Rejected:` option ({}) must be marked `violates` — it describes keeping the \
+             client's filename as the storage key, which is the defect this rule exists to \
+             report, not an alternative a project may adopt",
+            rejected.id
+        );
+
+        // (2) Fed the degenerate option, the chokepoint emits instead of rewriting.
+        let correct_directive = rule
+            .options
+            .iter()
+            .find(|o| !o.violates)
+            .expect("the rule must still have a non-degenerate option")
+            .directive
+            .clone();
+        let mut effective_selected = vec![(RULE_ID.to_string(), correct_directive.clone())];
+        let rejected_view = RuleOptionView {
+            id: rejected.id.clone(),
+            label: rejected.label.clone(),
+            directive: rejected.directive.clone(),
+            why: rejected.why.clone(),
+            violates: rejected.violates,
+        };
+
+        let finding = apply_alternative_decision(
+            &mut effective_selected,
+            "client/app",
+            RULE_ID,
+            &rejected_view,
+            "every upload call site passes file.name straight through as the object key",
+            Some("src/upload.ts:31 - uses file.name as the storage path after stripping '../'"),
+        );
+
+        assert_eq!(
+            effective_selected[0].1, correct_directive,
+            "the degenerate option must NEVER become this project's effective directive — \
+             that is how an unsanitized upload path got adopted as a convention"
+        );
+        let f = finding.expect(
+            "a codebase matching the `Rejected:` option must produce a finding, not silence",
+        );
+        assert_eq!(f.rule_id, RULE_ID, "the finding carries the rule's citation");
+        assert_eq!(
+            f.kind,
+            Some(camerata_api_types::audit::FindingKind::Defect),
+            "an objective fault, never a consistency deviation"
+        );
+        assert_eq!(
+            f.evaluated_option_id.as_deref(),
+            Some(rejected.id.as_str()),
+            "report_export::resolve_fix keys the remediation text off this"
+        );
+
+        // (3) And it is never recorded as an observed convention.
+        let alternatives = vec![RuleAlternatives {
+            rule_id: RULE_ID.to_string(),
+            options: rule
+                .options
+                .iter()
+                .map(|o| RuleOptionView {
+                    id: o.id.clone(),
+                    label: o.label.clone(),
+                    directive: o.directive.clone(),
+                    why: o.why.clone(),
+                    violates: o.violates,
+                })
+                .collect(),
+            selected_option_id: rule.default_option.clone(),
+            kind: rule.kind(),
+        }];
+        let recommendations = vec![RuleRecommendation {
+            rule_id: RULE_ID.to_string(),
+            recommended_option_id: rejected.id.clone(),
+            recommendation_reasoning: "the repo keeps the client filename as the key".to_string(),
+            evidence: Some("src/upload.ts:31".to_string()),
+            ..RuleRecommendation::default()
+        }];
+        let observed =
+            conventions_observed_findings("client/app", &[], &recommendations, &alternatives);
+        assert!(
+            observed.is_empty(),
+            "a codebase matching the `Rejected:` option must NOT be reported as having adopted \
+             a convention — that is the exact defect W12 fixes: {observed:?}"
+        );
+    }
+
     /// req_a5_4 positive twin: a genuine `decision`-shaped pick — the SAME two-option shape,
     /// but the selected option is NOT marked `violates` — rewrites the directive exactly as
     /// before this fix, and emits NO defect finding. Proves the fix is additive (it only
