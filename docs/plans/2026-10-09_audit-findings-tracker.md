@@ -1263,3 +1263,61 @@ No formatter was ever run in its mutating form.
 ## Touched outside `crates/rules/**`
 - This document only. No source file outside `crates/rules/` was touched; `A5.7` stays `Exempt` in the
   traceability registry because the `kind` hold is genuinely still in force.
+
+---
+
+# A5.7 HOLD STATUS — narrowed by Zach's directives, 2026-10-11
+
+Recording this because the documentation audit correctly flagged that kinds had been reclassified with
+**no explicit ruling on record**. That was a bookkeeping failure on my part, not a quiet override.
+
+The hold was never lifted wholesale. It was narrowed twice, by two explicit directives:
+
+1. **"Change the kind flag of the Java package rule and any related ones, implement the actual fix"** —
+   unlocked `kind` for the 11 rules declaring `kind = "default_with_exceptions"` alongside
+   `default = false`. The authority was the engine's own taxonomy doc
+   (`crates/rules/src/lib.rs` ~140), which names package-by-feature and API versioning as canonical
+   `decision`-kind examples and states that **no option on a `decision`-kind rule should carry
+   `violates = true`**.
+2. **"Classifying the security rules as defect, do that so we fix the issue of them being reported as
+   a consistently wrong thing in the code"** — unlocked `kind` for 19 security rules that shared one
+   shape: `kind = "decision"`, zero `violates` flags, exactly 2 options, exactly one option whose
+   `why` opens with the literal token `Rejected:`. A `decision` rule with no flag cannot report a
+   violation at all, so "no RLS policy", "`service_role` key in client code" and "dynamic SQL
+   injection" were all reporting as conventions the codebase had chosen.
+
+**Measured against the 58-rule list in `docs/plans/2026-10-09_rule-kind-classification.md`:**
+
+| | count |
+|---|---|
+| Rules on the hold list | 58 |
+| Resolved by the directives above (now non-decision) | **19** |
+| **Still awaiting Zach's review** | **39** |
+
+Corpus-wide kind distribution after both directives: **defect 151 · decision 156 ·
+default_with_exceptions 110** (417 total). Was defect 132 / decision 168 / default_with_exceptions 117.
+
+**The remaining 39 are still held.** The five-group presentation still applies to them, minus the
+security group that is now resolved. Nothing outside those two directives was reclassified.
+
+### [ ] NEW — the taxonomy has no slot for "several legitimate options PLUS degenerate faults"
+Confirmed independently by two agents. `RUST-DOMAIN-6` calls two options "a genuine organizational
+choice" and three others "boundary failures ... the options to avoid". That is neither `decision`
+(where the source forbids flags) nor `default_with_exceptions` (one default, the rest deviations).
+
+Worth knowing: a fourth kind would need **zero new pipeline behaviour** — the `violates` branch and
+the no-convention gate are already independent of each other. So the shape is already expressible;
+it just has no name. Zach's call.
+
+### [ ] NEW, SEVERE — a malformed rule silently vanishes from every scan
+Production loads the corpus leniently and **discards the parse errors**: five sites in
+`crates/server/src/lib.rs` do `let (corpus, _errs) = load_corpus_lenient(...)`. The test suite
+captures `corpus_errors`; production does not. So a rule with a typo'd enum value fails to parse, the
+rule disappears from every scan, and nothing reports it — not the ledger, not the coverage sheet, not
+`camerata integrity-gate`.
+
+This defeats the H1 requirement ("a rule that could never run for ANY stack is a DEFECT") by a second,
+invisible route, and it slips under the integrity gate that exists to make silent non-execution
+impossible. Compounding it: `deny_unknown_fields` is off for the rule struct, so a **misspelled field
+name vanishes without complaint**, and `tag` and `layer` are authored on all 417 rules while being
+parsed by nothing at all.
