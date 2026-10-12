@@ -4,7 +4,7 @@ tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
-kind = "default_with_exceptions"
+kind = "decision"
 # A5.2 forward-drift escape hatch, INHERITED from ARCH-EXPLICIT-TX-1 per Zach's W5-Q3 ruling
 # ("yes these should match"): severity must describe the PROBLEM, not which rule happened to
 # fire. Without this, a repo on this stack caps the identical architectural defect at medium
@@ -39,7 +39,6 @@ why = "Gives every transactional method one uniform signature, so there is a sin
 
 [[option]]
 id = "no-repository-transaction-boundaries"
-violates = true
 label = "No repository transaction boundaries at all"
 directive = "Repository methods do not provide transaction boundaries at all; intra-aggregate operations are redesigned as single writes, or callers are allowed to observe intermediate states between writes and reconcile after the fact."
 remediation = """

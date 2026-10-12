@@ -4,7 +4,7 @@ tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "structured"
-kind = "default_with_exceptions"
+kind = "decision"
 default = false
 verification = "grounded"
 
@@ -49,7 +49,6 @@ why = "Lets validation status travel with a value without introducing a distinct
 
 [[option]]
 id = "the-codebase-makes-no-distinction-between-valida"
-violates = true
 label = "No type distinction between validated and raw text"
 directive = "the codebase makes no distinction between validated and raw text; all string-shaped values use the same String type regardless of whether they have been checked"
 remediation = """

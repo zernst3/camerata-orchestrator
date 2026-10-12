@@ -4,7 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
-kind = "default_with_exceptions"
+kind = "decision"
 default = false
 verification = "grounded"
 
@@ -58,7 +58,6 @@ why = "Avoids the discrete-major-version problem entirely: instead of clients ju
 
 [[option]]
 id = "the-api-has-no-version-segment-at-all-and-evolve"
-violates = true
 label = "the API has no version segment at all and evolves in place"
 directive = "The API has no version segment at all and evolves in place; each change applies to all current clients, and breaking changes are coordinated directly with the consumers rather than isolated behind a version."
 remediation = """

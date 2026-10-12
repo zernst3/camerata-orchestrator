@@ -4,7 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
-kind = "default_with_exceptions"
+kind = "decision"
 default = false
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: the predicate is 'controller/route-handler files must not import domain types' (which modules count as 'domain' and which as 'controller' is project-specific), so it requires a custom AST/static-analysis CI gate — a project-configured import-boundary rule (ESLint no-restricted-imports / import/no-restricted-paths with the project's domain and controller paths wired in, dependency-cruiser, a Rust module-visibility constraint, or the stack equivalent). The off-the-shelf rule-ids exist but carry no DTO/domain semantics until the project configures the zones, so this is a custom check, not a citable off-the-shelf rule. Conformance holds when that custom gate runs in CI and a controller referencing a domain type fails the build; it fails when no rule blocks the import and a controller can return a domain type directly."
 verification = "grounded"
@@ -33,7 +33,6 @@ why = "Decouples the wire format from the domain model so each evolves on its ow
 
 [[option]]
 id = "endpoints-return-domain-types-directly-in-the-re"
-violates = true
 label = "endpoints return domain types directly, with no DTO layer"
 directive = "Endpoints return domain types directly in the response body and accept domain types in the request body, with no DTO layer in between."
 remediation = """
