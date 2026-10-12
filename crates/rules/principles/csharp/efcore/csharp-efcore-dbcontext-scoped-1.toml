@@ -24,6 +24,7 @@ why = "Scoped lifetime gives one DbContext instance per HTTP request, allowing t
 
 [[option]]
 id = "singleton-dbcontext"
+violates = true
 label = "DbContext registered as Singleton"
 directive = "DbContext is registered via AddSingleton<AppDbContext>(), sharing one instance across all requests and threads."
 why = "Produces data corruption under concurrent load: shared change tracker, stale identity-map cache entries, and thread-safety violations. Forbidden."

@@ -25,6 +25,7 @@ why = "The in-process TestServer is the correct ASP.NET Core mechanism for integ
 
 [[option]]
 id = "external-http-integration-tests"
+violates = true
 label = "integration tests call the running application on a real port (localhost:XXXX)"
 directive = "Tests start the application with 'dotnet run' and send real HTTP requests to the live URL."
 why = "Requires the application to be running before tests execute; introduces port-allocation races and environment dependencies. Not runnable in standard CI without extra setup. The WebApplicationFactory approach is both faster and more portable."

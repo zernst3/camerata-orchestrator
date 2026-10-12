@@ -25,6 +25,7 @@ why = "Mandated by Microsoft's official unit-testing best-practices documentatio
 
 [[option]]
 id = "multi-act-per-test"
+violates = true
 label = "multiple Act calls in a single test, multiple Assert blocks"
 directive = "A test can invoke the system under test multiple times in sequence and assert after each call."
 why = "When an Assert fails, it is impossible to know which Act caused it without a debugger. Subsequent assertions do not execute, hiding additional failures. Splits poorly with test filtering."

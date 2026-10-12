@@ -24,13 +24,13 @@ why = "Explicit named origins are environment-configurable, auditable, and corre
 
 [[option]]
 id = "allow-any-origin"
+violates = true
 label = "AllowAnyOrigin CORS policy applied globally"
 directive = "CORS is configured via policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader() and applied globally. Any browser origin may make cross-origin requests to any endpoint."
 why = "Appropriate only for fully public, unauthenticated APIs (CDN-served static content, open read-only data APIs). Forbidden on any endpoint that authenticates users or handles user-specific data."
 
 [[option]]
 id = "no-cors-configured"
-violates = true
 label = "No CORS middleware configured; cross-origin requests blocked by default"
 directive = "No UseCors or AddCors is registered. All cross-origin requests are blocked by the browser's same-origin policy. Server-to-server requests (no browser, no CORS preflight) are unaffected."
 why = "Correct for an API that is consumed only server-to-server and never directly from a browser; wrong for any API that a browser-based frontend calls."

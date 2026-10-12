@@ -31,13 +31,13 @@ why = "Controllers that translate protocol to service calls are independently te
 
 [[option]]
 id = "fat-controllers-inline-logic"
+violates = true
 label = "Business logic and data access inline in controller actions"
 directive = "Controller actions contain the full implementation: validate input, apply business rules, query the database directly (via DbContext or repositories), and compose the response, all inline in the action body."
 why = "Inlining logic in controller actions avoids the extra file and indirection of a service layer, which can seem like unnecessary ceremony for simple endpoints. The cost is that the logic is only reachable through an HTTP request, cannot be unit-tested without framework infrastructure, cannot be reused across a background job or a second endpoint without copying, and causes the controller to change for two unrelated reasons: HTTP contract changes and domain rule changes."
 
 [[option]]
 id = "no-repository-over-ef-core"
-violates = true
 label = "Services call EF Core's DbContext directly; no separate Repository abstraction layer"
 directive = "Controllers still delegate to a service layer for business logic, but the service layer calls the injected DbContext (via DbSet<T> and LINQ) directly rather than going through a hand-written Repository interface wrapping EF Core. This is orthogonal to the controller/service boundary: it does not change where business logic lives, only whether an additional repository abstraction sits between the service and DbContext."
 why = "DbContext already implements the Unit-of-Work and (via DbSet<T>) Repository-like patterns; a hand-rolled repository interface over EF Core often just re-exposes IQueryable with extra ceremony and no swappable-persistence benefit in practice, since most teams never actually swap out EF Core. Acceptable when the project has no concrete need to mock data access below the service layer (tests use an in-memory or SQLite provider instead) or to abstract over multiple storage backends; teams that do need that seam should keep an explicit repository interface."

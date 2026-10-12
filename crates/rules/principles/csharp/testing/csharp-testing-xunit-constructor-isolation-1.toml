@@ -32,6 +32,7 @@ why = "Static initialization runs once per AppDomain, not once per test class; s
 
 [[option]]
 id = "nunit-msstyle-setup-teardown"
+violates = true
 label = "use [TestInitialize]/[SetUp] + [TestCleanup]/[TearDown] attributes (MSTest/NUnit style)"
 directive = "Annotate setup methods with [TestInitialize] (MSTest) or [SetUp] (NUnit) and teardown with [TestCleanup]/[TearDown]."
 why = "These attributes don't exist in xUnit; their NUnit/MSTest equivalents produce hidden shared state that breaks test isolation. xUnit's constructor+Dispose pattern is explicit and safer."

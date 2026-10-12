@@ -25,6 +25,7 @@ why = "Eliminates all known sources of flakiness at the design level."
 
 [[option]]
 id = "sleep-based-timing"
+violates = true
 label = "use Thread.Sleep or Task.Delay in tests to wait for async side-effects"
 directive = "Tests that depend on timing behavior sleep for a fixed duration to ensure side effects have occurred."
 why = "Introduces environment-specific flakiness: a sleep that is long enough on a developer laptop may be too short on a loaded CI agent, or vice versa. Any test with a sleep is non-deterministic."
