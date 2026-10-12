@@ -4,7 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
-kind = "default_with_exceptions"
+kind = "decision"
 default = false
 verification = "grounded"
 
