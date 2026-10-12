@@ -28,6 +28,7 @@ why = "LAZY default prevents over-fetching; explicit fetch joins and EntityGraph
 
 [[option]]
 id = "eager-globally"
+violates = true
 label = "FetchType.EAGER on all associations"
 directive = "All associations are annotated with FetchType.EAGER, loading every relationship on every query regardless of whether the caller needs it."
 why = "Eliminates N+1 by eliminating lazy loading; over-fetches on every query that only needs the parent, producing unnecessary joins and data transfer. Also creates Cartesian product issues when multiple EAGER collections are present on the same entity."

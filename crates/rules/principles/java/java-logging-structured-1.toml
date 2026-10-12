@@ -37,6 +37,7 @@ why = "Unstructured, unsearchable, hard to correlate with events, and inefficien
 
 [[option]]
 id = "custom-string-concatenation"
+violates = true
 label = "build log messages by concatenating strings and calling log.info()"
 directive = "Log messages are built by concatenating strings (\"User \" + userId + \" logged in\") before passing to the logger."
 why = "Inefficient (string concatenation happens even when the log level is filtered out) and loses the opportunity to attach structured fields."

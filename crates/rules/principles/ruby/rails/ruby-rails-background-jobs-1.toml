@@ -24,6 +24,7 @@ why = "Offloading slow work to a background job keeps request threads available,
 
 [[option]]
 id = "inline-in-request"
+violates = true
 label = "perform slow work inline in the controller action"
 directive = "Email delivery, image processing, external API calls, and other slow operations run synchronously inside the request cycle before the response is sent."
 why = "Blocks the request thread for the duration of the operation, exhausts the thread pool under concurrent traffic, and surfaces external-system failures as user-facing 500 errors."

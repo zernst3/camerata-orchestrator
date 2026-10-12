@@ -24,6 +24,7 @@ why = "Expressive, co-located, and overrideable test data with no hidden fixture
 
 [[option]]
 id = "rails-fixtures"
+violates = true
 label = "Use Rails YAML fixtures for all test data"
 directive = "All test data lives in test/fixtures/*.yml and is loaded via fixtures :all in every test class."
 why = "Ships with Rails and requires no gems, but creates invisible coupling between tests and fixed attribute values in a separate file."

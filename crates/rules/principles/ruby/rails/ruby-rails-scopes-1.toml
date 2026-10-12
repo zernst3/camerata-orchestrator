@@ -24,13 +24,13 @@ why = "Named scopes give query conditions a single authoritative definition on t
 
 [[option]]
 id = "where-chains-at-call-site"
+violates = true
 label = "write where chains inline at each call site"
 directive = "Query conditions are written as `.where(...)` chains directly at each call site rather than extracted into named scopes."
 why = "Duplicates condition logic across call sites; a change to the condition requires finding and updating every site, and sites diverge over time."
 
 [[option]]
 id = "default-scope"
-violates = true
 label = "apply recurring conditions as a default scope on the model"
 directive = "Conditions that should apply to all queries for a model (e.g. soft-delete filter) are set via `default_scope { where(deleted_at: nil) }`."
 why = "Convenient for filters that must always apply but introduces invisible filtering that surprises callers who expect unfiltered results; `unscoped` must be remembered to escape it."

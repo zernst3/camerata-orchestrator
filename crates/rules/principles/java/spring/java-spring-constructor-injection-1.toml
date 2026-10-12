@@ -37,6 +37,7 @@ why = "Constructor injection exposes dependencies explicitly, enables final fiel
 
 [[option]]
 id = "field-injection-autowired"
+violates = true
 label = "@Autowired on instance fields"
 directive = "Dependencies are declared as instance fields annotated with @Autowired. Spring uses reflection to populate them after instantiation via the no-arg constructor."
 why = "Hides dependencies from the class's public contract, requires mutable non-final fields, makes testing require a Spring container or reflection, and is officially marked as not recommended by Spring since Spring Framework 5. Forbidden in this project."

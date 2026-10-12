@@ -53,6 +53,7 @@ why = "Reproduction steps in a PR description produce a record no automated syst
 
 [[option]]
 id = "the-bug-fix-lands-without-a-regression-test-the"
+violates = true
 label = "Rely on canary/staging to catch recurrence"
 directive = "the bug fix lands without a regression test; the project relies on canary or staging environments to surface any recurrence after the fix has shipped"
 why = "Staging environments catch some recurrences but only after the fix has shipped; by that point the cost of acting on the recurrence is higher and the link back to the original fix has often been lost."

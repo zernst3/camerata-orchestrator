@@ -35,6 +35,7 @@ why = "Couples the API contract to the database schema, causes Jackson serializa
 
 [[option]]
 id = "response-entity-map-inline"
+violates = true
 label = "Inline mapping from entity to ResponseEntity inside the controller"
 directive = "Controller actions perform the entity-to-response mapping inline: they call repository or service methods that return entities, then build a response map or anonymous object from the entity fields inside the controller method."
 why = "Keeps mapping in the wrong layer (controllers own HTTP translation, not domain-to-presentation mapping), makes the mapping logic non-reusable across endpoints, and still avoids direct entity serialization. A dedicated mapper or DTO class is preferable."

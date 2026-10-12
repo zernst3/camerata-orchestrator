@@ -26,6 +26,7 @@ why = "Strong Parameters moves the allowlist to the controller, where the action
 
 [[option]]
 id = "attr-accessible-on-model"
+violates = true
 label = "attr_accessible allowlist on the model class"
 directive = "Model classes declare `attr_accessible :field1, :field2` to limit which attributes can be set via mass assignment, rather than permitting fields in the controller."
 why = "The Rails 2/3 pattern; superseded in Rails 4+ by Strong Parameters. The model cannot distinguish a trusted internal call from an external form submission, so the allowlist is too broad or too narrow for every caller."

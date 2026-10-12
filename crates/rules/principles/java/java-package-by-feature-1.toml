@@ -38,7 +38,6 @@ why = "Groups code by technical role, so a layer's conventions and shared infras
 
 [[option]]
 id = "no-hierarchy"
-violates = true
 label = "keep all classes in a single package or a flat namespace"
 directive = "Classes are not partitioned into a package hierarchy; they live in com.example (or com.example.* with no role/feature split)."
 remediation = """

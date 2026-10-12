@@ -40,6 +40,7 @@ why = "Logging or re-throwing preserves diagnostic information and ensures failu
 
 [[option]]
 id = "silent-catch-and-continue"
+violates = true
 label = "catch and silently continue without logging or re-throwing"
 directive = "Exceptions are caught and the block continues or returns without logging, re-throwing, or preserving the cause."
 why = "Hides failures and breaks the causal chain; debugging is impossible when the error context is lost. Later failures appear unrelated to the original root cause."

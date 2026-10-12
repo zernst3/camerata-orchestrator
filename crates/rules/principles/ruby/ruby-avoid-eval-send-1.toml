@@ -26,7 +26,6 @@ why = "A fixed whitelist eliminates the ability to invoke unintended methods."
 
 [[option]]
 id = "permitted-symbols"
-violates = true
 label = "Use send() with a hardcoded symbol or string-to-symbol allowlist"
 directive = "Dynamic method invocation uses send() with a hardcoded symbol (send(:method_name)) or a symbol converted from user input via a strict allowlist. Example: ALLOWED_METHODS = %i[create delete update]; send(params[:action].to_sym) if ALLOWED_METHODS.include?(params[:action].to_sym)."
 why = "Acceptable alternative when the allowlist is kept small and reviewed. Converts the user input to a symbol only after allowlist validation."

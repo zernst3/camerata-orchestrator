@@ -35,6 +35,7 @@ why = "Allowing unbounded growth fails the human-comprehension axis the rule exi
 
 [[option]]
 id = "the-human-reading-size-guideline-applies-to-auto"
+violates = true
 label = "Size guideline applies to auto-generated files too"
 directive = "the human-reading size guideline applies to auto-generated files (schema dumps, ORM-emitted models, lockfiles) at the same threshold as hand-maintained files"
 why = "Applying the size guideline to auto-generated files forces useless splits in files no person hand-edits and that tooling rewrites wholesale anyway, adding churn with no human-comprehension benefit."

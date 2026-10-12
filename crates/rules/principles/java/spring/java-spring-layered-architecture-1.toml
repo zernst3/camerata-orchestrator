@@ -39,6 +39,7 @@ why = "Strict layer hierarchy ensures @Transactional semantics apply at the righ
 
 [[option]]
 id = "controller-accesses-repository-directly"
+violates = true
 label = "Controllers inject repositories directly for simple CRUD endpoints"
 directive = "For endpoints that perform simple CRUD operations (list, get by ID, delete), the @RestController injects the @Repository or Spring Data interface directly, bypassing the service layer. A service layer is introduced only when business logic is needed."
 why = "Reduces boilerplate for simple CRUD; bypasses @Transactional service-layer semantics, encourages business-logic creep into controllers as requirements evolve, and creates inconsistency between endpoints that do and do not use the service layer."

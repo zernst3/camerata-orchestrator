@@ -30,6 +30,7 @@ why = "Small, cohesive interfaces are easy to implement and reason about; they c
 
 [[option]]
 id = "god-interfaces"
+violates = true
 label = "define large interfaces with many methods"
 directive = "Large interfaces (e.g., Database, UserService, Repository) that expose every method a package might need are defined, and callers take the full interface."
 why = "Increases implementation burden; couples callers to a large contract that mixes unrelated responsibilities. Partial implementations are forced to stub out unused methods."

@@ -38,6 +38,7 @@ why = "Convenient for the happy path but offers zero protection against a forged
 
 [[option]]
 id = "database-constraints-only"
+violates = true
 label = "enforce integrity purely through database constraints"
 directive = "Integrity rules are expressed only as database-level constraints (NOT NULL, UNIQUE, CHECK); the application layer has no `validates` calls."
 why = "Catches violations at the deepest layer but returns raw database errors rather than user-friendly validation messages, and fires after an attempted write rather than before."
