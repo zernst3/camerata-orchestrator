@@ -28,6 +28,7 @@ why = "GDPR and the ICO's equal-weight consent rules require opt-in for non-esse
 
 [[option]]
 id = "third-party-analytics-and-tracking-scripts-initi"
+violates = true
 label = "Trackers initialize by default with opt-out"
 directive = "third-party analytics and tracking scripts initialize on every page by default, and the user is offered an opt-out control rather than an opt-in consent gate"
 why = "Opt-out is a compliance violation under GDPR and the ICO's equal-weight consent rules; regulators do not accept 'we let users turn it off' as a substitute for opt-in."
@@ -41,6 +42,7 @@ why = "Page-level consent checks force every page to re-implement the check, and
 
 [[option]]
 id = "consent-checks-run-inside-a-load-event-handler-t"
+violates = true
 label = "Consent check fires after tracker already loaded"
 directive = "consent checks run inside a load-event handler that fires after the tracker's script has already been fetched and made its first beacon"
 why = "A load-event handler fires after the tracker has already fetched its script and made its first beacon, so the compliance violation has already occurred by the time the check runs."

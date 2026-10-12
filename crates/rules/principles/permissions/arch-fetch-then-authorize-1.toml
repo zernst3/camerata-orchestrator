@@ -47,6 +47,7 @@ why = "Works but scatters the policy across every code path, making it easy to o
 
 [[option]]
 id = "request-only-authz"
+violates = true
 label = "authorize on the request before fetching"
 directive = "Authorization is decided entirely from the request (caller identity, route, and parameters) before the resource is loaded, and the resource is fetched only after the request-level check passes."
 why = "Cannot enforce ownership or resource-state rules, because the deciding facts live in the resource that has not been loaded yet."

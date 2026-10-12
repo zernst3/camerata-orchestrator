@@ -35,6 +35,7 @@ why = "A blanket created_by/modified_by/created_at/modified_at quartet on every 
 
 [[option]]
 id = "every-table-carries-the-same-four-column-audit-q"
+violates = true
 label = "Every table carries the four-column audit quartet"
 directive = "every table carries the same four-column audit quartet (created_by, created_on, modified_by, modified_on) regardless of whether the table is admin-curated, user-generated, or system-managed"
 why = "Simpler to apply uniformly (no per-table judgment required), but produces always-NULL columns on system-generated event tables where no user attribution exists, and duplicates author information on user-generated tables where an author foreign key already encodes provenance."

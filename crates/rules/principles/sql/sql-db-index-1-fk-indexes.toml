@@ -40,12 +40,14 @@ why = "Reduces migration boilerplate on MySQL with InnoDB, where auto-indexing h
 
 [[option]]
 id = "fk-indexes-are-added-reactively-in-later-migrati"
+violates = true
 label = "FK indexes added reactively after degradation"
 directive = "FK indexes are added reactively in later migrations after production performance degrades, rather than being added in the same migration that introduces the FK column"
 why = "Avoids speculative migrations for FK columns that may never be queried at scale, but surfaces the slowdown in production where it affects users, and the fix is still a migration authored under incident pressure rather than at calm design time."
 
 [[option]]
 id = "fk-indexes-are-declared-in-a-follow-up-migration"
+violates = true
 label = "FK indexes declared in a follow-up migration"
 directive = "FK indexes are declared in a follow-up migration that ships after the migration introducing the FK column, rather than in the same atomic change"
 why = "Keeps each migration smaller and focused, but creates a window where the FK exists without the index. The second migration is easy to forget across context switches, and the pairing is not reviewable in a single diff."

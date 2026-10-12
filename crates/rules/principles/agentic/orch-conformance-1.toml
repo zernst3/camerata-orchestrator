@@ -44,6 +44,7 @@ why = "Advisory-only commitments work at small human-review scale but degrade at
 
 [[option]]
 id = "architectural-commitments-are-mechanically-enfor"
+violates = true
 label = "Enforce without waivers"
 directive = "architectural commitments are mechanically enforced on every change with no waiver mechanism; a violation either rewrites the rule upstream or is rejected outright"
 why = "Enforcement without a waiver mechanism is overrigid; it pushes legitimate edge cases into rule-rewriting cycles or silent bypasses outside the recorded path, defeating the durability the enforcement step was meant to create."

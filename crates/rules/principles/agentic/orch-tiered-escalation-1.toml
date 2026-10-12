@@ -32,6 +32,7 @@ why = "Routine work should flow; reserve the halt for decisions that truly block
 
 [[option]]
 id = "hard-pause-on-everything"
+violates = true
 label = "hard-pause on everything"
 directive = "the routine hard-pauses on every flagged item, regardless of whether it falls in a hard-guard area"
 why = "Hard-pausing on everything produces constant halts that drain the forward-progress value the routine exists to create, and trains the human reviewer to glance and dismiss rather than read carefully."

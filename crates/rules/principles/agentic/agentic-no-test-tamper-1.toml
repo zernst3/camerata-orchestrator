@@ -38,6 +38,7 @@ escalation = { condition = "the change would modify or delete an existing test o
 
 [[option]]
 id = "allow-modifying-tests-within-the-same-change-whe"
+violates = true
 label = "Allow modifying tests within the same change when justified"
 directive = "the agent may modify or delete existing tests within the same change as the code change, on the strength of a written justification, without a separate human approval of the test edit itself"
 why = "Self-justification by the same agent that wrote the code is exactly the loophole the rule closes: the agent can author a plausible justification for the very test edit that masks its broken code, so a justification field is not a substitute for an independent human review."

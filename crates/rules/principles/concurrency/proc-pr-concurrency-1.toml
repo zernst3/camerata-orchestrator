@@ -35,7 +35,6 @@ why = "Without a required template section, the concurrency story depends on wha
 
 [[option]]
 id = "automated-race-detection-in-ci"
-violates = true
 label = "automated race-detection in CI, as a complement or alternative to a required written concurrency story"
 directive = "Run automated race/concurrency detection as part of CI on code touching shared mutable state: Go's `go test -race` (data-race detector), Rust's loom (exhaustive interleaving exploration for lock-free/unsafe concurrent code) or Miri (undefined-behavior and data-race detection under the Rust abstract machine), or ThreadSanitizer/TSan for C/C++. Treat a race-detector failure as a CI gate, the same way a failing test would be."
 why = "Catches actual races by exercising real interleavings mechanically, rather than relying on a human reviewer to reason correctly about a locking strategy described in prose — reviewers are good at checking that a story was written down, not at proving an absence of races by inspection. The trade-offs: race detectors only catch races on code paths actually exercised by the test suite (an untested interleaving is invisible to them), tools like loom/Miri require restructuring code to run under their model and add real CI time, and a race detector doesn't replace the design conversation a written concurrency story forces — it complements it by giving the design a mechanical check rather than only a documentation requirement. Best used alongside the PR-template requirement, not as a silent replacement for making the locking strategy explicit."
