@@ -39,12 +39,14 @@ why = "Returning the library's row type directly turns every persistence upgrade
 
 [[option]]
 id = "repository-methods-return-a-thin-wrapper-over-th"
+violates = true
 label = "Thin wrapper over persistence"
 directive = "repository methods return a thin wrapper over the persistence type that exposes additional helper methods on top of the underlying library's row representation, lifecycle, and fetch semantics"
 why = "A thin wrapper looks lightweight but still couples consumers to the underlying library's lifecycle, fetch semantics, and inheritance shape, so it does not actually decouple the domain from persistence."
 
 [[option]]
 id = "repository-methods-return-persistence-types-from"
+violates = true
 label = "Mixed return types per repo"
 directive = "repository methods return persistence types from some repositories and domain types from others, with the choice made per repository based on what is convenient at the time"
 why = "Mixed return types lose the architectural property entirely: reviewers cannot tell at a call site whether they are receiving a domain type or a persistence type, so the boundary's value disappears."

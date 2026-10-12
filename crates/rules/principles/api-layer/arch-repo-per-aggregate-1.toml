@@ -32,6 +32,7 @@ why = "Per-aggregate abstractions let services depend on the shape of the data t
 
 [[option]]
 id = "the-domain-layer-declares-a-single-generic-repos"
+violates = true
 label = "Single generic Repository-of-T"
 directive = "the domain layer declares a single generic Repository-of-T abstraction that every aggregate consumes through type parameters, rather than declaring a separate abstraction per aggregate"
 why = "A single generic Repository-of-T does not fit aggregate-specific finder methods like find_by_slug or find_active_by_org; it either degrades to find_by_id only or grows methods that some aggregates do not implement."

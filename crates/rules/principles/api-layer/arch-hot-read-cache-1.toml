@@ -47,6 +47,7 @@ why = "A TTL-only cache produces longer stale-read windows, and a request that j
 
 [[option]]
 id = "hot-reads-sit-behind-a-cache-with-explicit-write"
+violates = true
 label = "Invalidation only, no TTL"
 directive = "hot reads sit behind a cache with explicit write-side invalidation but no TTL; the cache trusts the invalidation paths to cover every change"
 remediation = """

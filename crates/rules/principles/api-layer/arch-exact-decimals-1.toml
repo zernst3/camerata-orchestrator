@@ -47,6 +47,7 @@ why = "Integer minor-units avoid floating-point imprecision just as well as a de
 
 [[option]]
 id = "monetary-and-quantity-values-are-represented-as"
+violates = true
 label = "Represent as strings"
 directive = "monetary and quantity values are represented as strings throughout, and consumers parse and re-format them at each compute step"
 why = "String representation gives up arithmetic at the type level and pushes the precision problem into every consumer who has to remember to parse and round consistently."
