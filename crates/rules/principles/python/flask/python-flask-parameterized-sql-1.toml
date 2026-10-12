@@ -33,7 +33,6 @@ why = "The canonical SQL injection antipattern; every such site is a latent vuln
 
 [[option]]
 id = "stored-procedures-only"
-violates = true
 label = "move all parameterized logic into database stored procedures"
 directive = "Business logic involving dynamic SQL is pushed into stored procedures called from Python with only scalar arguments."
 why = "Eliminates injection at the application layer but tightly couples business logic to the database, makes schema migrations more complex, and removes Python-level testability."

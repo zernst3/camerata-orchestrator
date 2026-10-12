@@ -33,6 +33,7 @@ why = "Credentials enter git history permanently; anyone with repository access 
 
 [[option]]
 id = "dotenv-committed"
+violates = true
 label = "use a committed .env file"
 directive = "Configuration is stored in a `.env` file that is version-controlled alongside the application and loaded with `python-dotenv`."
 why = "Equivalent to committing credentials; the `.env` pattern is safe only when the file is `.gitignore`d."

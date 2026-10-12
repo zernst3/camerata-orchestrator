@@ -31,6 +31,7 @@ why = "Couples every handler to the engine, reinvents lifecycle management per s
 
 [[option]]
 id = "global-session"
+violates = true
 label = "share a module-level global session"
 directive = "A single module-level session object is shared across requests and imported wherever a session is needed."
 why = "Sessions are not safe to share across concurrent requests; a global session produces cross-request data corruption under load."

@@ -33,6 +33,7 @@ why = "Centralized error handlers produce consistent error envelopes across all 
 
 [[option]]
 id = "try-except-per-route"
+violates = true
 label = "wrap each route in try/except and return error responses manually"
 directive = "Each route function contains its own try/except blocks that catch expected exceptions and return jsonify error responses directly."
 why = "Duplicates error-handling logic across routes; each route has slightly different error shapes; unhandled exception types in one route produce HTML 500 while the same type in another produces JSON."

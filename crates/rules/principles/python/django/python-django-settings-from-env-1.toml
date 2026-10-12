@@ -33,6 +33,7 @@ why = "The credentials enter git history permanently; anyone with repository acc
 
 [[option]]
 id = "per-environment-settings-files"
+violates = true
 label = "maintain separate settings files per environment committed to git"
 directive = "Environment-specific settings live in committed files (`settings_dev.py`, `settings_prod.py`) that contain the actual credentials for each environment."
 why = "Keeps environments isolated but still commits production credentials to the repository; rotation still requires a commit."
