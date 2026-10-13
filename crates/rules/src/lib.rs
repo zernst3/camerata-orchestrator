@@ -457,6 +457,16 @@ struct RuleToml {
     /// failing the BUILD rather than silently shipping an unclassified rule.
     #[serde(default)]
     kind: Option<RuleKind>,
+    /// Whether this rule is a SCAN TARGET (W16) — see [`Rule::inspectable`]'s doc comment for
+    /// the semantics. REQUIRED on every corpus rule, with the same lenient-parse /
+    /// strict-gate split `kind` uses and for the same reason: a bare `#[serde(default)]` so a
+    /// TOML lacking the key still parses (fixture corpora in other crates do not declare it)
+    /// while [`rules_missing_inspectable`] fails the BUILD on any real corpus rule that omits
+    /// it. There is deliberately NO value-level default resolving `None` to `true` at this
+    /// layer: every silent default this schema has shipped produced an invisible bug, and a
+    /// newly-authored rule must be forced to decide whether the scan can assess it.
+    #[serde(default)]
+    inspectable: Option<bool>,
     /// A ceiling on the severity this rule may ever export, e.g. `"high"` — see [`Rule::
     /// max_severity`]'s doc comment and E2 (`docs/plans/2026-10-09_audit-findings-tracker.md`).
     /// Free-form lowercase severity string (`"critical"` | `"high"` | `"medium"` | `"low"`),
@@ -770,6 +780,50 @@ pub struct Rule {
     /// is only ever seen on an in-progress/test-fixture rule, never a real corpus one at test
     /// time. See [`Rule::kind`] / [`Rule::is_defect_kind`] for the accessors.
     pub kind: Option<RuleKind>,
+    /// W16: is this rule a SCAN TARGET, or an EMITTED DIRECTIVE ONLY?
+    ///
+    /// # Why this field exists
+    ///
+    /// Until W16 every selected rule was scanned, with no exclusion of any kind. That was
+    /// right for the code rules and wrong for the ~23 rules whose subject is the AUTHORING
+    /// PROCESS rather than the artifact (`ORCH-MODEL-TIERING-1`, `SPIRIT-ROBUSTNESS-1`,
+    /// `PROC-CITE-CONVENTION-ID-1`, the `PROCESS-*` commit-metadata family, …). Those rules
+    /// armed on every unattended scan, ran in the semantic pass, found nothing — correctly,
+    /// since there is nothing in a file tree to find — and were then recorded
+    /// `RuleLedgerEntry::verified_clean()`, because that predicate is
+    /// `ran && findings_emitted == 0 && !not_applicable` and nothing marked them otherwise.
+    /// A paid client deliverable could therefore open its "What's healthy" list with
+    /// "`ORCH-MODEL-TIERING-1`: verified clean" — a claim about how WE run our agents,
+    /// presented as a verified property of THEIR codebase.
+    ///
+    /// This NARROWS the W4 ruling ("every single rule should be included in the AI semantic
+    /// scan"); it does not reverse it. W4 was right that the old `ORCH-`/`SPIRIT-`/`PROC-`
+    /// prefix gate over-excluded — `SPIRIT-FILE-SIZE-1` is a genuine scan rule, and so are
+    /// `PROC-PR-CONCURRENCY-1` and `PROC-HIDE-DEAD-END-1`. Every one of those families is
+    /// MIXED, which is exactly why the distinction has to be per-rule and declared in the
+    /// TOML, where it is visible to the rule's author, rather than a lexical check elsewhere
+    /// in the engine acting at a distance.
+    ///
+    /// # Semantics
+    ///
+    /// - `Some(true)` — today's behavior. The rule is emitted AND scanned.
+    /// - `Some(false)` — **emitted, never scanned.** The rule is still proposed, still
+    ///   auto-recommended, and still installed verbatim into the client's `AGENTS.md` /
+    ///   `CONVENTIONS.md` / `.camerata/rules.json` as a directive governing future work: the
+    ///   EMIT path is completely untouched. It is removed from the scan BEFORE arming
+    ///   (`camerata_server::onboard::inspectable_rules_for_scan`), so it never reaches the
+    ///   semantic prompt, never enters the scan ledger, and can therefore never be
+    ///   `verified_clean`, never appear in "What's healthy", and never be counted in
+    ///   `provenance.audited_rule_ids` or the Coverage sheet's "we checked N rules" line.
+    ///   Excluding it before arming rather than filtering its findings afterwards is
+    ///   deliberate: a rule that armed and was then suppressed still pollutes the ledger's
+    ///   accounting, which is the same shape as the defect being closed.
+    /// - `None` — the rule did not declare the field. The corpus-load gate
+    ///   ([`rules_missing_inspectable`]) fails the BUILD on this for any real corpus rule.
+    ///   At RUNTIME, [`Rule::is_inspectable`] resolves it to `true` (scan it), because the
+    ///   fail-safe direction for an undeclared rule is to keep looking, not to go quiet — and
+    ///   because fixture corpora in other crates legitimately omit the key.
+    pub inspectable: Option<bool>,
     /// A ceiling on the severity this rule may ever export (E2, `docs/plans/
     /// 2026-10-09_audit-findings-tracker.md`) — `report_export`'s severity pipeline clamps
     /// DOWN to this value whenever the finding's own (possibly floor-raised) severity would
@@ -963,6 +1017,21 @@ impl Rule {
     pub fn is_defect_kind(&self) -> bool {
         matches!(self.kind, Some(RuleKind::Defect))
     }
+
+    /// W16: whether this rule is a SCAN TARGET — see [`Rule::inspectable`]'s doc comment for
+    /// the full semantics and the defect it closes.
+    ///
+    /// `false` means EMITTED, NEVER SCANNED: the rule is still proposed, armed and installed
+    /// into the client's `AGENTS.md`/`CONVENTIONS.md`, but is removed from the scan before
+    /// arming, so no scan surface may claim anything about it.
+    ///
+    /// An UNDECLARED rule (`None`) resolves to `true` here. That is the fail-safe direction —
+    /// keep looking rather than go quiet — and it is only ever reachable from a test fixture
+    /// corpus, since [`rules_missing_inspectable`] fails the build on any real corpus rule
+    /// that omits the field.
+    pub fn is_inspectable(&self) -> bool {
+        self.inspectable.unwrap_or(true)
+    }
 }
 
 impl Rule {
@@ -1133,6 +1202,7 @@ pub fn bare_rule(id: &str, domain: &str) -> Rule {
         stack_exceptions: Vec::new(),
         extra_domains: Vec::new(),
         kind: None,
+        inspectable: None,
         max_severity: None,
         min_severity: None,
         deviation_ceiling: None,
@@ -1188,6 +1258,7 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         stack_exceptions: Vec::new(),
         extra_domains: Vec::new(),
         kind: None,
+        inspectable: None,
         max_severity: None,
         min_severity: None,
         deviation_ceiling: None,
@@ -1450,6 +1521,7 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
         stack_exceptions,
         extra_domains: raw.extra_domains,
         kind: raw.kind,
+        inspectable: raw.inspectable,
         max_severity: raw.max_severity.filter(|s| !s.trim().is_empty()),
         min_severity: raw.min_severity.filter(|s| !s.trim().is_empty()),
         deviation_ceiling: raw.deviation_ceiling.filter(|s| !s.trim().is_empty()),
@@ -1482,6 +1554,57 @@ pub fn rules_missing_kind(set: &RuleSet) -> Vec<String> {
         .collect();
     offenders.sort();
     offenders
+}
+
+/// W16. Every rule in `set` that does NOT declare [`Rule::inspectable`] at all, as a sorted
+/// list of ids. `req_w16_every_corpus_rule_declares_inspectable` asserts this is EMPTY for the
+/// real shipped corpus.
+///
+/// Same build-time-gate philosophy, and the same lenient-parse/strict-gate split, as
+/// [`rules_missing_kind`]: `RuleToml::inspectable` is `Option<bool>` with a bare
+/// `#[serde(default)]` so a TOML lacking the key still parses (and so fixture corpora in other
+/// crates, which do not declare it, keep working), while THIS function is what actually
+/// enforces the invariant — by failing the BUILD, never by refusing a scan at runtime
+/// (`docs/RULES_REFERENCE.md` section 10.6).
+///
+/// The field is REQUIRED rather than defaulted because of what every silent default in this
+/// schema has already cost. `verification` defaulting to `draft` silently disarmed
+/// `UI-UTC-DATES-1` on every repo (finding A7); an absent `kind` would silently exempt a rule
+/// from ever emitting a `violates` finding (A5.1). "Can the scan assess this rule from a file
+/// tree?" is a judgment only the rule's author can make, and the cost of guessing it wrongly
+/// in either direction is a wrong claim in a paid deliverable: guess `true` and an
+/// unassessable rule ships as "verified clean"; guess `false` and a real check silently stops
+/// running. So a new rule is forced to answer.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn rules_missing_inspectable(set: &RuleSet) -> Vec<String> {
+    let mut offenders: Vec<String> = set
+        .iter()
+        .filter(|r| r.inspectable.is_none())
+        .map(|r| r.id.0.clone())
+        .collect();
+    offenders.sort();
+    offenders
+}
+
+/// W16 VACUITY GUARD for [`rules_missing_inspectable`]: every rule in `set` that declares
+/// `inspectable = false`, as a sorted list of ids.
+///
+/// An empty offender list from the gate above means nothing on its own — it would also be
+/// empty for a corpus in which the field existed but no rule ever used the interesting value,
+/// which is the "complete, fully-tested, totally inert mechanism" failure mode
+/// [`rules_declaring_max_severity`] was written in response to. This function is the probe
+/// that proves the corpus actually EXERCISES the field, and
+/// `req_w16_the_emit_only_population_is_pinned` pins its exact contents so the population
+/// cannot drift silently in either direction.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn rules_declaring_emit_only(set: &RuleSet) -> Vec<String> {
+    let mut ids: Vec<String> = set
+        .iter()
+        .filter(|r| !r.is_inspectable())
+        .map(|r| r.id.0.clone())
+        .collect();
+    ids.sort();
+    ids
 }
 
 /// Every rule in `set` whose [`Verification`] value makes it UNSELECTABLE on every repo —
@@ -1763,6 +1886,7 @@ const RULE_LEVEL_FIELDS: &[&str] = &[
     "stack_exception",
     "extra_domains",
     "kind",
+    "inspectable",
     "max_severity",
     "min_severity",
     "deviation_ceiling",
