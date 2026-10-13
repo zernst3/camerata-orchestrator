@@ -5,6 +5,7 @@ domain = "csharp:testing"
 layer = "language"
 enforcement = "prose"
 kind = "decision"
+inspectable = true
 default = true
 qualifies = "Moq (or NSubstitute) is used exclusively for interfaces and abstractions that represent external dependencies: repositories, HTTP clients, email providers, clocks, message queues. Production classes that contain pure logic are never mocked — they are tested directly. When production code depends on a static reference (DateTime.Now, File.Exists) that makes tests non-deterministic, a seam interface (e.g. IDateTimeProvider) is introduced and injected via the constructor, then stubbed in tests."
 

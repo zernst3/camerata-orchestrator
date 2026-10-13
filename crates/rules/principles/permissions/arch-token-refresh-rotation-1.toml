@@ -5,6 +5,7 @@ domain = "permissions"
 layer = "universal"
 enforcement = "architectural"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 qualifies = "Deterministically checkable in principle (does an access token's own expiry fall within a short window, does a refresh exchange issue a NEW refresh token while invalidating the one just used, does replaying an already-used refresh token revoke the session rather than silently succeeding or silently failing), but confirming it requires understanding the project's specific auth/session issuance code, not a pattern any generic linter recognizes. This is architectural: a custom integration test exercising the refresh endpoint (issue a token, use it, replay the same one, confirm the session is revoked) is the only reliable check, and the project builds it. Conformance holds when such a test passes; it fails when access-token lifetime is long enough to substitute for session management (making revocation ineffective until expiry), when a refresh token is reusable (no rotation), or when a reused refresh token is accepted rather than triggering revocation."

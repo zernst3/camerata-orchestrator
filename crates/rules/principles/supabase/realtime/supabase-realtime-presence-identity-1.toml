@@ -5,6 +5,7 @@ domain = "supabase:realtime"
 layer = "platform"
 enforcement = "prose"
 kind = "defect"
+inspectable = true
 # E2 ceiling, transcribed from this rule's own prose: "Flag as medium-to-high severity (scaled
 # by how sensitive the extra field is)" — an explicitly bounded range topping out at high.
 max_severity = "high"

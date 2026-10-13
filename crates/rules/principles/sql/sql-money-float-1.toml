@@ -5,6 +5,7 @@ domain = "sql"
 layer = "universal"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity: 'Your
 # `<table>.<column>` column stores a dollar amount as floating ...'".
 min_severity = "high"

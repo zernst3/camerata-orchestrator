@@ -5,6 +5,7 @@ domain = "ruby:rails"
 layer = "framework"
 enforcement = "mechanical"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Enforced by the brakeman scanner (mass-assignment finding) and the Rails runtime: passing an unfiltered `params` hash to `.new`, `.create`, `.update`, or `.update_attributes` raises an ActiveModel::ForbiddenAttributesError in Rails 4+ when the Strong Parameters concern is active. Conformance holds when brakeman runs in CI and every controller action that accepts model attributes calls `.require(...)` and `.permit(...)` on params before passing them to the model; it fails when raw `params` or `params[:model]` is passed directly to a model method."
 verification = "grounded"

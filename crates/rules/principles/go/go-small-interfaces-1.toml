@@ -5,6 +5,7 @@ domain = "go"
 layer = "architecture"
 enforcement = "prose"
 kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
 

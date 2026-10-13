@@ -5,6 +5,7 @@ domain = "permissions"
 layer = "universal"
 enforcement = "prose"
 kind = "defect"
+inspectable = false
 default = true
 verification = "policy"
 

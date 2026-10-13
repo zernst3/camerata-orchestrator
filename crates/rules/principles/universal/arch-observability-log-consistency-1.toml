@@ -5,6 +5,7 @@ domain = "universal"
 layer = "universal"
 enforcement = "architectural"
 kind = "defect"
+inspectable = true
 # E2 ceiling, transcribed from this rule's own prose: "`ai_audit`'s D8 observability cap plus
 # `report_export::is_informational`'s structural bypass force this rule's findings to severity
 # Low and out of every action bucket regardless of the model's proposed severity."

@@ -5,6 +5,7 @@ domain = "java"
 layer = "architecture"
 enforcement = "prose"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Enforced by code review and architectural guidelines, judged by cohesion (does the interface represent one capability/role?) rather than a fixed method count. Small interfaces are easier to implement and reason about. Static analysis can flag interfaces with an unusually large method count (e.g. PMD's ExcessivePublicCount) as a signal worth a cohesion review, not as a hard violation on its own."
 verification = "grounded"

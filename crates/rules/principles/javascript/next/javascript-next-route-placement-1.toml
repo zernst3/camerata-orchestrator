@@ -15,6 +15,7 @@ domain = "javascript:next"
 layer = "framework"
 enforcement = "structured"
 kind = "decision"
+inspectable = true
 default = true
 opt_in_only = true
 verification = "grounded"

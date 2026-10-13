@@ -5,6 +5,7 @@ domain = "universal"
 layer = "universal"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 

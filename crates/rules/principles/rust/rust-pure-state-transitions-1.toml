@@ -5,6 +5,7 @@ domain = "rust"
 layer = "library"
 enforcement = "structured"
 kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
 

@@ -5,6 +5,7 @@ domain = "ci-cd"
 layer = "universal"
 enforcement = "mechanical"
 kind = "decision"
+inspectable = true
 # No adopted default: selecting this rule forces a conscious tier choice between
 # the free Community Edition and the paid AppSec Platform / Pro tier.
 default = false

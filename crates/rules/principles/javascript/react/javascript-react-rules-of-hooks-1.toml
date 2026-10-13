@@ -5,6 +5,7 @@ domain = "javascript:react"
 layer = "framework"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by the react-hooks/rules-of-hooks rule from eslint-plugin-react-hooks, which fails the lint step on a hook called conditionally, in a loop, after an early return, or from a plain (non-component, non-hook) function. Conformance holds when the rule is at error severity and a misplaced hook call fails the build; it fails when the plugin is not configured or the rule only warns."
 verification = "grounded"

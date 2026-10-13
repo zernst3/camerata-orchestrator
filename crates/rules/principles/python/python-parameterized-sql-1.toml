@@ -5,6 +5,7 @@ domain = "python"
 layer = "language"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by a static-analysis gate (Bandit B608 / Ruff S608 / Semgrep) that flags f-strings, `%`-formatting, `.format()`, or `+` concatenation feeding a value into `cursor.execute(...)`, `session.execute(text(...))`, or `.raw(...)`. Conformance holds when the gate runs in CI and an interpolated query string fails the build; it fails when no SQL-injection lint runs."
 verification = "grounded"

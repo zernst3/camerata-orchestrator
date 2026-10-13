@@ -14,6 +14,7 @@ extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Severity is High." Same W5-Q1
 # reading as its folder sibling; this is a privileged write with no authorization check, so
 # no ceiling.

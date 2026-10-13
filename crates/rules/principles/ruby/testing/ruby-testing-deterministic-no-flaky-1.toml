@@ -5,6 +5,7 @@ domain = "ruby:testing"
 layer = "language"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 

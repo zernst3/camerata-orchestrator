@@ -5,6 +5,7 @@ domain = "supabase:rls"
 layer = "platform"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Any match is a critical finding,
 # phrased as: 'Your admin check reads a ...'". Unconditional ("any match").
 min_severity = "critical"

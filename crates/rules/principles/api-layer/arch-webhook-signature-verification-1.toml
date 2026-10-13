@@ -5,6 +5,7 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as CRITICAL severity any
 # such handler with no call to the provider's signature-verification function ... before the
 # event's `type`/payload fields are read". One severity, named unconditionally for the one

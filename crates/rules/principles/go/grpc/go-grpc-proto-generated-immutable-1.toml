@@ -5,6 +5,7 @@ domain = "go:grpc"
 layer = "library"
 enforcement = "prose"
 kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
 

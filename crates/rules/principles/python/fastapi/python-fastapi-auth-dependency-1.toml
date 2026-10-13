@@ -5,6 +5,7 @@ domain = "python:fastapi"
 layer = "framework"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 

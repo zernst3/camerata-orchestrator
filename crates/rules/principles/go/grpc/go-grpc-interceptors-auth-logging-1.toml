@@ -5,6 +5,7 @@ domain = "go:grpc"
 layer = "framework"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 

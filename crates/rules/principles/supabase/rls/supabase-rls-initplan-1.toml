@@ -5,6 +5,7 @@ domain = "supabase:rls"
 layer = "platform"
 enforcement = "structured"
 kind = "decision"
+inspectable = true
 # E2 ceiling, transcribed from this rule's own prose: "emit a medium-severity, opt-in-only
 # finding"; the rejected option reports it "at the same tier as the security-relevant RLS
 # findings", rejected because it "conflates a performance optimization with a security defect

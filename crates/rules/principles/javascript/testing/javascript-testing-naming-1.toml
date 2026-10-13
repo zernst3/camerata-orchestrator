@@ -5,6 +5,7 @@ domain = "javascript:testing"
 layer = "language"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by the jest/no-identical-title rule (eslint-plugin-jest recommended config), which fails the lint step when two describe blocks or two test cases at the same nesting level share the same title. The jest/valid-title rule (also recommended config) blocks empty strings and titles that are plain boolean, numeric, or template-only expressions. The naming content convention — describe names the unit, it/test describes behaviour in present tense — is a prose convention enforced at PR review; no linter rule enforces the wording style. Conformance holds when no-identical-title and valid-title are both configured at error severity."
 verification = "grounded"

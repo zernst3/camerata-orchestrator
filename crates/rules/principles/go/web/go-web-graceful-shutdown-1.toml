@@ -5,6 +5,7 @@ domain = "go:web"
 layer = "framework"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 

@@ -5,6 +5,7 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag any match that originates
 # from application-controlled code ... as a CRITICAL finding." Unconditional ("any match").
 min_severity = "critical"

@@ -5,6 +5,7 @@ domain = "supabase:rls"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): a view without `security_invoker =
 # true` "is a high-severity finding: 'Your `<view>` view punches through the security on the
 # tables ...'".

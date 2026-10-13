@@ -14,6 +14,7 @@ extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Severity is High." Zach's W5-Q1
 # ruling made this explicit: a flat "Severity is High" is a floor of high with no escalation
 # NAMED, which does not forbid one -- and this rule is IDOR-in-the-database, genuinely

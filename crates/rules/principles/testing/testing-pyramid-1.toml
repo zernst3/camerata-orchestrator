@@ -5,6 +5,7 @@ domain = "testing"
 layer = "universal"
 enforcement = "prose"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 verification = "grounded"
 

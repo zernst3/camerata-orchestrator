@@ -16,6 +16,7 @@ extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Severity is High by default;
 # Critical when the same function is GRANTed ...". The clearest floor construction in the
 # corpus: a named minimum plus a named escalation above it.

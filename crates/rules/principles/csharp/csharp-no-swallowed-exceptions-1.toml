@@ -5,6 +5,7 @@ domain = "csharp"
 layer = "language"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by Roslyn analyzer CA1031 (Do not catch general exception types) plus the SonarAnalyzer rules S108 (Nested blocks of code should not be left empty) and S2486 (Generic exceptions should not be ignored), which together flag empty catch bodies and catch-all blocks that neither log nor rethrow. (CA1068 is an unrelated rule about CancellationToken parameter ordering and is not cited as enforcement here.) Conformance holds when these rules run in CI and swallowed exceptions fail the build."
 

@@ -5,6 +5,7 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
 kind = "default_with_exceptions"
+inspectable = true
 # A5.2 forward-drift escape hatch: the services-orchestrate / repositories-own-data-access
 # boundary is the decision every future feature's code placement depends on, so a
 # half-adopted layering makes every new feature re-litigate where its data access goes.

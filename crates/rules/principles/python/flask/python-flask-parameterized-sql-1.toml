@@ -5,6 +5,7 @@ domain = "python:flask"
 layer = "framework"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by Bandit (B608), Semgrep, or Ruff (S608) flagging f-strings, `%`-formatting, `.format()`, or string concatenation inside `session.execute()`, `connection.execute()`, `cursor.execute()`, or `db.engine.execute()`. Conformance holds when the CI gate runs and any interpolated SQL site fails; it fails when no SQL injection lint runs in CI."
 verification = "grounded"

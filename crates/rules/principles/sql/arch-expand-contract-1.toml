@@ -5,6 +5,7 @@ domain = "sql"
 layer = "universal"
 enforcement = "prose"
 kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
 

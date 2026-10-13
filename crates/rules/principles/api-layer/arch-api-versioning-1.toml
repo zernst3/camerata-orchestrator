@@ -5,6 +5,7 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 kind = "decision"
+inspectable = true
 default = false
 verification = "grounded"
 

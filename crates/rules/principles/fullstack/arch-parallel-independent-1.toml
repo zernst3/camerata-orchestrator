@@ -5,6 +5,7 @@ domain = "fullstack"
 layer = "universal"
 enforcement = "structured"
 kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
 

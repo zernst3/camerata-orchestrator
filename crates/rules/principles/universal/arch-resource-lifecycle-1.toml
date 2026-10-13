@@ -5,6 +5,7 @@ domain = "universal"
 layer = "universal"
 enforcement = "architectural"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Deterministically checkable, but no single off-the-shelf linter enforces the whole rule. The mechanical signal is that every child-process spawn carries a kill-on-drop / kill-on-cancel disposition (in Rust/tokio, `Command::kill_on_drop(true)`; the stack equivalent elsewhere) so a dropped, timed-out, or cancelled future terminates the child rather than orphaning it — that part is greppable per spawn site. The rest is a design predicate verified by review: children that outlive a single await (or the host process) are tracked and killed on shutdown, and every temporary file or directory uses RAII auto-cleanup (e.g. `tempfile`'s `TempDir`) or is explicitly removed when its operation ends. Conformance holds when, after a timeout or an app close, no spawned child survives and no scratch accumulates on disk; it fails when processes orphan (reparented to init/launchd) or temp paths leak."
 verification = "grounded"

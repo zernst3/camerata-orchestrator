@@ -5,6 +5,7 @@ domain = "supabase:rls"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 # E2 ceiling, transcribed from this rule's own prose: the worst branch is "unconditionally
 # high severity, there is no legitimate [case]"; the rejected option is an "automatic critical
 # finding with no severity distinction", rejected because "a uniform critical severity would

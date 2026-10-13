@@ -5,6 +5,7 @@ domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "mechanical"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Enforced by Roslyn analyzers (AsyncFixer, Microsoft.VisualStudio.Threading.Analyzers) that flag synchronous action methods whose bodies call async code via .Result or .Wait(). Conformance holds when all actions that perform I/O are declared async Task<IActionResult> (or async Task<T> for Minimal API handlers) and no .Result or .Wait() appears on a Task inside the request pipeline."
 

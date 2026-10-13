@@ -5,6 +5,7 @@ domain = "supabase:auth"
 layer = "platform"
 enforcement = "prose"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Report at high severity when"
 # the service-role path performs an action without checking the caller's entitlement.
 min_severity = "high"

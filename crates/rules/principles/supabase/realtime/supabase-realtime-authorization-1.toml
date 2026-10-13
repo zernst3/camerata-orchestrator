@@ -5,6 +5,7 @@ domain = "supabase:realtime"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity: 'Your
 # `<topic>` channel carries [private data] but is not marked private'", and the second clause
 # reinforces the same single severity: "flag a private channel with no such policy as equally

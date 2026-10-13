@@ -5,6 +5,7 @@ domain = "csharp:efcore"
 layer = "library"
 enforcement = "structured"
 kind = "default_with_exceptions"
+inspectable = true
 # A5.2 forward-drift escape hatch, INHERITED from ARCH-EXPLICIT-TX-1 per Zach's W5-Q3 ruling
 # ("yes these should match"): severity must describe the PROBLEM, not which rule happened to
 # fire. Without this, a repo on this stack caps the identical architectural defect at medium

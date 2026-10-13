@@ -5,6 +5,7 @@ domain = "java:testing"
 layer = "language"
 enforcement = "prose"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by Maven Surefire Plugin (picks up **/*Test.java, **/Test*.java, **/*Tests.java, **/*TestCase.java from src/test/java) and by IDE conventions. Conformance holds when every unit-test class lives under src/test/java/<same-package-path-as-production-class> and is named <ProductionClass>Test.java."
 verification = "grounded"

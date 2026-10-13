@@ -5,6 +5,7 @@ domain = "csharp:testing"
 layer = "language"
 enforcement = "prose"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "xUnit creates a new instance of the test class for every [Fact] and [Theory] case. Per-test setup belongs in the constructor; per-test teardown belongs in Dispose() (implement IDisposable) or DisposeAsync() (implement IAsyncLifetime). Shared expensive resources (database connections, HTTP servers) are managed via IClassFixture<T> (one instance per test class) or ICollectionFixture<T> (one instance per named collection). [SetUp] and [TearDown] attributes do not exist in xUnit v2/v3; their equivalent is the constructor and Dispose."
 

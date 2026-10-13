@@ -5,6 +5,7 @@ domain = "java"
 layer = "architecture"
 enforcement = "prose"
 kind = "decision"
+inspectable = true
 default = false
 qualifies = "Enforced by package structure conventions and code review. The directory structure reflects feature boundaries (users, organizations, projects) not horizontal layers."
 verification = "grounded"

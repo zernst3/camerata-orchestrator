@@ -5,6 +5,7 @@ domain = "java:testing"
 layer = "language"
 enforcement = "prose"
 kind = "decision"
+inspectable = true
 default = true
 qualifies = "Enforced by code review and optionally by a Checkstyle or Semgrep rule that flags calls to org.junit.jupiter.api.Assertions.assertEquals/assertTrue/assertFalse/assertNull in favor of AssertJ. PMD's UnitTestShouldIncludeAssert ensures at least one assertion is present; AssertJ's assertThat() satisfies this check. Conformance holds when all assertion calls use org.assertj.core.api.Assertions.assertThat (or BDDAssertions.then) rather than JUnit's static assertion methods."
 verification = "grounded"

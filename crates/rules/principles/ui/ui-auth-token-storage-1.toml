@@ -5,6 +5,7 @@ domain = "ui"
 layer = "universal"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over client-side code for an access token, refresh token, session id, or API key written via localStorage.setItem/sessionStorage.setItem, persisted into IndexedDB, or set as a cookie with no HttpOnly attribute (document.cookie writes are always JS-readable/writable and can never carry HttpOnly, which only a Set-Cookie response header can set). Conformance holds when every such credential is set only via a server response's Set-Cookie header carrying HttpOnly, Secure, and an explicit SameSite value, with no client-side JavaScript ever holding the token's own value in a readable store; it fails when a token is written to localStorage/sessionStorage/IndexedDB in any form (including a seemingly-opaque wrapper object), or when a cookie carrying a credential is set without HttpOnly."

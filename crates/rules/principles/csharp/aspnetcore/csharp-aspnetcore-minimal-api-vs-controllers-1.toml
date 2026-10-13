@@ -5,6 +5,7 @@ domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "structured"
 kind = "decision"
+inspectable = true
 default = false
 
 verification = "grounded"

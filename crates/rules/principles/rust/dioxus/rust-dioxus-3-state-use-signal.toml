@@ -5,6 +5,7 @@ domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 verification = "grounded"
 

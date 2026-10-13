@@ -5,6 +5,7 @@ domain = "python"
 layer = "language"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by a static type checker (mypy or pyright) configured at error severity in CI, with a coverage floor that fails when a public function signature is missing parameter or return annotations. Conformance holds when the type checker runs in CI in a strict-enough mode that an untyped public def fails the build; it fails when no type checker runs or it only warns."
 verification = "grounded"

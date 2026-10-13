@@ -5,6 +5,7 @@ domain = "python:testing"
 layer = "language"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Conformance holds when reusable test setup is expressed as @pytest.fixture functions in a conftest.py file at the appropriate scope level (top-level for all tests, subdirectory for a subset); fixtures declare their teardown via yield; test functions receive shared setup by naming the fixture as a parameter. Fails when tests copy-paste setup code, use module-level globals for shared state, or call helper functions directly from test bodies in ways that duplicate teardown logic."
 verification = "grounded"

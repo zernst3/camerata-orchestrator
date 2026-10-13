@@ -5,6 +5,7 @@ domain = "supabase:storage"
 layer = "platform"
 enforcement = "prose"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Report at high severity when no
 # such check is found: 'Anyone who changes the file id in ...'".
 min_severity = "high"

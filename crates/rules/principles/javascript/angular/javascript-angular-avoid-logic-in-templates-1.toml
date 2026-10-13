@@ -5,6 +5,7 @@ domain = "javascript:angular"
 layer = "framework"
 enforcement = "prose"
 kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
 

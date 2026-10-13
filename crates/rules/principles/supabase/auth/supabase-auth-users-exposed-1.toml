@@ -5,6 +5,7 @@ domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Any match is a critical,
 # unconditional finding", and the option's own why: "an unconditional critical with no
 # carve-out is the right severity".

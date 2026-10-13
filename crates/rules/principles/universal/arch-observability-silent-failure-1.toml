@@ -15,6 +15,7 @@ enforcement = "architectural"
 # for a fault this common, and a low-severity defect is coherent. Severity and kind are
 # orthogonal — see `RuleKind`'s doc comment.
 kind = "defect"
+inspectable = true
 # E2 ceiling, transcribed from this rule's own prose: "deliberately CAPPED LOW (owner
 # directive)"; "forces every finding of this rule to severity Low ... regardless of what
 # severity the model itself proposes"; "caps its severity at [low]". Previously enforced only

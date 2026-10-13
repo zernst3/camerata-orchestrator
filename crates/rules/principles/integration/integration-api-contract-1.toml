@@ -5,6 +5,7 @@ domain = "integration"
 layer = "universal"
 enforcement = "mechanical"
 kind = "default_with_exceptions"
+inspectable = true
 # No adopted default: this is a cross-agent seam rule, opted into per project when
 # the story spans a producer (API) and a consumer (UI / worker) agent.
 default = false

@@ -5,6 +5,7 @@ domain = "csharp:testing"
 layer = "language"
 enforcement = "prose"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Test method names consist of three underscore-separated parts: (1) the name of the method or behavior under test, (2) the scenario or input condition, and (3) the expected result. Test classes are named after the production class they test with a 'Tests' suffix (e.g. OrderServiceTests for OrderService). This naming makes a failing test self-documenting without opening the test body."
 

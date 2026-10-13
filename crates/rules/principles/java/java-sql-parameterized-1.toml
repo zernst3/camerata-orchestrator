@@ -12,6 +12,7 @@ layer = "language"
 # is wired.
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by static analysis (SpotBugs, Semgrep, IDE linters) that detect SQL string concatenation, string interpolation, or format() flowing into query execution. Conformance holds when the gate runs in CI and concatenated queries fail the build."
 verification = "grounded"

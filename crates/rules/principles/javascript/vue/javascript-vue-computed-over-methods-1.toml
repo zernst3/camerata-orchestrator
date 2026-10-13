@@ -5,6 +5,7 @@ domain = "javascript:vue"
 layer = "framework"
 enforcement = "prose"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 

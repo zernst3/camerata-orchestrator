@@ -5,6 +5,7 @@ domain = "ci-cd"
 layer = "universal"
 enforcement = "prose"
 kind = "decision"
+inspectable = false
 default = false
 verification = "policy"
 

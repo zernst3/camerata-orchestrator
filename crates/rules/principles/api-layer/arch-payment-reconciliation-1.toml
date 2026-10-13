@@ -5,6 +5,7 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: the predicate is 'this application has NO code path — neither a webhook handler updating local state on provider-side events, nor a scheduled job comparing local payment/order status against the provider's API — capable of correcting local state after the initial synchronous charge call returns,' which requires surveying the whole integration (route handlers, scheduled jobs, background workers) for the PRESENCE of any such path, not a single file's content. This is an absence-of-a-mechanism check, which an AST/pattern scan over one file cannot establish; it is a project-wide architectural review. Conformance holds when at least one of (webhook-driven status updates, a scheduled reconciliation job) exists and covers the payment/order states the application tracks; it fails when the only place payment status is ever set is the initial synchronous response handler, with no later correction path."
 verification = "grounded"

@@ -5,6 +5,7 @@ domain = "agentic"
 layer = "universal"
 enforcement = "structured"
 kind = "decision"
+inspectable = false
 default = true
 verification = "policy"
 

@@ -5,6 +5,7 @@ domain = "java:testing"
 layer = "language"
 enforcement = "prose"
 kind = "decision"
+inspectable = true
 default = true
 qualifies = "Enforced by code review and optionally by JUnit 5's @DisplayNameGeneration(DisplayNameGenerator.ReplaceUnderscores.class), which converts snake_case method names to readable sentences. Conformance holds when test method names follow a consistent pattern (e.g., shouldReturn404_whenUserNotFound or givenExpiredToken_whenRefresh_thenThrowsUnauthorized) and @DisplayName is added when the auto-generated name is ambiguous."
 verification = "grounded"

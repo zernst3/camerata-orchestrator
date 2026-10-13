@@ -5,6 +5,7 @@ domain = "java"
 layer = "language"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by static analysis (SpotBugs, Checkstyle, IntelliJ inspections) that flag unmanaged closeable resources and recommend try-with-resources. Conformance holds when every resource implementing AutoCloseable (Connection, Statement, Stream, Reader, Writer, etc.) is guarded by try-with-resources or an explicit finally close."
 verification = "grounded"

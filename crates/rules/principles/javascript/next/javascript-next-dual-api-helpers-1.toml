@@ -5,6 +5,7 @@ domain = "javascript:next"
 layer = "framework"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by an ESLint no-restricted-imports / no-restricted-globals rule that forbids the raw fetch global (and direct fetch usage) in client components, routing client-side calls through the two sanctioned helpers; the server-only helper additionally imports the server-only package so any client-bundle import of it is a build-time error. The lint rule is scoped to client-side files (client components, hooks, event handlers) and does not flag direct fetch in Server Components, route handlers, or other server-side rendering paths, where direct fetch is the documented pattern. Conformance holds when the client-scoped lint rule and the server-only guard are configured and a raw fetch call in a client component, or a client import of the server helper, fails the build; it fails when neither guard is present and client call sites can fetch directly."
 verification = "grounded"

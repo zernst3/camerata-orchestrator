@@ -5,6 +5,7 @@ domain = "sql"
 layer = "universal"
 enforcement = "prose"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 qualifies = "Prose check: which columns genuinely represent an invariant worth enforcing at the database (a required field, a bounded/valid range, a value that must be unique across rows) versus a column that is legitimately optional or whose validity is contextual and not expressible as a simple predicate, is a judgment call over the schema and its surrounding application logic, not a regex. The realistic mechanism is a migration-review checklist plus a periodic schema audit comparing application-level validation (model-layer 'required'/'unique' declarations, request-body validators) against what the database itself enforces, surfacing columns validated only in application code with no matching database constraint. Conformance holds when every invariant the application code treats as load-bearing (required, bounded, or unique) has a matching database-level constraint; it fails when application code is the ONLY layer enforcing an invariant the schema itself stays silent on."

@@ -5,6 +5,7 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "prose"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Prose check, not a pattern scan: the defect is a MISMATCH between the currency/denomination a value was created in and the currency/denomination it is later compared against, stored as, or displayed as — which requires reading the surrounding business logic (what currency was this order placed in, what does the provider API expect, what does the persisted column represent) rather than a textual pattern. The two concrete, recurring shapes worth naming for the agent: (1) a monetary integer passed to a payment-provider API meant for a zero-decimal currency (JPY, KRW, and similar) as if it needed the usual x100 minor-unit conversion, producing a charge 100x too large or too small; (2) a value computed or compared in one currency (e.g. a cart total summed in the customer's display currency) being passed to, or compared against, a provider call or stored column denominated in a different currency (the merchant's settlement currency) with no conversion step. Conformance holds when every amount's currency and minor-unit convention is traceable to a single, consistent source through its full path from computation to the provider call and to storage; it fails when a currency or denomination change happens silently partway through that path."
 verification = "grounded"

@@ -5,6 +5,7 @@ domain = "supabase:realtime"
 layer = "platform"
 enforcement = "prose"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity a topic
 # built ..." -- stated twice, both branches at the same single severity.
 min_severity = "high"

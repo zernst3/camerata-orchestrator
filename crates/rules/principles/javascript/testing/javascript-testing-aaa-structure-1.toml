@@ -5,6 +5,7 @@ domain = "javascript:testing"
 layer = "language"
 enforcement = "prose"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "No ESLint or Jest linter rule enforces the Arrange-Act-Assert (AAA) structure or single-act constraint at the AST level. The jest/no-conditional-expect rule (eslint-plugin-jest, recommended config) catches one class of AAA violation — assertions inside conditionals — but does not enforce the full pattern. AAA structure is a code-review / team convention enforced at PR time."
 verification = "grounded"

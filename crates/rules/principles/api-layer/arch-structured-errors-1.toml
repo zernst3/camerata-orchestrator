@@ -5,6 +5,7 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
 kind = "default_with_exceptions"
+inspectable = true
 # A5.2 forward-drift escape hatch: a half-converted error envelope means every future endpoint
 # re-decides its error shape and every consumer must handle both, so the cost of the
 # inconsistency is paid again by each new feature on both sides of the contract.

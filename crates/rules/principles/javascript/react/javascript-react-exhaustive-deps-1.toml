@@ -14,6 +14,7 @@ enforcement = "mechanical"
 # closure) would be authored as a THIRD option with `violates = false`, which this kind permits
 # and `defect` would not.
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Enforced by the react-hooks/exhaustive-deps rule from eslint-plugin-react-hooks, which fails the lint step when a useEffect / useCallback / useMemo dependency array omits a reactive value the body references. Conformance holds when the rule is at error severity and a missing dependency fails the build; it fails when the plugin is absent, the rule only warns, or dependencies are suppressed wholesale with a blanket lint-disable."
 verification = "grounded"

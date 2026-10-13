@@ -5,6 +5,7 @@ domain = "ci-cd"
 layer = "universal"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 qualifies = "Deterministically checkable by a regex scan over workflow `uses:` lines: any `owner/repo@ref` reference where `ref` is NOT a full 40-character hexadecimal commit SHA (i.e. it is a tag like `@v4`, a branch like `@main`, or a shorthand) is a match, scoped to third-party actions (first-party platform actions like `actions/checkout` are lower but non-zero risk; the same check applies to them too for defense in depth). Camerata ships no detector for this; a project wiring a CI gate for it uses an existing tool (zizmor, or GitHub's own Dependabot version-update support for Actions, or the OpenSSF Scorecard Pinned-Dependencies check) rather than a bespoke regex, since those tools also handle the auto-update workflow a bare SHA pin otherwise loses. Conformance holds when every third-party `uses:` reference is a full commit SHA, ideally with a trailing comment noting the human-readable version it corresponds to; it fails when any such reference is a tag or branch name."

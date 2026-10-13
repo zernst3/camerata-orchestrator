@@ -5,6 +5,7 @@ domain = "go:testing"
 layer = "testing"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 

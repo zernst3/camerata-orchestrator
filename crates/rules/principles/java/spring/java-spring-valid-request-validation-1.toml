@@ -5,6 +5,7 @@ domain = "java:spring"
 layer = "framework"
 enforcement = "prose"
 kind = "decision"
+inspectable = true
 default = true
 qualifies = "Enforced by a Checkstyle or Semgrep rule that flags @RequestBody parameters in controller methods that are not also annotated with @Valid or @Validated. Conformance holds when every @RequestBody parameter carries @Valid and a global @ControllerAdvice handles MethodArgumentNotValidException to return a structured 400 response."
 verification = "grounded"

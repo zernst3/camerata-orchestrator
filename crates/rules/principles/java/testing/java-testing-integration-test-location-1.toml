@@ -5,6 +5,7 @@ domain = "java:testing"
 layer = "language"
 enforcement = "mechanical"
 kind = "decision"
+inspectable = true
 default = true
 qualifies = "Enforced by Maven Failsafe Plugin (default inclusion patterns **/IT*.java, **/*IT.java, **/*ITCase.java) and by the JUnit @Tag annotation, which CI build tools filter on. Conformance holds when every test that touches an external process (database, HTTP endpoint, message broker, file system) is named with the IT suffix and annotated @Tag(\"integration\"), while plain unit tests use the *Test.java suffix and have no @Tag(\"integration\")."
 verification = "grounded"

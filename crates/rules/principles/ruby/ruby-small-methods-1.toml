@@ -5,6 +5,7 @@ domain = "ruby"
 layer = "language"
 enforcement = "structured"
 kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
 

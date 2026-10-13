@@ -5,6 +5,7 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Architectural check (AST tier): a static-analysis pass parses the import/use declarations of each module and rejects any import that crosses a declared architectural boundary (a controller importing a repository, a domain module importing an infrastructure module, a feature module importing another feature's internals). This is a structural fact about the module graph, not a text pattern: an import string alone does not say which boundary it crosses; the checker needs the boundary map plus the parsed import list. No LLM is needed — the dependency either is or is not in the allowed set. Conformance holds when the import-boundary AST check runs in CI and a forbidden import fails the build; it fails when any module can import any other with nothing enforcing the layering."
 verification = "grounded"

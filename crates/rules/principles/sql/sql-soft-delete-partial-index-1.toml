@@ -5,6 +5,7 @@ domain = "sql"
 layer = "universal"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "flag as high severity: 'Your
 # `<table>` table can't let a user reuse `<column>`'s value ...'".
 min_severity = "high"

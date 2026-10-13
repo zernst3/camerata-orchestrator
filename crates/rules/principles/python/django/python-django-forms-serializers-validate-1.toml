@@ -5,6 +5,7 @@ domain = "python:django"
 layer = "framework"
 enforcement = "structured"
 kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
 

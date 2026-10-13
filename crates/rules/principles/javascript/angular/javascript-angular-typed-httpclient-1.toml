@@ -5,6 +5,7 @@ domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
 kind = "decision"
+inspectable = true
 # A5.2 forward-drift escape hatch, INHERITED from ARCH-STRICT-LAYERING-1 per Zach's W5-Q3
 # ruling ("yes these should match"), extended corpus-wide by his W10 direction (2026-10-11):
 # "Extend it. Consider this directive, get all the rules consistent in this sense, you have the

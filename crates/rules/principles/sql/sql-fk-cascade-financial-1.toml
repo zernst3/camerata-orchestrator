@@ -5,6 +5,7 @@ domain = "sql"
 layer = "universal"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity:
 # 'Deleting a row in `<referencing_table>` would permanently destroy ...'". The sibling
 # "ambiguous table-name matches are `needs_review`" clause names no severity -- needs_review

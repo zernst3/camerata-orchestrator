@@ -5,6 +5,7 @@ domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
 kind = "decision"
+inspectable = true
 default = false
 verification = "grounded"
 

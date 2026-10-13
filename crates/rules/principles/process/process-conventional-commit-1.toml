@@ -5,6 +5,7 @@ domain = "process"
 layer = "universal"
 enforcement = "architectural"
 kind = "decision"
+inspectable = false
 # No adopted default: selecting this rule is a deliberate opt-in (like the CI
 # security rules). It must NEVER be auto-recommended / pre-checked at onboarding.
 default = false

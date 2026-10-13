@@ -5,6 +5,7 @@ domain = "rust"
 layer = "language"
 enforcement = "mechanical"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Mechanical, enforced by clippy: set `clippy::unwrap_used = \"deny\"` under [workspace.lints.clippy] and run `cargo clippy -D warnings` as a required CI gate. Test code is exempt via `allow-unwrap-in-tests = true` in clippy.toml; integration tests under crates/*/tests/ carry a file-level `#![allow(clippy::unwrap_used)]`. Conformance holds when the clippy gate is green; it fails the moment any non-test `unwrap()` compiles. The strict frontier (`expect_used`, `panic`, slice indexing) is the natural next tier."
 verification = "grounded"

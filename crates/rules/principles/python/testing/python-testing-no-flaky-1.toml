@@ -5,6 +5,7 @@ domain = "python:testing"
 layer = "language"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Conformance holds when every test either (a) mocks or overrides all sources of non-determinism (datetime.now, random, uuid4, network, filesystem) before acting, or (b) uses deterministic seeding/fakes so the same inputs always produce the same assertions. Fails when a test passes or fails depending on wall-clock time, random values, test execution order, or external system state."
 verification = "grounded"

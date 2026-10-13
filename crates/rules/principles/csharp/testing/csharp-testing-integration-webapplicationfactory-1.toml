@@ -5,6 +5,7 @@ domain = "csharp:testing"
 layer = "language"
 enforcement = "prose"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Integration tests that exercise the full HTTP request/response pipeline use WebApplicationFactory<TProgram> from Microsoft.AspNetCore.Mvc.Testing to start the application in-process. Production infrastructure (database, external services) is replaced inside a subclass that overrides ConfigureWebHost. The test project references Microsoft.AspNetCore.Mvc.Testing and specifies Sdk=\"Microsoft.NET.Sdk.Web\". Tests implement IClassFixture<CustomWebApplicationFactory<Program>> to share the factory across tests in one class."
 

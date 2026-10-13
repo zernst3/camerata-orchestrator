@@ -15,6 +15,7 @@ extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "emit a high-severity finding:
 # 'One of your database functions runs ...'".
 min_severity = "high"

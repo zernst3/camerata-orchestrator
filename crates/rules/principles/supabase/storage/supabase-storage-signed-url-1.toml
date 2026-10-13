@@ -5,6 +5,7 @@ domain = "supabase:storage"
 layer = "platform"
 enforcement = "prose"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 qualifies = "Prose check. Mechanical evidence feeds the judgment cheaply: the literal `expiresIn` seconds argument at every `createSignedUrl(path, expiresIn)` call site is a plain number to extract, and a subsequent write of the returned `signedUrl` value into a database column (an INSERT/UPDATE whose value expression is the variable the `createSignedUrl` call assigned) is detectable from the same file's control flow. Whether a given expiry is EXCESSIVE for the content being shared is a judgment call relative to the use case (a one-time invoice download and a long-lived public-facing asset link have legitimately different needs), so this routes to prose with both the expiry value and the call site's surrounding code as evidence. Conformance holds when the expiry is scoped to the actual viewing window the feature needs and the URL string itself is never written to a column read back later; it fails when the expiry is day-or-longer-scale with no stated reason, or when the signed URL is stored for reuse rather than re-signed on each access."

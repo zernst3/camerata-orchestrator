@@ -5,6 +5,7 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 qualifies = "Deterministically checkable, but no off-the-shelf linter enforces it: the predicate is 'does this endpoint/resolver's output include a field outside its documented client-facing contract,' and which fields belong in that contract is project-specific domain knowledge no generic tool carries. It requires a custom CI gate — a contract/schema test per endpoint or GraphQL type asserting the response field set against an approved allowlist, or a project-configured serializer convention (an explicit field list rather than a default-serialize-all-properties model/ORM-entity passthrough) checked by a project-specific static rule. Conformance holds when such a gate runs in CI and a response/resolver that adds a field outside the allowlist fails it; it fails when no such check exists and a model's own full property set is the only thing standing in for the API contract."

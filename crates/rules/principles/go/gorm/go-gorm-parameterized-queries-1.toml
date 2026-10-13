@@ -11,6 +11,7 @@ layer = "library"
 # real gosec/Semgrep detector is wired for GORM raw-SQL usage.
 enforcement = "structured"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 verification = "grounded"
 

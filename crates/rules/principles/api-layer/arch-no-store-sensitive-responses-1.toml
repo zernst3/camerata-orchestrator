@@ -5,6 +5,7 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 qualifies = "Deterministically checkable as a header-presence scan: does a response from a route that returns an auth/session token, a password-reset/magic-link token, or a payload containing PII fields set a Cache-Control header including no-store (or an equivalent private, no-cache, max-age=0, must-revalidate combination at minimum), versus a route with no Cache-Control header at all (inheriting whatever default the framework, a CDN, or an intermediate proxy applies) or an explicit max-age permitting retention. Camerata ships no detector for this scan; a project wiring an actual CI gate would assert the header via a contract/integration test hitting the representative routes. Conformance holds when every such response sets no-store (or equivalently strict directives); it fails when a token- or PII-bearing response has no Cache-Control header, or sets one that permits any caching."

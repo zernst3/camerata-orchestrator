@@ -5,6 +5,7 @@ domain = "csharp"
 layer = "language"
 enforcement = "prose"
 kind = "decision"
+inspectable = true
 default = true
 
 verification = "grounded"

@@ -5,6 +5,7 @@ domain = "java"
 layer = "language"
 enforcement = "prose"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Enforced by code review and Checkstyle/SpotBugs rules that flag @Nullable return types and recommend Optional. IDEs can also hint that methods should return Optional instead of null."
 verification = "grounded"

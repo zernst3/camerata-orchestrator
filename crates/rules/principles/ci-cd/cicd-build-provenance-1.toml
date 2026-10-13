@@ -5,6 +5,7 @@ domain = "ci-cd"
 layer = "universal"
 enforcement = "architectural"
 kind = "decision"
+inspectable = true
 default = false
 opt_in_only = true
 verification = "grounded"

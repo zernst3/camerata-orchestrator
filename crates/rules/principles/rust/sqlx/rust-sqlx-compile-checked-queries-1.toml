@@ -5,6 +5,7 @@ domain = "rust:sqlx"
 layer = "framework"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 

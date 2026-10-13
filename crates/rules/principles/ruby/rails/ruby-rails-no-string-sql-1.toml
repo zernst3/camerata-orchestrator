@@ -12,6 +12,7 @@ layer = "framework"
 # is wired.
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by brakeman (SQL injection findings) and a Rubocop-Rails rule. Conformance holds when every `.where`, `.order`, `.joins`, `.group`, and `.having` call either passes a hash condition or a string literal with `?`/named-bind placeholders (`where('active = ? AND role = ?', true, role)`), never an interpolated string (`where(\"role = '#{role}'\")`). Any site where a Ruby variable or expression is interpolated directly into a SQL fragment string fails."
 verification = "grounded"

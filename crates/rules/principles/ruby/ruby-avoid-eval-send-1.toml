@@ -5,6 +5,7 @@ domain = "ruby"
 layer = "language"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by Brakeman which flags eval, instance_eval, class_eval, and send/public_send with string or symbol parameters derived from user input. Conformance holds when the linter runs in CI and these patterns fail the build."
 verification = "grounded"

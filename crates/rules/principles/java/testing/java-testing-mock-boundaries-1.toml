@@ -5,6 +5,7 @@ domain = "java:testing"
 layer = "language"
 enforcement = "prose"
 kind = "decision"
+inspectable = true
 default = true
 qualifies = "Enforced by code review. Mockito's own documentation explicitly warns against mocking concrete List implementations ('please don't mock the List class; use a real instance instead') and cautions that mocking a value object is a 'well known anti-pattern' (RETURNS_DEEP_STUBS section). Conformance holds when mocks appear only on interfaces or abstract types that represent external system boundaries: repositories, HTTP clients, message brokers, clocks, random sources."
 verification = "grounded"

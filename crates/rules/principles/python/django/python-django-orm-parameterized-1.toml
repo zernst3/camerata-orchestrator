@@ -5,6 +5,7 @@ domain = "python:django"
 layer = "framework"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by Bandit (B608), Semgrep, or Ruff (S608) scanning for f-strings, `%`-formatting, `.format()`, or string concatenation feeding a value into `.raw(...)`, `.extra(...)`, or `cursor.execute(...)`. Conformance holds when the CI gate runs and any parameterized-via-interpolation SQL site fails; it fails when no SQL-injection lint covers Django-specific raw query APIs."
 verification = "grounded"

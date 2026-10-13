@@ -5,6 +5,7 @@ domain = "csharp:efcore"
 layer = "library"
 enforcement = "prose"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 
 verification = "grounded"

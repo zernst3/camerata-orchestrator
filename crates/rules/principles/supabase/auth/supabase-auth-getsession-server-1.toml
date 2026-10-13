@@ -5,6 +5,7 @@ domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
 kind = "decision"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "Emit a high-severity finding:
 # 'Your server trusts a badge the visitor ...'".
 min_severity = "high"

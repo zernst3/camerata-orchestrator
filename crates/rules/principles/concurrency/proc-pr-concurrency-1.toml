@@ -5,6 +5,7 @@ domain = "concurrency"
 layer = "universal"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 

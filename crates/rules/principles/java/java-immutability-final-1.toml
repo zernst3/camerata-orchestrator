@@ -5,6 +5,7 @@ domain = "java"
 layer = "language"
 enforcement = "prose"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Enforced by Checkstyle rules that recommend final on classes (unless explicitly designed for subclassing) and fields (unless explicitly mutable). Code review verifies that mutability is intentional and documented."
 verification = "grounded"

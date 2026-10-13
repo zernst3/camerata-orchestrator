@@ -5,6 +5,7 @@ domain = "sql"
 layer = "universal"
 enforcement = "prose"
 kind = "decision"
+inspectable = true
 default = true
 qualifies = "Prose check, enforced by query-plan inspection in CI: representative queries run under EXPLAIN (or the engine's plan tool) and the gate fails on a sequential/full-table scan over a column that is frequently filtered/ordered/joined on and selective enough to benefit from an index. Composite-index column order is checked against the query patterns that will actually use the index (leading column present in the WHERE clause; equality-filter columns generally ordered before range-filter columns), not against a blanket most-selective-first rule. The realistic mechanism is a slow-query / missing-index audit (pg_stat_statements plus an unused-or-missing-index report, or the engine equivalent) run on a representative dataset. Conformance holds when that audit runs and surfaces no unindexed, high-volume, selective WHERE/ORDER BY/JOIN column on hot paths; it fails when indexes are only added reactively after production queries slow down, or when composite indexes are ordered without regard to how they're actually queried."
 verification = "grounded"

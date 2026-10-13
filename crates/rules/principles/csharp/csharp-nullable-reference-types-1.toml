@@ -5,6 +5,7 @@ domain = "csharp"
 layer = "language"
 enforcement = "mechanical"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Enforced by the C# compiler when <Nullable>enable</Nullable> is set in the project file (.csproj). Conformance holds when nullable reference types are enabled globally (not just in files via #nullable) and the build treats warnings as errors."
 

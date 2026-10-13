@@ -5,6 +5,7 @@ domain = "javascript:testing"
 layer = "language"
 enforcement = "mechanical"
 kind = "decision"
+inspectable = true
 default = true
 qualifies = "Enforced by the jest/no-disabled-tests rule (eslint-plugin-jest recommended config), which flags xtest(), xit(), xdescribe(), test.skip(), it.skip(), describe.skip(), and test bodies called with no implementation. The jest/no-focused-tests rule (also in the recommended config) is the complementary gate: it blocks test.only() and fit() from being committed, preventing a focused test from silently skipping the entire rest of the suite. Both rules must be configured at error severity to form a hard gate; at warn severity they allow disabled tests to be committed. Conformance holds when both rules are error-level in the ESLint config and the lint step is a required CI gate."
 verification = "grounded"

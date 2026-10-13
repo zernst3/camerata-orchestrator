@@ -5,6 +5,7 @@ domain = "supabase:rls"
 layer = "platform"
 enforcement = "architectural"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "emit a critical finding distinct
 # from the bare SUPABASE-RLS-ENABLED-1" case.
 min_severity = "critical"

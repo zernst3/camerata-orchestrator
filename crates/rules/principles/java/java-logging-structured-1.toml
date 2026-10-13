@@ -5,6 +5,7 @@ domain = "java"
 layer = "language"
 enforcement = "prose"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Enforced by code review and Checkstyle rules that flag System.out.println() and System.err.println() in production code. Conformance requires slf4j or a similar logging framework with structured fields."
 verification = "grounded"

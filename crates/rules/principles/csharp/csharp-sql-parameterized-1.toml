@@ -11,6 +11,7 @@ layer = "language"
 # mechanically enforced) until a real Roslyn-analyzer or Semgrep detector is wired.
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by static analysis (Roslyn analyzers, Semgrep) that detect string concatenation or string interpolation in SQL queries flowing to execution. Conformance holds when the gate runs in CI and concatenated queries fail the build."
 

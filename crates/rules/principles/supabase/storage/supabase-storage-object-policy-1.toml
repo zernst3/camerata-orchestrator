@@ -5,6 +5,7 @@ domain = "supabase:storage"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 # E2 ceiling, transcribed from this rule's own prose: "Write/delete matches are high severity;
 # read-only matches are medium with `needs_review`, mirroring the RLS-permissive-true severity
 # split" — a fully enumerated split whose top is high, mirroring a rule that rejects critical.

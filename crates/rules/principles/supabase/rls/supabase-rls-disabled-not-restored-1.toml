@@ -16,6 +16,7 @@ extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
 kind = "defect"
+inspectable = true
 # W8 floor, transcribed from this rule's own prose (W5-Q2): "this is always SEVERITY_CRITICAL,
 # because a deliberate-but-unrestored disable" is its own defect, and "emit a CRITICAL finding
 # naming the table". Deliberately NO ceiling -- W5 recorded this rule as the control case for

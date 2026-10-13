@@ -5,6 +5,7 @@ domain = "testing"
 layer = "universal"
 enforcement = "prose"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 

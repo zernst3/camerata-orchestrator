@@ -5,6 +5,7 @@ domain = "csharp:testing"
 layer = "language"
 enforcement = "prose"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Test methods are organized into three named sections: // Arrange (set up objects and state), // Act (invoke the behavior under test — exactly one call), and // Assert (verify the outcome — one logical assertion or one Assert per behavior). Multiple Act blocks in a single test are forbidden. Tests that naturally share Act inputs should use [Theory] + [InlineData] rather than loops or multiple Assert calls."
 

@@ -5,6 +5,7 @@ domain = "ci-cd"
 layer = "universal"
 enforcement = "architectural"
 kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 qualifies = "Deterministically checkable in principle (does a job that deploys to production, runs a migration against a production database, or applies infrastructure changes reference a GitHub Environment — or the equivalent protected-deployment-target concept on another CI platform — configured with required reviewers/wait timer, versus running unconditionally on every push to its trigger branch), but confirming the environment protection rule is actually CONFIGURED (required reviewers added, not merely an environment referenced with no protection rules set) requires reading the platform's repository/environment settings, not only the workflow YAML — the YAML can reference an environment that has no protection configured at all, which looks identical to a correctly-gated job by file inspection alone. This is architectural: Camerata cannot confirm environment-level protection-rule configuration from repository file content; the project verifies it in its own platform settings. Conformance holds when the environment referenced by a privileged job has required reviewers (or an equivalent human gate) actually configured; it fails when no environment is referenced at all, or when one is referenced but has no protection rules configured."

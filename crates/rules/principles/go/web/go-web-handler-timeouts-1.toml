@@ -5,6 +5,7 @@ domain = "go:web"
 layer = "framework"
 enforcement = "prose"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 verification = "grounded"
 

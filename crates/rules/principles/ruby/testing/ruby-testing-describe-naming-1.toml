@@ -5,6 +5,7 @@ domain = "ruby:testing"
 layer = "language"
 enforcement = "mechanical"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by rubocop-rspec cops RSpec/DescribeClass (top-level describe must be a constant), RSpec/DescribeMethod (#/. prefix on method name), RSpec/ContextWording (context prefix list), and RSpec/ExampleWording (no 'should'/'will' in it blocks). Conformance holds when all four cops report no offenses."
 verification = "grounded"

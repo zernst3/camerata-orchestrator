@@ -5,6 +5,7 @@ domain = "ruby:testing"
 layer = "language"
 enforcement = "structured"
 kind = "defect"
+inspectable = true
 default = true
 qualifies = "The rule has two parts, and only one is mechanically checked. rubocop-rspec's RSpec/VerifiedDoubles cop enforces the HOW: it flags plain double('ClassName') and requires the verifying forms (instance_double/class_double/object_double), which is a real, deterministic lint check. It does not, and cannot, enforce the WHERE: whether a given double sits at an architectural boundary (an external service, I/O, a cross-layer seam) versus mocking an internal collaborator within the same layer is a design judgment the cop has no way to evaluate — it will happily pass an instance_double used to mock an in-process model method with no seam justification at all. So conformance for the verified-doubles half holds mechanically when RSpec/VerifiedDoubles reports no offenses; conformance for the mock-only-at-boundaries half is a code-review judgment call, not a lint gate."
 verification = "grounded"

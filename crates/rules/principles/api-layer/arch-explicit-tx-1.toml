@@ -5,6 +5,7 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 kind = "decision"
+inspectable = true
 # A5.2 forward-drift escape hatch: transactional ownership is a cross-cutting contract — once
 # some repository methods expect a handle and others open their own, every future method must
 # guess which posture its callers use, and atomicity bugs follow the inconsistency.

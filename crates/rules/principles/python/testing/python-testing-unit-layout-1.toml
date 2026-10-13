@@ -5,6 +5,7 @@ domain = "python:testing"
 layer = "language"
 enforcement = "structured"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Conformance holds when unit tests live in a top-level tests/ (or src/-sibling tests/) directory whose layout mirrors the application package hierarchy; it fails when test files are scattered inside production modules without a dedicated tests/ root, or when the project has no clear unit/integration split."
 verification = "grounded"

@@ -5,6 +5,7 @@ domain = "go:gorm"
 layer = "library"
 enforcement = "structured"
 kind = "default_with_exceptions"
+inspectable = true
 default = true
 verification = "grounded"
 

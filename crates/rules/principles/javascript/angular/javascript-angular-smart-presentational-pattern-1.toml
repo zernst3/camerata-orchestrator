@@ -5,6 +5,7 @@ domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
 kind = "decision"
+inspectable = true
 default = true
 verification = "policy"
 
