@@ -6,7 +6,7 @@ layer = "language"
 enforcement = "structured"
 kind = "default_with_exceptions"
 inspectable = true
-# A5.2 forward-drift escape hatch: crate-boundary error-type organization is a contract every
+# Deviation-ceiling escape hatch: crate-boundary error-type organization is a contract every
 # future crate must adopt, and mixed schemes force every caller to handle both shapes, so the
 # drift cost compounds with each crate added rather than staying with the existing ones.
 deviation_ceiling = "high"

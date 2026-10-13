@@ -2,22 +2,22 @@ id = "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1"
 title = "A SECURITY DEFINER function that writes data and is granted EXECUTE to anon/public/authenticated must check caller identity/role/ownership before writing"
 tag = "stack"
 domain = "supabase:database-functions"
-# General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that performs a
-# write and is reachable by a broad role with no caller-identity check is exploitable in any
-# Postgres database exposed through PostgREST (or any RPC layer that calls functions on the
-# caller's behalf), whether or not the repo also uses Supabase's folder layout. `extra_domains`
-# (crates/rules/src/lib.rs) is the general mechanism (identical to this folder's siblings
-# SUPABASE-FUNC-SEARCH-PATH-1 and SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1): this rule stays filed
-# under supabase/database-functions/ (keeping its existing supabase:* grouping/behavior), but
-# ALSO matches any repo whose stack carries the `sql` domain.
+# General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that performs a write
+# and is reachable by a broad role with no caller-identity check is exploitable in any Postgres
+# database exposed through PostgREST (or any RPC layer that calls functions on the caller's
+# behalf), whether or not the repo also uses Supabase's folder layout. `extra_domains` is the
+# general mechanism (identical to this folder's siblings SUPABASE-FUNC-SEARCH-PATH-1 and
+# SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1): this rule stays filed under supabase/database-functions/
+# (keeping its existing supabase:* grouping/behavior), but ALSO matches any repo whose stack
+# carries the `sql` domain.
 extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "Severity is High." Same W5-Q1
-# reading as its folder sibling; this is a privileged write with no authorization check, so
-# no ceiling.
+# Severity floor, transcribed from this rule's own prose: "Severity is High." Same reading as its
+# folder sibling: a flat minimum naming no escalation, and this is a privileged write with no
+# authorization check, so no ceiling.
 min_severity = "high"
 default = true
 verification = "grounded"

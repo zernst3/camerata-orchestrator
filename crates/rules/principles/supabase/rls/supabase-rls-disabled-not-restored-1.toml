@@ -6,21 +6,21 @@ domain = "supabase:rls"
 # that is never correctly restored is exploitable against ANY Postgres database reachable by an
 # untrusted role, whether or not the repo also uses Supabase/PostgREST. Without this, a
 # hand-rolled `db/migrations/*.sql` layout (no supabase/ folder, no supabase/config.toml) gets
-# only the generic `sql` domain from domains_for_stack, which never matches this rule's
+# only the generic `sql` domain from stack detection, which never matches this rule's
 # folder-derived `supabase:rls` domain — so the rule would never be proposed/armed for it.
-# `extra_domains` (crates/rules/src/lib.rs) is the general mechanism: this rule stays filed
-# under supabase/rls/ (keeping its existing supabase:* grouping/behavior and sharing
-# SupabaseRlsChecker with its three siblings), but ALSO matches any repo whose stack carries
-# the `sql` domain — mirroring SUPABASE-FUNC-SEARCH-PATH-1's own breadth precedent.
+# `extra_domains` is the general mechanism: this rule stays filed under supabase/rls/ (keeping its
+# existing supabase:* grouping/behavior and its three siblings' shared detector), but ALSO matches
+# any repo whose stack carries the `sql` domain — mirroring SUPABASE-FUNC-SEARCH-PATH-1's own
+# breadth precedent.
 extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "this is always SEVERITY_CRITICAL,
+# Severity floor, transcribed from this rule's own prose: "this is always SEVERITY_CRITICAL,
 # because a deliberate-but-unrestored disable" is its own defect, and "emit a CRITICAL finding
-# naming the table". Deliberately NO ceiling -- W5 recorded this rule as the control case for
-# a rule that must never be capped.
+# naming the table". Deliberately NO ceiling: this is the control case for a rule that must never
+# be capped.
 min_severity = "critical"
 default = true
 verification = "grounded"

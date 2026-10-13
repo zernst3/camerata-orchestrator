@@ -6,7 +6,7 @@ layer = "platform"
 enforcement = "mechanical"
 kind = "defect"
 inspectable = true
-# E2 ceiling, transcribed from this rule's own prose: the uncompensated branch is "(high
+# Severity ceiling, transcribed from this rule's own prose: the uncompensated branch is "(high
 # severity)" and the compensated branch "downgrade[s] to informational"; the rejected option
 # is "always critical", rejected because "flagging it unconditionally at critical severity
 # would produce a false positive on every correctly-built webhook handler in the corpus".

@@ -6,12 +6,12 @@ layer = "library"
 enforcement = "structured"
 kind = "decision"
 inspectable = true
-# A5.2 forward-drift escape hatch, INHERITED from ARCH-EXPLICIT-TX-1 per Zach's W5-Q3 ruling
-# ("yes these should match"): severity must describe the PROBLEM, not which rule happened to
-# fire. Without this, a repo on this stack caps the identical architectural defect at medium
-# while an unmirrored stack reaches high under the general rule. This rule mirrors
-# ARCH-EXPLICIT-TX-1 because it re-litigates the same question for intra-aggregate writes:
-# inside the repository method, on a uniform unit-of-work seam, or at the service.
+# Deviation-ceiling escape hatch, INHERITED from ARCH-EXPLICIT-TX-1: severity must describe the
+# PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the identical
+# architectural defect at medium while an unmirrored stack reaches high under the general rule.
+# This rule mirrors ARCH-EXPLICIT-TX-1 because it re-litigates the same question for
+# intra-aggregate writes: inside the repository method, on a uniform unit-of-work seam, or at the
+# service.
 deviation_ceiling = "high"
 default = false
 verification = "grounded"

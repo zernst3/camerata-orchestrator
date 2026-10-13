@@ -6,11 +6,11 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
-# E2 ceiling, transcribed from this rule's own prose: "Medium severity — this is an
+# Severity ceiling, transcribed from this rule's own prose: "Medium severity — this is an
 # availability/architecture smell, not a direct exposure, so it is a lower severity than the
 # missing-RLS and policy-disabled findings."
 max_severity = "medium"
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "emit a medium-severity finding",
+# Severity floor, transcribed from this rule's own prose: "emit a medium-severity finding",
 # and "it ships at medium severity and its remediation text should point the reader at both
 # possibilities". Floor and ceiling are both medium, from the same two sentences.
 min_severity = "medium"

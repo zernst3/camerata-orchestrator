@@ -6,7 +6,7 @@ layer = "universal"
 enforcement = "structured"
 kind = "default_with_exceptions"
 inspectable = true
-# A5.2 forward-drift escape hatch: where authorization happens relative to the fetch is the
+# Deviation-ceiling escape hatch: where authorization happens relative to the fetch is the
 # pattern every future endpoint copies from its neighbours, so a split convention means each
 # new endpoint author guesses — and the wrong guess is an authorization gap, not a style nit.
 deviation_ceiling = "high"

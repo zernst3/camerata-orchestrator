@@ -6,7 +6,7 @@ layer = "universal"
 enforcement = "structured"
 kind = "default_with_exceptions"
 inspectable = true
-# A5.2 forward-drift escape hatch: a split injection posture (abstractions at the composition
+# Deviation-ceiling escape hatch: a split injection posture (abstractions at the composition
 # root vs. concrete dependencies constructed in place) forces every future service to be wired
 # the second way too, and removes test substitution for everything downstream of it.
 deviation_ceiling = "high"

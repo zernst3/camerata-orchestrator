@@ -6,15 +6,14 @@ layer = "library"
 enforcement = "structured"
 kind = "default_with_exceptions"
 inspectable = true
-# A5.2 forward-drift escape hatch, INHERITED from ARCH-EXPLICIT-TX-1 per Zach's W5-Q3 ruling
-# ("yes these should match"): severity must describe the PROBLEM, not which rule happened to
-# fire. Without this, a repo on this stack caps the identical architectural defect at medium
-# while an unmirrored stack reaches high under the general rule. This rule mirrors
-# ARCH-EXPLICIT-TX-1 because it re-litigates the same transactional-ownership contract: a
-# multi-write operation opens ONE explicit transaction and every write inside it uses the
-# passed `tx` handle rather than the ambient `db`, which is precisely the spine rule's
-# "repositories receive the handle as a parameter" posture in GORM form, and its violating
-# option (separate uncoordinated writes) is the spine rule's rejected per-call-transaction one.
+# Deviation-ceiling escape hatch, INHERITED from ARCH-EXPLICIT-TX-1: severity must describe the
+# PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the identical
+# architectural defect at medium while an unmirrored stack reaches high under the general rule.
+# This rule mirrors ARCH-EXPLICIT-TX-1 because it re-litigates the same transactional-ownership
+# contract: a multi-write operation opens ONE explicit transaction and every write inside it uses
+# the passed `tx` handle rather than the ambient `db`, which is precisely the spine rule's
+# "repositories receive the handle as a parameter" posture in GORM form, and its violating option
+# (separate uncoordinated writes) is the spine rule's rejected per-call-transaction one.
 deviation_ceiling = "high"
 default = true
 verification = "grounded"

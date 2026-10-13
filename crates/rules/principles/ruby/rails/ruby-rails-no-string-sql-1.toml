@@ -3,13 +3,12 @@ title = "ActiveRecord queries use placeholders or hash conditions; SQL is never 
 tag = "stack"
 domain = "ruby:rails"
 layer = "framework"
-# W1 item 4 (mechanical-enforcement build gate, crates/server/src/mechanical_gate.rs): this
+# Enforcement-tier correction (the declared tier must match a detector that really runs): this
 # rule's `qualifies` text names brakeman / a Rubocop-Rails cop, but no such check is actually
-# wired today (no registered ArchChecker, no gateway rule arm, no bundled Semgrep rule, and
-# Ruby is not one of the Clippy/Ruff/ESLint preview tools). Declaring `mechanical` here
-# claimed a hard check that never ran. Corrected to `structured` (evaluated by the
-# semantic/AI audit tier, not mechanically enforced) until a real brakeman/Semgrep detector
-# is wired.
+# wired today (no registered ArchChecker, no gateway rule arm, no bundled Semgrep rule, and Ruby
+# is not one of the Clippy/Ruff/ESLint preview tools). Declaring `mechanical` here claimed a hard
+# check that never ran. Corrected to `structured` (evaluated by the semantic/AI audit tier, not
+# mechanically enforced) until a real brakeman/Semgrep detector is wired.
 enforcement = "structured"
 kind = "defect"
 inspectable = true

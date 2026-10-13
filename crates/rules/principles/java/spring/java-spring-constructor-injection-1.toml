@@ -6,13 +6,12 @@ layer = "framework"
 enforcement = "prose"
 kind = "default_with_exceptions"
 inspectable = true
-# A5.2 forward-drift escape hatch, INHERITED from ARCH-SERVICE-DI-1 per Zach's W5-Q3 ruling
-# ("yes these should match"): severity must describe the PROBLEM, not which rule happened to
-# fire. Without this, a repo on this stack caps the identical architectural defect at medium
-# while an unmirrored stack reaches high under the general rule. This rule mirrors
-# ARCH-SERVICE-DI-1 because it re-litigates the same question (how a service obtains its
-# dependencies), answered with constructor parameters in final fields rather than field
-# injection.
+# Deviation-ceiling escape hatch, INHERITED from ARCH-SERVICE-DI-1: severity must describe the
+# PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the identical
+# architectural defect at medium while an unmirrored stack reaches high under the general rule.
+# This rule mirrors ARCH-SERVICE-DI-1 because it re-litigates the same question (how a service
+# obtains its dependencies), answered with constructor parameters in final fields rather than
+# field injection.
 deviation_ceiling = "high"
 default = true
 qualifies = "Enforced by a Checkstyle rule or Semgrep pattern that flags @Autowired annotations on instance fields (as opposed to constructors). Conformance holds when all Spring bean dependencies are declared as constructor parameters, assigned to final fields, and no @Autowired appears on a field declaration. Single-constructor beans in Spring 4.3+ are auto-wired without requiring @Autowired on the constructor at all."

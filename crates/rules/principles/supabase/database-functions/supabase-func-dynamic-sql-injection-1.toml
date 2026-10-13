@@ -2,22 +2,22 @@ id = "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1"
 title = "A database function must not EXECUTE a dynamically-assembled query string built via non-quoting interpolation (|| concatenation or format()'s %s)"
 tag = "stack"
 domain = "supabase:database-functions"
-# General Postgres, not just Supabase: a plpgsql function that EXECUTEs a dynamically-built
-# query string assembled via `||` concatenation or `format()`'s non-escaping `%s` placeholder
-# is exploitable in ANY Postgres database, whether or not the repo also uses Supabase. Without
-# this, a plain-Postgres repo (hand-written .sql, no supabase/ layout, no @supabase/* dependency)
-# gets only the generic `sql` domain from domains_for_stack, which never matches this rule's
-# folder-derived `supabase:database-functions` domain — so the rule would never be
-# proposed/armed for it. `extra_domains` (crates/rules/src/lib.rs) is the general mechanism
-# (identical to this folder's sibling SUPABASE-FUNC-SEARCH-PATH-1): this rule stays filed under
-# supabase/database-functions/ (keeping its existing supabase:* grouping/behavior), but ALSO
-# matches any repo whose stack carries the `sql` domain.
+# General Postgres, not just Supabase: a plpgsql function that EXECUTEs a dynamically-built query
+# string assembled via `||` concatenation or `format()`'s non-escaping `%s` placeholder is
+# exploitable in ANY Postgres database, whether or not the repo also uses Supabase. Without this,
+# a plain-Postgres repo (hand-written .sql, no supabase/ layout, no @supabase/* dependency) gets
+# only the generic `sql` domain from stack detection, which never matches this rule's
+# folder-derived `supabase:database-functions` domain — so the rule would never be proposed/armed
+# for it. `extra_domains` is the general mechanism (identical to this folder's sibling
+# SUPABASE-FUNC-SEARCH-PATH-1): this rule stays filed under supabase/database-functions/ (keeping
+# its existing supabase:* grouping/behavior), but ALSO matches any repo whose stack carries the
+# `sql` domain.
 extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "Severity is High by default;
+# Severity floor, transcribed from this rule's own prose: "Severity is High by default;
 # Critical when the same function is GRANTed ...". The clearest floor construction in the
 # corpus: a named minimum plus a named escalation above it.
 min_severity = "high"

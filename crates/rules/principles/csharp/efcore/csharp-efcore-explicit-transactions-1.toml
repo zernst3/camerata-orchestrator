@@ -6,13 +6,12 @@ layer = "library"
 enforcement = "structured"
 kind = "default_with_exceptions"
 inspectable = true
-# A5.2 forward-drift escape hatch, INHERITED from ARCH-EXPLICIT-TX-1 per Zach's W5-Q3 ruling
-# ("yes these should match"): severity must describe the PROBLEM, not which rule happened to
-# fire. Without this, a repo on this stack caps the identical architectural defect at medium
-# while an unmirrored stack reaches high under the general rule. This rule mirrors
-# ARCH-EXPLICIT-TX-1 because it re-litigates the same transactional-ownership contract: the
-# SERVICE method that spans multiple SaveChanges opens, commits, and rolls back the explicit
-# transaction, and its violating option (multiple SaveChanges calls each riding its own
+# Deviation-ceiling escape hatch, INHERITED from ARCH-EXPLICIT-TX-1: severity must describe the
+# PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the identical
+# architectural defect at medium while an unmirrored stack reaches high under the general rule.
+# This rule mirrors ARCH-EXPLICIT-TX-1 because it re-litigates the same transactional-ownership
+# contract: the SERVICE method that spans multiple SaveChanges opens, commits, and rolls back the
+# explicit transaction, and its violating option (multiple SaveChanges calls each riding its own
 # implicit per-call transaction) is the spine rule's own rejected "per-call short transactions"
 # option in EF Core form, with the same stated consequence — partial state on failure.
 deviation_ceiling = "high"

@@ -6,12 +6,12 @@ layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# E2 ceiling, transcribed from this rule's own prose (finding C8): "flagged with
+# Severity ceiling, transcribed from this rule's own prose: "flagged with
 # `needs_review`, not an automatic critical", and again "`needs_review`, not an automatic
 # critical" — the conforming failure mode is an explicit high-severity needs_review row, and
 # the rejected option is literally "flag only suspicious-named buckets, at critical severity".
 max_severity = "high"
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "emit a high-severity
+# Severity floor, transcribed from this rule's own prose: "emit a high-severity
 # `needs_review` finding naming the bucket". Floor and ceiling are both high: read together
 # with the ceiling above ("not an automatic critical"), the prose pins this rule at exactly
 # high. needs_review is a routing qualifier here, not a severity.

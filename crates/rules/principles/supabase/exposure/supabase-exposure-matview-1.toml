@@ -6,10 +6,10 @@ layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# E2 ceiling, transcribed from this rule's own prose (finding C8): "this ships as a
+# Severity ceiling, transcribed from this rule's own prose: "this ships as a
 # high-severity finding for review, not an automatic critical."
 max_severity = "high"
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "Emit a high-severity finding",
+# Severity floor, transcribed from this rule's own prose: "Emit a high-severity finding",
 # and "this ships as a high-severity finding for review, not an automatic critical". Floor
 # and ceiling are both high: the prose pins this rule at exactly high from both sides.
 min_severity = "high"

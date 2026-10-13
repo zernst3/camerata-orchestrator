@@ -4,7 +4,7 @@ tag = "stack"
 domain = "javascript:react"
 layer = "framework"
 enforcement = "mechanical"
-# A5.7 (owner ruling): RECLASSIFIED from `decision` to `default_with_exceptions`. Trimming a
+# RECLASSIFIED from `decision` to `default_with_exceptions`. Trimming a
 # dependency array is wrong BY DEFAULT, but a deliberately stale closure is a legitimate
 # technique, so this is neither an equal-weight choice (`decision`) nor a thing with no
 # acceptable form anywhere (`defect`). Note what this rule's own text does and does not say: it
@@ -47,7 +47,7 @@ why = "The dependency array declares what the effect depends on; omitting a valu
 id = "dependency-arrays-are-trimmed-to-control-when-ef"
 label = "Trim effect dependency arrays manually"
 directive = "dependency arrays are trimmed to control when effects re-run, omitting values the body reads (or suppressing the exhaustive-deps lint) when listing them would cause unwanted re-execution, rather than keeping every read reactive value in the array"
-# A5.7: flagged on the authored prose below, which condemns this option rather than carving it
+# Flagged on the authored prose below, which condemns this option rather than carving it
 # out as a justified exception — "treats the symptom by lying about what the effect reads",
 # "the hardest class of React bug", "The correct fixes keep the array complete ... instead of
 # hiding a real dependency". The rule's own `[decision] why` adds: "A blanket eslint-disable on

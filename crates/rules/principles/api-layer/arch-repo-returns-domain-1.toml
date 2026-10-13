@@ -6,7 +6,7 @@ layer = "universal"
 enforcement = "structured"
 kind = "default_with_exceptions"
 inspectable = true
-# A5.2 forward-drift escape hatch: once some repositories return persistence representations
+# Deviation-ceiling escape hatch: once some repositories return persistence representations
 # and others return domain types, every future service method must know which kind it holds,
 # and the persistence coupling spreads with each new caller rather than staying put.
 deviation_ceiling = "high"

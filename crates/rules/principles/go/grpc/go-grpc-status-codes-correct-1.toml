@@ -6,32 +6,27 @@ layer = "framework"
 enforcement = "prose"
 kind = "defect"
 inspectable = true
-# A5.2 forward-drift escape hatch, INHERITED from ARCH-STRUCTURED-ERRORS-1 per Zach's W5-Q3
-# ruling ("yes these should match"), extended corpus-wide by his W10 direction (2026-10-11):
-# "Extend it. Consider this directive, get all the rules consistent in this sense, you have the
-# green light for ALL instances of this." Severity must describe the PROBLEM, not which rule
-# happened to fire. Without this, a gRPC service caps the identical error-contract defect at
-# medium while an unmirrored stack reaches high under the general rule.
+# Deviation-ceiling escape hatch, INHERITED from ARCH-STRUCTURED-ERRORS-1: severity must describe
+# the PROBLEM, not which rule happened to fire. Without this, a gRPC service caps the identical
+# error-contract defect at medium while an unmirrored stack reaches high under the general rule.
 #
-# This rule mirrors ARCH-STRUCTURED-ERRORS-1 because it decides the same axis — does every
-# error response carry a stable machine-readable discriminator the client can branch on,
-# consistently across every endpoint — in the one vocabulary gRPC has for it. gRPC fixes the
-# envelope at the protocol level (status + message, which is the spine rule's own legitimate
-# "status code only, no body" option), so the code IS the error contract here. Both of its
-# violating options are the spine rule's rejected positions: "all errors are returned as
-# INTERNAL, the error message contains the full detail" is the rejected "plain string error
-# responses ... clients are expected to pattern-match on the human-readable wording", and
-# "status codes are assigned inconsistently across handlers" is the rejected "each endpoint
-# defines its own custom error response shape". Its `why` restates the spine rule's own
-# rationale: clients rely on the code for retry and recovery logic, never on the wording.
-# GO-WEB-STRUCTURED-ERROR-RESPONSES-1 already covers this stack's HTTP transport; this is the
-# same commitment on its RPC transport.
+# This rule mirrors ARCH-STRUCTURED-ERRORS-1 because it decides the same axis — does every error
+# response carry a stable machine-readable discriminator the client can branch on, consistently
+# across every endpoint — in the one vocabulary gRPC has for it. gRPC fixes the envelope at the
+# protocol level (status + message, which is the spine rule's own legitimate "status code only, no
+# body" option), so the code IS the error contract here. Both of its violating options are the
+# spine rule's rejected positions: "all errors are returned as INTERNAL, the error message
+# contains the full detail" is the rejected "plain string error responses ... clients are expected
+# to pattern-match on the human-readable wording", and "status codes are assigned inconsistently
+# across handlers" is the rejected "each endpoint defines its own custom error response shape".
+# Its `why` restates the spine rule's own rationale: clients rely on the code for retry and
+# recovery logic, never on the wording. GO-WEB-STRUCTURED-ERROR-RESPONSES-1 already covers this
+# stack's HTTP transport; this is the same commitment on its RPC transport.
 #
-# NOTE, and it is why this line is cheap rather than risky: this rule is `kind = "defect"`, so
-# it never enters the alternatives pass (`Rule::is_defect_kind`) and therefore emits NO
-# deviation rows today, which makes the ceiling inert as shipped. It is authored anyway so the
-# per-stack mirror set is internally consistent per the owner's direction, and so the bound is
-# already correct if this rule is ever reclassified to a deviation-producing kind.
+# Why this line is cheap rather than risky: this rule is `kind = "defect"`, so it never enters the
+# alternatives pass and therefore emits NO deviation rows today, which makes the ceiling inert as
+# shipped. It is authored anyway so the per-stack mirror set stays internally consistent, and so
+# the bound is already correct if this rule is ever reclassified to a deviation-producing kind.
 deviation_ceiling = "high"
 default = true
 verification = "grounded"

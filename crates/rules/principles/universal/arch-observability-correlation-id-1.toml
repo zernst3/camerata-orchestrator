@@ -6,9 +6,9 @@ layer = "universal"
 enforcement = "architectural"
 kind = "decision"
 inspectable = true
-# E2 ceiling, transcribed from this rule's own prose: "`ai_audit`'s D8 observability cap plus
-# `report_export::is_informational`'s structural bypass force this rule's findings to severity
-# Low and out of every action bucket regardless of the model's proposed severity."
+# Severity ceiling, transcribed from this rule's own prose: "the pipeline's observability cap plus
+# `report_export::is_informational`'s structural bypass force this rule's findings to severity Low
+# and out of every action bucket regardless of the model's proposed severity."
 max_severity = "low"
 default = true
 verification = "grounded"

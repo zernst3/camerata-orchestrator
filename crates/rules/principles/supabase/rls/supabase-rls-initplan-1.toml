@@ -6,12 +6,12 @@ layer = "platform"
 enforcement = "structured"
 kind = "decision"
 inspectable = true
-# E2 ceiling, transcribed from this rule's own prose: "emit a medium-severity, opt-in-only
+# Severity ceiling, transcribed from this rule's own prose: "emit a medium-severity, opt-in-only
 # finding"; the rejected option reports it "at the same tier as the security-relevant RLS
 # findings", rejected because it "conflates a performance optimization with a security defect
 # in a report whose entire credibility rests on precise severity framing".
 max_severity = "medium"
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "When found, emit a
+# Severity floor, transcribed from this rule's own prose: "When found, emit a
 # medium-severity, opt-in-only finding". Floor and ceiling are both medium: the prose pins
 # this performance rule at exactly medium.
 min_severity = "medium"

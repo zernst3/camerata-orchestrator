@@ -6,7 +6,7 @@ layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity: 'Your
+# Severity floor, transcribed from this rule's own prose: "Flag as high severity: 'Your
 # upload path is the ...'".
 min_severity = "high"
 default = true

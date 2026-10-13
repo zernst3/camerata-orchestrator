@@ -6,7 +6,7 @@ layer = "universal"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity any such
+# Severity floor, transcribed from this rule's own prose: "Flag as high severity any such
 # value whose data-flow path leads back to the request body, query string, or path parameters
 # with NO intervening server-side lookup".
 min_severity = "high"

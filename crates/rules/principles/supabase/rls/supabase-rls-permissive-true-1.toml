@@ -6,12 +6,12 @@ layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# E2 ceiling, transcribed from this rule's own prose: the worst branch is "unconditionally
+# Severity ceiling, transcribed from this rule's own prose: the worst branch is "unconditionally
 # high severity, there is no legitimate [case]"; the rejected option is an "automatic critical
 # finding with no severity distinction", rejected because "a uniform critical severity would
 # flag intentional, benign patterns ... the fix is a severity split".
 max_severity = "high"
-# W8 floor, transcribed from this rule's own prose (W5-Q2) -- a MULTI-BRANCH rule, so the
+# Severity floor, transcribed from this rule's own prose -- a MULTI-BRANCH rule, so the
 # rule-level floor is the LOWEST severity its prose names: "Write-side matches ... are high
 # severity ... SELECT-only with USING (true) and no WITH CHECK, emit a medium-severity finding
 # with `needs_review`." A floor of high would silently raise the read side the author

@@ -6,12 +6,13 @@ layer = "platform"
 enforcement = "prose"
 kind = "defect"
 inspectable = true
-# E2 ceiling, transcribed from this rule's own prose: "Flag as medium-to-high severity (scaled
-# by how sensitive the extra field is)" — an explicitly bounded range topping out at high.
+# Severity ceiling, transcribed from this rule's own prose: "Flag as medium-to-high severity
+# (scaled by how sensitive the extra field is)" — an explicitly bounded range topping out at
+# high.
 max_severity = "high"
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as medium-to-high severity
-# (scaled by how sensitive the extra field is)". An explicit RANGE -- its bottom is the floor,
-# its top is the ceiling W5 already transcribed above.
+# Severity floor, transcribed from this rule's own prose: "Flag as medium-to-high severity (scaled
+# by how sensitive the extra field is)". An explicit RANGE -- its bottom is the floor, its top is
+# the ceiling above.
 min_severity = "medium"
 default = true
 verification = "grounded"

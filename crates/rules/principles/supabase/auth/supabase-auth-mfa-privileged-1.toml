@@ -6,7 +6,7 @@ layer = "platform"
 enforcement = "prose"
 kind = "defect"
 inspectable = true
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "Report at high severity when no
+# Severity floor, transcribed from this rule's own prose: "Report at high severity when no
 # such check is found: 'This privileged action can be performed by ...'".
 min_severity = "high"
 default = true

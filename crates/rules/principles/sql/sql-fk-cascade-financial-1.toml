@@ -6,7 +6,7 @@ layer = "universal"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity:
+# Severity floor, transcribed from this rule's own prose: "Flag as high severity:
 # 'Deleting a row in `<referencing_table>` would permanently destroy ...'". The sibling
 # "ambiguous table-name matches are `needs_review`" clause names no severity -- needs_review
 # is a confidence/routing qualifier in this pipeline, not a second severity branch.

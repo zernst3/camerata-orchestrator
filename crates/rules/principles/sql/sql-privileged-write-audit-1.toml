@@ -6,7 +6,7 @@ layer = "universal"
 enforcement = "prose"
 kind = "defect"
 inspectable = true
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "Report at ... high severity when
+# Severity floor, transcribed from this rule's own prose: "Report at ... high severity when
 # no such record is found: 'This privileged action changes `<table>` with no durable record
 # of who ...'".
 min_severity = "high"

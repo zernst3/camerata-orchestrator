@@ -6,7 +6,7 @@ layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag
+# Severity floor, transcribed from this rule's own prose: "Flag
 # `enable_refresh_token_rotation = false` unconditionally at high severity". The JWT-expiry
 # side is explicitly scoped to `needs_review` and names no severity of its own.
 min_severity = "high"

@@ -6,7 +6,7 @@ layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# W8 floor, transcribed from this rule's own prose (W5-Q2): "Flag as high severity any such
+# Severity floor, transcribed from this rule's own prose: "Flag as high severity any such
 # bucket missing `fileSizeLimit`/`file_size_limit` ...".
 min_severity = "high"
 default = true

@@ -6,21 +6,17 @@ layer = "framework"
 enforcement = "structured"
 kind = "decision"
 inspectable = true
-# A5.2 forward-drift escape hatch, INHERITED from ARCH-STRICT-LAYERING-1 per Zach's W5-Q3
-# ruling ("yes these should match"): severity must describe the PROBLEM, not which rule
-# happened to fire. Without this, a repo on this stack caps the identical architectural defect
-# at medium while an unmirrored stack reaches high under the general rule. This rule mirrors
-# ARCH-STRICT-LAYERING-1 because it re-litigates that boundary for Django: views are thin HTTP
-# adapters, and business rules live in model methods (single-model) or in a service module with
-# no dependency on Django's HTTP layer (cross-model).
+# Deviation-ceiling escape hatch, INHERITED from ARCH-STRICT-LAYERING-1: severity must describe
+# the PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the
+# identical architectural defect at medium while an unmirrored stack reaches high under the
+# general rule. This rule mirrors ARCH-STRICT-LAYERING-1 because it re-litigates that boundary for
+# Django: views are thin HTTP adapters, and business rules live in model methods (single-model) or
+# in a service module with no dependency on Django's HTTP layer (cross-model).
 #
-# AUTHORED ON A RULE ON THE 58-RULE A5.7 CLASSIFICATION HOLD, under the owner's explicit W9
-# direction (2026-10-11): "Lift the hold and ensure all are consistent here, regardless of any
-# holds or locks in place ... I direct that they all must be consistent, so make it so." The
-# hold on this rule's `kind` is NOT lifted and `kind` is untouched; only the ceiling is
-# authored. Safe either way: as `decision` this rule already emits deviation rows, so a ceiling
-# only BOUNDS rows that exist today, and if the owner later reclassifies it as `defect` the
-# ceiling becomes dead config rather than wrong behaviour.
+# The ceiling is authored without touching this rule's `kind`, and is safe either way: as a
+# `decision` rule it already emits deviation rows, so the ceiling only BOUNDS rows that exist
+# today; were it ever reclassified as `defect` the ceiling becomes dead config rather than wrong
+# behaviour.
 deviation_ceiling = "high"
 default = true
 verification = "grounded"
