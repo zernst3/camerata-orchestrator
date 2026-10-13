@@ -4,7 +4,16 @@ tag = "stack"
 domain = "javascript:react"
 layer = "framework"
 enforcement = "mechanical"
-kind = "decision"
+# A5.7 (owner ruling): RECLASSIFIED from `decision` to `default_with_exceptions`. Trimming a
+# dependency array is wrong BY DEFAULT, but a deliberately stale closure is a legitimate
+# technique, so this is neither an equal-weight choice (`decision`) nor a thing with no
+# acceptable form anywhere (`defect`). Note what this rule's own text does and does not say: it
+# describes NO justified exception — the single non-default option is condemned outright as
+# "lying about what the effect reads" and "the hardest class of React bug". So the flag below
+# sits on that option. A future genuinely-justified exception (an explicitly reasoned stale
+# closure) would be authored as a THIRD option with `violates = false`, which this kind permits
+# and `defect` would not.
+kind = "default_with_exceptions"
 default = true
 qualifies = "Enforced by the react-hooks/exhaustive-deps rule from eslint-plugin-react-hooks, which fails the lint step when a useEffect / useCallback / useMemo dependency array omits a reactive value the body references. Conformance holds when the rule is at error severity and a missing dependency fails the build; it fails when the plugin is absent, the rule only warns, or dependencies are suppressed wholesale with a blanket lint-disable."
 verification = "grounded"
@@ -37,4 +46,11 @@ why = "The dependency array declares what the effect depends on; omitting a valu
 id = "dependency-arrays-are-trimmed-to-control-when-ef"
 label = "Trim effect dependency arrays manually"
 directive = "dependency arrays are trimmed to control when effects re-run, omitting values the body reads (or suppressing the exhaustive-deps lint) when listing them would cause unwanted re-execution, rather than keeping every read reactive value in the array"
+# A5.7: flagged on the authored prose below, which condemns this option rather than carving it
+# out as a justified exception — "treats the symptom by lying about what the effect reads",
+# "the hardest class of React bug", "The correct fixes keep the array complete ... instead of
+# hiding a real dependency". The rule's own `[decision] why` adds: "A blanket eslint-disable on
+# the deps line is the same lie written down." Nothing in this rule's text describes a
+# legitimate reason to trim, so there is nothing here to leave unflagged.
+violates = true
 why = "Trimming dependency arrays to control when effects re-run treats the symptom by lying about what the effect reads: an effect that closes over a prop or state value not in the array operates on a stale copy of that value indefinitely, producing a UI that shows one value while the effect acts on an older one. This is the hardest class of React bug, invisible in local testing where async work happens to finish fast, with no error and no obvious cause. The correct fixes keep the array complete and control re-runs structurally instead of hiding a real dependency."

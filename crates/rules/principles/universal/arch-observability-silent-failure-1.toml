@@ -4,7 +4,17 @@ tag = "stack"
 domain = "universal"
 layer = "universal"
 enforcement = "architectural"
-kind = "decision"
+# A5.7 (owner ruling): RECLASSIFIED from `decision` to `defect`. Two options, one of which this
+# rule's own author opens with `Rejected:`, is not a decision under any reading — "allow a caught
+# error to be discarded with no log call, no propagation and no comment" is the fault CWE-390
+# names, not an equal-weight alternative. As `decision` with zero `violates` flags the rule
+# reported NOTHING: fed a codebase of empty catch blocks it emitted a single `ConventionObserved`
+# row claiming the codebase "consistently follows" that discard convention (measured on the real
+# corpus through `audit_repo` — see `crates/server/tests/w15_reclassified_rule_silence_e2e.rs`).
+# The `max_severity = "low"` ceiling below is UNCHANGED and deliberate: low is the volume control
+# for a fault this common, and a low-severity defect is coherent. Severity and kind are
+# orthogonal — see `RuleKind`'s doc comment.
+kind = "defect"
 # E2 ceiling, transcribed from this rule's own prose: "deliberately CAPPED LOW (owner
 # directive)"; "forces every finding of this rule to severity Low ... regardless of what
 # severity the model itself proposes"; "caps its severity at [low]". Previously enforced only
@@ -70,4 +80,9 @@ why = "Logging (or explicitly justifying) a caught error is the minimum action t
 id = "allow-silent-discards"
 label = "Allow a caught or inspected error to be discarded with no log call, no propagation, and no comment"
 directive = "Catch/except/rescue blocks and error-value checks may be left empty, or may discard the error binding, with no logging, rethrow, or explanatory comment required."
+# A5.7: this option IS the fault (CWE-390's "detection of error condition without action"), not
+# an alternative a project may adopt — its own `why` opens with `Rejected:`. The flag sits here
+# and ONLY here; the conforming option above must never carry it, or conforming code would be
+# reported as a fault.
+violates = true
 why = "Rejected: an empty catch block and a deliberately-justified no-op are visually indistinguishable without either a log call or a comment, so allowing silent discards means every empty block looks the same as a genuine bug — a reviewer (or a future maintainer) has no way to tell which empty blocks were considered and which were simply never finished."

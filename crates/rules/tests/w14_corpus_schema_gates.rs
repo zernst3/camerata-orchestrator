@@ -277,11 +277,22 @@ Rejected: authored as a block string, which starts with a newline.
 ///
 /// Hardcoded deliberately rather than derived: a derived list moves with the corpus and could
 /// not catch a NEW rule drifting into this shape, which is exactly what this roster prevents.
-const DECISION_KIND_RULES_WITH_REJECTED_PROSE: [&str; 8] = [
+const DECISION_KIND_RULES_WITH_REJECTED_PROSE: [&str; 7] = [
     // On the A5.7 hold list: "the rule's own question is phrased as a yes/no compliance check,
     // not an open style choice — could be an under-authored default_with_exceptions".
     "ARCH-OBSERVABILITY-CORRELATION-ID-1 / correlate-after-the-fact-by-timestamp-and-content",
-    "ARCH-OBSERVABILITY-SILENT-FAILURE-1 / allow-silent-discards",
+    //
+    // RESOLVED 2026-10-12 by the owner's A5.7 ruling, and REMOVED from this roster as the
+    // deliberate roster edit this gate's doc comment calls for ("Shrinkage means someone
+    // resolved one, which is the owner's call under the A5.7 hold and should land as a
+    // deliberate roster edit, not silently"):
+    //   ARCH-OBSERVABILITY-SILENT-FAILURE-1 / allow-silent-discards
+    // It is now `kind = "defect"` with `violates = true` on that option, so it is no longer a
+    // `decision`-kind rule and GATE 1b no longer has anything to say about it. GATE 1 ("every
+    // `Rejected:` option on a flag-permitting kind carries the flag") now covers it instead,
+    // and `req_w15_silent_failure_is_defect_kind_with_the_discard_option_flagged` pins it.
+    // `ARCH-OBSERVABILITY-CORRELATION-ID-1` above stays `decision` by the same ruling.
+    //
     "ARCH-SERVER-CLIENT-PROJECTION-1 / pass-raw-query-result-rely-on-ui-to-not-render-extra-fields",
     "ARCH-SERVER-CLIENT-PROJECTION-1 / strip-sensitive-fields-client-side-after-hydration",
     // NOT on the hold list — classified a clear `decision`. See the doc comment above.
