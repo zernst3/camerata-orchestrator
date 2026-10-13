@@ -129,7 +129,7 @@ impl std::fmt::Display for EnforcementKind {
 // Rule kind (Pass-1 W2 — A5.1, `docs/plans/2026-10-09_audit-findings-tracker.md`)
 // ────────────────────────────────────────────────────────────────────────────
 
-/// The THREE-WAY classification of how a multi-option rule's alternatives relate to the
+/// The FOUR-WAY classification of how a multi-option rule's alternatives relate to the
 /// rule's underlying requirement — orthogonal to [`EnforcementKind`] (which classifies HOW a
 /// rule is emitted/enforced, not what its alternatives MEAN).
 ///
@@ -153,6 +153,10 @@ impl std::fmt::Display for EnforcementKind {
 ///   justified alternatives (`violates = false`); others may be the degenerate/absent form of
 ///   the requirement wearing the same `[[option]]` shape (`violates = true`) — both can coexist
 ///   on the same rule.
+/// - [`RuleKind::DecisionWithFloor`] — SEVERAL options hold equal weight (as in `Decision`),
+///   AND the rule additionally names shapes that are faults under every one of them (as in
+///   `DefaultWithExceptions`). W17; see that variant's own doc comment for the full pipeline
+///   contract and for why this is not expressible as either of the two it sits between.
 ///
 /// `serde(default)` deliberately does NOT exist here — see [`RuleToml::kind`]'s doc comment:
 /// an absent `kind` must not silently resolve to a permissive value. [`Rule::kind`] is
@@ -172,15 +176,112 @@ pub enum RuleKind {
     /// consistently. May mix legitimate, justified alternatives with degenerate ones on the
     /// same rule.
     DefaultWithExceptions,
+    /// SEVERAL options hold genuinely equal weight — no privileged default, the choice follows
+    /// from project context — AND the rule separately names shapes that are faults under every
+    /// one of those choices. W17.
+    ///
+    /// # Why the three-way taxonomy could not express this
+    ///
+    /// [`RuleKind::Decision`] forbids `violates` on any option, so classifying a rule of this
+    /// shape `decision` means DELETING real fault flags — the A5/gotcha-3 defect class, where
+    /// "no RLS policy" reported as a convention the codebase chose.
+    /// [`RuleKind::DefaultWithExceptions`] requires one privileged default with the rest as
+    /// deviations FROM it, so classifying it DWE means fabricating a default that does not
+    /// exist — which also drags in gotcha 2 (`default = false` + DWE is a contradiction) and
+    /// leaves `has_default()` false while the kind asserts a default exists. Neither is a
+    /// rounding error; each forces a false statement about the rule into the corpus.
+    ///
+    /// # Name
+    ///
+    /// "Decision" because the live alternatives genuinely hold equal weight; "with floor"
+    /// because the rule also names a floor BENEATH that equality — shapes no choice among the
+    /// legitimate options can excuse. The grammar deliberately parallels
+    /// `default_with_exceptions`, so the four values read as one taxonomy. Note the floor here
+    /// is on the OPTION SPACE and has nothing to do with [`Rule::min_severity`]'s severity
+    /// floor; the two words collide and the mechanisms do not touch.
+    ///
+    /// # What it does to the pipeline
+    ///
+    /// Adding this variant required NO new pipeline behaviour, verified by reading the two
+    /// branches rather than by assuming: `ai_audit::apply_alternative_decision` keys purely on
+    /// the DECIDED option's `violates` and never consults `kind`, and the no-convention escape
+    /// is gated independently on `kind`. The two are orthogonal, so a kind that permits flags
+    /// AND withholds the escape was already reachable; only the value was missing.
+    ///
+    /// - **Arming: no effect.** `kind` is not consulted when deciding whether a rule arms.
+    ///   That is [`Rule::is_auto_recommended`] (`verification`), [`Rule::is_opt_in_only`] and
+    ///   [`Rule::inspectable`]. A `decision_with_floor` rule arms on exactly the same terms as
+    ///   any other.
+    /// - **Emission: no effect.** The CONVENTIONS/AGENTS partition is `arm.rs`'s own
+    ///   `is_ci_tier` over [`EnforcementKind`]. `kind` never reaches it.
+    /// - **Alternatives pass: ENTERS it.** [`Rule::is_defect_kind`] is false, so
+    ///   `onboard::audit::is_semantic_multi_option_rule` admits the rule on the usual terms
+    ///   (>= 2 options, non-CI-tier, not gate-armed, code-auditable). A decided
+    ///   `violates = false` option rewrites the rule's effective directive and per-site rows
+    ///   become [`FindingKind::Deviation`]; a decided `violates = true` option leaves the
+    ///   directive untouched and emits the guaranteed evidence-backed `Defect`. Both branches
+    ///   are the behaviour that already existed — which is the entire point of the shape: the
+    ///   engine must be able to say "the repo picked a legitimate organization" AND "the repo
+    ///   picked a named fault" for the same rule.
+    /// - **No-convention escape: WITHHELD** ([`RuleKind::offers_no_convention_escape`] is
+    ///   false, same as `default_with_exceptions`). This is a deliberate safety choice, not an
+    ///   artifact of taking the cheaper branch. The escape severs the per-site violation path
+    ///   in three layers, so granting it would let a repo that is split between a legitimate
+    ///   option AND a named fault answer "no convention adopted" and have the fault go
+    ///   unreported — reconstructing precisely the A5 defect this taxonomy exists to prevent.
+    ///   A rule that names faults can always report them; it may not opt out of reporting
+    ///   them. (`docs/RULES_REFERENCE.md` section 11 item 7 speculated the escape should be
+    ///   allowed "among the genuine options"; the pipeline has no way to scope the escape to a
+    ///   subset of options, so in practice that would be the unscoped escape.)
+    /// - **Severity: no direct effect, one indirect consequence.**
+    ///   [`Rule::deviation_ceiling`] is LIVE on this kind (contrast gotcha 6, where it is inert
+    ///   on `defect` because such a rule emits no Deviation rows), because the rule does enter
+    ///   the alternatives pass. A decided `violates` option's finding anchors at `"high"`; cap
+    ///   it per rule with [`Rule::max_severity`] if that is too aggressive for a specific rule.
+    /// - **Flags: PERMITTED and expected** ([`RuleKind::permits_violates_flag`] is true). The
+    ///   `Rejected:` convention applies to every flagged option, and GATE 1
+    ///   ([`options_with_rejected_prose_but_no_violates_flag`]) holds this kind to it;
+    ///   [`suspicious_default_with_exceptions_rules`] deliberately does NOT sweep it, because
+    ///   that gate's premise is a privileged default this kind has none of.
+    ///
+    /// # Authoring it honestly
+    ///
+    /// `default = false` and no `[decision].default`: there is no adopted default, which is the
+    /// whole distinction from `default_with_exceptions`. At least two options whose own `why`
+    /// blesses them ("the natural fit", "a legitimate choice"), at least one `violates = true`
+    /// option whose `why` opens `Rejected:`, and a `[decision].why` that says the choice follows
+    /// from project context rather than from a presumed winner. If only ONE option is blessed,
+    /// the rule is `default_with_exceptions` (or `defect`) and not this.
+    ///
+    /// Exemplar and, as of W17, the only corpus rule classified here: `RUST-DOMAIN-6`. Its own
+    /// `why` holds both halves in one paragraph — organizing errors by failure category or by
+    /// module/aggregate is "a genuine organizational choice" that "follows from the crate's size
+    /// and how its failures cluster, not from a presumed winner", while three other shapes "are
+    /// not organizational choices but boundary failures, and are called out as the options to
+    /// avoid regardless of which organization is chosen". The candidate sweep that found it the
+    /// only instance is recorded in `crates/rules/tests/w17_decision_with_floor_kind.rs`.
+    DecisionWithFloor,
 }
 
 impl RuleKind {
+    /// Every variant, so a sweep or a round-trip test enumerates the taxonomy instead of
+    /// restating a hand-maintained copy of it. Adding a variant without extending this is a
+    /// compile error (the array length is checked), which is deliberate: the `as_str`/`from_tag`
+    /// round-trip test iterates this, so a new kind cannot ship untested.
+    pub const ALL: [RuleKind; 4] = [
+        RuleKind::Defect,
+        RuleKind::Decision,
+        RuleKind::DefaultWithExceptions,
+        RuleKind::DecisionWithFloor,
+    ];
+
     /// The snake_case wire/TOML string for this kind. Inverse of [`RuleKind::from_tag`].
     pub fn as_str(&self) -> &'static str {
         match self {
             RuleKind::Defect => "defect",
             RuleKind::Decision => "decision",
             RuleKind::DefaultWithExceptions => "default_with_exceptions",
+            RuleKind::DecisionWithFloor => "decision_with_floor",
         }
     }
 
@@ -190,7 +291,50 @@ impl RuleKind {
             "defect" => Some(RuleKind::Defect),
             "decision" => Some(RuleKind::Decision),
             "default_with_exceptions" => Some(RuleKind::DefaultWithExceptions),
+            "decision_with_floor" => Some(RuleKind::DecisionWithFloor),
             _ => None,
+        }
+    }
+
+    /// Whether this kind PERMITS an option to carry `violates = true`.
+    ///
+    /// `true` for every kind except [`RuleKind::Decision`], whose premise is that its
+    /// alternatives hold equal weight — a flag there is a contradiction, it is live at runtime,
+    /// and [`decision_kind_rules_with_violates_flag`] fails the build on it.
+    ///
+    /// Exhaustive on purpose, with no `_` arm: a new variant must state its answer here rather
+    /// than inherit one. A kind that silently matched a catch-all is exactly how this corpus
+    /// accumulated three separate fully-implemented, fully-inert mechanisms.
+    pub fn permits_violates_flag(&self) -> bool {
+        match self {
+            RuleKind::Defect => true,
+            // Documentation plus gate signal only on a `defect` rule (it never enters the
+            // alternatives pass), but permitted and expected.
+            RuleKind::Decision => false,
+            RuleKind::DefaultWithExceptions => true,
+            RuleKind::DecisionWithFloor => true,
+        }
+    }
+
+    /// Whether the alternatives pass may offer this kind the `[PURE DECISION — "no convention"
+    /// is a valid answer]` escape, and whether the parser may honor a `no_convention` claim for
+    /// it. Consumed by `camerata_server::ai_audit`'s `build_alternatives_block` and
+    /// `parse_alternative_recommendations`.
+    ///
+    /// `true` ONLY for [`RuleKind::Decision`]. The escape severs the per-site violation path in
+    /// three layers, so it is honest only when no option is a fault. A
+    /// [`RuleKind::DecisionWithFloor`] rule names faults by construction and therefore may not
+    /// opt out of reporting them; a [`RuleKind::DefaultWithExceptions`] rule has an
+    /// externally-correct default, so "no convention" is not an honest outcome; a
+    /// [`RuleKind::Defect`] rule never enters the pass at all.
+    ///
+    /// Exhaustive on purpose, same reason as [`RuleKind::permits_violates_flag`].
+    pub fn offers_no_convention_escape(&self) -> bool {
+        match self {
+            RuleKind::Defect => false,
+            RuleKind::Decision => true,
+            RuleKind::DefaultWithExceptions => false,
+            RuleKind::DecisionWithFloor => false,
         }
     }
 }
@@ -1680,6 +1824,15 @@ pub fn rules_disarmed_by_verification(set: &RuleSet) -> Vec<String> {
 /// itself (unlike [`rules_missing_kind`]) — "suspicious" is a signal for human review during
 /// authoring/classification, not a hard invariant the way "every rule has A kind" is; callers
 /// that want it enforced (e.g. a classification-coverage test) assert on this directly.
+///
+/// W17: [`RuleKind::DecisionWithFloor`] is deliberately NOT swept here, and that is a
+/// substantive exclusion rather than an oversight. This gate's premise is the "exceptions"
+/// half of `default_with_exceptions` — deviations FROM a privileged default — and a
+/// `decision_with_floor` rule has no privileged default to deviate from. Its flags are not
+/// exceptions to a winner; they are a floor beneath several winners. Sweeping it here would
+/// report a correctly-authored rule as under-authored. The flag discipline that DOES apply to
+/// it is GATE 1 ([`options_with_rejected_prose_but_no_violates_flag`]), which holds it to the
+/// `Rejected:` convention like any other flag-permitting kind.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn suspicious_default_with_exceptions_rules(set: &RuleSet) -> Vec<String> {
     let mut offenders: Vec<String> = set
@@ -1740,24 +1893,34 @@ fn why_opens_with_rejected(why: &str) -> bool {
 /// other on the same option and no corpus could satisfy both. So the invariant splits cleanly in
 /// two along `kind`:
 ///
-/// - on a rule whose kind PERMITS the flag (`defect`, `default_with_exceptions`, or an absent
-///   kind — which `rules_missing_kind` separately fails the build on), `Rejected:` prose MUST be
-///   paired with the flag, and that is this gate;
+/// - on a rule whose kind PERMITS the flag (`defect`, `default_with_exceptions`,
+///   `decision_with_floor`, or an absent kind — which `rules_missing_kind` separately fails the
+///   build on), `Rejected:` prose MUST be paired with the flag, and that is this gate;
 /// - on a `decision`-kind rule, `Rejected:` prose is instead evidence that the KIND is wrong,
 ///   which is [`decision_kind_rules_with_rejected_prose`]'s advisory finding.
+///
+/// W17: the scoping test is [`RuleKind::permits_violates_flag`] rather than an inline
+/// `!= Decision` comparison, so the fourth kind states its answer in one exhaustive match
+/// instead of inheriting one by falling past a comparison. `decision_with_floor` is IN scope —
+/// it names faults by construction, so the prose/flag agreement is exactly as binding there as
+/// on a `defect` rule.
 ///
 /// Measured on all 417 corpus rules / 1124 options on 2026-10-11: 78 options open with the
 /// token. 70 carry the flag and 8 do not — and all 70 flagged sit on `defect` (65) or
 /// `default_with_exceptions` (5) rules while all 8 unflagged sit on `decision` rules. So within
 /// this gate's scope the prose/flag agreement is 70 out of 70, with zero counter-examples; the
-/// split is not a convenience, it is where the corpus's own data divides.
+/// split is not a convenience, it is where the corpus's own data divides. (W17 moved
+/// `RUST-DOMAIN-6` from `default_with_exceptions` to `decision_with_floor`; both kinds permit
+/// the flag, so the in-scope population is unchanged.)
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn options_with_rejected_prose_but_no_violates_flag(set: &RuleSet) -> Vec<String> {
     let mut offenders: Vec<String> = Vec::new();
     for r in set.iter() {
         // A `decision`-kind rule cannot satisfy this gate and the no-flag invariant at once;
         // its `Rejected:` options are reported by `decision_kind_rules_with_rejected_prose`.
-        if r.kind == Some(RuleKind::Decision) {
+        // An ABSENT kind stays in scope: `rules_missing_kind` fails the build on it separately,
+        // and until then the conservative reading is that the prose is right.
+        if r.kind.is_some_and(|k| !k.permits_violates_flag()) {
             continue;
         }
         for o in &r.options {
@@ -4717,8 +4880,8 @@ mod tests {
     // ── Pass-1 W2: rule kind / violates / max_severity schema ──────────────────────────────
     // (`docs/plans/2026-10-09_audit-findings-tracker.md`, A5.1 + the corpus-load gate)
 
-    /// req_a5_1: the three [`RuleKind`] variants round-trip through TOML in both directions —
-    /// the wire string parses to the right variant, and an ABSENT `kind` field parses to
+    /// req_a5_1: EVERY [`RuleKind`] variant round-trips through TOML in both directions — the
+    /// wire string parses to the right variant, and an ABSENT `kind` field parses to
     /// `None` rather than silently defaulting to a permissive variant (the back-compat
     /// requirement: `RuleToml::kind` has `#[serde(default)]` so the loader never hard-errors
     /// on a pre-classification TOML, but the resulting `Rule::kind()` must stay `None`, never
@@ -4727,15 +4890,24 @@ mod tests {
     /// FAILS BEFORE THE FIX: before this field existed at all, `kind = "defect"` in a TOML was
     /// silently ignored by serde (unknown field, no `deny_unknown_fields`) and `Rule` had no
     /// `kind` accessor to assert against — this test could not even be written. After the fix,
-    /// each of the three wire strings resolves to its variant and the absent case resolves to
-    /// `None`.
+    /// each wire string resolves to its variant and the absent case resolves to `None`.
+    ///
+    /// TEST DISCIPLINE exception (a), W17: this test hardcoded the three variants and was
+    /// renamed from `req_a5_1_three_rule_kinds_round_trip_through_toml` when
+    /// [`RuleKind::DecisionWithFloor`] was added. It now iterates [`RuleKind::ALL`] rather than
+    /// a hand-maintained copy of the variant list, so a FIFTH kind is covered the moment it is
+    /// declared instead of shipping untested — which is the failure this edit was one step away
+    /// from being.
     #[test]
-    fn req_a5_1_three_rule_kinds_round_trip_through_toml() {
-        for (wire, expected) in [
-            ("defect", RuleKind::Defect),
-            ("decision", RuleKind::Decision),
-            ("default_with_exceptions", RuleKind::DefaultWithExceptions),
-        ] {
+    fn req_a5_1_every_rule_kind_round_trips_through_toml() {
+        assert_eq!(
+            RuleKind::ALL.len(),
+            4,
+            "RuleKind::ALL must list every variant; a new kind belongs in it, and in this test \
+             by consequence"
+        );
+        for expected in RuleKind::ALL {
+            let wire = expected.as_str();
             let src = format!(
                 r#"
                 id = "KIND-ROUNDTRIP-1"
@@ -4755,6 +4927,12 @@ mod tests {
                 rule.kind().unwrap().as_str(),
                 wire,
                 "as_str is the inverse of from_tag"
+            );
+            assert_eq!(
+                RuleKind::from_tag(wire),
+                Some(expected),
+                "from_tag must accept every variant's own wire string — its `_ => None` arm is \
+                 where a new kind silently stops parsing"
             );
         }
 

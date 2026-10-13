@@ -3,7 +3,7 @@ title = "Crate-boundary error types: typed enums organized by category or by agg
 domain = "rust"
 layer = "language"
 enforcement = "structured"
-kind = "default_with_exceptions"
+kind = "decision_with_floor"
 inspectable = true
 # Deviation-ceiling escape hatch: crate-boundary error-type organization is a contract every
 # future crate must adopt, and mixed schemes force every caller to handle both shapes, so the

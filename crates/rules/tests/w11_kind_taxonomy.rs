@@ -45,22 +45,52 @@ const W11_RECLASSIFIED_TO_DECISION: [&str; 7] = [
 
 /// W11, the taxonomy's own words: "No option on a `decision`-kind rule should carry
 /// `violates = true`." Asserted corpus-WIDE, not just over W11's seven — a `decision` rule with a
-/// flagged option is a contradiction wherever it appears, and the invariant holds across all 175
-/// `decision` rules as of this commit.
+/// flagged option is a contradiction wherever it appears.
 ///
 /// FAILS BEFORE THE FIX: inverted — before W11 the seven rules below were
 /// `default_with_exceptions`, so they were not `decision` rules and this sweep did not see them.
 /// It is the pairing of this test with `w11_reclassified_rules_are_decision_kind_and_carry_no_violates_flag`
 /// that pins the fix: the latter proves they ARE now `decision`, this one proves that being
 /// `decision` costs them every flag.
+///
+/// TEST DISCIPLINE exception (a), W17: a fourth kind
+/// (`RuleKind::DecisionWithFloor`) was added, so the invariant is restated as an EXHAUSTIVE
+/// `match` over `Option<RuleKind>` instead of an `== Some(Decision)` comparison. Nothing the
+/// test asserted was weakened — `decision` still permits no flag, and the three other kinds
+/// still do. What changed is that the fourth kind had to state its answer to be compiled at all,
+/// rather than inheriting one by falling past a comparison it does not match. A new variant
+/// silently matching a catch-all is how this corpus accumulated inert mechanisms, so the match
+/// has no `_` arm and a FIFTH kind will not compile until someone decides.
 #[tokio::test]
 async fn no_decision_kind_rule_in_the_corpus_carries_a_violates_flag() {
     let Some(set) = corpus().await else {
         return;
     };
+
+    /// Whether a rule of this kind may carry a `violates` option. Mirrors
+    /// `RuleKind::permits_violates_flag` DELIBERATELY rather than calling it: this test is the
+    /// independent statement of the taxonomy's rule, and asserting it by calling the production
+    /// predicate would only prove the predicate equals itself. The equality of the two is
+    /// asserted separately, in `w17_decision_with_floor_kind.rs`.
+    fn flags_permitted(kind: Option<RuleKind>) -> bool {
+        match kind {
+            // No acceptable alternative anywhere; the flag records which option is the fault.
+            Some(RuleKind::Defect) => true,
+            // The premise is that the alternatives hold EQUAL weight. A flag contradicts it.
+            Some(RuleKind::Decision) => false,
+            // The "exceptions" half of the name IS the degenerate options.
+            Some(RuleKind::DefaultWithExceptions) => true,
+            // W17: equal-weight options PLUS named faults. The faults are the whole point.
+            Some(RuleKind::DecisionWithFloor) => true,
+            // `rules_missing_kind` fails the build on this separately; it is not this sweep's
+            // business, and treating it as flag-permitting keeps the two gates from overlapping.
+            None => true,
+        }
+    }
+
     let offenders: Vec<String> = set
         .iter()
-        .filter(|r| r.kind == Some(RuleKind::Decision))
+        .filter(|r| !flags_permitted(r.kind))
         .filter_map(|r| {
             let flagged: Vec<&str> = r
                 .options
@@ -68,22 +98,33 @@ async fn no_decision_kind_rule_in_the_corpus_carries_a_violates_flag() {
                 .filter(|o| o.violates)
                 .map(|o| o.id.as_str())
                 .collect();
-            (!flagged.is_empty()).then(|| format!("{}: {:?}", r.id.0, flagged))
+            (!flagged.is_empty()).then(|| format!("{} (kind {:?}): {:?}", r.id.0, r.kind, flagged))
         })
         .collect();
     assert!(
         offenders.is_empty(),
-        "a `decision`-kind rule must carry no `violates` option (RuleKind docs, lib.rs ~150): {offenders:#?}"
+        "a `decision`-kind rule must carry no `violates` option (RuleKind docs, lib.rs): {offenders:#?}"
     );
 
     // Guard the sweep against silently passing because the corpus has no decision rules at all.
-    let decision_count = set
+    let swept = set.iter().filter(|r| !flags_permitted(r.kind)).count();
+    assert!(
+        swept >= W11_RECLASSIFIED_TO_DECISION.len(),
+        "sweep is vacuous: only {swept} rules of a flag-forbidding kind loaded"
+    );
+
+    // And the complement, so the sweep is proven to be a PARTITION rather than a filter that
+    // happens to select nothing interesting: the flag-permitting kinds must actually be using
+    // the flag somewhere, or `flags_permitted` could return true for everything undetected.
+    let flagged_elsewhere = set
         .iter()
-        .filter(|r| r.kind == Some(RuleKind::Decision))
+        .filter(|r| flags_permitted(r.kind))
+        .filter(|r| r.options.iter().any(|o| o.violates))
         .count();
     assert!(
-        decision_count >= W11_RECLASSIFIED_TO_DECISION.len(),
-        "sweep is vacuous: only {decision_count} decision-kind rules loaded"
+        flagged_elsewhere >= 50,
+        "only {flagged_elsewhere} flag-PERMITTING rules actually carry a flag; if this collapses, \
+         `flags_permitted` is no longer dividing the corpus and the sweep above proves nothing"
     );
 }
 
@@ -190,32 +231,29 @@ async fn arch_hot_read_cache_is_default_with_exceptions_with_a_resolvable_defaul
 /// W11, category (c) — the TAXONOMY GAP, pinned so it cannot be silently "resolved" by a later
 /// pass without a deliberate decision.
 ///
-/// These three rules fit NEITHER `decision` (which forbids `violates` flags) NOR
-/// `default_with_exceptions` (one default, others are deviations). Each has several options its
-/// own prose blesses as equally legitimate PLUS options it calls outright faults:
+/// `INTEGRATION-API-CONTRACT-1` / `INTEGRATION-AUTH-SEAM-1`: exactly two options — the check,
+/// and its ABSENCE. That is `defect`-shaped ("every option other than the correct one describes
+/// the absence"), but both are deliberately `opt_in_only = true` with `default = false`, a
+/// combination the corpus explicitly blesses, so neither the `kind` nor the `default` field is
+/// self-evidently the thing that is wrong.
 ///
-/// - `RUST-DOMAIN-6`: "how the enums are grouped is a genuine organizational choice" and the
-///   choice "follows from the crate's size and how its failures cluster, not from a presumed
-///   winner" — yet "Two shapes are not organizational choices but boundary failures, and are
-///   called out as the options to avoid regardless of which organization is chosen".
-/// - `INTEGRATION-API-CONTRACT-1` / `INTEGRATION-AUTH-SEAM-1`: exactly two options — the check,
-///   and its ABSENCE. That is `defect`-shaped ("every option other than the correct one describes
-///   the absence"), but both are deliberately `opt_in_only = true` with `default = false`, a
-///   combination the corpus explicitly blesses (lib.rs ~3446), so neither the `kind` nor the
-///   `default` field is self-evidently the thing that is wrong.
+/// W11 changed NOTHING on these and reported them for a ruling. This test asserts the as-left
+/// state, so the open question stays visible.
 ///
-/// W11 therefore changed NOTHING on these three and reported them for a ruling. This test asserts
-/// the as-left state, so the open question stays visible.
+/// TEST DISCIPLINE exception (a), W17: `RUST-DOMAIN-6` was the third rule on this list and has
+/// been REMOVED from it, because the owner resolved its half of the gap. It is now
+/// `kind = "decision_with_floor"`, the fourth `RuleKind`, and
+/// `w17_decision_with_floor_kind.rs` pins it there. The two `INTEGRATION-*` rules stay: their
+/// gap is a DIFFERENT shape and is NOT what the new kind resolves — each has exactly ONE blessed
+/// option plus its absence, so there are no equal-weight alternatives for a floor to sit under.
+/// Classifying them `decision_with_floor` would assert a choice they do not offer. This test is
+/// deliberately not emptied, because the remaining question is still open.
 #[tokio::test]
 async fn w11_category_c_taxonomy_gap_rules_are_left_untouched_pending_a_ruling() {
     let Some(set) = corpus().await else {
         return;
     };
-    for id in [
-        "RUST-DOMAIN-6",
-        "INTEGRATION-API-CONTRACT-1",
-        "INTEGRATION-AUTH-SEAM-1",
-    ] {
+    for id in ["INTEGRATION-API-CONTRACT-1", "INTEGRATION-AUTH-SEAM-1"] {
         let rule = set
             .get_by_id(id)
             .unwrap_or_else(|| panic!("{id} must be present in the bundled corpus"));
