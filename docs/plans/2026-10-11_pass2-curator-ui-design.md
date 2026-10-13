@@ -485,7 +485,33 @@ with N exceptions", with a jump into the Queue. The count is context, never a ga
 "Observations" panel to reduce the switcher to two primary surfaces. Zach: *"I think it is
 fine as is."* Dropped; the kind switcher keeps one tab per kind.
 
-### Still open after this round
+### Q2, Q3, Q5 DECIDED (2026-10-12) -- Zach: "good to go with your recommendations"
+
+- **Q2 `Confirmed` stays LOCAL for Pass 2.** Report-export-readable draft state, like False
+  Positive, with no Process-time backend commit. A durable per-finding record across
+  engagements is a real backend surface and Pass 2 must not invent it as a side effect of a
+  UI build. Revisit if cross-scan engagement history is ever wanted.
+- **Q3 a `NoConvention` option pick IS client-facing.** It feeds the derived decision set, so
+  it is a governance act and must say so in the UI. It therefore **inherits Q4's gating**: the
+  same typed-destination confirm, the same honest count of what was not opened.
+- **Q5 single-key dispositions SHIP.** `C` / `I` / `T` / `F` on the focused row, scoped so the
+  keys only fire while the detail pane holds focus, plus a five-second undo toast. At 400 rows
+  the keystroke is the whole speed gain; the toast removes the 1am risk.
+
+### Dependency check (2026-10-12): chorale 0.2.3 already has everything
+
+The design named the group-header content hook as "the one chorale ask" and flagged
+master/detail as needing verification. Both are present in the installed registry version
+(`chorale-core` / `chorale-dioxus` `0.2.3`), so nothing needs requesting upstream and the
+fallback-to-modal risk is closed:
+
+- `detail_renderer`, `set_detail_column_enabled`, `detail_column_enabled` -- the docked pane
+- `render_grouped_row`, `group_header_tr`, `group_header_class` -- custom group-header content
+- `set_grouping`, `expand_all_groups`, `collapse_all_groups`, `group_selection_state`
+- `select_all_filtered`, `select_all_visible_page`, `selection_count`, `set_selection`
+
+### Nothing remains open
+
 - **Q2** what `Confirmed` means downstream (local export-readable state, or a durable
   per-finding record across engagements). Recommendation: keep it local for Pass 2.
 - **Q3** whether a `NoConvention` option pick is a client-facing recommendation or curator
