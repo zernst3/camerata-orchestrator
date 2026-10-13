@@ -128,6 +128,239 @@ pub struct FindingView {
     /// each multi-option rule group "Evaluated against: <option label>".
     #[serde(default)]
     pub evaluated_option_id: Option<String>,
+    /// WHAT THIS ROW IS — the five-kind taxonomy (A5.6), mirrored verbatim from
+    /// `camerata_server::onboard::Finding::kind` with the same `#[serde(default, flatten)]`
+    /// shape, so the wire's single flat `"kind"` discriminator plus the variant's payload
+    /// fields (`deviating_sites`, `convention_label`, `reason`, …) land here as siblings of
+    /// this struct's own fields. The UI READS this; it never derives it (the taxonomy's hard
+    /// constraint: structured identity, never prose).
+    ///
+    /// `None` is the `"unspecified"` ALARM state, not a synonym for `Defect`: it means the
+    /// producer never assigned a kind, i.e. an unmapped emission path. See
+    /// [`kind_surface`] (such a row stays in the Queue, visibly flagged) and
+    /// [`is_unspecified_kind`].
+    #[serde(default, flatten)]
+    pub kind: Option<camerata_api_types::audit::FindingKind>,
+}
+
+/// Which of the curator workbench's four kind surfaces a finding row belongs on
+/// (`docs/plans/2026-10-11_pass2-curator-ui-design.md` §1-§2).
+///
+/// The split is NOT a UI taste: it is the data model's own
+/// [`FindingKind::is_informational`](camerata_api_types::audit::FindingKind::is_informational)
+/// boundary. The two ACCUSING kinds share one decision shape (is this real, do we act) and so
+/// share one burn-down Queue; each informational kind asserts nothing is wrong, has no site to
+/// dispose and no severity worth showing, and gets its own list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
+pub enum KindSurface {
+    /// `Defect` + `Deviation` + every kind-less (`unspecified`) row — the triage Queue.
+    Queue,
+    /// `ConventionObserved` — the codebase already follows a convention, zero violations.
+    Conventions,
+    /// `NoConvention` — the codebase is inconsistent with no clear majority (one row per rule).
+    NoConvention,
+    /// `NotAssessed` — the rule was armed but could not be evaluated. An honesty row.
+    NotAssessed,
+}
+
+impl KindSurface {
+    /// The switcher's tab label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queue => "Queue",
+            Self::Conventions => "Conventions",
+            Self::NoConvention => "No convention",
+            Self::NotAssessed => "Not assessed",
+        }
+    }
+
+    /// The four surfaces in switcher order (Queue is primary and always first).
+    pub fn all() -> [KindSurface; 4] {
+        [
+            Self::Queue,
+            Self::Conventions,
+            Self::NoConvention,
+            Self::NotAssessed,
+        ]
+    }
+}
+
+/// The surface this row belongs on. Total and structural — it reads the row's own
+/// [`FindingKind`](camerata_api_types::audit::FindingKind) and nothing else.
+///
+/// A kind-less row routes to the Queue DELIBERATELY. It is an alarm (an unmapped emission
+/// path), and the Queue is the surface the curator actually looks at; hiding it in an
+/// informational list would be exactly the silent bucket the taxonomy's backfill rule
+/// forbids. It is flagged there, never silently counted as a `Defect` — see
+/// [`is_unspecified_kind`] and [`unspecified_kind_count`].
+pub fn kind_surface(f: &FindingView) -> KindSurface {
+    use camerata_api_types::audit::FindingKind;
+    match &f.kind {
+        Some(FindingKind::ConventionObserved(_)) => KindSurface::Conventions,
+        Some(FindingKind::NoConvention(_)) => KindSurface::NoConvention,
+        Some(FindingKind::NotAssessed(_)) => KindSurface::NotAssessed,
+        // Defect, Deviation, and the kind-less alarm row all accuse (or need looking at) and
+        // all share the dispose-this-row decision shape.
+        Some(FindingKind::Defect) | Some(FindingKind::Deviation(_)) | None => KindSurface::Queue,
+    }
+}
+
+/// The row's kind as its stable wire tag — the kind's own serde discriminator, or
+/// `"unspecified"` when the producer never assigned one. Delegates to the api-types helper so
+/// the badge text can never drift from the wire.
+pub fn kind_tag(f: &FindingView) -> &'static str {
+    camerata_api_types::audit::FindingKind::tag_or_unspecified(f.kind.as_ref())
+}
+
+/// True when this row reached the UI with NO kind — an unmapped emission path. The curator
+/// surface must make this impossible to miss, never fold it into `Defect`.
+pub fn is_unspecified_kind(f: &FindingView) -> bool {
+    f.kind.is_none()
+}
+
+/// How many rows reached the UI with no kind. Drives the Queue tab's red alarm chip.
+pub fn unspecified_kind_count(findings: &[FindingView]) -> usize {
+    findings.iter().filter(|f| is_unspecified_kind(f)).count()
+}
+
+/// Every row routed to `surface`, in input order (the caller sorts).
+pub fn findings_on_surface(findings: &[FindingView], surface: KindSurface) -> Vec<FindingView> {
+    findings
+        .iter()
+        .filter(|f| kind_surface(f) == surface)
+        .cloned()
+        .collect()
+}
+
+/// Per-surface row counts for the kind switcher, in [`KindSurface::all`] order.
+pub fn surface_counts(findings: &[FindingView]) -> [(KindSurface, usize); 4] {
+    let mut out = KindSurface::all().map(|s| (s, 0usize));
+    for f in findings {
+        let s = kind_surface(f);
+        for slot in out.iter_mut() {
+            if slot.0 == s {
+                slot.1 += 1;
+            }
+        }
+    }
+    out
+}
+
+/// THE ONE-RULE-ONE-SURFACE INVARIANT (design §8).
+///
+/// The pipeline guarantees a rule emits deviations OR a convention row OR one no-convention
+/// row OR a not-assessed row — never two of those in the same scan. The UI's job is to ASSERT
+/// that, not to defend against it: a rule on two surfaces is a pipeline bug, and the honest
+/// response is to surface it loudly rather than to pick a winner and hide the conflict.
+///
+/// Returns `(rule_id, surfaces)` for every offending rule, sorted, so a caller can render the
+/// violation verbatim. Empty is the healthy case.
+///
+/// Scoped per `(repo, rule_id)`, NOT per rule id alone. In a multi-repo scan one repo can
+/// honestly follow a convention while another deviates from it — that is two different
+/// assessments of two different codebases, not a conflict. Keying on the rule id alone would
+/// make a legitimate multi-repo scan ring the alarm permanently, which would train the curator
+/// to ignore it.
+pub fn rules_on_multiple_surfaces(
+    findings: &[FindingView],
+) -> Vec<((String, String), Vec<KindSurface>)> {
+    let mut seen: std::collections::BTreeMap<(String, String), std::collections::BTreeSet<KindSurface>> =
+        std::collections::BTreeMap::new();
+    for f in findings {
+        seen.entry((f.repo.clone(), f.rule_id.clone()))
+            .or_default()
+            .insert(kind_surface(f));
+    }
+    seen.into_iter()
+        .filter(|(_, surfaces)| surfaces.len() > 1)
+        .map(|(k, surfaces)| (k, surfaces.into_iter().collect()))
+        .collect()
+}
+
+/// Ordering rank of the severity string as the pipeline CALIBRATED it (critical > high >
+/// medium > everything else).
+///
+/// This orders an authored string; it does not re-derive, re-weight or second-guess a
+/// severity. Comparability between kinds is manufactured UPSTREAM by the rules' `max_severity`
+/// ceilings, `min_severity` floors and `deviation_ceiling` — a UI that recomputed severity
+/// would be a second calibration layer, which is precisely the mid-layer accretion this effort
+/// exists to remove.
+fn severity_rank(severity: &str) -> u8 {
+    match severity {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        _ => 3,
+    }
+}
+
+/// Ordering rank of the row's KIND within one severity band (design §5 step 3).
+///
+/// `Defect` before `Deviation`: an accusation of objective fault outranks an accusation of
+/// inconsistency at equal severity. This mirrors the pipeline's own `kind_actionability_rank`
+/// in the merge layer rather than inventing a second ranking.
+///
+/// A kind-less (`unspecified`) row ranks FIRST, ahead of `Defect`. It is an alarm about the
+/// pipeline itself, there should be zero of them, and burying one under hundreds of real rows
+/// is how an unmapped emission path survives a release. Ranking it first is also why it is not
+/// "treated as a Defect": it does not share Defect's rank, badge, or disposition set.
+fn kind_rank(f: &FindingView) -> u8 {
+    use camerata_api_types::audit::FindingKind;
+    match &f.kind {
+        None => 0,
+        Some(FindingKind::Defect) => 1,
+        Some(FindingKind::Deviation(_)) => 2,
+        // Informational kinds never enter the Queue (that is the whole point of the surface
+        // split), so this arm orders nothing in practice. It is last rather than unreachable
+        // so the function stays total and a routing regression degrades visibly, not by panic.
+        Some(_) => 3,
+    }
+}
+
+/// Deviation ratio as a sortable integer in parts-per-million, ASCENDING (design §5 step 4).
+///
+/// A 2-of-47 deviation is a near-unanimous convention with two clear outliers — the fastest,
+/// highest-confidence decision in the queue — while 19-of-47 is drifting toward no-convention
+/// and needs thought. Cheapest decisions first.
+///
+/// An unknown (or zero) denominator yields [`u64::MAX`] so it sorts AFTER every known ratio:
+/// the producer could not count honestly, so the row cannot claim a position in the cheapness
+/// ordering. Non-deviation rows yield 0, which never decides anything — [`kind_rank`] has
+/// already separated them by the time this term is reached.
+fn deviation_ratio_ppm(f: &FindingView) -> u64 {
+    use camerata_api_types::audit::FindingKind;
+    match &f.kind {
+        Some(FindingKind::Deviation(d)) => match d.assessed_sites {
+            Some(assessed) if assessed > 0 => {
+                (d.deviating_sites as u64).saturating_mul(1_000_000) / assessed as u64
+            }
+            _ => u64::MAX,
+        },
+        _ => 0,
+    }
+}
+
+/// The Queue's default curated order (design §5), lexicographic:
+///
+/// 1. `status` — active before suppressed.
+/// 2. `severity` — as CALIBRATED upstream; never re-derived here.
+/// 3. `kind` — unspecified alarm, then Defect, then Deviation.
+/// 4. deviation ratio, ascending; unknown denominators last.
+/// 5. tie-break: rule id, then path, then line.
+///
+/// The default is opinionated; the table is not locked — chorale's column headers still
+/// re-sort on demand.
+pub fn queue_sort_key(f: &FindingView) -> (u8, u8, u8, u64, String, String, usize) {
+    let enforced = if f.status == "active" { 0 } else { 1 };
+    (
+        enforced,
+        severity_rank(&f.severity),
+        kind_rank(f),
+        deviation_ratio_ppm(f),
+        f.rule_id.clone(),
+        f.path.clone(),
+        f.line,
+    )
 }
 
 /// The default finding status (`"active"`). FindingView's `#[serde(default)]` provider; lives in
@@ -212,24 +445,23 @@ impl TriageModel {
         }
     }
 
-    /// The findings visible in the current `triage_view`: filtered to that table's state, then
-    /// ordered active-before-suppressed, then by severity (critical > high > medium > other).
+    /// The findings visible in the current `triage_view`: the QUEUE rows (see
+    /// [`kind_surface`]) in that disposition, in the curated default order
+    /// ([`queue_sort_key`]).
+    ///
+    /// The kind filter is load-bearing, not cosmetic. An informational row asserts nothing is
+    /// wrong: it has no site to dispose and no severity worth showing, so leaving it here made
+    /// a compliment compete with a critical injection finding for the curator's attention AND
+    /// parked it as Unresolved forever, which the Process gate blocks on. Informational rows
+    /// are served by [`findings_on_surface`] instead.
     pub fn visible(&self, findings: &[FindingView]) -> Vec<FindingView> {
         let mut out: Vec<FindingView> = findings
             .iter()
+            .filter(|f| kind_surface(f) == KindSurface::Queue)
             .filter(|f| self.state_of(f) == self.triage_view)
             .cloned()
             .collect();
-        out.sort_by_key(|f| {
-            let enforced = if f.status == "active" { 0 } else { 1 };
-            let sev = match f.severity.as_str() {
-                "critical" => 0,
-                "high" => 1,
-                "medium" => 2,
-                _ => 3,
-            };
-            (enforced, sev)
-        });
+        out.sort_by_key(queue_sort_key);
         out
     }
 
@@ -513,5 +745,325 @@ mod tests {
         }));
         assert_eq!(f.confidence.as_deref(), Some("needs-review"));
         assert_eq!(f.effort.as_deref(), Some("high"));
+    }
+
+    // ── Pass 2 step 1: the five-kind taxonomy reaches the curator UI ──────────
+    //
+    // RED BEFORE THE FIX. Both of these fail on `850cac4`:
+    //  1. `FindingView` drops the wire's flattened `kind` discriminator on the floor, so the
+    //     UI cannot tell a compliment from an accusation at all.
+    //  2. Consequently every informational row sits in the triage Queue next to real defects.
+
+    /// req_pass2_1: the wire's flattened `kind` discriminator and its payload survive the trip
+    /// into `FindingView` and back out — the same round-trip contract `confidence`/`effort`
+    /// already hold. A field the server sets and the UI silently drops is the whole defect.
+    #[test]
+    fn req_pass2_1_finding_view_mirrors_the_wire_kind_discriminator() {
+        let f = finding(serde_json::json!({
+            "repo": "r", "path": "p", "line": 1,
+            "rule_id": "API-VERSIONING-1", "severity": "medium", "snippet": "s", "detail": "",
+            "kind": "deviation", "deviating_sites": 2, "assessed_sites": 47,
+            "convention_option_id": "versioned", "convention_label": "URI-versioned endpoints"
+        }));
+        let back = serde_json::to_value(&f).expect("FindingView serializes");
+        assert_eq!(
+            back["kind"], "deviation",
+            "the kind discriminator must survive into the view model and back out"
+        );
+        assert_eq!(back["deviating_sites"], 2, "the deviation numerator must survive");
+        assert_eq!(back["assessed_sites"], 47, "the deviation denominator must survive");
+        assert_eq!(back["convention_label"], "URI-versioned endpoints");
+    }
+
+    /// req_pass2_2: an informational row (a convention the codebase already follows — a
+    /// COMPLIMENT) must never appear in the triage Queue, where it competes for attention with
+    /// an accusation and blocks the Process gate by sitting Unresolved forever.
+    #[test]
+    fn req_pass2_2_informational_rows_are_not_in_the_triage_queue() {
+        let defect = finding(serde_json::json!({
+            "repo": "r", "path": "src/a.rs", "line": 1, "rule_id": "SQL-INJECTION-1",
+            "severity": "critical", "snippet": "s", "detail": "", "kind": "defect"
+        }));
+        let compliment = finding(serde_json::json!({
+            "repo": "r", "path": "src/b.rs", "line": 2, "rule_id": "API-VERSIONING-1",
+            "severity": "info", "snippet": "s", "detail": "", "kind": "convention_observed",
+            "convention_option_id": "versioned", "convention_label": "URI-versioned endpoints"
+        }));
+        let m = TriageModel::new();
+        let visible = m.visible(&[defect, compliment]);
+        assert_eq!(
+            visible.len(),
+            1,
+            "the Queue must hold only the accusing kinds; got {} rows: {:?}",
+            visible.len(),
+            visible.iter().map(|f| f.rule_id.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(visible[0].rule_id, "SQL-INJECTION-1");
+    }
+
+    // ── Pass 2 step 1: kind routing, the sort, and the one-surface invariant ──
+
+    /// Build a finding with an explicit kind payload merged into the row (the wire shape).
+    fn kinded(rule_id: &str, severity: &str, kind: serde_json::Value) -> FindingView {
+        let mut row = serde_json::json!({
+            "repo": "r", "path": "src/x.rs", "line": 1, "rule_id": rule_id,
+            "severity": severity, "snippet": "s", "detail": "", "status": "active"
+        });
+        for (k, v) in kind.as_object().expect("kind payload is an object") {
+            row[k] = v.clone();
+        }
+        finding(row)
+    }
+
+    fn defect(rule_id: &str, severity: &str) -> FindingView {
+        kinded(rule_id, severity, serde_json::json!({"kind": "defect"}))
+    }
+
+    fn deviation(rule_id: &str, severity: &str, num: usize, den: Option<usize>) -> FindingView {
+        kinded(
+            rule_id,
+            severity,
+            serde_json::json!({
+                "kind": "deviation", "deviating_sites": num, "assessed_sites": den,
+                "convention_option_id": "opt", "convention_label": "A convention"
+            }),
+        )
+    }
+
+    fn convention(rule_id: &str) -> FindingView {
+        kinded(
+            rule_id,
+            "info",
+            serde_json::json!({
+                "kind": "convention_observed", "convention_option_id": "opt",
+                "convention_label": "A convention"
+            }),
+        )
+    }
+
+    fn no_convention(rule_id: &str) -> FindingView {
+        kinded(
+            rule_id,
+            "info",
+            serde_json::json!({"kind": "no_convention", "observed_options": []}),
+        )
+    }
+
+    fn not_assessed(rule_id: &str) -> FindingView {
+        kinded(
+            rule_id,
+            "info",
+            serde_json::json!({
+                "kind": "not_assessed", "reason": "tool_failed", "reason_detail": "eslint exited 2"
+            }),
+        )
+    }
+
+    fn unspecified(rule_id: &str, severity: &str) -> FindingView {
+        kinded(rule_id, severity, serde_json::json!({}))
+    }
+
+    /// req_pass2_1: a legacy row with no `kind` key still deserializes (back-compat) and lands
+    /// in the explicit `"unspecified"` alarm state — NEVER silently as a `Defect`.
+    #[test]
+    fn req_pass2_1_absent_kind_is_the_unspecified_alarm_never_a_defect() {
+        let f = unspecified("LEGACY-1", "high");
+        assert!(f.kind.is_none());
+        assert!(is_unspecified_kind(&f));
+        assert_eq!(kind_tag(&f), "unspecified");
+        assert_ne!(kind_tag(&f), "defect");
+        assert_eq!(unspecified_kind_count(&[f, defect("D", "high")]), 1);
+    }
+
+    /// req_pass2_1: every kind's tag reaches the badge verbatim from api-types, so the badge
+    /// text can never drift from the wire discriminator.
+    #[test]
+    fn req_pass2_1_kind_tag_matches_the_wire_discriminator_for_every_kind() {
+        assert_eq!(kind_tag(&defect("D", "high")), "defect");
+        assert_eq!(kind_tag(&deviation("V", "medium", 2, Some(47))), "deviation");
+        assert_eq!(kind_tag(&convention("C")), "convention_observed");
+        assert_eq!(kind_tag(&no_convention("N")), "no_convention");
+        assert_eq!(kind_tag(&not_assessed("A")), "not_assessed");
+    }
+
+    /// req_pass2_2: each of the five kinds routes to exactly one surface, and the three
+    /// informational kinds route OUT of the Queue.
+    #[test]
+    fn req_pass2_2_every_kind_routes_to_exactly_one_surface() {
+        assert_eq!(kind_surface(&defect("D", "high")), KindSurface::Queue);
+        assert_eq!(
+            kind_surface(&deviation("V", "medium", 2, Some(47))),
+            KindSurface::Queue
+        );
+        assert_eq!(kind_surface(&convention("C")), KindSurface::Conventions);
+        assert_eq!(kind_surface(&no_convention("N")), KindSurface::NoConvention);
+        assert_eq!(kind_surface(&not_assessed("A")), KindSurface::NotAssessed);
+        // The alarm row stays where the curator is looking, flagged — not hidden in a list.
+        assert_eq!(kind_surface(&unspecified("U", "high")), KindSurface::Queue);
+    }
+
+    /// req_pass2_2: the three informational panels each get their own rows and nothing else,
+    /// and the four surface counts partition the input exactly (no row lost, none duplicated).
+    #[test]
+    fn req_pass2_2_surfaces_partition_the_finding_set() {
+        let all = vec![
+            defect("D", "high"),
+            deviation("V", "medium", 2, Some(47)),
+            unspecified("U", "low"),
+            convention("C1"),
+            convention("C2"),
+            no_convention("N"),
+            not_assessed("A"),
+        ];
+        assert_eq!(findings_on_surface(&all, KindSurface::Queue).len(), 3);
+        let conventions = findings_on_surface(&all, KindSurface::Conventions);
+        assert_eq!(
+            conventions.iter().map(|f| f.rule_id.clone()).collect::<Vec<_>>(),
+            vec!["C1", "C2"]
+        );
+        assert_eq!(findings_on_surface(&all, KindSurface::NoConvention).len(), 1);
+        assert_eq!(findings_on_surface(&all, KindSurface::NotAssessed).len(), 1);
+
+        let counts = surface_counts(&all);
+        assert_eq!(counts[0], (KindSurface::Queue, 3));
+        assert_eq!(counts[1], (KindSurface::Conventions, 2));
+        assert_eq!(counts[2], (KindSurface::NoConvention, 1));
+        assert_eq!(counts[3], (KindSurface::NotAssessed, 1));
+        assert_eq!(
+            counts.iter().map(|(_, n)| n).sum::<usize>(),
+            all.len(),
+            "the four surfaces must partition the set — every row on exactly one"
+        );
+    }
+
+    /// req_pass2_3: the curated default order — active before suppressed, then severity AS
+    /// CALIBRATED, then Defect before Deviation, then ascending deviation ratio.
+    #[test]
+    fn req_pass2_3_default_sort_is_status_then_severity_then_kind_then_ratio() {
+        let crit_defect = defect("Z-DEFECT", "critical");
+        let high_defect = defect("A-DEFECT", "high");
+        let high_deviation = deviation("A-DEVIATION", "high", 2, Some(47));
+        let mut suppressed = defect("SUPPRESSED", "critical");
+        suppressed.status = "suppressed-baseline".to_string();
+
+        let m = TriageModel::new();
+        let out = m.visible(&[
+            suppressed.clone(),
+            high_deviation.clone(),
+            high_defect.clone(),
+            crit_defect.clone(),
+        ]);
+        assert_eq!(
+            out.iter().map(|f| f.rule_id.clone()).collect::<Vec<_>>(),
+            vec!["Z-DEFECT", "A-DEFECT", "A-DEVIATION", "SUPPRESSED"],
+            "active critical, then active high defect, then the equal-severity deviation \
+             (kind breaks the tie, not the rule id), then the suppressed row last"
+        );
+    }
+
+    /// req_pass2_3: at equal status/severity/kind, deviations order by ASCENDING ratio — the
+    /// near-unanimous conventions (cheapest decisions) first — and an unknown denominator
+    /// sorts after every known one rather than fabricating a position.
+    #[test]
+    fn req_pass2_3_deviations_order_by_ascending_ratio_unknown_denominator_last() {
+        let cheap = deviation("B-CHEAP", "medium", 2, Some(47)); // ~4%
+        let costly = deviation("A-COSTLY", "medium", 19, Some(47)); // ~40%
+        let unknown = deviation("A-UNKNOWN", "medium", 3, None);
+        let m = TriageModel::new();
+        let out = m.visible(&[unknown.clone(), costly.clone(), cheap.clone()]);
+        assert_eq!(
+            out.iter().map(|f| f.rule_id.clone()).collect::<Vec<_>>(),
+            vec!["B-CHEAP", "A-COSTLY", "A-UNKNOWN"],
+            "ascending ratio wins over the alphabetical rule-id tie-break; unknown last"
+        );
+    }
+
+    /// req_pass2_3: the kind-less ALARM row sorts to the very top of its severity band, ahead
+    /// of a Defect. It must not be buried, and it must not share Defect's rank.
+    #[test]
+    fn req_pass2_3_unspecified_rows_rank_ahead_of_defects_not_as_defects() {
+        let m = TriageModel::new();
+        let out = m.visible(&[defect("A-DEFECT", "high"), unspecified("Z-UNMAPPED", "high")]);
+        assert_eq!(
+            out.iter().map(|f| f.rule_id.clone()).collect::<Vec<_>>(),
+            vec!["Z-UNMAPPED", "A-DEFECT"]
+        );
+    }
+
+    /// req_pass2_3: the UI never re-derives severity. A deviation whose rule authored a HIGH
+    /// ceiling ranks in the high band purely because the row says `high` — there is no
+    /// kind-based severity adjustment anywhere in the sort. If the UI discounted deviations,
+    /// this high deviation would sink below the medium defect; it must not.
+    #[test]
+    fn req_pass2_3_sort_never_re_derives_severity_from_kind() {
+        let m = TriageModel::new();
+        let out = m.visible(&[
+            defect("A-MEDIUM-DEFECT", "medium"),
+            deviation("Z-HIGH-DEVIATION", "high", 19, Some(20)),
+        ]);
+        assert_eq!(
+            out[0].rule_id, "Z-HIGH-DEVIATION",
+            "the authored severity ceiling/floor is the only calibration layer; a high \
+             deviation outranks a medium defect"
+        );
+    }
+
+    /// req_pass2_4: the one-rule-one-surface invariant. A healthy scan reports nothing; a rule
+    /// that reaches two surfaces is reported verbatim so the UI can surface the PIPELINE bug
+    /// loudly instead of silently picking a winner.
+    #[test]
+    fn req_pass2_4_one_rule_one_surface_invariant_is_asserted_not_tolerated() {
+        let healthy = vec![
+            defect("D", "high"),
+            deviation("V", "medium", 2, Some(47)),
+            convention("C"),
+            not_assessed("A"),
+        ];
+        assert!(
+            rules_on_multiple_surfaces(&healthy).is_empty(),
+            "a healthy scan must not ring the alarm"
+        );
+
+        // The same rule emitting BOTH a convention row and deviating sites: impossible by the
+        // pipeline's own contract, therefore a bug the UI must name.
+        let broken = vec![convention("API-VERSIONING-1"), deviation("API-VERSIONING-1", "medium", 2, Some(47))];
+        let violations = rules_on_multiple_surfaces(&broken);
+        assert_eq!(violations.len(), 1, "the conflicting rule must be reported");
+        assert_eq!(violations[0].0 .1, "API-VERSIONING-1");
+        assert_eq!(
+            violations[0].1,
+            vec![KindSurface::Queue, KindSurface::Conventions]
+        );
+    }
+
+    /// req_pass2_4: the invariant is scoped per (repo, rule) ON PURPOSE. One repo following a
+    /// convention while another deviates from it is two honest assessments of two codebases,
+    /// not a conflict — a rule-id-only key would ring the alarm on every legitimate multi-repo
+    /// scan and train the curator to ignore it.
+    #[test]
+    fn req_pass2_4_invariant_is_scoped_per_repo_so_multi_repo_scans_do_not_false_alarm() {
+        let mut clean_repo = convention("API-VERSIONING-1");
+        clean_repo.repo = "me/api".to_string();
+        let mut drifting_repo = deviation("API-VERSIONING-1", "medium", 2, Some(47));
+        drifting_repo.repo = "me/worker".to_string();
+        assert!(
+            rules_on_multiple_surfaces(&[clean_repo, drifting_repo]).is_empty(),
+            "same rule, different repos, different outcomes — that is not a pipeline bug"
+        );
+    }
+
+    /// req_pass2_2: the disposition tally is taken over QUEUE rows only, so informational rows
+    /// can never park themselves as Unresolved and block the Process gate forever.
+    #[test]
+    fn req_pass2_2_informational_rows_cannot_block_the_process_gate() {
+        let m = TriageModel::new();
+        let all = vec![convention("C"), no_convention("N"), not_assessed("A")];
+        let queue = findings_on_surface(&all, KindSurface::Queue);
+        assert!(queue.is_empty());
+        let (unresolved, _, _, _) = m.counts(&queue);
+        assert_eq!(
+            unresolved, 0,
+            "a scan whose only rows are informational is fully triaged on arrival"
+        );
     }
 }
