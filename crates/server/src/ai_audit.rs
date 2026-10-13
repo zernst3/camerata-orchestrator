@@ -2302,7 +2302,13 @@ fn build_alternatives_block(alternatives: &[RuleAlternatives]) -> String {
         // A5.3: only a PURE decision rule may honestly answer "no convention adopted" — a
         // default_with_exceptions rule has an externally-correct default, so the model is
         // never offered the escape for it (and the parser refuses it even if volunteered).
-        let marker = if a.kind == Some(camerata_rules::RuleKind::Decision) {
+        //
+        // W17: asks `RuleKind::offers_no_convention_escape()` rather than comparing against
+        // `Decision` inline, so a newly added kind states its answer in one exhaustive match in
+        // the rules crate instead of inheriting "no escape" by failing a comparison. Behaviour
+        // is identical for all existing kinds; `decision_with_floor` is also withheld, because
+        // the escape severs the per-site violation path and that kind names real faults.
+        let marker = if a.kind.is_some_and(|k| k.offers_no_convention_escape()) {
             " [PURE DECISION — \"no convention\" is a valid answer]"
         } else {
             ""
@@ -2503,9 +2509,13 @@ pub fn parse_alternative_recommendations(
                 let observed_options = parse_observed_options(r, &a.options);
                 let no_convention_claimed =
                     r.get("no_convention").and_then(|v| v.as_bool()).unwrap_or(false);
+                // W17: `offers_no_convention_escape()` in place of an inline `== Decision`, so
+                // the kind taxonomy answers this in one exhaustive match. Same reasoning and
+                // same behaviour as the prompt-side marker in `build_alternatives_block`, and
+                // the two now cannot drift apart.
                 if applicable
                     && no_convention_claimed
-                    && a.kind == Some(camerata_rules::RuleKind::Decision)
+                    && a.kind.is_some_and(|k| k.offers_no_convention_escape())
                     && (!observed_options.is_empty() || evidence.is_some())
                 {
                     out.push(RuleRecommendation {
