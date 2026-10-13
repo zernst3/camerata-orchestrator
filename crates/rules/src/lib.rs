@@ -220,12 +220,16 @@ impl std::fmt::Display for RuleKind {
 /// - `policy`   — honest project policy, with NO external authority: the rule
 ///   encodes a deliberate project/team decision (e.g. an internal convention
 ///   or process), and any cited [`RuleSource`]s are internal docs, not a
-///   published standard or real linter rule. `policy` is NOT grounded — it is
-///   kept out of the armed ruleset the same as `draft`, but it is labeled
-///   honestly as policy rather than being mislabeled `grounded` by virtue of
-///   merely having a source citation. Use this instead of `grounded` whenever
-///   the only "source" is a Camerata doc citing Camerata (or another purely
-///   internal document) rather than a real external authority.
+///   published standard or real linter rule. `policy` is NOT grounded, but it
+///   DOES arm: [`Rule::is_auto_recommended`] includes it, so a `policy` rule is
+///   pre-checked and runs unattended exactly like a `grounded` one. What
+///   `policy` says is that the rule is not mislabeled `grounded` by virtue of
+///   merely having a source citation — a provenance statement, not an arming
+///   one. (W17: this bullet also used to claim `policy` was "kept out of the
+///   armed ruleset the same as `draft`"; false since the A8 fix. See
+///   [`Verification::Policy`].) Use this instead of `grounded` whenever the only
+///   "source" is a Camerata doc citing Camerata (or another purely internal
+///   document) rather than a real external authority.
 /// - `grounded` — mapped to a cited authoritative source or a real, established
 ///   linter rule: a URL + identifier is present in [`Rule::sources`].
 ///   Machine-grounded; an automated grounding pass may emit this.
@@ -250,8 +254,26 @@ pub enum Verification {
     Draft,
     /// Honest project policy: a deliberate project/team decision with NO
     /// external authority. Any cited source is internal, not a published
-    /// standard or real linter rule. Not grounded; kept out of the armed
-    /// ruleset like `draft`, but labeled honestly rather than as `grounded`.
+    /// standard or real linter rule.
+    ///
+    /// NOT grounded ([`Verification::is_grounded`] and
+    /// [`Verification::is_shippable`] both return `false`) — but it DOES arm.
+    /// [`Rule::is_auto_recommended`] returns `true` for
+    /// `Grounded | Verified | Policy` (see its body), so a `policy` rule is
+    /// pre-checked in the onboarding proposal and IS selected by an unattended
+    /// scan via `camerata_cli::inspect_cmd::curated_rule_selection`. 21 corpus
+    /// rules carry this value and all 21 arm.
+    ///
+    /// W17 corrected a stale claim here. This comment used to read "kept out of
+    /// the armed ruleset like `draft`, but labeled honestly rather than as
+    /// `grounded`", which has been FALSE since the A8 fix added `Policy` to the
+    /// auto-recommended set. Believing it is what disarmed 17 shipped rules on
+    /// every repo — `SPIRIT-FILE-SIZE-1` and every `PROC-*` governance rule
+    /// among them — because provenance ("no external authority") was conflated
+    /// with worth-running. `verification` no longer disarms a rule anywhere;
+    /// `rules_disarmed_by_verification` now fails the BUILD on any value that
+    /// would. The honest statement of what `Policy` costs a rule is a weaker
+    /// CITATION story, not a weaker arming story.
     Policy,
     /// Mapped to a cited authoritative source or real linter rule (sources present).
     Grounded,
@@ -1059,9 +1081,18 @@ impl Rule {
         self.verification.is_grounded()
     }
 
-    /// Whether this rule is shippable — true for every at-least-grounded status,
-    /// false for `draft`. Used to keep `draft` (un-grounded, AI-designed) rules
-    /// out of the demo'd / armed ruleset.
+    /// Whether this rule is shippable — true for every at-least-grounded status
+    /// (`grounded`, `verified`, `needs_recheck`), false for `draft` AND `policy`.
+    ///
+    /// W17: this doc comment used to say "false for `draft`" and "Used to keep
+    /// `draft` ... out of the demo'd / armed ruleset". Both halves were wrong.
+    /// It is also false for `policy` (delegates to
+    /// [`Verification::is_shippable`] = [`Verification::is_grounded`]), and it
+    /// gates NOTHING: a workspace-wide search finds zero production callers of
+    /// `Rule::is_shippable` outside this crate's own tests. Arming is
+    /// [`Rule::is_auto_recommended`]'s job and nothing else's. Reading this
+    /// method as an arming control is precisely the mistake that disarmed 17
+    /// shipped rules (A8).
     pub fn is_shippable(&self) -> bool {
         self.verification.is_shippable()
     }
