@@ -1787,6 +1787,70 @@ pub(super) fn order_indicator_text(
     )
 }
 
+/// The order the Queue is showing, resolved for display: the sentence, plus whether it is the
+/// curator's own cut (so the way back has to be offered).
+///
+/// One struct from one function ([`queue_order`]) rather than two props, so the sentence and
+/// the "is this a manual cut" flag cannot disagree — a bar that said "Camerata default order"
+/// while offering a reset button, or named a cut while hiding the way back, would be worse
+/// than no indicator.
+#[derive(Clone, PartialEq)]
+pub(super) struct QueueOrder {
+    /// The sentence shown to the curator.
+    pub text: String,
+    /// True when a manual column cut is active.
+    pub manual: bool,
+}
+
+/// Resolve chorale's sort state into what the order bar shows.
+pub(super) fn queue_order(
+    sort: &[chorale_core::SortState],
+    cols: &[ColumnDef<FindingView>],
+) -> QueueOrder {
+    QueueOrder {
+        text: order_indicator_text(sort, cols),
+        manual: !sort.is_empty(),
+    }
+}
+
+/// The Queue's ORDER BAR: which order is on screen, and one click back to the curated default.
+///
+/// Rendered immediately above the table's header row so the sentence and chorale's own ↑/↓
+/// arrow read in one glance. Its own component (rather than inline in `FindingsTable`) because
+/// both of its states need to be verifiable under render: SSR cannot click a column header, so
+/// a bar buried inside the table component could only ever be checked in its default state.
+///
+/// `Default order` is shown ONLY while a manual sort is active. On the default it would be a
+/// no-op control, and its absence is itself part of the indicator: no button means you are
+/// looking at the curated order.
+#[component]
+pub(super) fn QueueOrderBar(
+    /// The resolved order (see [`queue_order`]).
+    order: QueueOrder,
+    /// Invoked by `Default order`. The call site clears chorale's whole sort list.
+    on_reset: Callback<()>,
+) -> Element {
+    let QueueOrder { text, manual } = order;
+    rsx! {
+        div { class: "queue-order",
+            span { class: "queue-order-eyebrow", "Order" }
+            span {
+                class: if manual { "queue-order-value manual" } else { "queue-order-value" },
+                title: "Click any column header to re-cut the list; click it again to reverse. The curated default is severity, then kind (the unspecified alarm first, then defects, then deviations), then the cheapest deviations first.",
+                "{text}"
+            }
+            if manual {
+                button {
+                    class: "btn-edit-sm queue-order-reset",
+                    title: "Drop every manual column sort and restore Camerata's curated default order.",
+                    onclick: move |_| on_reset.call(()),
+                    "Default order"
+                }
+            }
+        }
+    }
+}
+
 /// The findings table with TRIAGE: sort by repo/severity/type, filter, select rows
 /// and Ignore / Resolve / Accept-as-tech-debt (open a ticket) them. Virtualized by
 /// chorale, so a large audit doesn't choke the UI.
@@ -1852,22 +1916,18 @@ pub(super) fn FindingsTable(
     // empty is chorale's "unsorted", but it is Camerata's curated order, and nothing on screen
     // said so or offered a way back to it from an arbitrary sort state.
     //
-    // Two chained memos rather than reading the table signal inline: this component renders the
-    // chorale table, and subscribing it directly to `TableState` would re-render the whole
-    // subtree on every scroll/selection write. The inner memo narrows the state to the sort
-    // vector, so the (allocating) label computation re-runs only when the sort actually changes.
+    // A memo rather than reading the table signal inline: this component renders the chorale
+    // table, and subscribing it directly to `TableState` would re-render the whole subtree on
+    // every scroll/selection write. The memo narrows the state to the sort vector, so the bar
+    // below re-renders only when the sort actually changes.
     let sort_signal = handle.signal();
     let active_sort = use_memo(move || sort_signal.read().sort.clone());
-    let order_text = use_memo(move || {
-        order_indicator_text(
-            &active_sort(),
-            &finding_columns(indicator_repos.clone(), in_techdebt),
-        )
+    // The column set the bar resolves sorted-column headers against. Built once per mount and
+    // shared by `Rc`, so the bar's props stay cheap to compare (`ColumnDef` holds `Arc`'d
+    // closures and is not `PartialEq`).
+    let order_columns = use_hook(|| {
+        std::rc::Rc::new(finding_columns(indicator_repos.clone(), in_techdebt))
     });
-    // "Default order" is shown only while a manual sort is active. On the default it would be a
-    // no-op control, and its ABSENCE is itself part of the indicator: no button = you are on
-    // the curated default.
-    let manual_sort_active = use_memo(move || !active_sort().is_empty());
     // Subscribe to the disposition map so the bucket flag column re-renders when the architect
     // marks resolve-later/now (the renderer below captures this snapshot).
     let bucket_snapshot = dispositions.read().clone();
@@ -2218,31 +2278,16 @@ pub(super) fn FindingsTable(
                 "Export CSV"
             }
         }
-        // The order bar sits immediately above the header row it describes, so the sentence and
-        // the ↑/↓ arrow it is explaining are in the same glance.
-        div { class: "queue-order",
-            span { class: "queue-order-eyebrow", "Order" }
-            span {
-                class: if manual_sort_active() { "queue-order-value manual" } else { "queue-order-value" },
-                title: "Click any column header to re-cut the list; click it again to reverse. The curated default is severity, then kind (the unspecified alarm first, then defects, then deviations), then the cheapest deviations first.",
-                "{order_text}"
-            }
-            if manual_sort_active() {
-                button {
-                    class: "btn-edit-sm queue-order-reset",
-                    title: "Drop every manual column sort and restore Camerata's curated default order.",
-                    // `clear_sort` drops the whole sort list in one act, which is why this
-                    // button exists rather than relying on chorale's third click: a plain click
-                    // cycles ONE column back to unsorted, but a shift+click multi-sort leaves
-                    // two or three columns set and no single click undoes all of them. This is
-                    // correct from any sort state. With `state.sort` empty, chorale's
-                    // `filtered_sorted_pairs` stops reordering entirely and hands back
-                    // `state.rows` — the rows exactly as `TriageModel::visible` ordered them —
-                    // so the restored default is byte-identical, not approximately restored.
-                    onclick: move |_| handle.clear_sort(),
-                    "Default order"
-                }
-            }
+        // `clear_sort` drops the whole sort list in one act, which is why the bar's button
+        // exists rather than relying on chorale's third click: a plain click cycles ONE column
+        // back to unsorted, but a shift+click multi-sort leaves two or three columns set and no
+        // single click undoes all of them. This is correct from any sort state. With
+        // `state.sort` empty, chorale's `filtered_sorted_pairs` stops reordering entirely and
+        // hands back `state.rows` — the rows exactly as `TriageModel::visible` ordered them —
+        // so the restored default is byte-identical, not approximately restored.
+        QueueOrderBar {
+            order: queue_order(&active_sort(), &order_columns),
+            on_reset: Callback::new(move |()| handle.clear_sort()),
         }
         CamerataTable {
             handle,
@@ -8261,6 +8306,60 @@ mod render_tests {
             !html.contains("queue-order-reset"),
             "no manual sort is active on mount, so the return-to-default control must not be \
              rendered — its absence is part of the indicator; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_8 (UNDER RENDER, the manual state): with a cut active the bar names the column
+    /// and direction in an accented style AND renders the way back to the default.
+    ///
+    /// `FindingsTable` owns its own `TableState`, and SSR cannot click a column header, so the
+    /// bar is its own component precisely so this state can be rendered at all. Without it,
+    /// "the Default order button appears when you sort" would be untested in the product.
+    #[test]
+    fn req_pass2_8_order_bar_renders_the_manual_state_with_the_way_back() {
+        use chorale_core::{SortDirection, SortState};
+
+        // `Callback::new` has to run inside the Dioxus runtime, so the sort is passed into a
+        // harness ROOT rather than built into props from outside the VirtualDom.
+        #[component]
+        fn OrderBarHarness(sort: Vec<SortState>) -> Element {
+            let cols = finding_columns(vec!["me/api".to_string()], false);
+            rsx! {
+                QueueOrderBar {
+                    order: queue_order(&sort, &cols),
+                    on_reset: Callback::new(|()| {}),
+                }
+            }
+        }
+
+        fn bar(sort: Vec<SortState>) -> String {
+            let mut vdom =
+                VirtualDom::new_with_props(OrderBarHarness, OrderBarHarnessProps { sort });
+            vdom.rebuild_in_place();
+            dioxus_ssr::render(&vdom)
+        }
+
+        // Default state: names the curated order, no reset control, no accent.
+        let html = bar(vec![]);
+        assert!(html.contains(DEFAULT_ORDER_LABEL), "html=\n{html}");
+        assert!(!html.contains("queue-order-reset"), "html=\n{html}");
+        assert!(!html.contains("queue-order-value manual"), "html=\n{html}");
+
+        // Manual state: column, direction, accent, and the Default order button.
+        let html = bar(vec![SortState::new(ColumnId("severity"), SortDirection::Desc)]);
+        assert!(html.contains("Severity"), "names the column; html=\n{html}");
+        assert!(html.contains('\u{2193}'), "names the direction; html=\n{html}");
+        assert!(
+            html.contains("queue-order-value manual"),
+            "a manual cut reads differently from the default; html=\n{html}"
+        );
+        assert!(
+            html.contains("queue-order-reset") && html.contains("Default order"),
+            "the way back must be visible and labelled; html=\n{html}"
+        );
+        assert!(
+            !html.contains(DEFAULT_ORDER_LABEL),
+            "the bar must not claim to be showing the default while a cut is active; html=\n{html}"
         );
     }
 
