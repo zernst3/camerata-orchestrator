@@ -66,9 +66,15 @@ const REGISTRY: &[(&str, Coverage)] = &[
     ("A5.4", Required(&["req_a5_4"])),
     ("A5.5", Required(&["req_a5_5"])),
     ("A5.6", Required(&["req_a5_6"])),
-    ("A5.7", Exempt("the 58 ambiguous rule classifications are ON HOLD at Zach's explicit request \
-                     ('pause the rule review for me for when I can sit down and look at these'). \
-                     No code may depend on a classification he has not made.")),
+    ("A5.7", Exempt("CLOSED 2026-10-12. The 58-rule classification hold is resolved: 19 by \
+                     Zach's security directive, 2 by his review of the remaining 39, and 37 \
+                     confirmed as-is. One rule, PROC-MIGRATION-ROLE-GRANTS-1, he ruled stays \
+                     `decision` because its answer depends on whether an admin tool exists to \
+                     grant permissions -- possibly in a different application entirely, so no \
+                     scan of this repo can settle it. Two others (SUPABASE-AUTH-GETSESSION-SERVER-1, \
+                     SUPABASE-RLS-INITPLAN-1) need their options REMOVED rather than reclassified, \
+                     because the options describe our own detector's scope, not the client's code. \
+                     Exempt stands: this is a classification record, not a code behaviour.")),
     ("A6", Required(&["req_a6"])),
     ("A7", Required(&["req_a7", "req_h1"])),
     ("A8", Required(&["req_a8"])),
@@ -180,6 +186,14 @@ const REGISTRY: &[(&str, Coverage)] = &[
     // B1/B4 -> `req_d1`/`req_d2` and W5-Q2 -> `req_w8`.
     ("W13", Required(&["req_w13"])),
     ("W14", Required(&["req_w14"])),
+    // W15, 2026-10-12: the two reclassifications from Zach's review of the 39 held rules.
+    ("W15", Required(&["req_w15"])),
+    // W16, 2026-10-12: all 23 agentic rules armed on every unattended scan, ran in the
+    // semantic pass, found nothing (their subject is the authoring process, not the code),
+    // and were recorded `verified_clean` -- 14 with grounded citations, sorting FIRST into
+    // the capped "What's healthy" list of a paid deliverable. Closed by a required per-rule
+    // `inspectable` flag plus exclusion before arming.
+    ("W16", Required(&["req_w16"])),
     // W8-Q4, found 2026-10-11: the D5 severity floor matched its phrase tables against the
     // MODEL'S PROSE with a bare `text.contains(phrase)`, and the tables contain one-syllable
     // entries ("read", "view", "list", "see", "rls"). So al`read`y, re`view`, allow`list`,
