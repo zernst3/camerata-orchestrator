@@ -452,3 +452,45 @@ NoConvention        -> per-rule: Recommend <option> | Leave as reported (default
 NotAssessed         -> none (read-only, grouped by structured reason)
 unspecified         -> alarm surface; FP(reason) is the only exit; fix is in the pipeline
 ```
+
+---
+
+## 13. Zach's rulings on the open questions (2026-10-12)
+
+**Q4 DECIDED — convention adoption is opt-out, and thoroughly gated.**
+> "Yes it should be opt out by default, make sure it is thoroughly gated and not an accidental click."
+
+Pre-checked by default. The commit dialog must name the destination repository, the adopted
+count, and **how many were adopted without being opened**, and must require the repository name
+typed rather than a checkbox. It offers three exits, not two: Cancel, Review the unopened set,
+Commit. Opt-out is fast, so the gate has to be honest about its own cost.
+
+**Q1 DECIDED, AGAINST MY DESIGN — a convention with live deviations IS adoptable.**
+> "I could decide that 'this is the correct convention even though there are inconsistencies
+> that exist'. The remediation of those inconsistencies is a separate process. But if I say
+> 'this is the rule and convention' then I mean it, and that can be adopted."
+
+I had designed adoption as blocked until the deviations were dispositioned. That was wrong, and
+it inverts the same causality A5.2 already settled: **adopting a convention states what the
+standard is going forward; whether the code complies today is separate work with a separate
+owner.** Gating one on the other conflates "what is our rule" with "are we currently compliant."
+
+It also fails worst where it matters most: the repo with the most drift is the one that most
+needs the convention written down, and the blocked design was least able to write it.
+
+So majority conventions behind Deviation rows DO enter the adoptable set, labelled "observed
+with N exceptions", with a jump into the Queue. The count is context, never a gate.
+
+**Four tabs stay.** I floated collapsing `No convention` and `Not assessed` into a shared
+"Observations" panel to reduce the switcher to two primary surfaces. Zach: *"I think it is
+fine as is."* Dropped; the kind switcher keeps one tab per kind.
+
+### Still open after this round
+- **Q2** what `Confirmed` means downstream (local export-readable state, or a durable
+  per-finding record across engagements). Recommendation: keep it local for Pass 2.
+- **Q3** whether a `NoConvention` option pick is a client-facing recommendation or curator
+  scratch. Recommendation: client-facing, which means it inherits Q4's gating.
+- **Q5** single-key dispositions. Recommendation: build them, scoped to the focused detail
+  pane, with a five-second undo toast.
+
+Layout mockups for all four screens were produced and reviewed on 2026-10-12.
