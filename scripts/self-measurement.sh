@@ -29,6 +29,13 @@
 #      244 `violates` flags in which 76 (31 percent) were wrong, the dominant shape being a
 #      MISSING flag — the engine silent on a fault its own rule describes in plain language.
 #      Each gate is proven to FIRE against a synthetic corpus, not merely to pass.
+#   6. W16 — the scan-vs-emit split. Every corpus rule must declare `inspectable` (can the
+#      scan assess this rule from a repository at all?), the exact set declared
+#      `inspectable = false` is pinned by id, and the end-to-end half proves both directions:
+#      an emit-only rule never reaches the model, the ledger or "What's healthy", AND it is
+#      still installed verbatim into the client's AGENTS.md / CONVENTIONS.md. The second half
+#      is the one most likely to break silently, and breaking it deletes client value rather
+#      than noise.
 #
 # `--include-known-red` is kept for the next deliberately-red measurement; today there are no
 # #[ignore]d tests in the harness, so it adds nothing.
@@ -67,6 +74,11 @@ cargo test -p camerata-server --lib req_w13
 echo
 echo "── W14: corpus SCHEMA gates (Rejected:/violates parity, unknown fields) ───────"
 cargo test -p camerata-rules --test w14_corpus_schema_gates
+
+echo
+echo "── W16: scan-vs-emit (every rule declares \`inspectable\`; the population is pinned) ──"
+cargo test -p camerata-rules --test w16_inspectable_gate
+cargo test -p camerata-server --test w16_emit_only_rules_e2e
 
 if [ "$INCLUDE_KNOWN_RED" -eq 1 ]; then
   echo
