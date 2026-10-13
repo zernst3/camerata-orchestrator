@@ -1,6 +1,5 @@
 id = "RUST-ENTITIES-10"
 title = "Owner + audit FKs to the same parent: belongs_to on child only; no reverse has_many for audit FKs"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"

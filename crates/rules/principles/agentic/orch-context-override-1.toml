@@ -1,6 +1,5 @@
 id = "ORCH-CONTEXT-OVERRIDE-1"
 title = "Rule overrides driven by project context require explicit human sign-off"
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"

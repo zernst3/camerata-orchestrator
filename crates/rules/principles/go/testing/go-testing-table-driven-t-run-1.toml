@@ -1,6 +1,5 @@
 id = "GO-TESTING-TABLE-DRIVEN-T-RUN-1"
 title = "Tests with multiple input/output cases use table-driven structure with t.Run subtests"
-tag = "stack"
 domain = "go:testing"
 layer = "testing"
 enforcement = "structured"

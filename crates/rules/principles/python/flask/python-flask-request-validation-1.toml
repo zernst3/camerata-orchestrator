@@ -1,6 +1,5 @@
 id = "PYTHON-FLASK-REQUEST-VALIDATION-1"
 title = "Request input is validated through marshmallow or pydantic schemas before reaching business logic"
-tag = "stack"
 domain = "python:flask"
 layer = "framework"
 enforcement = "structured"

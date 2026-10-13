@@ -1,6 +1,5 @@
 id = "PYTHON-FASTAPI-AUTH-DEPENDENCY-1"
 title = "Authenticated and write endpoints declare an auth dependency, not in-handler checks"
-tag = "stack"
 domain = "python:fastapi"
 layer = "framework"
 enforcement = "structured"

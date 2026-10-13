@@ -65,7 +65,6 @@ fn rule_toml(kind: &str, second_why: &str, second_violates: bool) -> String {
         r#"
 id = "W14-FIXTURE-1"
 title = "W14 synthetic fixture rule"
-tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "structured"
@@ -515,15 +514,20 @@ verification = "grounded"
     }
 }
 
-/// req_w14 / GATE 3 NEGATIVE PROOF: the four accepted-and-unconsumed keys do NOT fire. Without
+/// req_w14 / GATE 3 NEGATIVE PROOF: the accepted-and-unconsumed keys do NOT fire. Without
 /// this, a later edit could silently re-reject the entire 417-rule corpus — or, worse, someone
 /// could "fix" the gate by widening it until it reported nothing at all.
+///
+/// TEST DISCIPLINE exception (a), W17: this fixture authored `tag = "stack"` until W17 deleted
+/// `tag` from `RuleToml` and from all 417 corpus files. It is removed from the fixture because
+/// the data it stood for no longer exists, and the inverse is now asserted by
+/// `req_w17_gate_3_rejects_a_reappearing_tag_field` — the deletion's whole purpose. `layer`,
+/// `emits` and `sources.qualifies` are unchanged and still proven not to fire here.
 #[tokio::test]
 async fn req_w14_gate_3_accepts_the_declared_unconsumed_fields() {
     let body = r#"
 id = "W14-ACCEPTED-1"
 title = "W14 accepted-unconsumed fixture"
-tag = "stack"
 domain = "universal"
 layer = "library"
 enforcement = "structured"
@@ -546,7 +550,7 @@ scope = "repo"
         .expect("fixture dir is readable");
     assert!(
         offenders.is_empty(),
-        "tag/layer/emits/sources.qualifies are declared accepted-and-unconsumed and must not \
+        "layer/emits/sources.qualifies are declared accepted-and-unconsumed and must not \
          fire: {offenders:#?}"
     );
     // And the file must still LOAD — declaring a field accepted is pointless if the loader

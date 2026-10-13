@@ -1,6 +1,5 @@
 id = "PYTHON-TYPE-HINTS-1"
 title = "Public functions carry type hints and a type checker runs in CI"
-tag = "stack"
 domain = "python"
 layer = "language"
 enforcement = "mechanical"

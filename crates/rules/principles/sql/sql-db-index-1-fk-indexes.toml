@@ -1,6 +1,5 @@
 id = "SQL-DB-INDEX-1"
 title = "Every foreign-key column gets an index in the same migration"
-tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "prose"

@@ -1,6 +1,5 @@
 id = "SPIRIT-OPTIMIZE-1"
 title = "Optimization by default"
-tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "prose"

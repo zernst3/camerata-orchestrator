@@ -1,6 +1,5 @@
 id = "PROCESS-CONVENTIONAL-COMMIT-1"
 title = "Commit subjects follow the conventional-commits shape"
-tag = "stack"
 domain = "process"
 layer = "universal"
 enforcement = "architectural"

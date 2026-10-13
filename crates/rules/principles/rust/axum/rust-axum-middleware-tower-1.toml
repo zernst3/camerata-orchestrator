@@ -1,6 +1,5 @@
 id = "RUST-AXUM-MIDDLEWARE-TOWER-1"
 title = "Implement cross-cutting concerns as tower middleware, not inline in handlers"
-tag = "stack"
 domain = "rust:axum"
 layer = "framework"
 enforcement = "structured"

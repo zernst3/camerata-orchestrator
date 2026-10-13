@@ -1,6 +1,5 @@
 id = "CSHARP-SQL-PARAMETERIZED-1"
 title = "SQL queries use parameterized queries via SqlParameter or Entity Framework parameters; string concatenation is forbidden"
-tag = "stack"
 domain = "csharp"
 layer = "language"
 # Enforcement-tier correction (the declared tier must match a detector that really runs): this

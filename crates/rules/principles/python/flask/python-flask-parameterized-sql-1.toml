@@ -1,6 +1,5 @@
 id = "PYTHON-FLASK-PARAMETERIZED-SQL-1"
 title = "Database queries use SQLAlchemy ORM or parameterized text() expressions; f-strings in SQL are forbidden"
-tag = "stack"
 domain = "python:flask"
 layer = "framework"
 enforcement = "mechanical"

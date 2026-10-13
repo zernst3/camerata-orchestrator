@@ -1,6 +1,5 @@
 id = "PYTHON-PARAMETERIZED-SQL-1"
 title = "SQL is parameterized; query strings are never built from interpolated values"
-tag = "stack"
 domain = "python"
 layer = "language"
 enforcement = "mechanical"

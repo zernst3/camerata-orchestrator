@@ -1,6 +1,5 @@
 id = "ARCH-SERVER-AUTHZ-1"
 title = "Authorization on the server; UI renders permission hints"
-tag = "stack"
 domain = "permissions"
 layer = "universal"
 enforcement = "architectural"

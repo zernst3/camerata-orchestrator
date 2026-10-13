@@ -1,6 +1,5 @@
 id = "RUST-AXUM-HANDLERS-THIN-DELEGATE-1"
 title = "Handlers stay thin; business logic and data access live in services or repositories"
-tag = "stack"
 domain = "rust:axum"
 layer = "framework"
 enforcement = "structured"

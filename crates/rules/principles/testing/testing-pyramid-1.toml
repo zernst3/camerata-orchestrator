@@ -1,6 +1,5 @@
 id = "TESTING-PYRAMID-1"
 title = "Test pyramid: many unit tests, fewer integration tests, few end-to-end tests"
-tag = "universal"
 domain = "testing"
 layer = "universal"
 enforcement = "prose"

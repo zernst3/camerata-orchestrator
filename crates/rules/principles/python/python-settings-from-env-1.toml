@@ -1,6 +1,5 @@
 id = "PYTHON-SETTINGS-FROM-ENV-1"
 title = "Configuration and secrets come from the environment, never hardcoded"
-tag = "stack"
 domain = "python"
 layer = "language"
 enforcement = "structured"

@@ -1,6 +1,5 @@
 id = "RUST-DOMAIN-4"
 title = "Errors via thiserror enums per crate"
-tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "structured"

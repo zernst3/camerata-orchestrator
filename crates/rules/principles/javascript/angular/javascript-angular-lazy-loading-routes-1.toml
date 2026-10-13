@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-LAZY-LOADING-ROUTES-1"
 title = "Feature routes are lazy-loaded to reduce the initial bundle"
-tag = "stack"
 domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"

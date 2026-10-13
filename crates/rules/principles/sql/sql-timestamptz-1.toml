@@ -1,6 +1,5 @@
 id = "SQL-TIMESTAMPTZ-1"
 title = "A column recording when an EVENT happened uses timestamp WITH time zone, never the bare, zone-less timestamp type"
-tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "structured"

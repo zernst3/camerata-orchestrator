@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-TESTING-NO-DISABLED-TESTS-1"
 title = "Disabled tests (xtest, xit, .skip, pending) are forbidden in committed code"
-tag = "stack"
 domain = "javascript:testing"
 layer = "language"
 enforcement = "mechanical"

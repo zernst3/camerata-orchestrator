@@ -1,6 +1,5 @@
 id = "RUST-TOKIO-NO-STD-MUTEX-ACROSS-AWAIT-1"
 title = "Do not hold a std::sync::Mutex lock across await points; use tokio::sync::Mutex"
-tag = "stack"
 domain = "rust:tokio"
 layer = "framework"
 enforcement = "structured"

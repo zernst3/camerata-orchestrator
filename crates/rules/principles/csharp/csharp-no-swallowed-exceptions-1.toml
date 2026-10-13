@@ -1,6 +1,5 @@
 id = "CSHARP-NO-SWALLOWED-EXCEPTIONS-1"
 title = "Exceptions are never silently swallowed; catch blocks log, rethrow, or transform exceptions; no empty catch bodies"
-tag = "stack"
 domain = "csharp"
 layer = "language"
 enforcement = "mechanical"

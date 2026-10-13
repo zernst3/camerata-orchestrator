@@ -1,6 +1,5 @@
 id = "CSHARP-TESTING-AAA-STRUCTURE-1"
 title = "Every test body follows Arrange-Act-Assert structure with one Act and one Assert per test"
-tag = "stack"
 domain = "csharp:testing"
 layer = "language"
 enforcement = "prose"

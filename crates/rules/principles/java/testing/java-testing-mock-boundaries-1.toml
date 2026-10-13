@@ -1,6 +1,5 @@
 id = "JAVA-TESTING-MOCK-BOUNDARIES-1"
 title = "Mocks are used only at architectural boundaries (external services, repositories, HTTP clients); concrete classes and value objects are never mocked"
-tag = "stack"
 domain = "java:testing"
 layer = "language"
 enforcement = "prose"

@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-VUE-NO-DIRECT-DOM-1"
 title = "Do not manipulate the DOM directly; declare the desired state and let Vue render it"
-tag = "stack"
 domain = "javascript:vue"
 layer = "framework"
 enforcement = "structured"

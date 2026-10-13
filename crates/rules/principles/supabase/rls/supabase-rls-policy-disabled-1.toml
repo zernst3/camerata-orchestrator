@@ -1,6 +1,5 @@
 id = "SUPABASE-RLS-POLICY-DISABLED-1"
 title = "A table with CREATE POLICY statements must have Row Level Security enabled in its replayed end-state"
-tag = "stack"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "architectural"

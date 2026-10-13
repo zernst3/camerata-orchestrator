@@ -1,6 +1,5 @@
 id = "RUST-ENTITIES-3"
 title = "How entity files are laid out: one file per table, grouped by domain concept, a prelude re-export, or inlined together"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"

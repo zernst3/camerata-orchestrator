@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-TESTING-DETERMINISTIC-1"
 title = "Tests are deterministic: clocks, timers, and random values are controlled; no real I/O or network calls in unit tests"
-tag = "stack"
 domain = "javascript:testing"
 layer = "language"
 enforcement = "structured"

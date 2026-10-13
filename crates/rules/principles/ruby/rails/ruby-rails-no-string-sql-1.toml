@@ -1,6 +1,5 @@
 id = "RUBY-RAILS-NO-STRING-SQL-1"
 title = "ActiveRecord queries use placeholders or hash conditions; SQL is never built from interpolated strings"
-tag = "stack"
 domain = "ruby:rails"
 layer = "framework"
 # Enforcement-tier correction (the declared tier must match a detector that really runs): this

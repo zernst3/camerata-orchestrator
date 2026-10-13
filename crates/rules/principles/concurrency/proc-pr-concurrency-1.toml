@@ -1,6 +1,5 @@
 id = "PROC-PR-CONCURRENCY-1"
 title = "PR template forces a concurrency story"
-tag = "stack"
 domain = "concurrency"
 layer = "universal"
 enforcement = "structured"

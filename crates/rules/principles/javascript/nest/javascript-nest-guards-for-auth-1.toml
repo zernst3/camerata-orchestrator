@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-NEST-GUARDS-FOR-AUTH-1"
 title = "Use guards for authentication and authorization checks"
-tag = "stack"
 domain = "javascript:nest"
 layer = "framework"
 enforcement = "structured"

@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-REDUX-NO-STATE-MUTATION-1"
 title = "Reducers never mutate existing state; they produce a new state value"
-tag = "stack"
 domain = "javascript:redux"
 layer = "library"
 enforcement = "structured"

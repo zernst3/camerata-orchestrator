@@ -1,6 +1,5 @@
 id = "CSHARP-IDISPOSABLE-USING-1"
 title = "Resources implementing IDisposable are managed via using statements or using declarations; no manual Dispose() calls or naked instantiation"
-tag = "stack"
 domain = "csharp"
 layer = "language"
 enforcement = "mechanical"

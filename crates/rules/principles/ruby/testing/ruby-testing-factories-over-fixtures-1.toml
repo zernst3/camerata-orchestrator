@@ -1,6 +1,5 @@
 id = "RUBY-TESTING-FACTORIES-OVER-FIXTURES-1"
 title = "Use FactoryBot factories for test data; avoid Rails fixtures and bare ActiveRecord.create calls in specs"
-tag = "stack"
 domain = "ruby:testing"
 layer = "language"
 enforcement = "structured"

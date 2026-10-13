@@ -1,6 +1,5 @@
 id = "ARCH-API-DTOS-1"
 title = "API wire types: dedicated DTOs, the domain types directly, or one shared model"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"

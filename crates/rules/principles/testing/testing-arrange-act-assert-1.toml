@@ -1,6 +1,5 @@
 id = "TESTING-ARRANGE-ACT-ASSERT-1"
 title = "Structure every test as Arrange / Act / Assert with no interleaving"
-tag = "universal"
 domain = "testing"
 layer = "universal"
 enforcement = "prose"

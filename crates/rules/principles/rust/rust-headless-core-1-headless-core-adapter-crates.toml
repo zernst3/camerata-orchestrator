@@ -1,6 +1,5 @@
 id = "RUST-HEADLESS-CORE-1"
 title = "UI logic and state live in a framework-agnostic core; the rendering framework is a thin adapter (applications, not just libraries)"
-tag = "stack"
 domain = "rust"
 layer = "library"
 enforcement = "structured"

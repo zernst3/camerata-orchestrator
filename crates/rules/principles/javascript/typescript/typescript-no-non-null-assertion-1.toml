@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1"
 title = "The non-null assertion operator (!) is forbidden; narrow instead"
-tag = "stack"
 domain = "javascript:typescript"
 layer = "language"
 enforcement = "mechanical"

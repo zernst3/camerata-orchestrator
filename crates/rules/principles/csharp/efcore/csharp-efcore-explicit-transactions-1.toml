@@ -1,6 +1,5 @@
 id = "CSHARP-EFCORE-EXPLICIT-TRANSACTIONS-1"
 title = "Multi-write operations are wrapped in an explicit transaction; partial writes are not observable"
-tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
 enforcement = "structured"

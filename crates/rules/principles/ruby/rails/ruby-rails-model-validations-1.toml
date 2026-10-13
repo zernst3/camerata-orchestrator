@@ -1,6 +1,5 @@
 id = "RUBY-RAILS-MODEL-VALIDATIONS-1"
 title = "Data integrity rules are declared as model validations, not enforced only in controllers or views"
-tag = "stack"
 domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"

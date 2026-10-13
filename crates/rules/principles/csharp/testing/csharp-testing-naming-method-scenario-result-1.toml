@@ -1,6 +1,5 @@
 id = "CSHARP-TESTING-NAMING-METHOD-SCENARIO-RESULT-1"
 title = "Test methods follow MethodName_Scenario_ExpectedResult naming; test classes are named <ClassUnderTest>Tests"
-tag = "stack"
 domain = "csharp:testing"
 layer = "language"
 enforcement = "prose"

@@ -1,6 +1,5 @@
 id = "PYTHON-DJANGO-SELECT-RELATED-1"
 title = "select_related and prefetch_related are used to avoid N+1 queries on related objects"
-tag = "stack"
 domain = "python:django"
 layer = "framework"
 enforcement = "structured"

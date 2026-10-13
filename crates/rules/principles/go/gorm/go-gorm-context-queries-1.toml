@@ -1,6 +1,5 @@
 id = "GO-GORM-CONTEXT-QUERIES-1"
 title = "All database queries accept and respect context arguments; timeouts and cancellation propagate from requests to queries"
-tag = "stack"
 domain = "go:gorm"
 layer = "library"
 enforcement = "structured"

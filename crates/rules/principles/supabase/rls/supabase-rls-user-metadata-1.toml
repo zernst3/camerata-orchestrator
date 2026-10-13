@@ -1,6 +1,5 @@
 id = "SUPABASE-RLS-USER-METADATA-1"
 title = "An RLS policy predicate must never authorize against user_metadata / raw_user_meta_data"
-tag = "stack"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "mechanical"

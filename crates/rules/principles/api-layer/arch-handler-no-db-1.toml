@@ -1,6 +1,5 @@
 id = "ARCH-HANDLER-NO-DB-1"
 title = "Handlers never touch the database directly"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"

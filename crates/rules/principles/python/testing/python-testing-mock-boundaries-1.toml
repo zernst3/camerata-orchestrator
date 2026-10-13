@@ -1,6 +1,5 @@
 id = "PYTHON-TESTING-MOCK-BOUNDARIES-1"
 title = "Mocks replace dependencies at the boundary where the code under test imports them, not at the definition site"
-tag = "stack"
 domain = "python:testing"
 layer = "language"
 enforcement = "structured"

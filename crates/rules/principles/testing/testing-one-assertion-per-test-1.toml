@@ -1,6 +1,5 @@
 id = "TESTING-ONE-ASSERTION-PER-TEST-1"
 title = "One logical assertion per test (guideline): each test verifies a single behavior"
-tag = "universal"
 domain = "testing"
 layer = "universal"
 enforcement = "prose"

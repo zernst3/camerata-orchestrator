@@ -1,6 +1,5 @@
 id = "PYTHON-FLASK-ERROR-HANDLERS-1"
 title = "Structured error responses are provided by registered error handlers, not ad-hoc try/except in route functions"
-tag = "stack"
 domain = "python:flask"
 layer = "framework"
 enforcement = "structured"

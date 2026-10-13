@@ -1,6 +1,5 @@
 id = "SUPABASE-REALTIME-CHANNEL-SCOPE-1"
 title = "A channel topic must not be a guessable/enumerable identifier or an unvalidated client-supplied string standing in for an authorization check"
-tag = "stack"
 domain = "supabase:realtime"
 layer = "platform"
 enforcement = "prose"

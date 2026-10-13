@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-TYPESCRIPT-NO-EXPLICIT-ANY-1"
 title = "any is forbidden; unknown is the typed escape hatch at boundaries"
-tag = "stack"
 domain = "javascript:typescript"
 layer = "language"
 enforcement = "mechanical"

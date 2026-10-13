@@ -1,6 +1,5 @@
 id = "RUST-AXUM-EXTRACTORS-VALIDATE-1"
 title = "Use extractors for request validation; reject invalid requests at the boundary"
-tag = "stack"
 domain = "rust:axum"
 layer = "framework"
 enforcement = "structured"

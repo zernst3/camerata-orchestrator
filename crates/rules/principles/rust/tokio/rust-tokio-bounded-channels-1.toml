@@ -1,6 +1,5 @@
 id = "RUST-TOKIO-BOUNDED-CHANNELS-1"
 title = "Use bounded channels to prevent memory exhaustion and apply backpressure"
-tag = "stack"
 domain = "rust:tokio"
 layer = "framework"
 enforcement = "structured"

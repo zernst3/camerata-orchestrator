@@ -1,6 +1,5 @@
 id = "CSHARP-ASPNETCORE-MINIMAL-API-VS-CONTROLLERS-1"
 title = "ASP.NET Core routing style: Minimal APIs or MVC controllers"
-tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "structured"

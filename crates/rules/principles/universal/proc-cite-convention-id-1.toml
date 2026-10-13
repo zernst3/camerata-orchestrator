@@ -1,6 +1,5 @@
 id = "PROC-CITE-CONVENTION-ID-1"
 title = "Cite the convention ID in commit messages and PR descriptions"
-tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "structured"

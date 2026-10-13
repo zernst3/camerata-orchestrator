@@ -1,6 +1,5 @@
 id = "SUPABASE-STORAGE-PUBLIC-BUCKET-1"
 title = "A storage bucket created public bypasses auth/RLS for object retrieval; every public bucket is named and reviewed"
-tag = "stack"
 domain = "supabase:storage"
 layer = "platform"
 enforcement = "structured"

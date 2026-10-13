@@ -1,6 +1,5 @@
 id = "INTEGRATION-API-CONTRACT-1"
 title = "Consumer endpoint calls match a producer route and shape"
-tag = "stack"
 domain = "integration"
 layer = "universal"
 enforcement = "mechanical"

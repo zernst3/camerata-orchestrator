@@ -1,6 +1,5 @@
 id = "ARCH-HOT-READ-CACHE-1"
 title = "Hot reads sit behind a TTL cache with explicit write-side invalidation"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"

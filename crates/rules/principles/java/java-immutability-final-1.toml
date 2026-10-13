@@ -1,6 +1,5 @@
 id = "JAVA-IMMUTABILITY-FINAL-1"
 title = "Classes and fields are marked final by default; mutability is explicit and intentional"
-tag = "stack"
 domain = "java"
 layer = "language"
 enforcement = "prose"

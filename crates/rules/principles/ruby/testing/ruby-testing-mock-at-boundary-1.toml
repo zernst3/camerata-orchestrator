@@ -1,6 +1,5 @@
 id = "RUBY-TESTING-MOCK-AT-BOUNDARY-1"
 title = "Mock only at architectural boundaries (external services, I/O); use instance_double/class_double to keep doubles verified"
-tag = "stack"
 domain = "ruby:testing"
 layer = "language"
 enforcement = "structured"

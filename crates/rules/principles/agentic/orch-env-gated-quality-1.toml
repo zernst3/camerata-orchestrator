@@ -1,6 +1,5 @@
 id = "ORCH-ENV-GATED-QUALITY-1"
 title = "Environment-gated quality — nothing ships unverified"
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "structured"

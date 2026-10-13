@@ -1,6 +1,5 @@
 id = "CSHARP-RECORDS-IMMUTABILITY-1"
 title = "Data transfer objects and value types use records (C# 9+) or immutable classes; mutable classes are avoided outside of domain entities"
-tag = "stack"
 domain = "csharp"
 layer = "language"
 enforcement = "prose"

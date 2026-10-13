@@ -1,6 +1,5 @@
 id = "SQL-DB-INDEX-2"
 title = "Index WHERE-clause columns based on query frequency, selectivity, and access pattern, not indiscriminately"
-tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "prose"

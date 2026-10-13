@@ -1,6 +1,5 @@
 id = "PROC-FEATURE-FLAGS-1"
 title = "Feature flags via env var or runtime config; no long-lived feature branches"
-tag = "stack"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "structured"

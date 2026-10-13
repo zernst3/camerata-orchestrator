@@ -492,26 +492,28 @@ struct RuleToml {
     /// applies.
     #[serde(default)]
     deviation_ceiling: Option<String>,
-    /// W14 (gotcha 8): ACCEPTED BUT UNCONSUMED. `tag` is authored on all 417 corpus rules and
-    /// is read by NOTHING in this workspace — established 2026-10-11 by a workspace-wide search
-    /// (the only other TOML parsers are `checks/src/manifest.rs`,
-    /// `checks/src/architecture_config.rs` and `server/src/feature_flags.rs`, none of which
-    /// touch the principle corpus). It is declared here so it is part of the DOCUMENTED schema
-    /// rather than an unknown field, which is what lets
-    /// [`corpus_files_with_unknown_fields`] treat every OTHER unrecognized rule-level key as a
-    /// build failure. Measured value distribution on 2026-10-11: `"stack"` 388, `"universal"`
-    /// 28, `"process"` 1 — a 3-value coarse bucket, 93 percent one value, agreeing with the
-    /// folder-derived domain on only 21 of 417 rules. Whether it should be consumed or deleted
-    /// is the corpus owner's call; deleting a field from 417 hand-authored files is a
-    /// topology-level change, not a gate's business.
-    #[serde(default)]
-    #[allow(dead_code)]
-    tag: Option<String>,
-    /// W14 (gotcha 8): ACCEPTED BUT UNCONSUMED, same provenance and same reason as [`tag`]
-    /// above — authored on all 417 rules, read by nothing, established 2026-10-11.
+    /// W17 (gotcha 8, half resolved): `tag` is GONE. It was authored on all 417 corpus rules,
+    /// read by nothing, and W14 declared it here as accepted-but-unconsumed so
+    /// [`corpus_files_with_unknown_fields`] could treat every OTHER unrecognized rule-level key
+    /// as a build failure. The owner ruled on 2026-10-12 that it is dead weight and must go, on
+    /// three measured grounds: three values across 417 rules (`"stack"` 388, `"universal"` 28,
+    /// `"process"` 1 — 93 percent one value); agreement with the folder-derived domain on only
+    /// 21 of 417; and the 28 `"universal"` rules being exactly the `testing/` and `universal/`
+    /// folders, already derivable from the path. Deleted from all 417 TOMLs and from this
+    /// struct, so the unknown-field gate now REJECTS any reappearance rather than silently
+    /// accepting it — see `req_w17_no_corpus_rule_carries_a_tag_field`.
     ///
-    /// Unlike `tag`, `layer` carries information that is NOT derivable from the folder path, so
-    /// it is the more plausible latent feature of the two. Measured distribution on 2026-10-11:
+    /// `layer` below deliberately stays: it is NOT the same shape (see its doc comment).
+    ///
+    /// W14 (gotcha 8): ACCEPTED BUT UNCONSUMED — authored on all 417 rules, read by nothing,
+    /// established 2026-10-11 by a workspace-wide search (the only other TOML parsers are
+    /// `checks/src/manifest.rs`, `checks/src/architecture_config.rs` and
+    /// `server/src/feature_flags.rs`, none of which touch the principle corpus). It is declared
+    /// here so it is part of the DOCUMENTED schema rather than an unknown field.
+    ///
+    /// Unlike the deleted `tag`, `layer` carries information that is NOT derivable from the
+    /// folder path, so it is the more plausible latent feature of the two, and the owner has NOT
+    /// ruled on it. Measured distribution on 2026-10-11:
     /// `universal` 131, `framework` 113, `language` 90, `platform` 35, `library` 34,
     /// `architecture` 7, `testing` 7. Eight folder families hold MORE THAN ONE layer value, so
     /// the field genuinely sub-divides a domain rather than restating it (e.g. `go/` splits into
@@ -1868,7 +1870,11 @@ pub fn decision_kind_rule_count(set: &RuleSet) -> usize {
 // the corpus (a red build), never silently accept an unread key.
 
 /// Rule-level keys `RuleToml` declares, including the explicitly-accepted-but-unconsumed
-/// `tag`/`layer`/`emits` (see their doc comments on `RuleToml`). Mirrors `RuleToml`.
+/// `layer`/`emits` (see their doc comments on `RuleToml`). Mirrors `RuleToml`.
+///
+/// W17: `tag` is deliberately ABSENT. It was deleted from `RuleToml` and from all 417 TOMLs, so
+/// this gate is now what rejects its reappearance — the whole point of removing a field from the
+/// schema at the same time as removing it from the data.
 const RULE_LEVEL_FIELDS: &[&str] = &[
     "id",
     "title",
@@ -1890,8 +1896,8 @@ const RULE_LEVEL_FIELDS: &[&str] = &[
     "max_severity",
     "min_severity",
     "deviation_ceiling",
-    // Accepted, unconsumed (gotcha 8), established 2026-10-11:
-    "tag",
+    // Accepted, unconsumed (gotcha 8), established 2026-10-11. `tag` was here too until W17
+    // deleted it from the schema AND from all 417 files; do not re-add it.
     "layer",
     "emits",
 ];
@@ -1976,9 +1982,17 @@ fn collect_unknown_keys(
 /// [`rules_with_invalid_severity_floor`] uses for an invalid `max_severity`.
 ///
 /// Measured on all 417 corpus files on 2026-10-11: zero unknown fields, once `tag` (417),
-/// `layer` (417), `emits` (2) and `sources.qualifies` (29) are declared as
+/// `layer` (417), `emits` (2) and `sources.qualifies` (29) were declared as
 /// accepted-and-unconsumed above. Those four were the ONLY unknown keys in the corpus; before
 /// declaring them this gate reported 865 offenders.
+///
+/// W17 narrowed that list. `tag` was DELETED from all 417 files and from the schema, so this
+/// gate now REJECTS it (417 offenders if it ever returns). `sources.qualifies` stays in
+/// [`SOURCE_FIELDS`] — the 29 occurrences were MOVED to the rule level, and the regression guard
+/// is `req_w14_the_misplaced_qualifies_roster_has_not_grown` now asserting an EMPTY roster rather
+/// than this gate, which keeps this gate's synthetic fixtures (and `RuleSource`'s tolerance of a
+/// stray key) unchanged. `layer` (417) and `emits` (2) remain accepted-and-unconsumed, both
+/// awaiting an owner ruling.
 #[cfg_attr(not(test), allow(dead_code))]
 pub async fn corpus_files_with_unknown_fields(
     corpus_dir: &Path,

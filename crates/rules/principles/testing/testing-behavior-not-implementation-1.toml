@@ -1,6 +1,5 @@
 id = "TESTING-BEHAVIOR-NOT-IMPLEMENTATION-1"
 title = "Test observable behavior and contracts, not internal implementation details"
-tag = "universal"
 domain = "testing"
 layer = "universal"
 enforcement = "prose"

@@ -1,6 +1,5 @@
 id = "RUST-TOKIO-CANCELLATION-SAFE-SELECTS-1"
 title = "Use tokio::select! safely; ensure the selected branch leaves the system in a consistent state"
-tag = "stack"
 domain = "rust:tokio"
 layer = "framework"
 enforcement = "structured"

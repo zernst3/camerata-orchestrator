@@ -1,6 +1,5 @@
 id = "ORCH-CLEAR-WINNER-1"
 title = "The clear-winner test — decide vs. stop"
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"

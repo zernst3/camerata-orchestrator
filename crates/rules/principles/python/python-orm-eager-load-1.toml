@@ -1,6 +1,5 @@
 id = "PYTHON-ORM-EAGER-LOAD-1"
 title = "ORM relationships accessed in loops are eager-loaded; no N+1"
-tag = "stack"
 domain = "python"
 layer = "library"
 enforcement = "prose"

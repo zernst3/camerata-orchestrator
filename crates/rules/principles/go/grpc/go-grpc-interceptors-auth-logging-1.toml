@@ -1,6 +1,5 @@
 id = "GO-GRPC-INTERCEPTORS-AUTH-LOGGING-1"
 title = "Authentication, logging, error recovery, and other cross-cutting concerns are implemented as interceptors, not duplicated in handler methods"
-tag = "stack"
 domain = "go:grpc"
 layer = "framework"
 enforcement = "structured"

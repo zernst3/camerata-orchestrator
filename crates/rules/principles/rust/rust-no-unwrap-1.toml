@@ -1,6 +1,5 @@
 id = "RUST-NO-UNWRAP-1"
 title = "unwrap() is forbidden in non-test code; propagate the error instead"
-tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "mechanical"

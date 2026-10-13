@@ -1,6 +1,5 @@
 id = "ARCH-STRICT-LAYERING-1"
 title = "Strict layering — services orchestrate, repositories own data access"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"

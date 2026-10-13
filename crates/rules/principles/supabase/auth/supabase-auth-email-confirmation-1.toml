@@ -1,6 +1,5 @@
 id = "SUPABASE-AUTH-EMAIL-CONFIRMATION-1"
 title = "A production-linked config disables email confirmation only deliberately, never by carrying the local-dev default forward unreviewed"
-tag = "stack"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"

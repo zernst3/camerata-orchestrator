@@ -1,6 +1,5 @@
 id = "ARCH-OBSERVABILITY-SILENT-FAILURE-1"
 title = "A caught or inspected error is never discarded with zero action; it is logged, rethrown, transformed, or its silence is explicitly justified"
-tag = "stack"
 domain = "universal"
 layer = "universal"
 enforcement = "architectural"

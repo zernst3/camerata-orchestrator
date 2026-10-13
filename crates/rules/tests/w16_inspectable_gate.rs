@@ -244,7 +244,6 @@ fn rule_toml(id: &str, inspectable_line: &str) -> String {
         r#"
 id = "{id}"
 title = "W16 synthetic fixture rule"
-tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "structured"

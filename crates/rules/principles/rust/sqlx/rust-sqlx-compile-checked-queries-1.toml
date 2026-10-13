@@ -1,6 +1,5 @@
 id = "RUST-SQLX-COMPILE-CHECKED-QUERIES-1"
 title = "Use the sqlx::query! macro for compile-time SQL validation; never use format! to build SQL strings"
-tag = "stack"
 domain = "rust:sqlx"
 layer = "framework"
 enforcement = "structured"

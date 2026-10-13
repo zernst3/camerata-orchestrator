@@ -1,6 +1,5 @@
 id = "GO-TESTING-DETERMINISTIC-NO-TIME-SLEEP-1"
 title = "Tests are deterministic: no time.Sleep, no real clocks, no random seeds; use t.TempDir and t.Setenv for isolation"
-tag = "stack"
 domain = "go:testing"
 layer = "testing"
 enforcement = "mechanical"

@@ -1,6 +1,5 @@
 id = "CSHARP-EFCORE-NO-LAZY-LOADING-1"
 title = "Lazy loading is disabled; all navigation property access is intentional and explicit"
-tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
 enforcement = "prose"

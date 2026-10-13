@@ -1,6 +1,5 @@
 id = "CSHARP-EFCORE-NO-NPLUS1-1"
 title = "Related data is loaded via Include/ThenInclude or projection; no lazy-loading and no N+1 loops"
-tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
 enforcement = "structured"

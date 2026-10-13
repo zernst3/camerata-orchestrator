@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-VUE-COMPUTED-OVER-METHODS-1"
 title = "Use computed properties for derived state, not methods with side effects"
-tag = "stack"
 domain = "javascript:vue"
 layer = "framework"
 enforcement = "prose"

@@ -1,6 +1,5 @@
 id = "SUPABASE-AUTH-SESSION-LIFETIME-1"
 title = "JWT expiry and refresh-token rotation are tuned deliberately for the project's risk profile, not left at whichever default was never revisited"
-tag = "stack"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"

@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-REACT-KEYED-LISTS-1"
 title = "Rendered lists carry a stable key from the data, never the array index"
-tag = "stack"
 domain = "javascript:react"
 layer = "framework"
 enforcement = "structured"

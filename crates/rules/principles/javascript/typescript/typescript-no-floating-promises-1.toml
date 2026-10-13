@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-TYPESCRIPT-NO-FLOATING-PROMISES-1"
 title = "Every Promise is awaited, returned, or explicitly handled"
-tag = "stack"
 domain = "javascript:typescript"
 layer = "language"
 enforcement = "structured"

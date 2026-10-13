@@ -1,6 +1,5 @@
 id = "GO-GORM-NO-N-PLUS-ONE-1"
 title = "Related data is loaded with Preload or Join in a single query; no N+1 patterns where a loop fetches related records one-by-one"
-tag = "stack"
 domain = "go:gorm"
 layer = "library"
 enforcement = "structured"

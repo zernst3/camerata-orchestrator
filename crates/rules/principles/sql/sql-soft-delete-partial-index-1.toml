@@ -1,6 +1,5 @@
 id = "SQL-SOFT-DELETE-PARTIAL-INDEX-1"
 title = "A soft-deleted row's unique constraints are partial (excluding deleted rows), and ordinary reads filter it out by default"
-tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "structured"

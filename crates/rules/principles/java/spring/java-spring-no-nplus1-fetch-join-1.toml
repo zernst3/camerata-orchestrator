@@ -1,6 +1,5 @@
 id = "JAVA-SPRING-NO-NPLUS1-FETCH-JOIN-1"
 title = "Spring Data JPA queries load associations via fetch joins or @EntityGraph; no N+1 from default LAZY traversal in loops"
-tag = "stack"
 domain = "java:spring"
 layer = "framework"
 enforcement = "structured"

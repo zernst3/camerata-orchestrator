@@ -1,6 +1,5 @@
 id = "CICD-BUILD-PROVENANCE-1"
 title = "Published build artifacts (container images, packages, binaries) carry signed build provenance a consumer can verify back to the exact source commit and workflow run"
-tag = "stack"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "architectural"

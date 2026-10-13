@@ -1,6 +1,5 @@
 id = "RUST-DIOXUS-1"
 title = "How the UI crate is organized: by file role, by feature, flat, or file-based routing"
-tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"

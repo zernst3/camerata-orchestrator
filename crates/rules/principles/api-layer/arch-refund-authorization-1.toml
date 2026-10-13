@@ -1,6 +1,5 @@
 id = "ARCH-REFUND-AUTHORIZATION-1"
 title = "A refund or credit is authorized against the specific charge's owner and bounded by that charge's remaining refundable amount"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"

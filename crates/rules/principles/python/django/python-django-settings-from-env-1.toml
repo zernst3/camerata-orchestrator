@@ -1,6 +1,5 @@
 id = "PYTHON-DJANGO-SETTINGS-FROM-ENV-1"
 title = "Django settings read credentials from environment variables; no secrets in settings.py"
-tag = "stack"
 domain = "python:django"
 layer = "framework"
 enforcement = "mechanical"

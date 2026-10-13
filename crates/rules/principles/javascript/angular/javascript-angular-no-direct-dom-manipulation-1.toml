@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-NO-DIRECT-DOM-MANIPULATION-1"
 title = "DOM is not manipulated directly; Renderer2 and property bindings are used instead"
-tag = "stack"
 domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"

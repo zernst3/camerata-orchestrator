@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-CONST-DEFAULT-1"
 title = "const is the default binding; let only when the binding is reassigned"
-tag = "stack"
 domain = "javascript"
 layer = "language"
 enforcement = "mechanical"

@@ -1,6 +1,5 @@
 id = "PYTHON-FASTAPI-DI-SESSION-1"
 title = "Database sessions are dependency-injected with a per-request lifecycle"
-tag = "stack"
 domain = "python:fastapi"
 layer = "framework"
 enforcement = "structured"

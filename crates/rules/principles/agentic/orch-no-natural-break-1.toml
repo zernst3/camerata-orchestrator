@@ -1,6 +1,5 @@
 id = "ORCH-NO-NATURAL-BREAK-1"
 title = "Never stop on a \"natural break\""
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"

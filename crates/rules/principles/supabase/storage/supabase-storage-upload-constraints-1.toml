@@ -1,6 +1,5 @@
 id = "SUPABASE-STORAGE-UPLOAD-CONSTRAINTS-1"
 title = "Every bucket that accepts user uploads declares a file-size limit and a content-type allowlist at the bucket level"
-tag = "stack"
 domain = "supabase:storage"
 layer = "platform"
 enforcement = "structured"

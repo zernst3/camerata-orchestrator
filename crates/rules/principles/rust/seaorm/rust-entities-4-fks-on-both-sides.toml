@@ -1,6 +1,5 @@
 id = "RUST-ENTITIES-4"
 title = "FK relations declared on BOTH sides"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"

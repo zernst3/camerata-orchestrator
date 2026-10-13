@@ -1,6 +1,5 @@
 id = "ARCH-REPO-PER-AGGREGATE-1"
 title = "One repository abstraction per aggregate, declared in the domain layer"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"

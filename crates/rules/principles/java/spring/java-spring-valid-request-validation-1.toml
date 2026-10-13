@@ -1,6 +1,5 @@
 id = "JAVA-SPRING-VALID-REQUEST-VALIDATION-1"
 title = "@Valid (or @Validated) is applied to @RequestBody and @RequestParam parameters to trigger Bean Validation before the method body runs"
-tag = "stack"
 domain = "java:spring"
 layer = "framework"
 enforcement = "prose"

@@ -1,6 +1,5 @@
 id = "RUST-ENTITIES-2"
 title = "No serde derives on the SeaORM Model (load-bearing)"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"

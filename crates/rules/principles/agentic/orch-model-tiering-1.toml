@@ -1,6 +1,5 @@
 id = "ORCH-MODEL-TIERING-1"
 title = "Model tiering — cheap for bulk, top-tier for decisions"
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"

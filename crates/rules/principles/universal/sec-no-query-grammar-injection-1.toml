@@ -1,6 +1,5 @@
 id = "SEC-NO-QUERY-GRAMMAR-INJECTION-1"
 title = "User-controlled data is never concatenated into a query/filter grammar string (PostgREST .or()/.filter(), a NoSQL operator string, an LDAP filter); it is passed as a bound argument"
-tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "structured"

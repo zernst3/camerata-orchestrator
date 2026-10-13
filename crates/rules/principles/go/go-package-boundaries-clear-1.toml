@@ -1,6 +1,5 @@
 id = "GO-PACKAGE-BOUNDARIES-CLEAR-1"
 title = "Package boundaries are clear; no circular imports; internal packages are used for internal APIs"
-tag = "stack"
 domain = "go"
 layer = "architecture"
 enforcement = "mechanical"

@@ -1,6 +1,5 @@
 id = "RUBY-TESTING-UNIT-FILE-LOCATION-1"
 title = "Unit test files mirror the source tree under spec/ (RSpec) or test/ (Minitest) with matching names"
-tag = "stack"
 domain = "ruby:testing"
 layer = "language"
 enforcement = "mechanical"

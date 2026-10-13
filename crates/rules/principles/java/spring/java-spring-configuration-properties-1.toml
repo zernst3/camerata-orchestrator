@@ -1,6 +1,5 @@
 id = "JAVA-SPRING-CONFIGURATION-PROPERTIES-1"
 title = "@ConfigurationProperties binds typed config POJOs; @Value on individual fields is reserved for simple single-value injections"
-tag = "stack"
 domain = "java:spring"
 layer = "framework"
 enforcement = "structured"

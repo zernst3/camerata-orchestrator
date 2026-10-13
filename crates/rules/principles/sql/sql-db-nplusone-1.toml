@@ -1,6 +1,5 @@
 id = "SQL-DB-NPLUSONE-1"
 title = "No N+1 query patterns"
-tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "prose"

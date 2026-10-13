@@ -1,6 +1,5 @@
 id = "UI-QUERY-LIBRARY-1"
 title = "All UI data fetches go through a query library, never ad-hoc fetch and store"
-tag = "stack"
 domain = "ui"
 layer = "universal"
 enforcement = "structured"

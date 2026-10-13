@@ -1,6 +1,5 @@
 id = "GO-GRPC-CONTEXT-DEADLINES-1"
 title = "All RPC implementations respect context deadlines; client deadlines propagate through the call chain and are honored by outbound RPCs"
-tag = "stack"
 domain = "go:grpc"
 layer = "framework"
 enforcement = "structured"

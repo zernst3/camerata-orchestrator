@@ -1,6 +1,5 @@
 id = "SUPABASE-RLS-ENABLED-1"
 title = "Every table in an API-exposed schema has Row Level Security enabled in its replayed end-state"
-tag = "stack"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "architectural"

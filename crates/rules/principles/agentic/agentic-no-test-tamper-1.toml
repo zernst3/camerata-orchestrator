@@ -1,6 +1,5 @@
 id = "AGENTIC-NO-TEST-TAMPER-1"
 title = "Do not modify existing tests without human review"
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "architectural"

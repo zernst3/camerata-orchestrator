@@ -1,6 +1,5 @@
 id = "ORCH-CONFORMANCE-1"
 title = "Codified architectural commitments are enforced gates, not advisory documents"
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "structured"

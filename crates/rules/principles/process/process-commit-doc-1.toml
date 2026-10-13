@@ -1,6 +1,5 @@
 id = "PROCESS-COMMIT-DOC-1"
 title = "Commits carry a substantive body documenting the change"
-tag = "stack"
 domain = "process"
 layer = "universal"
 enforcement = "architectural"

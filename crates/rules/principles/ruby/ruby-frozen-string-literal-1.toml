@@ -1,6 +1,5 @@
 id = "RUBY-FROZEN-STRING-LITERAL-1"
 title = "All Ruby files declare frozen_string_literal: true to prevent accidental string mutations"
-tag = "stack"
 domain = "ruby"
 layer = "language"
 enforcement = "mechanical"

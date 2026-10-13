@@ -1,6 +1,5 @@
 id = "ARCH-IDEMPOTENCY-KEYS-1"
 title = "Non-GET writes that trigger external side effects require an idempotency key"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"

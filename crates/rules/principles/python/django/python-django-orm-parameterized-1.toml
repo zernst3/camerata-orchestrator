@@ -1,6 +1,5 @@
 id = "PYTHON-DJANGO-ORM-PARAMETERIZED-1"
 title = "Django ORM queries use parameters; raw SQL with f-strings or .extra() is forbidden"
-tag = "stack"
 domain = "python:django"
 layer = "framework"
 enforcement = "mechanical"

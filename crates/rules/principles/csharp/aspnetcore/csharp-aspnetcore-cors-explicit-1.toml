@@ -1,6 +1,5 @@
 id = "CSHARP-ASPNETCORE-CORS-EXPLICIT-1"
 title = "CORS policy is declared explicitly with named origins; wildcard origin is forbidden on non-public APIs"
-tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "structured"

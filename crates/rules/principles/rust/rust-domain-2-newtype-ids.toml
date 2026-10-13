@@ -1,6 +1,5 @@
 id = "RUST-DOMAIN-2"
 title = "How IDs are typed: per-type newtypes, bare Uuid, or a single phantom-parameterized generic"
-tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "structured"

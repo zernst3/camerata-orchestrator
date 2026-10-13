@@ -1,6 +1,5 @@
 id = "ARCH-OBSERVABILITY-CORRELATION-ID-1"
 title = "A single request's handling path carries one correlation/request id across every log line it writes and every downstream call it makes"
-tag = "stack"
 domain = "universal"
 layer = "universal"
 enforcement = "architectural"

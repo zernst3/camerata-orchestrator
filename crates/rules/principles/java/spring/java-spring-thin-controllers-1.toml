@@ -1,6 +1,5 @@
 id = "JAVA-SPRING-THIN-CONTROLLERS-1"
 title = "@RestController methods contain no business logic; they translate HTTP to service calls and return DTOs"
-tag = "stack"
 domain = "java:spring"
 layer = "framework"
 enforcement = "structured"

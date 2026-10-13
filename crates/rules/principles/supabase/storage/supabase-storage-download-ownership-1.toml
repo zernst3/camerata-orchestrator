@@ -1,6 +1,5 @@
 id = "SUPABASE-STORAGE-DOWNLOAD-OWNERSHIP-1"
 title = "A handler that signs or downloads a client-supplied object path must verify the caller is entitled to that specific object first"
-tag = "stack"
 domain = "supabase:storage"
 layer = "platform"
 enforcement = "prose"

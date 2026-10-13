@@ -1,6 +1,5 @@
 id = "GO-TESTING-INTEGRATION-BUILD-TAGS-1"
 title = "Integration tests are gated behind a //go:build integration build tag and live in *_integration_test.go files"
-tag = "stack"
 domain = "go:testing"
 layer = "testing"
 enforcement = "structured"

@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-NEST-DTOS-VALIDATION-PIPE-1"
 title = "Use DTOs with class-validator and ValidationPipe to validate incoming requests"
-tag = "stack"
 domain = "javascript:nest"
 layer = "framework"
 enforcement = "structured"

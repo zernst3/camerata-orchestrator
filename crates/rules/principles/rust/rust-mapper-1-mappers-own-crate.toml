@@ -1,6 +1,5 @@
 id = "RUST-MAPPER-1"
 title = "Where domain↔entity mappers live: a dedicated mapper crate, the entity crate, or the domain crate"
-tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "structured"

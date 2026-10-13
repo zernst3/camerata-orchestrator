@@ -1,6 +1,5 @@
 id = "ORCH-TIERED-ESCALATION-1"
 title = "Tiered escalation — soft-flag by default, hard-pause only for guard areas"
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"

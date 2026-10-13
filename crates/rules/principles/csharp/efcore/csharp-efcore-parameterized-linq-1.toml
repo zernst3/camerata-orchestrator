@@ -1,6 +1,5 @@
 id = "CSHARP-EFCORE-PARAMETERIZED-LINQ-1"
 title = "LINQ queries pass values as parameters; string interpolation into raw SQL is forbidden"
-tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
 enforcement = "prose"

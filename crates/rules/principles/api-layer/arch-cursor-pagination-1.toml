@@ -1,6 +1,5 @@
 id = "ARCH-CURSOR-PAGINATION-1"
 title = "List-endpoint pagination: cursor, offset, no pagination, or both shapes"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"

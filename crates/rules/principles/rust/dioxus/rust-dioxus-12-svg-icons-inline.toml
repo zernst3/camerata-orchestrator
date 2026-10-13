@@ -1,6 +1,5 @@
 id = "RUST-DIOXUS-12"
 title = "Icons render as inline SVG from static string constants; no runtime icon-library fetches"
-tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"

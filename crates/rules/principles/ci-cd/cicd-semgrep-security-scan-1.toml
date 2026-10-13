@@ -1,6 +1,5 @@
 id = "CICD-SEMGREP-SECURITY-SCAN-1"
 title = "Run the Semgrep security suite (CI + scan preview)"
-tag = "stack"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "mechanical"

@@ -1,6 +1,5 @@
 id = "RUBY-CONCERNS-JUDICIOUSLY-1"
 title = "Concerns (module mixins) are used sparingly for cross-cutting behavior; large concerns or single-use concerns are flags"
-tag = "stack"
 domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"

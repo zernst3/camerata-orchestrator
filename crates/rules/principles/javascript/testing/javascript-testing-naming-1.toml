@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-TESTING-NAMING-1"
 title = "Test names describe observable behaviour in plain language; no duplicate titles within a suite"
-tag = "stack"
 domain = "javascript:testing"
 layer = "language"
 enforcement = "mechanical"

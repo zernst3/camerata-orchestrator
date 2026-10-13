@@ -1,6 +1,5 @@
 id = "CSHARP-TESTING-MOCK-AT-BOUNDARY-1"
 title = "Mocks and stubs target only infrastructure boundaries (I/O, external services, time); production class internals are never mocked"
-tag = "stack"
 domain = "csharp:testing"
 layer = "language"
 enforcement = "prose"

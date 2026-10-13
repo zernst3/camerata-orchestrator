@@ -1,6 +1,5 @@
 id = "ARCH-RESPONSE-FIELD-PROJECTION-1"
 title = "REST and GraphQL responses expose an explicit, allowlisted set of fields the consumer needs, not a serialize-the-whole-model default"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"

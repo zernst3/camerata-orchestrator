@@ -1,6 +1,5 @@
 id = "JAVA-OPTIONAL-OVER-NULL-1"
 title = "Methods return Optional<T> instead of null; null is used only for legacy compatibility or internal state"
-tag = "stack"
 domain = "java"
 layer = "language"
 enforcement = "prose"

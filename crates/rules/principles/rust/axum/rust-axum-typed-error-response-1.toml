@@ -1,6 +1,5 @@
 id = "RUST-AXUM-TYPED-ERROR-RESPONSE-1"
 title = "Handlers return typed error types that implement IntoResponse, not raw HTTP responses"
-tag = "stack"
 domain = "rust:axum"
 layer = "framework"
 enforcement = "structured"

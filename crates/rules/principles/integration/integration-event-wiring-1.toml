@@ -1,6 +1,5 @@
 id = "INTEGRATION-EVENT-WIRING-1"
 title = "Every emitted event has a consumer and every subscription is emitted"
-tag = "stack"
 domain = "integration"
 layer = "universal"
 enforcement = "mechanical"

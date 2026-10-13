@@ -1,6 +1,5 @@
 id = "ORCH-REVIEWER-SPLIT-1"
 title = "The reviewer agent for any change is distinct from the author agent"
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "structured"

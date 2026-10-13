@@ -1,6 +1,5 @@
 id = "GO-GOROUTINE-LEAKS-DEFER-CLEANUP-1"
 title = "Resources are cleaned up via defer; goroutines are never left running when a function exits"
-tag = "stack"
 domain = "go"
 layer = "language"
 enforcement = "structured"

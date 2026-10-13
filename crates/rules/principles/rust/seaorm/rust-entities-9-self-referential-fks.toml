@@ -1,6 +1,5 @@
 id = "RUST-ENTITIES-9"
 title = "Self-referential FKs: single belongs_to + impl Related<Entity> for Entity"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"

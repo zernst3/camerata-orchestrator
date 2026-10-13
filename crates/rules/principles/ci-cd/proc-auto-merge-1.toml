@@ -1,6 +1,5 @@
 id = "PROC-AUTO-MERGE-1"
 title = "Auto-merge tight, bot-authored PRs"
-tag = "stack"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "prose"

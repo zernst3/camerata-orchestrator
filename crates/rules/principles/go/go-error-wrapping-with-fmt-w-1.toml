@@ -1,6 +1,5 @@
 id = "GO-ERROR-WRAPPING-WITH-FMT-W-1"
 title = "Errors are wrapped with %w; error chains remain inspectable via errors.Unwrap and errors.Is"
-tag = "stack"
 domain = "go"
 layer = "language"
 enforcement = "prose"

@@ -1,6 +1,5 @@
 id = "ARCH-PARALLEL-INDEPENDENT-1"
 title = "Independent concurrent calls in any code path run in parallel, not sequentially"
-tag = "stack"
 domain = "fullstack"
 layer = "universal"
 enforcement = "structured"

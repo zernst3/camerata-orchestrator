@@ -1,6 +1,5 @@
 id = "GO-NO-GOROUTINE-GLOBALS-1"
 title = "Goroutine-unsafe state is never stored in global or package-level variables; mutable state is thread-local or guarded by locks"
-tag = "stack"
 domain = "go"
 layer = "language"
 enforcement = "structured"

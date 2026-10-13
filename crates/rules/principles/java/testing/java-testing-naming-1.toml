@@ -1,6 +1,5 @@
 id = "JAVA-TESTING-NAMING-1"
 title = "Test methods use descriptive snake_case or camelCase names that state the scenario and expected outcome; @DisplayName provides the human-readable label in reports"
-tag = "stack"
 domain = "java:testing"
 layer = "language"
 enforcement = "prose"

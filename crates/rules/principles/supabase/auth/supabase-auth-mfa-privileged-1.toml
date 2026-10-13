@@ -1,6 +1,5 @@
 id = "SUPABASE-AUTH-MFA-PRIVILEGED-1"
 title = "Privileged roles and actions must require a verified MFA factor (aal2), not just a password-only session (aal1)"
-tag = "stack"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "prose"

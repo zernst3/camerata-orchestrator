@@ -1,6 +1,5 @@
 id = "ORCH-PREREVIEW-1"
 title = "Every change carries an AI reviewer's verdict into the human review queue"
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "structured"

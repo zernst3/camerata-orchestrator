@@ -1,6 +1,5 @@
 id = "RUST-DIOXUS-11"
 title = "Single binary serves server-rendered HTML, the client bundle, and server-function endpoints"
-tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"

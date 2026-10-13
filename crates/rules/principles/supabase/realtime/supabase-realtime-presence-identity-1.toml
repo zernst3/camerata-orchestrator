@@ -1,6 +1,5 @@
 id = "SUPABASE-REALTIME-PRESENCE-IDENTITY-1"
 title = "A Presence payload carries only the identity a feature genuinely needs — not a user's email, full name, or other PII broadcast to every channel subscriber"
-tag = "stack"
 domain = "supabase:realtime"
 layer = "platform"
 enforcement = "prose"

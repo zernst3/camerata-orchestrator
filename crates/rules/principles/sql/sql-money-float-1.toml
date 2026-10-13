@@ -1,6 +1,5 @@
 id = "SQL-MONEY-FLOAT-1"
 title = "Money and currency amounts are stored as numeric/decimal, never as a floating-point type"
-tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "mechanical"

@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-REACTIVE-FORMS-1"
 title = "Angular form building: reactive forms (FormBuilder, FormGroup) or template-driven forms"
-tag = "stack"
 domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"

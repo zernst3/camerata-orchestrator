@@ -1,6 +1,5 @@
 id = "GO-ERRORS-MUST-BE-CHECKED-1"
 title = "Errors are always checked; no naked return statements or silently ignored errors"
-tag = "stack"
 domain = "go"
 layer = "language"
 enforcement = "mechanical"

@@ -1,6 +1,5 @@
 id = "ORCH-BUDGET-MONITOR-1"
 title = "Budget self-monitoring"
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"

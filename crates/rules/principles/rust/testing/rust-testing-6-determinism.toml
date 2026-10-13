@@ -1,6 +1,5 @@
 id = "RUST-TESTING-6"
 title = "Tests are deterministic: no global mutable state, no wall-clock time, no random without a fixed seed"
-tag = "stack"
 domain = "rust:testing"
 layer = "language"
 enforcement = "prose"

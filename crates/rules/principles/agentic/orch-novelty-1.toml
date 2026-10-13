@@ -1,6 +1,5 @@
 id = "ORCH-NOVELTY-1"
 title = "Novelty downgrades authority"
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"

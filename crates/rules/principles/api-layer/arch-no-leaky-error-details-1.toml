@@ -1,6 +1,5 @@
 id = "ARCH-NO-LEAKY-ERROR-DETAILS-1"
 title = "Error responses never surface raw database error text, exception stack traces, or internal file paths, regardless of the envelope shape"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"

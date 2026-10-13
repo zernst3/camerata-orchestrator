@@ -1,6 +1,5 @@
 id = "JAVA-SMALL-INTERFACES-1"
 title = "Interfaces are small and focused; each interface has a single responsibility, not a god-interface"
-tag = "stack"
 domain = "java"
 layer = "architecture"
 enforcement = "prose"

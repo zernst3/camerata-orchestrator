@@ -1,6 +1,5 @@
 id = "GO-ACCEPT-INTERFACES-RETURN-STRUCTS-1"
 title = "Functions accept interfaces, return concrete structs; define interfaces at the consumer, not the producer"
-tag = "stack"
 domain = "go"
 layer = "architecture"
 enforcement = "prose"

@@ -1,6 +1,5 @@
 id = "ARCH-REPO-RETURNS-DOMAIN-1"
 title = "Repositories return domain types, never persistence representations"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"

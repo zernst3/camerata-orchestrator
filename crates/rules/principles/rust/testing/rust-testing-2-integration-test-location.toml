@@ -1,6 +1,5 @@
 id = "RUST-TESTING-2"
 title = "Integration tests live in a top-level tests/ directory; each file is a separate crate"
-tag = "stack"
 domain = "rust:testing"
 layer = "language"
 enforcement = "structured"

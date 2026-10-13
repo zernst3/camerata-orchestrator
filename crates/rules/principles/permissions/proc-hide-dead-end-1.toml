@@ -1,6 +1,5 @@
 id = "PROC-HIDE-DEAD-END-1"
 title = "Hide dead-end affordances"
-tag = "stack"
 domain = "permissions"
 layer = "universal"
 enforcement = "structured"

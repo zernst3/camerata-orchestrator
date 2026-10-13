@@ -1,6 +1,5 @@
 id = "RUBY-RAILS-CSRF-1"
 title = "CSRF protection is on by default; only API-only JSON endpoints are selectively exempt with token auth"
-tag = "stack"
 domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"

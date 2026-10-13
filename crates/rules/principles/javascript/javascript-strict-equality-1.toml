@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-STRICT-EQUALITY-1"
 title = "Comparisons use strict equality (=== / !==), never the coercing == / !="
-tag = "stack"
 domain = "javascript"
 layer = "language"
 enforcement = "mechanical"

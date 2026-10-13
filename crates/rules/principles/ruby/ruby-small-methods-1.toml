@@ -1,6 +1,5 @@
 id = "RUBY-SMALL-METHODS-1"
 title = "Methods are kept small and focused; complex logic is extracted into smaller private methods or separate classes"
-tag = "stack"
 domain = "ruby"
 layer = "language"
 enforcement = "structured"

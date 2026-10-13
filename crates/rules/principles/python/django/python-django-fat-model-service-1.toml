@@ -1,6 +1,5 @@
 id = "PYTHON-DJANGO-FAT-MODEL-SERVICE-1"
 title = "Business logic lives in model methods or a service layer, not in views"
-tag = "stack"
 domain = "python:django"
 layer = "framework"
 enforcement = "structured"

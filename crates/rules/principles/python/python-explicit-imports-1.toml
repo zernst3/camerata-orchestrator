@@ -1,6 +1,5 @@
 id = "PYTHON-EXPLICIT-IMPORTS-1"
 title = "Imports are explicit and module boundaries are intentional"
-tag = "stack"
 domain = "python"
 layer = "language"
 enforcement = "prose"

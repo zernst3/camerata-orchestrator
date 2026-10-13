@@ -1,6 +1,5 @@
 id = "RUST-DOMAIN-5"
 title = "Async all the way down"
-tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "prose"

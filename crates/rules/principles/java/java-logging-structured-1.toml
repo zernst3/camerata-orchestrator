@@ -1,6 +1,5 @@
 id = "JAVA-LOGGING-STRUCTURED-1"
 title = "Logging is structured and machine-readable using a logging framework; no concatenated strings printed to stdout"
-tag = "stack"
 domain = "java"
 layer = "language"
 enforcement = "prose"

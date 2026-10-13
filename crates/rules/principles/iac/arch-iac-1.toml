@@ -1,6 +1,5 @@
 id = "ARCH-IAC-1"
 title = "Infrastructure as code, per-environment isolation"
-tag = "stack"
 domain = "iac"
 layer = "universal"
 enforcement = "prose"

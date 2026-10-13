@@ -1,6 +1,5 @@
 id = "SEC-NO-WEAK-TOKEN-RANDOMNESS-1"
 title = "Tokens, nonces, and session/access identifiers are generated from a cryptographically secure random source, never a general-purpose PRNG"
-tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "structured"

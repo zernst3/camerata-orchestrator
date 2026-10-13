@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-REDUX-NO-EFFECTS-IN-REDUCERS-1"
 title = "Reducers are pure; side effects live in thunks or middleware"
-tag = "stack"
 domain = "javascript:redux"
 layer = "library"
 enforcement = "structured"

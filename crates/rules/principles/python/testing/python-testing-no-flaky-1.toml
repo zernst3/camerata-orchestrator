@@ -1,6 +1,5 @@
 id = "PYTHON-TESTING-NO-FLAKY-1"
 title = "Tests are deterministic: no time, random, or external-state dependencies without explicit control"
-tag = "stack"
 domain = "python:testing"
 layer = "language"
 enforcement = "structured"

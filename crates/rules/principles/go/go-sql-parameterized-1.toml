@@ -1,6 +1,5 @@
 id = "GO-SQL-PARAMETERIZED-1"
 title = "SQL is parameterized via prepared statements or ORM query builders; query strings are never built from interpolated values"
-tag = "stack"
 domain = "go"
 layer = "language"
 # Enforcement-tier correction (the declared tier must match a detector that really runs): this

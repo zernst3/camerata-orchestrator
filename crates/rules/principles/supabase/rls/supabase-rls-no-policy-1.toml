@@ -1,6 +1,5 @@
 id = "SUPABASE-RLS-NO-POLICY-1"
 title = "A table with Row Level Security enabled but zero policies denies all anon/authenticated access"
-tag = "stack"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "architectural"

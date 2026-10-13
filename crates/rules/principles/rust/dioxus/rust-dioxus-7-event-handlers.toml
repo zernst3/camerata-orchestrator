@@ -1,6 +1,5 @@
 id = "RUST-DIOXUS-7"
 title = "Event handlers are move closures in templates; callback props use the framework EventHandler type"
-tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"

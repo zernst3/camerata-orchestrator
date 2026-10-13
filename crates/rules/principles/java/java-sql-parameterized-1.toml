@@ -1,6 +1,5 @@
 id = "JAVA-SQL-PARAMETERIZED-1"
 title = "SQL queries are parameterized with PreparedStatement or JPA parameters; strings are never built via concatenation"
-tag = "stack"
 domain = "java"
 layer = "language"
 # Enforcement-tier correction (the declared tier must match a detector that really runs): this

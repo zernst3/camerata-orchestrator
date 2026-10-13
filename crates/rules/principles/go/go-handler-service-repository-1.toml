@@ -1,6 +1,5 @@
 id = "GO-HANDLER-SERVICE-REPOSITORY-1"
 title = "Business logic is layered: HTTP handlers call services, services call repositories; no business logic in handlers"
-tag = "stack"
 domain = "go"
 layer = "architecture"
 enforcement = "structured"

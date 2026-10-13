@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-NO-VAR-1"
 title = "Bindings are declared with const or let; var is forbidden"
-tag = "stack"
 domain = "javascript"
 layer = "language"
 enforcement = "mechanical"

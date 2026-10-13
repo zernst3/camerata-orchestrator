@@ -1,6 +1,5 @@
 id = "RUST-TESTING-4"
 title = "Test bodies follow Arrange-Act-Assert (AAA): setup, execute, then assert — in that order"
-tag = "stack"
 domain = "rust:testing"
 layer = "language"
 enforcement = "prose"

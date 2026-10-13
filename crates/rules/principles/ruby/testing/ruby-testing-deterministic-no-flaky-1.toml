@@ -1,6 +1,5 @@
 id = "RUBY-TESTING-DETERMINISTIC-NO-FLAKY-1"
 title = "Tests run in random order with --order random and pass on any seed; no time, sequence, or state leakage"
-tag = "stack"
 domain = "ruby:testing"
 layer = "language"
 enforcement = "structured"

@@ -1,6 +1,5 @@
 id = "ARCH-TRUNK-SYNC-1"
 title = "Single-source trunk sync"
-tag = "stack"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "prose"

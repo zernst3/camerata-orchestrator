@@ -1,6 +1,5 @@
 id = "RUST-TESTING-3"
 title = "Test functions use snake_case names that read as sentences describing the scenario"
-tag = "stack"
 domain = "rust:testing"
 layer = "language"
 enforcement = "mechanical"

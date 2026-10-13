@@ -1,6 +1,5 @@
 id = "RUST-ENTITIES-13"
 title = "Where persistence entities live: their own crate, the infrastructure crate, or the mapper crate"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"

@@ -1,6 +1,5 @@
 id = "GO-CONTEXT-PROPAGATION-1"
 title = "Context is propagated through the call stack; request timeouts and cancellation flow to all goroutines"
-tag = "stack"
 domain = "go"
 layer = "language"
 enforcement = "structured"

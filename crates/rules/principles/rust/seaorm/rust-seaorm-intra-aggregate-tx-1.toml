@@ -1,6 +1,5 @@
 id = "RUST-SEAORM-INTRA-AGGREGATE-TX-1"
 title = "Where intra-aggregate atomicity lives: inside the repository method, on a uniform unit-of-work parameter, or not provided"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"

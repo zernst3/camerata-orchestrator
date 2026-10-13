@@ -1,6 +1,5 @@
 id = "SUPABASE-AUTH-GETSESSION-SERVER-1"
 title = "Server-side code must not trust getSession() for identity; use getClaims() or getUser() instead"
-tag = "stack"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"

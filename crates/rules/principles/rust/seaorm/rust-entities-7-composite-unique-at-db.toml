@@ -1,6 +1,5 @@
 id = "RUST-ENTITIES-7"
 title = "Unique constraints the macro cannot express live at the DB level and are noted in the module doc"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"

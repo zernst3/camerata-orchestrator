@@ -1,6 +1,5 @@
 id = "RUST-DIOXUS-5"
 title = "Side effects run inside use_effect; dependencies auto-track from signal reads in the closure"
-tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"

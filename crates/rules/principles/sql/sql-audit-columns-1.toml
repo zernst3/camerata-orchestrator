@@ -1,6 +1,5 @@
 id = "SQL-AUDIT-COLUMNS-1"
 title = "Three audit-column strategies; pick by table semantics"
-tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "structured"

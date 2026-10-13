@@ -1,6 +1,5 @@
 id = "PYTHON-NO-BLOCKING-IO-ASYNC-1"
 title = "Async handlers never call blocking I/O on the event loop"
-tag = "stack"
 domain = "python"
 layer = "language"
 enforcement = "structured"

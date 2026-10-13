@@ -1,6 +1,5 @@
 id = "GO-GORM-PARAMETERIZED-QUERIES-1"
 title = "All SQL queries use parameterized arguments, never string interpolation or fmt.Sprintf; GORM query builder is preferred over raw SQL"
-tag = "stack"
 domain = "go:gorm"
 layer = "library"
 # Enforcement-tier correction (the declared tier must match a detector that really runs): no

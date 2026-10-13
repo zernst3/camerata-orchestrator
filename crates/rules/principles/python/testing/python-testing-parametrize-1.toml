@@ -1,6 +1,5 @@
 id = "PYTHON-TESTING-PARAMETRIZE-1"
 title = "Multiple input/output variants use @pytest.mark.parametrize, not copy-paste test functions"
-tag = "stack"
 domain = "python:testing"
 layer = "language"
 enforcement = "structured"

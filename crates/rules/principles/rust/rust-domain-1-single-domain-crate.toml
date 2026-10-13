@@ -1,6 +1,5 @@
 id = "RUST-DOMAIN-1"
 title = "How the domain is crated: one crate with modules by context, a crate per context, or one flat crate"
-tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "structured"

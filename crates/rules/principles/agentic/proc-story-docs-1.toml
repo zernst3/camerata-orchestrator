@@ -1,6 +1,5 @@
 id = "PROC-STORY-DOCS-1"
 title = "Per-story durable documentation keyed by story id"
-tag = "process"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"

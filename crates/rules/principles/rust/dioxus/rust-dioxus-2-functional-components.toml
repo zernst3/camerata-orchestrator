@@ -1,6 +1,5 @@
 id = "RUST-DIOXUS-2"
 title = "Components are free functions returning Element; multi-prop components derive Props, Clone, and PartialEq"
-tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"

@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-NEXT-DUAL-API-1"
 title = "Client-side code goes through sanctioned API helpers; Server Components may fetch directly"
-tag = "stack"
 domain = "javascript:next"
 layer = "framework"
 enforcement = "mechanical"

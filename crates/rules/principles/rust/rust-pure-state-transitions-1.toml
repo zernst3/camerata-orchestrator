@@ -1,6 +1,5 @@
 id = "RUST-PURE-STATE-TRANSITIONS-1"
 title = "Core state changes are pure functions from old state to new state, with side effects pushed to the edges"
-tag = "stack"
 domain = "rust"
 layer = "library"
 enforcement = "structured"

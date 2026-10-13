@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1"
 title = "Effect and memo dependency arrays list every reactive value the body reads"
-tag = "stack"
 domain = "javascript:react"
 layer = "framework"
 enforcement = "mechanical"

@@ -1,6 +1,5 @@
 id = "RUST-DIOXUS-14"
 title = "Where common UI elements come from: a shared primitives layer, per-feature elements, a third-party library, or inline markup"
-tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"

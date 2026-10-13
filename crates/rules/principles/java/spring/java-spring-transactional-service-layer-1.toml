@@ -1,6 +1,5 @@
 id = "JAVA-SPRING-TRANSACTIONAL-SERVICE-LAYER-1"
 title = "@Transactional belongs on the service layer; controllers and repositories do not own transactions"
-tag = "stack"
 domain = "java:spring"
 layer = "framework"
 enforcement = "structured"

@@ -1,6 +1,5 @@
 id = "RUST-ENTITIES-12"
 title = "Postgres pgEnum columns map to typed Rust enums via DeriveActiveEnum"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"

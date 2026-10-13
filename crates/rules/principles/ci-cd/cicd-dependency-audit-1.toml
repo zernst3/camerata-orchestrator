@@ -1,6 +1,5 @@
 id = "CICD-DEPENDENCY-AUDIT-1"
 title = "Scan dependencies for known vulnerabilities (osv-scanner)"
-tag = "stack"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "mechanical"

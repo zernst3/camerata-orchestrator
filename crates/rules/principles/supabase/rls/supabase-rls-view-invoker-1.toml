@@ -1,6 +1,5 @@
 id = "SUPABASE-RLS-VIEW-INVOKER-1"
 title = "A view in an exposed schema must set security_invoker = true so it does not bypass base-table RLS"
-tag = "stack"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "structured"

@@ -1,6 +1,5 @@
 id = "SUPABASE-STORAGE-SIGNED-URL-1"
 title = "Signed download URLs use the shortest expiry the use case allows and are never persisted into a readable column"
-tag = "stack"
 domain = "supabase:storage"
 layer = "platform"
 enforcement = "prose"

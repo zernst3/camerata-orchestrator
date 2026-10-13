@@ -1,6 +1,5 @@
 id = "PYTHON-TESTING-AAA-STRUCTURE-1"
 title = "Each test follows Arrange-Act-Assert: one act, one assertion focus"
-tag = "stack"
 domain = "python:testing"
 layer = "language"
 enforcement = "structured"

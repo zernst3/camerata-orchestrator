@@ -1,6 +1,5 @@
 id = "ARCH-CURRENCY-CONSISTENCY-1"
 title = "A payment amount's currency code and minor-unit denomination stay consistent from authorization through storage and comparison"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "prose"

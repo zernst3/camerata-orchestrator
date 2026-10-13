@@ -1,6 +1,5 @@
 id = "RUST-DIOXUS-6"
 title = "Async UI data goes through the resource hook; fire-and-forget work goes through spawn"
-tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"

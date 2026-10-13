@@ -1,6 +1,5 @@
 id = "RUBY-TESTING-AAA-STRUCTURE-1"
 title = "Each example follows Arrange-Act-Assert: let/subject for setup, a single action, then expect(); hooks appear before examples"
-tag = "stack"
 domain = "ruby:testing"
 layer = "language"
 enforcement = "structured"

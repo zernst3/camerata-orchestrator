@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-STANDALONE-COMPONENTS-1"
 title = "Angular component organization: standalone components, or NgModule declarations"
-tag = "stack"
 domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"

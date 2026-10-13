@@ -1,6 +1,5 @@
 id = "RUBY-AVOID-EVAL-SEND-1"
 title = "eval(), instance_eval(), class_eval(), and dynamic send() with user input are forbidden; use safer dispatch patterns"
-tag = "stack"
 domain = "ruby"
 layer = "language"
 enforcement = "mechanical"

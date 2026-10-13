@@ -1,6 +1,5 @@
 id = "SUPABASE-REALTIME-PAYLOAD-EXPOSURE-1"
 title = "A Postgres Changes or Broadcast payload must not fan out sensitive columns to every channel subscriber by default"
-tag = "stack"
 domain = "supabase:realtime"
 layer = "platform"
 enforcement = "structured"

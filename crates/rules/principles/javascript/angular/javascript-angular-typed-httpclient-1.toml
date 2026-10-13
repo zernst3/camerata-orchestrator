@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-TYPED-HTTPCLIENT-1"
 title = "HTTP requests are made through typed services, not directly from components"
-tag = "stack"
 domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"

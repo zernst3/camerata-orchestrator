@@ -1,6 +1,5 @@
 id = "CSHARP-ASPNETCORE-MODEL-VALIDATION-1"
 title = "[ApiController] automatic 400 responses are active; validation errors never reach business logic"
-tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "prose"

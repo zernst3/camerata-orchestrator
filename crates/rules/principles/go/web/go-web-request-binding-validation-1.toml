@@ -1,6 +1,5 @@
 id = "GO-WEB-REQUEST-BINDING-VALIDATION-1"
 title = "Request payloads are bound to typed structs with validation tags; no raw map access or manual parsing"
-tag = "stack"
 domain = "go:web"
 layer = "framework"
 enforcement = "structured"

@@ -1,6 +1,5 @@
 id = "RUST-ENTITIES-5"
 title = "Empty ActiveModelBehavior unless a hook is genuinely needed"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"

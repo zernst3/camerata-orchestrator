@@ -1,6 +1,5 @@
 id = "GO-SMALL-INTERFACES-1"
 title = "Interfaces are small and cohesive; an interface has one responsibility, not a god-interface with every method a package might need"
-tag = "stack"
 domain = "go"
 layer = "architecture"
 enforcement = "prose"

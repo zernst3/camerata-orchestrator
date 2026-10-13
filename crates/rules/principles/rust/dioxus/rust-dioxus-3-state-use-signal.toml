@@ -1,6 +1,5 @@
 id = "RUST-DIOXUS-3"
 title = "Local component state is a Signal, read via call or read, written via set or with_mut"
-tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"

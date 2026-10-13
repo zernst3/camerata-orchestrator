@@ -1,6 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1"
 title = "Services are injected via inject() (preferred) or constructor parameters, never manually instantiated"
-tag = "stack"
 domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"

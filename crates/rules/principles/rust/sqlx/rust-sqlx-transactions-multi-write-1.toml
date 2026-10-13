@@ -1,6 +1,5 @@
 id = "RUST-SQLX-TRANSACTIONS-MULTI-WRITE-1"
 title = "Wrap multiple writes in an explicit transaction to ensure atomicity"
-tag = "stack"
 domain = "rust:sqlx"
 layer = "framework"
 enforcement = "structured"

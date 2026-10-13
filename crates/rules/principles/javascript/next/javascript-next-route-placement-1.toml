@@ -8,7 +8,6 @@
 # set is redesigned to separate "how routes are organized" from "how auth is actually enforced".
 id = "JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1"
 title = "App Router pages are organized into route groups by access tier, but auth is enforced in middleware/data layer, not by folder placement"
-tag = "stack"
 domain = "javascript:next"
 layer = "framework"
 enforcement = "structured"

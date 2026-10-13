@@ -1,6 +1,5 @@
 id = "CSHARP-ASPNETCORE-OPTIONS-PATTERN-1"
 title = "Configuration values are bound via the Options pattern (IOptions<T>); no raw IConfiguration access in service classes"
-tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "structured"

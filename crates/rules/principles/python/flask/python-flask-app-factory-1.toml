@@ -1,6 +1,5 @@
 id = "PYTHON-FLASK-APP-FACTORY-1"
 title = "Flask apps are created with an application factory and blueprints, not a module-level app instance"
-tag = "stack"
 domain = "python:flask"
 layer = "framework"
 enforcement = "structured"

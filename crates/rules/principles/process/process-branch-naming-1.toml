@@ -1,6 +1,5 @@
 id = "PROCESS-BRANCH-NAMING-1"
 title = "Branch names start with an allowed prefix"
-tag = "stack"
 domain = "process"
 layer = "universal"
 enforcement = "architectural"

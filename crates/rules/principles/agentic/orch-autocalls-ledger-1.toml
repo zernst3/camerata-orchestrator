@@ -1,6 +1,5 @@
 id = "ORCH-AUTOCALLS-LEDGER-1"
 title = "Auto-calls ledger + periodic judgment review"
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "structured"

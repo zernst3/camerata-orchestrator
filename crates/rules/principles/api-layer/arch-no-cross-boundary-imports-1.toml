@@ -1,6 +1,5 @@
 id = "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1"
 title = "No cross-boundary imports — modules import only their declared dependencies"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"

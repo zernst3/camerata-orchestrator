@@ -1,6 +1,5 @@
 id = "SUPABASE-AUTH-REDIRECT-ALLOWLIST-1"
 title = "OAuth and magic-link redirect URLs are an exact-origin allowlist, never a bare or broad wildcard"
-tag = "stack"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"

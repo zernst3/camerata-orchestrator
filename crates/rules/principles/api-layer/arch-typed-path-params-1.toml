@@ -1,6 +1,5 @@
 id = "ARCH-TYPED-PATH-PARAMS-1"
 title = "Path and query parameters are extracted into typed values at the framework boundary"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"

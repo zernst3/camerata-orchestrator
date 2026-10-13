@@ -1,6 +1,5 @@
 id = "ARCH-TRIGGER-ENV-1"
 title = "Trigger→environment mapping with immutable prod tags"
-tag = "stack"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "prose"

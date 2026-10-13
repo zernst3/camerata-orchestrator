@@ -1,6 +1,5 @@
 id = "CSHARP-TESTING-DETERMINISTIC-NO-FLAKY-1"
 title = "Tests are deterministic and environment-independent; no sleeps, random values, real clocks, or shared mutable state across tests"
-tag = "stack"
 domain = "csharp:testing"
 layer = "language"
 enforcement = "prose"
