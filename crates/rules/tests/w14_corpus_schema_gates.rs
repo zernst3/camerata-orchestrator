@@ -559,18 +559,29 @@ scope = "repo"
     assert_eq!(set.iter().count(), 1, "the fixture rule must load");
 }
 
-/// req_w14 ADVISORY: the `qualifies`-misplaced-into-`[[sources]]` roster has not grown.
+/// req_w14 ADVISORY: the `qualifies`-inside-`[[sources]]` roster has not grown.
 ///
-/// `qualifies` is a RULE-level field, but 17 rules author it on a line below a `[[sources]]`
-/// header, so TOML scopes it into the source table and `RuleSource` discards it — 29 occurrences
-/// on 2026-10-11, every one in the `go/` family. For the 10 affected `go/*.toml` rules there is
-/// NO rule-level `qualifies` at all, so `Rule::summary` silently falls through to
-/// `[decision].why` rather than the authored text. This is gotcha 9 in the wild, found by
-/// writing gate 3.
+/// `qualifies` is a RULE-level field, but 17 `go/` rules authored it on a line below a
+/// `[[sources]]` header, so TOML scoped it into the source table and `RuleSource` discarded it —
+/// 29 occurrences on 2026-10-11. Gotcha 9 in the wild, found by writing gate 3.
 ///
-/// It is PINNED, not fixed: the fix is to move a line in 17 hand-authored corpus files, which
-/// changes each rule's derived `summary` — the corpus owner's call, not a gate's. What a gate can
-/// honestly carry is that the mistake cannot SPREAD while it waits for that ruling.
+/// TEST DISCIPLINE exception (a), W17: the pinned numbers changed because the DATA changed, and
+/// because re-measuring the 29 showed the single count had hidden two different shapes.
+///
+/// - **10 occurrences, 10 `go/*.toml` rules, NO rule-level `qualifies`** — the rule genuinely
+///   lost its authored text and shipped `[decision].why` as its summary. W17 MOVED all 10 to the
+///   rule level. This subset must now be ZERO, and
+///   `req_w17_no_corpus_rule_loses_its_qualifies_text_to_a_sources_block` is the build-failing
+///   gate that keeps it there. The `lost` assertion below therefore flips from 10 to 0.
+/// - **19 occurrences, 7 `go/testing/*.toml` rules that ALREADY carry a rule-level
+///   `qualifies`** — each annotates the SOURCE it sits under, not the rule. Nothing is lost, they
+///   cannot all move (TOML forbids duplicate keys) and merging source trivia into a rule's
+///   summary would corrupt text that reads correctly today. Left as authored, still pinned here,
+///   awaiting an owner ruling on whether to delete them or give `[[sources]]` a real `note`
+///   field. 29 -> 19 and 17 -> 7 are that subset standing alone.
+///
+/// What this test carries is unchanged: the shape cannot SPREAD silently. Growth in either half
+/// fails here.
 #[tokio::test]
 async fn req_w14_the_misplaced_qualifies_roster_has_not_grown() {
     let Some(dir) = corpus_dir() else {
@@ -581,9 +592,10 @@ async fn req_w14_the_misplaced_qualifies_roster_has_not_grown() {
         .expect("corpus is readable");
     assert_eq!(
         found.len(),
-        29,
-        "the misplaced-`qualifies` roster must not change silently (29 occurrences across 17 \
-         rules on 2026-10-11, all in `go/`); a NEW one means the mistake is spreading:\n{found:#?}"
+        19,
+        "the `qualifies`-in-`[[sources]]` roster must not change silently (19 per-source \
+         annotations across 7 `go/testing/` rules after W17 moved the 10 harmful ones); a NEW one \
+         means the shape is spreading:\n{found:#?}"
     );
     let distinct: std::collections::BTreeSet<&str> = found
         .iter()
@@ -591,16 +603,16 @@ async fn req_w14_the_misplaced_qualifies_roster_has_not_grown() {
         .collect();
     assert_eq!(
         distinct.len(),
-        17,
-        "expected 17 distinct rules in the misplaced-`qualifies` roster: {distinct:#?}"
+        7,
+        "expected 7 distinct rules in the `qualifies`-in-`[[sources]]` roster: {distinct:#?}"
     );
-    // The 10 rules with NO rule-level `qualifies` are the ones that actually lost authored
-    // text; pin that subset separately so a partial fix is visible as a partial fix.
+    // The harmful subset — a nested `qualifies` on a rule with no rule-level one — is now zero
+    // and gated. Kept here as well so a partial regression is visible from either test.
     let lost = found.iter().filter(|s| s.contains("ABSENT")).count();
     assert_eq!(
-        lost, 10,
-        "10 of the misplaced-`qualifies` rules have no rule-level `qualifies` at all, so their \
-         `summary` silently falls back to `[decision].why`: {found:#?}"
+        lost, 0,
+        "no rule may have a nested `qualifies` AND no rule-level one — that is the shape whose \
+         `summary` silently falls back to `[decision].why` (W17 fixed all 10): {found:#?}"
     );
 }
 
