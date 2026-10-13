@@ -1186,15 +1186,115 @@ fn calibration_floor_scan_text(f: &Finding) -> String {
     .to_ascii_lowercase()
 }
 
+/// W8 (Q4): the inflections a D5 phrase-table entry may carry and still be the SAME word.
+/// Every table above is written in the BARE form ("read", "credential", "medical record") but
+/// the text being scanned is a model's English prose, where the same word arrives inflected
+/// ("reads", "accessed", "listing", "credentials", "accessible"). Whole-word-only matching
+/// would therefore have silenced most genuine escalations, which is a worse failure than the
+/// substring bug it fixes — so the END boundary admits exactly this closed set, and nothing
+/// else. Each entry earns its place: `"s"`/`"es"` (plurals and third-person), `"ed"`/`"ing"`
+/// (participles), `"able"`/`"ible"` (`readable`, `accessible`).
+///
+/// Deliberately ABSENT, each for a demonstrated false positive a looser set would readmit:
+/// `"y"` would readmit `read` -> `ready`; `"en"` would readmit `list` -> `listen`; `"er"`
+/// would readmit `list` -> `lister`; bare `"d"` is handled separately below rather than listed
+/// here, because unconditionally it readmits `see` -> `seed`.
+const PHRASE_INFLECTION_SUFFIXES: &[&str] = &["s", "es", "ed", "ing", "able", "ible"];
+
+/// Whether a bare `"d"` may follow `phrase` as an inflection. English forms the past tense of
+/// an `e`-final verb by appending `d` alone (`retrieve` -> `retrieved`), so the suffix is real
+/// and dropping it would lose genuine matches. It is gated on a stem of 4+ characters —
+/// the same structural threshold W7/B9's [`dotted_run_is_identifier`] uses, and for the same
+/// reason: a 3-character stem is too short to carry an inflection unambiguously. That gate is
+/// what keeps `see` -> `seed` (a noun, and a test fixture word) out while keeping
+/// `retrieve` -> `retrieved` in.
+fn phrase_admits_bare_d_suffix(phrase: &str) -> bool {
+    phrase.len() >= 4 && phrase.ends_with('e')
+}
+
+/// Whether `c` is part of a word for boundary purposes — Unicode-aware `is_alphanumeric` plus
+/// `_`, i.e. the usual `\w` class. A hyphen is deliberately NOT a word character: the phrase
+/// tables already contain hyphenated entries (`"cross-tenant"`, `"defense-in-depth"`) that must
+/// match as written, and a hyphen in prose separates words rather than joining them.
+fn is_phrase_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// W8 (Q4): whether `text` contains `phrase` as a WORD rather than as a bare substring.
+///
+/// The D5 floor tables are matched against the MODEL'S PROSE, and they contain one-syllable
+/// entries (`"read"`, `"view"`, `"list"`, `"see"`, `"rls"`) that are substrings of common,
+/// entirely unrelated English words. Under the previous `text.contains(phrase)` test,
+/// al`read`y, re`view`, allow`list`, `each` transfer, `password`less and signed-u`rls` all
+/// tripped the floor, manufacturing High and Critical severities out of ordinary prose — the
+/// measured case being a finding that floored to High on "another user's ... already ..." and
+/// to Critical once the word "credential" appeared anywhere in the same text.
+///
+/// Same fix shape as W7/B9's [`dotted_run_is_identifier`]: a structural property, not a
+/// blacklist of observed words. A match counts when it begins at a word boundary AND ends at
+/// one, where "ends at one" also admits a single inflection from the closed
+/// [`PHRASE_INFLECTION_SUFFIXES`] set (see its doc comment for why whole-word-only would be
+/// the worse bug). Plain `char` boundary tests rather than a regex: the scan text has been
+/// `to_ascii_lowercase`d but may still hold non-ASCII, and `regex::bytes`' Unicode-by-default
+/// mode is a trap this does not need to step near.
+///
+/// Every phrase table is matched through here; none of them changed.
+fn contains_phrase_as_word(text: &str, phrase: &str) -> bool {
+    if phrase.is_empty() {
+        return false;
+    }
+    for (start, _) in text.match_indices(phrase) {
+        // Leading boundary: the character immediately before the match must not be a word
+        // character. This alone kills al`read`y / re`view` / allow`list` / `each` transfer /
+        // signed-u`rls`.
+        if text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(is_phrase_word_char)
+        {
+            continue;
+        }
+        let rest = &text[start + phrase.len()..];
+        match rest.chars().next() {
+            // End of text, or a non-word character: an exact word match.
+            None => return true,
+            Some(c) if !is_phrase_word_char(c) => return true,
+            // Otherwise the match runs into more word characters. It still counts, but only
+            // when what follows is exactly one admitted inflection AND that inflection itself
+            // ends at a boundary — so `access` matches `accessed` but `password` does not
+            // match `passwordless`.
+            Some(_) => {
+                let admitted = PHRASE_INFLECTION_SUFFIXES
+                    .iter()
+                    .copied()
+                    .chain(phrase_admits_bare_d_suffix(phrase).then_some("d"))
+                    .any(|suffix| {
+                        rest.strip_prefix(suffix).is_some_and(|after| {
+                            after.chars().next().is_none_or(|c| !is_phrase_word_char(c))
+                        })
+                    });
+                if admitted {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn mentions_unauthenticated_or_full_compromise(text: &str) -> bool {
     UNAUTHENTICATED_OR_FULL_COMPROMISE_PHRASES
         .iter()
-        .any(|p| text.contains(p))
+        .any(|p| contains_phrase_as_word(text, p))
 }
 
 fn mentions_authenticated_cross_tenant_read(text: &str) -> bool {
-    CROSS_TENANT_PHRASES.iter().any(|p| text.contains(p))
-        && READ_VERBS.iter().any(|v| text.contains(v))
+    CROSS_TENANT_PHRASES
+        .iter()
+        .any(|p| contains_phrase_as_word(text, p))
+        && READ_VERBS
+            .iter()
+            .any(|v| contains_phrase_as_word(text, v))
 }
 
 fn mentions_escalating_data_class(text: &str) -> bool {
@@ -1202,14 +1302,20 @@ fn mentions_escalating_data_class(text: &str) -> bool {
         .iter()
         .chain(CREDENTIAL_DATA_PHRASES)
         .chain(SENSITIVE_PII_PHRASES)
-        .any(|p| text.contains(p))
+        .any(|p| contains_phrase_as_word(text, p))
 }
 
 fn mentions_speculative_rls_hedge(text: &str) -> bool {
-    let mentions_rls = text.contains("rls")
-        || text.contains("row-level security")
-        || text.contains("row level security");
-    mentions_rls && RLS_HEDGE_PHRASES.iter().any(|h| text.contains(h))
+    // `"rls"` was the worst offender of the whole section: as a bare substring it matched
+    // `urls`, so ANY access-control finding mentioning signed URLs alongside an ordinary hedge
+    // word was floored to High without row-level security appearing in the text at all.
+    let mentions_rls = contains_phrase_as_word(text, "rls")
+        || contains_phrase_as_word(text, "row-level security")
+        || contains_phrase_as_word(text, "row level security");
+    mentions_rls
+        && RLS_HEDGE_PHRASES
+            .iter()
+            .any(|h| contains_phrase_as_word(text, h))
 }
 
 /// Whether `f` is in the access-control / injection family D3 already treats as a class that
@@ -9929,6 +10035,287 @@ mod tests {
             out.severity, "low",
             "a non-access-control finding is unaffected by the hedge guard"
         );
+    }
+
+    // ── W8-Q4: the D5 floor's phrase tables must match WORDS, not bare substrings ──────────
+    //
+    // Every phrase table in the D5 floor was tested with `text.contains(phrase)`. The floor
+    // scans the MODEL'S PROSE, so a one-syllable entry like `"read"` or `"list"` matched
+    // whatever English word happened to contain it: al`read`y, re`view`, allow`list`,
+    // `each` transfer, `password`less, `urls` (which contains "rls"). Each false positive
+    // below was observed RED against the pre-fix `contains` implementation; the fix is
+    // `contains_phrase_as_word` (word boundaries + a closed inflection set), the same fix
+    // shape as W7/B9's `dotted_run_is_identifier`. The phrase tables themselves are unchanged.
+
+    /// RED BEFORE FIX: "already" contains "read", so a finding that merely mentions another
+    /// user's record alongside the word "already" floored to High — a fabricated cross-tenant
+    /// read escalation out of two ordinary English words.
+    #[test]
+    fn req_w8_q4_read_verb_does_not_match_inside_already() {
+        let f = finding_with_detail(
+            "ARCH-STRUCTURED-ERRORS-1",
+            "medium",
+            "A request for another user's record is already rejected by the guard clause, so \
+             the handler never returns a row it should not.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "medium",
+            "\"already\" is not the read verb \"read\": no cross-tenant-read floor may fire \
+             (rationale was: {:?})",
+            out.calibration_rationale
+        );
+        assert_eq!(
+            out.calibration_rationale, None,
+            "no rule of thumb applies, so no rationale may be fabricated"
+        );
+    }
+
+    /// RED BEFORE FIX: "review" contains "view".
+    #[test]
+    fn req_w8_q4_read_verb_does_not_match_inside_review() {
+        let f = finding_with_detail(
+            "ARCH-NAMING-1",
+            "low",
+            "A code review of the handler confirmed another tenant's id is validated before \
+             the query is built.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "low",
+            "\"review\" is not the read verb \"view\" (rationale was: {:?})",
+            out.calibration_rationale
+        );
+        assert_eq!(out.calibration_rationale, None);
+    }
+
+    /// RED BEFORE FIX: "allowlist" contains "list".
+    #[test]
+    fn req_w8_q4_read_verb_does_not_match_inside_allowlist() {
+        let f = finding_with_detail(
+            "ARCH-CONFIG-1",
+            "low",
+            "The allowlist of another organization's permitted domains is hard-coded in the \
+             module rather than configured.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "low",
+            "\"allowlist\" is not the read verb \"list\" (rationale was: {:?})",
+            out.calibration_rationale
+        );
+        assert_eq!(out.calibration_rationale, None);
+    }
+
+    /// RED BEFORE FIX, and the headline measured case: prose containing "another user's" plus
+    /// "already" floored to High, and adding the bare word "credential" took the SAME prose to
+    /// Critical. Both escalations were manufactured by substring matching. The badged-CRITICAL
+    /// `ARCH-STRUCTURED-ERRORS-1` case in the audit is this bug, not a separate quirk.
+    #[test]
+    fn req_w8_q4_substring_read_verb_plus_credential_does_not_manufacture_critical() {
+        let f = finding_with_detail(
+            "ARCH-STRUCTURED-ERRORS-1",
+            "medium",
+            "The error branch for another user's record is already structured, but the \
+             credential refresh path still returns a bare string.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "medium",
+            "a real word (\"credential\") must not escalate a floor that a SUBSTRING \
+             (\"already\" -> \"read\") fabricated in the first place (rationale was: {:?})",
+            out.calibration_rationale
+        );
+    }
+
+    /// RED BEFORE FIX: "each transfer" contains the payment phrase "ach transfer", so a GENUINE
+    /// High cross-tenant read was inflated to Critical by the word "each". The read verb here
+    /// is real, so the High floor must survive — only the data-class escalation is wrong.
+    #[test]
+    fn req_w8_q4_payment_data_class_does_not_match_ach_transfer_inside_each_transfer() {
+        let f = finding_with_detail(
+            "AI-LEDGER-LEAK",
+            "medium",
+            "An authenticated user can view another organization's ledger page, where each \
+             transfer row is rendered.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "high",
+            "the genuine cross-tenant read still floors at High, but \"each transfer\" is not \
+             the payment phrase \"ach transfer\" and must not escalate to Critical"
+        );
+    }
+
+    /// RED BEFORE FIX: "passwordless" contains "password". A passwordless-login CONFIG is not
+    /// an exposed credential, so the Critical data-class escalation was unearned.
+    #[test]
+    fn req_w8_q4_credential_data_class_does_not_match_password_inside_passwordless() {
+        let f = finding_with_detail(
+            "AI-AUTH-CONFIG-LEAK",
+            "medium",
+            "An authenticated user can view another tenant's passwordless sign-in \
+             configuration from the settings page.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "high",
+            "a passwordless-login CONFIG is not an exposed credential: the cross-tenant read \
+             floors at High, not Critical"
+        );
+    }
+
+    /// RED BEFORE FIX: "urls" contains "rls". Any access-control finding mentioning signed URLs
+    /// alongside an ordinary hedge word ("probably") was floored to High by the RLS-hedge guard
+    /// without row-level security being anywhere in the text.
+    #[test]
+    fn req_w8_q4_rls_hedge_guard_does_not_match_rls_inside_urls() {
+        let f = finding_with_category(
+            "AI-SIGNED-URL-TTL",
+            "low",
+            "The handler mints signed urls for attachments with a seven-day expiry, which is \
+             probably longer than this feature needs.",
+            "authorization",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "low",
+            "\"urls\" is not \"rls\": the RLS-hedge guard must not fire on text that never \
+             mentions row-level security (rationale was: {:?})",
+            out.calibration_rationale
+        );
+        assert_eq!(out.calibration_rationale, None);
+    }
+
+    /// THE OTHER HALF, and the one that matters most: the fix must not silence the mechanism.
+    /// Real prose about reading another tenant's data still escalates — including the INFLECTED
+    /// forms real write-ups use ("accessed", "listed", "fetches", "downloaded", "viewing"),
+    /// which a naive whole-word-only matcher would have thrown away.
+    #[test]
+    fn req_w8_q4_genuine_cross_tenant_reads_still_floor_at_high() {
+        let genuine = [
+            "An authenticated user can read another tenant's invoices.",
+            "Any member can view another organization's settings by changing the org id.",
+            "Records belonging to another user are accessed without an owner check.",
+            "The endpoint lists other tenants' projects alongside the caller's own.",
+            "The loader fetches another organization's rows before filtering.",
+            "Attachments belonging to another user can be downloaded by id.",
+            "A member sees other users' draft documents in the sidebar.",
+            "The report job is viewing another tenant's aggregate table directly.",
+            "Data from another account is retrieved by the shared helper.",
+        ];
+        for detail in genuine {
+            let out = apply_severity_calibration_rule(finding_with_detail(
+                "AI-TENANT-LEAK",
+                "low",
+                detail,
+            ));
+            assert_eq!(
+                out.severity, "high",
+                "a genuine authenticated cross-tenant read must still floor at High: {detail}"
+            );
+            assert!(
+                out.calibration_rationale.is_some(),
+                "the floor rationale must still be recorded: {detail}"
+            );
+        }
+    }
+
+    /// The genuine data-class escalations must also survive the boundary fix, in the INFLECTED
+    /// plural forms real write-ups overwhelmingly use ("credentials", "passwords", "medical
+    /// records") — the escalation list is matched by word, not by exact string.
+    #[test]
+    fn req_w8_q4_genuine_data_class_escalations_still_reach_critical() {
+        let genuine = [
+            "An authenticated user can read another tenant's stored passwords.",
+            "Any member can view another organization's api keys and credentials.",
+            "The endpoint lists other tenants' payments with full card numbers.",
+            "A member can fetch another user's medical records from the export route.",
+            "Rows containing another user's social security number are retrieved.",
+        ];
+        for detail in genuine {
+            let out = apply_severity_calibration_rule(finding_with_detail(
+                "AI-TENANT-LEAK",
+                "low",
+                detail,
+            ));
+            assert_eq!(
+                out.severity, "critical",
+                "a genuine escalating data class must still reach Critical: {detail}"
+            );
+        }
+    }
+
+    /// Pins the one deliberately CONSERVATIVE consequence of the boundary fix, so it is a
+    /// recorded decision rather than an accident: "seen" is a genuine past participle of the
+    /// read verb "see", but W8-Q4 names `see`-inside-`seen` as one of the substring hits to
+    /// close, and `"n"` is not an inflection the closed suffix set admits (admitting it would
+    /// be safe in isolation — no other phrase gains a match — so this is reversible with a
+    /// one-word change to `PHRASE_INFLECTION_SUFFIXES` if a benchmark run argues for it).
+    /// Documented here, with the reversal named, rather than left silent.
+    #[test]
+    fn req_w8_q4_seen_is_conservatively_not_treated_as_the_read_verb_see() {
+        let f = finding_with_detail(
+            "AI-TENANT-LEAK",
+            "low",
+            "Another tenant's rows can be seen on the shared dashboard.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "low",
+            "\"seen\" is deliberately outside the admitted inflection set (see this test's \
+             doc comment for the one-word reversal)"
+        );
+    }
+
+    /// The boundary helper itself, exercised directly over the exact pairs that motivated it —
+    /// so a future edit to `contains_phrase_as_word` fails here, at the unit, rather than
+    /// three layers up in a severity assertion.
+    #[test]
+    fn req_w8_q4_contains_phrase_as_word_unit_contract() {
+        // Substring hits that must NOT match.
+        for (text, phrase) in [
+            ("the record was already returned", "read"),
+            ("a code review of the handler", "view"),
+            ("the allowlist of domains", "list"),
+            ("it seems fine", "see"),
+            ("the seed data script", "see"),
+            ("the endpoint is ready", "read"),
+            ("an event listener fires", "list"),
+            ("the handler will listen on the socket", "list"),
+            ("passwordless sign-in", "password"),
+            ("each transfer row", "ach transfer"),
+            ("signed urls expire", "rls"),
+            ("the preview pane", "view"),
+        ] {
+            assert!(
+                !contains_phrase_as_word(text, phrase),
+                "{phrase:?} must not match as a bare substring of {text:?}"
+            );
+        }
+        // Genuine word matches, bare and inflected, that MUST still match.
+        for (text, phrase) in [
+            ("can read the row", "read"),
+            ("reads every row", "read"),
+            ("reading the row", "read"),
+            ("a readable export", "read"),
+            ("rows are listed", "list"),
+            ("listing every row", "list"),
+            ("the data is accessed", "access"),
+            ("publicly accessible", "access"),
+            ("the loader fetches rows", "fetch"),
+            ("rows are retrieved", "retrieve"),
+            ("stored credentials", "credential"),
+            ("medical records", "medical record"),
+            ("rls is enabled", "rls"),
+            ("(read)", "read"),
+            ("read", "read"),
+        ] {
+            assert!(
+                contains_phrase_as_word(text, phrase),
+                "{phrase:?} must still match as a word in {text:?}"
+            );
+        }
     }
 
     /// `apply_severity_calibration_rules` (plural) must apply the floor across a whole finding

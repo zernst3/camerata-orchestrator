@@ -22,6 +22,13 @@
 #      synthetic corpus containing one deliberately malformed rule file, and asserts the rule
 #      is recorded, disclosed, and FAILS the integrity gate — plus a control proving the same
 #      scan over an intact corpus still passes, so the gate stays switched on.
+#   5. W14 — the corpus SCHEMA gates. W13 catches a rule file that will not PARSE; W14 catches
+#      one that parses but is wrong: an option whose `why` opens with "Rejected:" and yet
+#      carries no `violates = true`, a `decision`-kind rule that carries one anyway, and any
+#      unknown field name at any nesting level. The motivating measurement was a hand audit of
+#      244 `violates` flags in which 76 (31 percent) were wrong, the dominant shape being a
+#      MISSING flag — the engine silent on a fault its own rule describes in plain language.
+#      Each gate is proven to FIRE against a synthetic corpus, not merely to pass.
 #
 # `--include-known-red` is kept for the next deliberately-red measurement; today there are no
 # #[ignore]d tests in the harness, so it adds nothing.
@@ -35,7 +42,7 @@ INCLUDE_KNOWN_RED=0
 for arg in "$@"; do
   case "$arg" in
     --include-known-red) INCLUDE_KNOWN_RED=1 ;;
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -56,6 +63,10 @@ echo
 echo "── W13: corpus-load integrity (a rule file that would not parse) ──────────────"
 cargo test -p camerata-server --test corpus_load_failure_e2e
 cargo test -p camerata-server --lib req_w13
+
+echo
+echo "── W14: corpus SCHEMA gates (Rejected:/violates parity, unknown fields) ───────"
+cargo test -p camerata-rules --test w14_corpus_schema_gates
 
 if [ "$INCLUDE_KNOWN_RED" -eq 1 ]; then
   echo

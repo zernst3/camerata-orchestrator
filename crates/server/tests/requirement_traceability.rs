@@ -164,6 +164,20 @@ const REGISTRY: &[(&str, Coverage)] = &[
     // has no requirement letter for corpus-load integrity; same recorded-indirection pattern as
     // B1/B4 -> `req_d1`/`req_d2` and W5-Q2 -> `req_w8`.
     ("W13", Required(&["req_w13"])),
+    ("W14", Required(&["req_w14"])),
+    // W8-Q4, found 2026-10-11: the D5 severity floor matched its phrase tables against the
+    // MODEL'S PROSE with a bare `text.contains(phrase)`, and the tables contain one-syllable
+    // entries ("read", "view", "list", "see", "rls"). So al`read`y, re`view`, allow`list`,
+    // `each` transfer, `password`less and signed-u`rls` all tripped the floor: measured, prose
+    // containing "another user's ... already ..." floored to High, and the bare word
+    // "credential" anywhere in the same text took it to Critical. The badged-CRITICAL
+    // `ARCH-STRUCTURED-ERRORS-1` case is this bug, not a separate quirk. Fixed with word
+    // boundaries plus a closed inflection set (`contains_phrase_as_word`), the same fix shape
+    // as W7/B9's `dotted_run_is_identifier`; no phrase table changed. Registered under its own
+    // id rather than folded into `req_w8`, because W5-Q2 already claims that prefix for the
+    // floor MECHANISM and this is the floor's MATCHING — same recorded-indirection pattern as
+    // B1/B4 -> `req_d1`/`req_d2`.
+    ("W8-Q4", Required(&["req_w8_q4"])),
     // ── Pass 3 — CLIENT DELIVERABLES ───────────────────────────────────────────────────────────
     // Zach's three-pass sequence: "PDF = the summary ... Excel = the meat and potatoes. Needs
     // rethinking: separate worksheets for findings, conventions, deviations, coverage ... JSON =
