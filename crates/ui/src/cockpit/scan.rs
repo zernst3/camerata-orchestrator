@@ -7903,6 +7903,86 @@ mod render_tests {
         );
     }
 
+    /// req_pass2_7 (END-TO-END through the real table): the live `FindingsTable` carries the
+    /// Kind column, DROPS an informational row entirely, and lays the remaining rules out in
+    /// the curated default order. This exercises the path the curator actually sees —
+    /// `TriageModel::visible`'s kind filter, `queue_sort_key`, and the real column set —
+    /// rather than the pieces in isolation.
+    #[test]
+    fn req_pass2_7_live_findings_table_drops_informational_rows_and_keeps_the_curated_order() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(|| Signal::new(None::<FindingView>));
+            let dispositions =
+                use_signal(std::collections::HashMap::<String, Disposition>::new);
+            rsx! {
+                FindingsTable {
+                    findings: vec![
+                        kinded_finding(
+                            "SQL-INJECTION-1",
+                            "critical",
+                            serde_json::json!({ "kind": "defect" }),
+                        ),
+                        kinded_finding(
+                            "API-VERSIONING-1",
+                            "medium",
+                            serde_json::json!({
+                                "kind": "deviation",
+                                "deviating_sites": 2,
+                                "assessed_sites": 47,
+                                "convention_option_id": "versioned",
+                                "convention_label": "URI-versioned endpoints",
+                            }),
+                        ),
+                        kinded_finding("LEGACY-UNMAPPED-1", "high", serde_json::json!({})),
+                        kinded_finding(
+                            "ALREADY-GOOD-1",
+                            "info",
+                            serde_json::json!({
+                                "kind": "convention_observed",
+                                "convention_option_id": "versioned",
+                                "convention_label": "URI-versioned endpoints",
+                            }),
+                        ),
+                    ],
+                    repos: vec!["me/api".to_string()],
+                    descriptions: std::collections::HashMap::new(),
+                    triage_view: TriageState::Unresolved,
+                    dispositions,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+
+        // The table groups by rule and mounts COLLAPSED, so the SSR snapshot shows the Kind
+        // column header and one group header per rule, not the individual cells. That is
+        // enough to prove the three things this test exists for; the chip renderer itself is
+        // covered by the column-accessor test above.
+        assert!(html.contains(">Kind<"), "the Kind column header; html=\n{html}");
+        assert!(
+            !html.contains("ALREADY-GOOD-1"),
+            "an informational row must never reach the accusing queue; html=\n{html}"
+        );
+
+        // And the curated default sort survives into the real table: critical defect, then
+        // the kind-less ALARM row (high), then the medium deviation. If the UI re-derived
+        // severity or ranked the alarm as a plain defect, this order would change.
+        let at = |needle: &str| {
+            html.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing from the queue; html=\n{html}"))
+        };
+        assert!(
+            at("SQL-INJECTION-1") < at("LEGACY-UNMAPPED-1"),
+            "critical defect before the high alarm row; html=\n{html}"
+        );
+        assert!(
+            at("LEGACY-UNMAPPED-1") < at("API-VERSIONING-1"),
+            "high alarm row before the medium deviation; html=\n{html}"
+        );
+    }
+
     /// req_pass2_6: each panel's empty state is a sentence, not a blank area — the curator has
     /// to be able to tell "nothing of this kind" from "this did not render".
     #[test]
