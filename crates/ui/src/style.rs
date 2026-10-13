@@ -1156,6 +1156,23 @@ html, body {
 .findings-key-swatch.crit { background: #d4332b; }
 .findings-key-swatch.arch { background: var(--surface); border: 1px solid var(--line); }
 
+/* Order bar above the findings table (Pass 2 step 2): which order the Queue is showing, and
+   one click back to the curated default. Sits flush against the sticky header it describes so
+   the sentence and chorale's own ↑/↓ arrow read together. The `.manual` state is deliberately
+   the louder one — the default is the resting state and should not shout, but "you are looking
+   at your own cut, not the curated order" is worth an accent. */
+.queue-order {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  margin: 0 0 6px; font-size: 12px; line-height: 1.4;
+}
+.queue-order-eyebrow {
+  flex: none; text-transform: uppercase; letter-spacing: 0.06em;
+  font-size: 10px; font-weight: 700; color: var(--ink-faint);
+}
+.queue-order-value { color: var(--ink-soft); cursor: help; }
+.queue-order-value.manual { color: var(--ink); font-weight: 600; }
+.findings-toolbar + .queue-order { margin-top: 2px; }
+
 /* Rule-alternatives review panel (audit-integrated alternative recommendation,
    docs/design/2026-09-22_audit-integrated-alternatives.md). Lists every multi-option rule the
    audit evaluated, including zero-violation ones, with its recommended option, a Why

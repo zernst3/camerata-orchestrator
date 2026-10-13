@@ -448,6 +448,12 @@ pub(super) use camerata_ui_core::triage::{
     unspecified_kind_count, KindSurface,
 };
 
+// Pass 2 step 2: the MANUAL column sort over the curated default. `severity_sort_value` is the
+// Severity column's cell value — the authored severity carrying its calibrated ladder position,
+// because chorale sorts a column by exactly that value and 0.2.3 offers no sort-key hook. See
+// the function's docs in core for why that is not a second calibration layer.
+pub(super) use camerata_ui_core::triage::{severity_sort_value, severity_sort_values};
+
 /// Durable ignore: record the findings as reasoned baseline suppressions (governed PR).
 /// Returns the PR URL.
 pub(super) async fn ignore_findings(
@@ -1533,11 +1539,15 @@ pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<Colu
     // chorale 0.2.3's palette has a native orange, so each severity gets a distinct color
     // straight from RenderKind::Badge — no custom cell renderer needed (Critical = red,
     // High = orange, Medium = yellow, Low = gray).
+    //
+    // The MAP KEYS are `severity_sort_value`s, not bare severities, because that is what the
+    // accessor emits (the cell value doubles as the column's sort key — see below). The LABELS
+    // are unchanged, so the rendered badge still reads "Critical" / "High" / "Medium" / "Low".
     let sev = BadgeVariantMap::new()
-        .with("critical", BadgeVariant::new("Critical", "red"))
-        .with("high", BadgeVariant::new("High", "orange"))
-        .with("medium", BadgeVariant::new("Medium", "yellow"))
-        .with("low", BadgeVariant::new("Low", "gray"));
+        .with(severity_sort_value("critical"), BadgeVariant::new("Critical", "red"))
+        .with(severity_sort_value("high"), BadgeVariant::new("High", "orange"))
+        .with(severity_sort_value("medium"), BadgeVariant::new("Medium", "yellow"))
+        .with(severity_sort_value("low"), BadgeVariant::new("Low", "gray"));
     let mut cols = vec![
         ColumnDef::new(ColumnId("repo"), "Repo", |f: &FindingView| {
             CellValue::Text(f.repo.clone())
@@ -1569,17 +1579,28 @@ pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<Colu
             ],
         })
         .initial_width(130.0),
+        // SEVERITY. The cell value is the authored severity PREFIXED BY ITS CALIBRATED LADDER
+        // POSITION (`severity_sort_value`), because a sortable chorale column is ordered by
+        // exactly the value its accessor returns and `chorale-core` 0.2.3 has no separate
+        // sort-key hook. Severity is the one Queue column whose words do not sort into their
+        // own meaning — alphabetically `low` sits above `medium` — so without the prefix a
+        // header click reads "critical, high, low, medium" in one direction and the same
+        // nonsense reversed in the other.
+        //
+        // This re-derives nothing: the prefix is `severity_rank`, the identical ordering of the
+        // identical authored string that `queue_sort_key` applies for the default order, and
+        // kind is not an input. The authored word is still what the badge label, the row
+        // highlight (`row_class`, which reads `f.severity`), the CSV export (`findings_csv`,
+        // hand-rolled off `FindingView`) and the report all read.
         ColumnDef::new(ColumnId("severity"), "Severity", |f: &FindingView| {
-            CellValue::Text(f.severity.clone())
+            CellValue::Text(severity_sort_value(&f.severity))
         })
         .sortable()
+        // Options come from the same function as the accessor, so the filter vocabulary cannot
+        // drift from the cell it filters (a stale option list would filter every row out and
+        // read as "no findings"). The list is in ladder order, as it was before.
         .filter(FilterKind::MultiSelect {
-            options: vec![
-                "critical".to_string(),
-                "high".to_string(),
-                "medium".to_string(),
-                "low".to_string(),
-            ],
+            options: severity_sort_values(),
         })
         .render_kind(RenderKind::Badge(sev))
         .initial_width(110.0),
@@ -1712,6 +1733,60 @@ pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<Colu
     cols
 }
 
+/// What the Queue's order indicator says when NO manual column sort is active: the curated
+/// default from design §5, named rather than implied.
+///
+/// A blank indicator would be the failure mode worth avoiding — the default order is a
+/// JUDGEMENT (the `unspecified` alarm floated to the top of its severity band, Defect before
+/// Deviation at equal severity, cheapest deviations first), and a curator 300 rows into a
+/// sitting has to be able to tell at a glance whether he is looking at that judgement or at
+/// his own re-cut.
+pub(super) const DEFAULT_ORDER_LABEL: &str =
+    "Camerata default order \u{2014} severity, then kind, then cheapest deviations first";
+
+/// Human name of a findings column, for the order indicator. Resolved from the live column
+/// set (never a second hand-written table), so a renamed or new column can't leave the
+/// indicator naming a header that no longer exists; an unknown id degrades to the raw id
+/// rather than vanishing.
+fn finding_column_header(cols: &[ColumnDef<FindingView>], id: ColumnId) -> String {
+    cols.iter()
+        .find(|c| c.id == id)
+        .map_or_else(|| id.as_str().to_string(), |c| c.header.clone())
+}
+
+/// The sentence the Queue's order indicator shows for `sort` (chorale's own sort state).
+///
+/// Empty sort = the curated default, which is also what `clear_sort` restores: chorale's
+/// `filtered_sorted_pairs` only reorders when `state.sort` is non-empty, so an empty sort
+/// hands back `state.rows` exactly as `TriageModel::visible` ordered them.
+///
+/// A manual cut names its column(s) and direction, and says the default is still underneath —
+/// which is literally true, because chorale's sort is STABLE: ties in the manual key keep the
+/// curated order, so e.g. a cut by Kind still lists the deviations cheapest-ratio-first within
+/// the Deviation block. Multi-column (shift+click) cuts are listed in priority order.
+pub(super) fn order_indicator_text(
+    sort: &[chorale_core::SortState],
+    cols: &[ColumnDef<FindingView>],
+) -> String {
+    if sort.is_empty() {
+        return DEFAULT_ORDER_LABEL.to_string();
+    }
+    let cuts: Vec<String> = sort
+        .iter()
+        .map(|s| {
+            let arrow = match s.direction {
+                chorale_core::SortDirection::Asc => "\u{2191}",
+                chorale_core::SortDirection::Desc => "\u{2193}",
+            };
+            format!("{} {arrow}", finding_column_header(cols, s.column))
+        })
+        .collect();
+    format!(
+        "Your sort: {} \u{2014} Camerata default order underneath",
+        cuts.join(", then ")
+    )
+}
+
 /// The findings table with TRIAGE: sort by repo/severity/type, filter, select rows
 /// and Ignore / Resolve / Accept-as-tech-debt (open a ticket) them. Virtualized by
 /// chorale, so a large audit doesn't choke the UI.
@@ -1759,12 +1834,40 @@ pub(super) fn FindingsTable(
     // the complete, untruncated explanation that the row cell clips.
     let mut detail_finding = use_context::<Signal<Option<FindingView>>>();
     let in_techdebt = triage_view == TriageState::TechDebt;
+    // The column set is rebuilt for the order indicator below, so the repo list is cloned
+    // before `use_table` takes ownership of its copy.
+    let indicator_repos = filter_repos.clone();
     let handle = use_table(move || {
         TableState::new(
             rows.clone(),
             finding_columns(filter_repos.clone(), in_techdebt),
         )
     });
+    // ── The ORDER BAR: which order is on screen, and one click back to the default ───────
+    //
+    // Pass 2 step 2 (design §5; Zach 2026-10-12: "Keep sort with [unspecified] first, sure, as
+    // long as the table can be manually sorted by me as the user"). chorale already owns the
+    // manual sort itself — every column is `.sortable()` and `sort_enabled` makes the headers
+    // clickable with its own ↑/↓ arrow. What it does not own is the DEFAULT: `state.sort` being
+    // empty is chorale's "unsorted", but it is Camerata's curated order, and nothing on screen
+    // said so or offered a way back to it from an arbitrary sort state.
+    //
+    // Two chained memos rather than reading the table signal inline: this component renders the
+    // chorale table, and subscribing it directly to `TableState` would re-render the whole
+    // subtree on every scroll/selection write. The inner memo narrows the state to the sort
+    // vector, so the (allocating) label computation re-runs only when the sort actually changes.
+    let sort_signal = handle.signal();
+    let active_sort = use_memo(move || sort_signal.read().sort.clone());
+    let order_text = use_memo(move || {
+        order_indicator_text(
+            &active_sort(),
+            &finding_columns(indicator_repos.clone(), in_techdebt),
+        )
+    });
+    // "Default order" is shown only while a manual sort is active. On the default it would be a
+    // no-op control, and its ABSENCE is itself part of the indicator: no button = you are on
+    // the curated default.
+    let manual_sort_active = use_memo(move || !active_sort().is_empty());
     // Subscribe to the disposition map so the bucket flag column re-renders when the architect
     // marks resolve-later/now (the renderer below captures this snapshot).
     let bucket_snapshot = dispositions.read().clone();
@@ -2113,6 +2216,32 @@ pub(super) fn FindingsTable(
                     spawn(async move { let _ = save_csv("camerata-findings.csv", csv).await; });
                 },
                 "Export CSV"
+            }
+        }
+        // The order bar sits immediately above the header row it describes, so the sentence and
+        // the ↑/↓ arrow it is explaining are in the same glance.
+        div { class: "queue-order",
+            span { class: "queue-order-eyebrow", "Order" }
+            span {
+                class: if manual_sort_active() { "queue-order-value manual" } else { "queue-order-value" },
+                title: "Click any column header to re-cut the list; click it again to reverse. The curated default is severity, then kind (the unspecified alarm first, then defects, then deviations), then the cheapest deviations first.",
+                "{order_text}"
+            }
+            if manual_sort_active() {
+                button {
+                    class: "btn-edit-sm queue-order-reset",
+                    title: "Drop every manual column sort and restore Camerata's curated default order.",
+                    // `clear_sort` drops the whole sort list in one act, which is why this
+                    // button exists rather than relying on chorale's third click: a plain click
+                    // cycles ONE column back to unsorted, but a shift+click multi-sort leaves
+                    // two or three columns set and no single click undoes all of them. This is
+                    // correct from any sort state. With `state.sort` empty, chorale's
+                    // `filtered_sorted_pairs` stops reordering entirely and hands back
+                    // `state.rows` — the rows exactly as `TriageModel::visible` ordered them —
+                    // so the restored default is byte-identical, not approximately restored.
+                    onclick: move |_| handle.clear_sort(),
+                    "Default order"
+                }
             }
         }
         CamerataTable {
@@ -8001,6 +8130,579 @@ mod render_tests {
             html.matches("kind-panel-empty").count(),
             3,
             "every panel states its own empty case; html=\n{html}"
+        );
+    }
+
+    // ── Pass 2 step 2: MANUAL column sorting over the curated default ────────
+    // docs/plans/2026-10-11_pass2-curator-ui-design.md §5: "the default sort is a curated
+    // order ... the column headers still allow any manual re-sort chorale supports — the
+    // default is opinionated, the table is not locked."
+    //
+    // Zach's ruling (2026-10-12): "Keep sort with [unspecified] first, sure, as long as the
+    // table can be manually sorted by me as the user." So the kind-aware key stays, demoted
+    // from the only order to the DEFAULT order, and a return path to it is mandatory.
+    //
+    // These tests drive chorale's REAL sort pipeline (`toggle_sort` / `clear_sort` /
+    // `filtered_sorted_rows` / `visible_grouped_view`) over the REAL column set, because the
+    // sort the curator experiences is chorale's, not ours.
+
+    /// The findings fixture these sort tests re-cut: one row per severity band, deliberately
+    /// NOT in any natural order, so a passing assertion can only come from the sort under
+    /// test. Returned already in the curated default order (as `FindingsTable` hands it to
+    /// chorale) so a cleared sort is provably a return to THAT order.
+    fn sortable_queue_rows() -> Vec<FindingView> {
+        let raw = vec![
+            kinded_finding("B-LOW-DEFECT", "low", serde_json::json!({ "kind": "defect" })),
+            kinded_finding(
+                "A-MEDIUM-DEFECT",
+                "medium",
+                serde_json::json!({ "kind": "defect" }),
+            ),
+            kinded_finding(
+                "C-CRITICAL-DEFECT",
+                "critical",
+                serde_json::json!({ "kind": "defect" }),
+            ),
+            kinded_finding("D-HIGH-DEFECT", "high", serde_json::json!({ "kind": "defect" })),
+        ];
+        TriageModel::new().visible(&raw)
+    }
+
+    /// The rows' serialized bytes, in order. `FindingView` is `Serialize` but not `Debug`, and
+    /// this is the comparison the round-trip test actually wants anyway: byte-identical, with a
+    /// readable diff when it is not.
+    fn row_bytes(findings: &[FindingView]) -> String {
+        serde_json::to_string(findings).expect("FindingView serializes")
+    }
+
+    /// Mint `(RowId, FindingView)` pairs in the given order, as `FindingsTable` does.
+    fn sort_rows(findings: &[FindingView]) -> Vec<(RowId, FindingView)> {
+        findings.iter().map(|f| (RowId::new(), f.clone())).collect()
+    }
+
+    /// A `TableState` over the real findings columns, rows in the curated default order and
+    /// chorale's own sort EMPTY — exactly the state `FindingsTable` mounts.
+    fn queue_table_state(findings: &[FindingView]) -> chorale_core::TableState<FindingView> {
+        chorale_core::TableState::new(
+            sort_rows(findings),
+            finding_columns(vec!["me/api".to_string()], false),
+        )
+    }
+
+    /// req_pass2_8: a manual sort on the Severity header must order the AUTHORED severity by
+    /// its CALIBRATED rank (critical > high > medium > low), not by its alphabet.
+    ///
+    /// This is the one column whose words do not sort into their own meaning: alphabetically
+    /// `low` lands above `medium`, so a lexicographic header cut reads
+    /// "critical, high, low, medium" — a visibly wrong severity ladder. The rank is the same
+    /// ordering of the same authored string that `queue_sort_key` uses; nothing is re-derived.
+    #[test]
+    fn req_pass2_8_severity_header_sort_is_calibrated_not_alphabetical() {
+        use chorale_core::{filtered_sorted_rows, toggle_sort, SortAction};
+
+        let findings = sortable_queue_rows();
+        let state = queue_table_state(&findings);
+        let sorted = toggle_sort(&state, ColumnId("severity"), SortAction::Replace);
+        let order: Vec<String> = filtered_sorted_rows(&sorted)
+            .iter()
+            .map(|f| f.severity.clone())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["critical", "high", "medium", "low"],
+            "ascending Severity must walk the calibrated ladder; an alphabetical cut would \
+             put `low` above `medium`"
+        );
+
+        // And descending is the exact reverse — not a different alphabet.
+        let sorted = toggle_sort(&sorted, ColumnId("severity"), SortAction::Replace);
+        let order: Vec<String> = filtered_sorted_rows(&sorted)
+            .iter()
+            .map(|f| f.severity.clone())
+            .collect();
+        assert_eq!(order, vec!["low", "medium", "high", "critical"]);
+    }
+
+    /// req_pass2_8: the Queue names the order it is currently showing and, when that order is
+    /// the curator's own cut, offers an explicit way back to the curated default.
+    ///
+    /// The indicator is not decoration: the default order is a judgement (cheapest deviations
+    /// first, the `unspecified` alarm floated to the top of its band) and a curator 300 rows
+    /// into a sitting has to be able to tell at a glance whether he is looking at it or at his
+    /// own re-cut.
+    #[test]
+    fn req_pass2_8_queue_names_the_active_order_and_defaults_to_the_curated_one() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(|| Signal::new(None::<FindingView>));
+            let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
+            rsx! {
+                FindingsTable {
+                    findings: sortable_queue_rows(),
+                    repos: vec!["me/api".to_string()],
+                    descriptions: std::collections::HashMap::new(),
+                    triage_view: TriageState::Unresolved,
+                    dispositions,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("queue-order"),
+            "the Queue must carry an order indicator; html=\n{html}"
+        );
+        assert!(
+            html.contains("Camerata default order"),
+            "on mount the indicator must name the CURATED DEFAULT, not a blank; html=\n{html}"
+        );
+        assert!(
+            !html.contains("queue-order-reset"),
+            "no manual sort is active on mount, so the return-to-default control must not be \
+             rendered — its absence is part of the indicator; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_8 (THE failure mode that would actually hurt): the round trip. Default order,
+    /// a manual cut, back to the default — and the restored default must be BYTE-IDENTICAL to
+    /// where it started, not approximately restored.
+    ///
+    /// Driven through chorale end to end, because that is where the guarantee comes from:
+    /// `filtered_sorted_pairs` only reorders when `state.sort` is non-empty, so an empty sort
+    /// hands back `state.rows` exactly as `TriageModel::visible` ordered them. Losing the
+    /// curated default with no way back would be worse than having no manual sort at all.
+    #[test]
+    fn req_pass2_8_manual_sort_round_trips_to_a_byte_identical_default_order() {
+        use chorale_core::{clear_sort, filtered_sorted_rows, toggle_sort, SortAction};
+
+        let findings = sortable_queue_rows();
+        let state = queue_table_state(&findings);
+        let baseline = filtered_sorted_rows(&state);
+        assert_eq!(
+            row_bytes(&baseline),
+            row_bytes(&findings),
+            "an empty sort must hand back the curated order untouched"
+        );
+
+        // A cut that provably MOVES the rows, so the restore below cannot pass vacuously. By
+        // rule id this fixture is scrambled relative to the default (the default leads on
+        // severity, and the rule ids were chosen to disagree with it).
+        let by_rule = toggle_sort(&state, ColumnId("type"), SortAction::Replace);
+        assert_ne!(
+            row_bytes(&filtered_sorted_rows(&by_rule)),
+            row_bytes(&baseline),
+            "the Finding-type cut must actually re-cut the list"
+        );
+        assert_eq!(
+            row_bytes(&filtered_sorted_rows(&clear_sort(&by_rule))),
+            row_bytes(&baseline),
+            "`Default order` must restore the curated order byte-for-byte"
+        );
+
+        // And from a reversed severity cut, which is the one that inverts the whole queue.
+        let desc = toggle_sort(
+            &toggle_sort(&state, ColumnId("severity"), SortAction::Replace),
+            ColumnId("severity"),
+            SortAction::Replace,
+        );
+        assert_ne!(
+            row_bytes(&filtered_sorted_rows(&desc)),
+            row_bytes(&baseline),
+            "descending severity must re-cut"
+        );
+        assert_eq!(
+            row_bytes(&filtered_sorted_rows(&clear_sort(&desc))),
+            row_bytes(&baseline),
+            "`Default order` must restore the curated order from a reversed cut too"
+        );
+
+        // And from a MULTI-column cut (shift+click), which is exactly the state chorale's own
+        // third-click cycle cannot undo on its own: a plain click clears one column, leaving
+        // the others set. This is why the explicit control is the contract.
+        let multi = toggle_sort(&state, ColumnId("file"), SortAction::Append);
+        let multi = toggle_sort(&multi, ColumnId("severity"), SortAction::Append);
+        assert_eq!(multi.sort.len(), 2, "two columns are sorted");
+        let one_more_click = toggle_sort(&multi, ColumnId("severity"), SortAction::Replace);
+        assert!(
+            !one_more_click.sort.is_empty(),
+            "a plain click out of a multi-sort does NOT reach the default — it replaces the \
+             list with one column. Without the explicit control there would be no way back."
+        );
+        assert_eq!(
+            row_bytes(&filtered_sorted_rows(&clear_sort(&multi))),
+            row_bytes(&baseline),
+            "`Default order` must restore the curated order from a multi-column cut too"
+        );
+    }
+
+    /// req_pass2_8: the default order survives a SCAN CHANGE. A fresh mount starts with
+    /// chorale's sort empty, which is the curated default — the curator never inherits the
+    /// previous scan's re-cut, and never has to reset it by hand.
+    #[test]
+    fn req_pass2_8_a_fresh_scan_mounts_on_the_curated_default() {
+        let state = queue_table_state(&sortable_queue_rows());
+        assert!(
+            state.sort.is_empty(),
+            "a newly mounted findings table carries no manual sort"
+        );
+        assert_eq!(
+            order_indicator_text(&state.sort, &finding_columns(vec![], false)),
+            DEFAULT_ORDER_LABEL,
+            "and the indicator says so"
+        );
+    }
+
+    /// req_pass2_8 (manual sort vs RULE GROUPING — the deliberate choice): a manual cut
+    /// reorders the GROUPS and the rows within them; it never flattens the grouping.
+    ///
+    /// That falls out of chorale's own pipeline rather than being imposed: `visible_grouped_view`
+    /// sorts the whole row set first and then partitions it into groups in first-occurrence
+    /// order, so each group lands at the position of its best row under the active cut and its
+    /// rows keep that cut inside the group. It is also exactly what design §5 specifies
+    /// ("Groups order by their best row; rows order within groups by the same key").
+    ///
+    /// Grouping is load-bearing — it is what the deviation group-header sentence and the later
+    /// rule-level bulk actions hang off — so "every group still has exactly one header and a
+    /// contiguous block of rows" is the invariant under test, not just the row order.
+    #[test]
+    fn req_pass2_8_manual_sort_reorders_rule_groups_without_flattening_them() {
+        use chorale_core::{toggle_sort, visible_grouped_view, GroupedRow, SortAction};
+
+        // Two rules, two sites each, so a cut can both reorder the groups and reorder inside
+        // one. Severities are chosen so the severity cut interleaves the rules if grouping were
+        // ignored — that is what makes this test able to fail.
+        let findings = TriageModel::new().visible(&[
+            kinded_finding("RULE-B", "critical", serde_json::json!({ "kind": "defect" })),
+            kinded_finding("RULE-A", "high", serde_json::json!({ "kind": "defect" })),
+            kinded_finding("RULE-B", "low", serde_json::json!({ "kind": "defect" })),
+            kinded_finding("RULE-A", "medium", serde_json::json!({ "kind": "defect" })),
+        ]);
+        let mut state = queue_table_state(&findings);
+        // Group by rule only (the real table adds a second File level; one level is enough to
+        // pin the invariant and keeps the walk readable).
+        state.grouping = vec![ColumnId("type")];
+        state.grouped_pagination = chorale_core::GroupedPaginationMode::Virtualized;
+
+        /// Walk a grouped view into (group label, row count) pairs, asserting as it goes that
+        /// no group's header appears twice and that every data row sits under a header.
+        fn group_blocks(view: &[GroupedRow<FindingView>]) -> Vec<(String, usize)> {
+            let mut blocks: Vec<(String, usize)> = Vec::new();
+            for row in view {
+                match row {
+                    GroupedRow::Header { label, .. } => {
+                        assert!(
+                            !blocks.iter().any(|(l, _)| l == label),
+                            "group {label} appeared twice — the grouping was flattened"
+                        );
+                        blocks.push((label.clone(), 0));
+                    }
+                    GroupedRow::Data(..) => {
+                        blocks
+                            .last_mut()
+                            .expect("a data row before any group header")
+                            .1 += 1;
+                    }
+                    // `GroupedRow` is `#[non_exhaustive]`, so the wildcard is mandatory rather
+                    // than a choice. It panics instead of skipping: a chorale upgrade that adds
+                    // a row kind this walk does not understand would otherwise make the
+                    // grouping invariant quietly stop being checked.
+                    _ => panic!(
+                        "chorale's GroupedRow grew a variant this grouping-invariant walk does \
+                         not understand; teach it the new row kind rather than skipping it"
+                    ),
+                }
+            }
+            blocks
+        }
+
+        // Default: RULE-B leads on its critical row; each rule keeps both of its sites.
+        assert_eq!(
+            group_blocks(&visible_grouped_view(&state)),
+            vec![("RULE-B".to_string(), 2), ("RULE-A".to_string(), 2)],
+            "default order: the group with the critical row first, both groups intact"
+        );
+
+        // Ascending Severity: RULE-B still leads (critical), and inside each group the two
+        // sites are now in ladder order rather than the default's.
+        let asc = toggle_sort(&state, ColumnId("severity"), SortAction::Replace);
+        assert_eq!(
+            group_blocks(&visible_grouped_view(&asc)),
+            vec![("RULE-B".to_string(), 2), ("RULE-A".to_string(), 2)],
+            "a manual cut keeps one header per group and its rows contiguous"
+        );
+
+        // Descending Severity: RULE-B's best row is now its `low` one, so the GROUPS swap —
+        // the group order follows the group's best row under the active cut.
+        let desc = toggle_sort(&asc, ColumnId("severity"), SortAction::Replace);
+        assert_eq!(
+            group_blocks(&visible_grouped_view(&desc)),
+            vec![("RULE-B".to_string(), 2), ("RULE-A".to_string(), 2)],
+            "reversing the cut still yields exactly two intact groups"
+        );
+        let rows: Vec<String> = visible_grouped_view(&desc)
+            .iter()
+            .filter_map(|r| match r {
+                GroupedRow::Data(_, f) => Some(f.severity.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["low", "critical", "medium", "high"],
+            "within each group the rows follow the descending cut; the groups are led by \
+             their own best row under it"
+        );
+    }
+
+    /// req_pass2_8: a manual cut PRESERVES the deviation-ratio honesty baked into the default.
+    ///
+    /// The default key orders deviations by ascending `deviating_sites / assessed_sites` in
+    /// parts-per-million, with an unknown or zero denominator sorting after every known ratio
+    /// rather than fabricating a position. chorale's sort is STABLE, so ties in the manual key
+    /// keep the curated order underneath — a cut by Kind groups the deviations together and the
+    /// cheapest-first, unknown-last ratio order survives inside that block, untouched and
+    /// un-recomputed.
+    #[test]
+    fn req_pass2_8_manual_sort_preserves_the_deviation_ratio_order_within_ties() {
+        use chorale_core::{filtered_sorted_rows, toggle_sort, SortAction};
+
+        let dev = |rule: &str, deviating: u32, assessed: serde_json::Value| {
+            kinded_finding(
+                rule,
+                "medium",
+                serde_json::json!({
+                    "kind": "deviation",
+                    "deviating_sites": deviating,
+                    "assessed_sites": assessed,
+                    "convention_option_id": "versioned",
+                    "convention_label": "URI-versioned endpoints",
+                }),
+            )
+        };
+        let findings = TriageModel::new().visible(&[
+            dev("A-UNKNOWN-RATIO", 3, serde_json::Value::Null),
+            dev("B-COSTLY", 19, serde_json::json!(47)),
+            dev("C-CHEAP", 2, serde_json::json!(47)),
+            kinded_finding("D-DEFECT", "medium", serde_json::json!({ "kind": "defect" })),
+        ]);
+        let state = queue_table_state(&findings);
+
+        // Sanity: the default already orders them cheapest-first, unknown last.
+        assert_eq!(
+            findings.iter().map(|f| f.rule_id.as_str()).collect::<Vec<_>>(),
+            vec!["D-DEFECT", "C-CHEAP", "B-COSTLY", "A-UNKNOWN-RATIO"],
+        );
+
+        // A manual cut by Kind. Every deviation ties on the Kind key, so the stable sort hands
+        // the ratio ordering straight through.
+        let by_kind = toggle_sort(&state, ColumnId("kind"), SortAction::Replace);
+        assert_eq!(
+            filtered_sorted_rows(&by_kind)
+                .iter()
+                .map(|f| f.rule_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["D-DEFECT", "C-CHEAP", "B-COSTLY", "A-UNKNOWN-RATIO"],
+            "cheapest deviation first and the unknown denominator last, inside the manual cut \
+             — the ratio is never re-derived and never given a fabricated position"
+        );
+    }
+
+    /// req_pass2_8: the order indicator names the active column AND direction, in priority
+    /// order for a multi-column cut, and says the curated default is still underneath (which it
+    /// is — chorale's sort is stable).
+    #[test]
+    fn req_pass2_8_order_indicator_names_the_column_and_direction() {
+        use chorale_core::{SortDirection, SortState};
+
+        let cols = finding_columns(vec!["me/api".to_string()], false);
+        assert_eq!(order_indicator_text(&[], &cols), DEFAULT_ORDER_LABEL);
+
+        let one = [SortState::new(ColumnId("severity"), SortDirection::Desc)];
+        let text = order_indicator_text(&one, &cols);
+        assert!(text.contains("Severity"), "names the column header; got {text}");
+        assert!(text.contains('\u{2193}'), "names the direction; got {text}");
+        assert!(
+            text.contains("Camerata default order underneath"),
+            "says the curated order is still the tie-break; got {text}"
+        );
+
+        let two = [
+            SortState::new(ColumnId("file"), SortDirection::Asc),
+            SortState::new(ColumnId("severity"), SortDirection::Desc),
+        ];
+        let text = order_indicator_text(&two, &cols);
+        assert!(
+            text.find("File").expect("File named") < text.find("Severity").expect("Severity named"),
+            "a multi-column cut is listed in priority order; got {text}"
+        );
+
+        // An id with no column (a column removed from the set) degrades to the raw id rather
+        // than dropping the cut from the sentence and claiming an order that isn't showing.
+        let gone = [SortState::new(ColumnId("no-such-column"), SortDirection::Asc)];
+        assert!(order_indicator_text(&gone, &cols).contains("no-such-column"));
+    }
+
+    /// req_pass2_8: the whole Queue is re-cuttable. Every column the curator would re-cut by is
+    /// `.sortable()`, so chorale renders its header clickable with its own ↑/↓ arrow; only
+    /// Snippet (free text, no meaningful order) is not.
+    #[test]
+    fn req_pass2_8_every_meaningful_queue_column_header_is_sortable() {
+        let cols = finding_columns(vec!["me/api".to_string()], false);
+        for id in [
+            "repo",
+            "kind",
+            "severity",
+            "authority",
+            "type",
+            "needs_review",
+            "status",
+            "file",
+            "loc",
+        ] {
+            let col = cols
+                .iter()
+                .find(|c| c.id == ColumnId(id))
+                .unwrap_or_else(|| panic!("column {id} must exist"));
+            assert!(
+                col.sortable,
+                "{id}: the curator must be able to re-cut the list by this column"
+            );
+        }
+    }
+
+    /// req_pass2_8: the Severity column's filter vocabulary is built from the SAME function as
+    /// its cell value, so the two cannot drift. A stale option list would match nothing and
+    /// read as "no findings" — a worse failure than a wrong sort.
+    #[test]
+    fn req_pass2_8_severity_filter_vocabulary_matches_the_cell_it_filters() {
+        let cols = finding_columns(vec!["me/api".to_string()], false);
+        let sev = cols
+            .iter()
+            .find(|c| c.id == ColumnId("severity"))
+            .expect("Severity column");
+        let options = match &sev.filter {
+            FilterKind::MultiSelect { options } => options.clone(),
+            other => panic!("Severity must keep its multi-select filter, got {other:?}"),
+        };
+        for s in ["critical", "high", "medium", "low"] {
+            let cell = (sev.accessor)(&kinded_finding("R", s, serde_json::json!({})));
+            let CellValue::Text(cell) = cell else {
+                panic!("Severity cells are text");
+            };
+            assert!(
+                options.contains(&cell),
+                "{s}: the filter option list must contain the exact cell value it filters \
+                 (cell={cell}, options={options:?})"
+            );
+        }
+    }
+
+    /// req_pass2_8: making the cell value the sort key must not change what the curator READS.
+    ///
+    /// chorale renders a `RenderKind::Badge` cell by resolving the cell value in the badge map
+    /// and drawing the matched variant's LABEL (`badge_span` in chorale-dioxus), so asserting
+    /// the map resolution is asserting the rendered text. Done here rather than over SSR HTML
+    /// because the real table mounts with every group collapsed, so no severity cell is in the
+    /// snapshot to look at.
+    ///
+    /// The one place the ladder prefix IS visible is the Severity filter's checkbox list, whose
+    /// option labels are the raw values chorale filters on — it now reads "1 critical / 2 high /
+    /// 3 medium / 4 low". That is the accepted cost of chorale 0.2.3 having no sort-key hook
+    /// separate from the cell value; the list was already in this order, and it is honest about
+    /// the ladder rather than wrong about it.
+    #[test]
+    fn req_pass2_8_severity_cell_still_renders_the_authored_label() {
+        let cols = finding_columns(vec!["me/api".to_string()], false);
+        let sev = cols
+            .iter()
+            .find(|c| c.id == ColumnId("severity"))
+            .expect("Severity column");
+        let RenderKind::Badge(map) = &sev.render_kind else {
+            panic!("Severity must still render as a badge");
+        };
+        for (authored, label, color) in [
+            ("critical", "Critical", "red"),
+            ("high", "High", "orange"),
+            ("medium", "Medium", "yellow"),
+            ("low", "Low", "gray"),
+        ] {
+            let CellValue::Text(cell) =
+                (sev.accessor)(&kinded_finding("R", authored, serde_json::json!({})))
+            else {
+                panic!("Severity cells are text");
+            };
+            let variant = map.resolve(&cell).unwrap_or_else(|| {
+                panic!("{authored}: cell value {cell:?} must resolve in the badge map")
+            });
+            assert_eq!(
+                variant.label, label,
+                "{authored}: the rendered badge must read the authored label, never the \
+                 ladder prefix"
+            );
+            assert_eq!(variant.color, color, "{authored}: colour unchanged");
+        }
+    }
+
+    /// req_pass2_8 (a DELIBERATE non-change, pinned so it is not "fixed" by accident): the Kind
+    /// column's cell value stays the bare WIRE TAG.
+    ///
+    /// Severity needed its ladder position in the cell because its words sort against their own
+    /// meaning. Kind's do not: the wire tags sort `defect` → `deviation` → `unspecified`, which
+    /// is a coherent actionability order. Prefixing a rank here would buy nothing and would cost
+    /// the thing req_pass2_5 pins — that the Kind filter's vocabulary IS the wire's, never
+    /// re-derived prose.
+    ///
+    /// The `unspecified`-first priority therefore lives where Zach's ruling put it: in the
+    /// DEFAULT order (`kind_rank`), which is what the table shows until the curator chooses
+    /// otherwise. The alarm is also surfaced independently of row order by the Queue tab's
+    /// count chip, so a manual cut can never hide it.
+    #[test]
+    fn req_pass2_8_kind_column_keeps_the_bare_wire_tag_as_its_cell_value() {
+        use chorale_core::{filtered_sorted_rows, toggle_sort, SortAction};
+
+        let cols = finding_columns(vec!["me/api".to_string()], false);
+        let kind = cols
+            .iter()
+            .find(|c| c.id == ColumnId("kind"))
+            .expect("Kind column");
+        let row = kinded_finding("R", "high", serde_json::json!({ "kind": "defect" }));
+        assert_eq!(
+            (kind.accessor)(&row),
+            CellValue::Text("defect".to_string()),
+            "no ladder prefix on Kind — the wire tag is the cell value and the filter vocabulary"
+        );
+
+        // And the cut it produces is the actionability order, not an accident nobody checked.
+        let findings = TriageModel::new().visible(&[
+            kinded_finding("A-UNMAPPED", "high", serde_json::json!({})),
+            kinded_finding("B-DEFECT", "high", serde_json::json!({ "kind": "defect" })),
+            kinded_finding(
+                "C-DEVIATION",
+                "high",
+                serde_json::json!({
+                    "kind": "deviation", "deviating_sites": 2, "assessed_sites": 47,
+                    "convention_option_id": "v", "convention_label": "L",
+                }),
+            ),
+        ]);
+        assert_eq!(
+            findings.iter().map(|f| f.rule_id.as_str()).collect::<Vec<_>>(),
+            vec!["A-UNMAPPED", "B-DEFECT", "C-DEVIATION"],
+            "the DEFAULT floats the kind-less alarm to the top of its severity band"
+        );
+        let by_kind = toggle_sort(
+            &queue_table_state(&findings),
+            ColumnId("kind"),
+            SortAction::Replace,
+        );
+        assert_eq!(
+            filtered_sorted_rows(&by_kind)
+                .iter()
+                .map(|f| f.rule_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["B-DEFECT", "C-DEVIATION", "A-UNMAPPED"],
+            "the manual Kind cut is the wire tags' own order: defect, deviation, unspecified"
         );
     }
 }
