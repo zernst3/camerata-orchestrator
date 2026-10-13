@@ -133,10 +133,9 @@ async fn req_w17_the_ten_moved_rules_summarise_with_their_authored_qualifies() {
             rule.summary
         );
 
-        let why = rule
-            .decision_why
-            .as_deref()
-            .unwrap_or_else(|| panic!("{id} has a `[decision].why`; it is the fallback under test"));
+        let why = rule.decision_why.as_deref().unwrap_or_else(|| {
+            panic!("{id} has a `[decision].why`; it is the fallback under test")
+        });
         assert_ne!(
             rule.summary.trim(),
             why.trim(),
@@ -251,9 +250,7 @@ qualifies = "A note about THIS source specifically, not about the rule."
         lost.summary, "The fallback text, which must NOT become this rule's summary.",
         "the harmful shape's summary IS `[decision].why` — that is the defect, demonstrated"
     );
-    let annotated = set
-        .get_by_id("W17-Q-ANNOTATED-1")
-        .expect("fixture loads");
+    let annotated = set.get_by_id("W17-Q-ANNOTATED-1").expect("fixture loads");
     assert_eq!(
         annotated.summary, "The rule-level text the engine reads.",
         "the benign shape's summary is its rule-level `qualifies`; the nested note is ignored, \
