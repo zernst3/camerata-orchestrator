@@ -285,13 +285,77 @@ pub fn rules_on_multiple_surfaces(
 /// ceilings, `min_severity` floors and `deviation_ceiling` — a UI that recomputed severity
 /// would be a second calibration layer, which is precisely the mid-layer accretion this effort
 /// exists to remove.
-fn severity_rank(severity: &str) -> u8 {
+///
+/// Public because the MANUAL column sort needs the identical ordering of the identical
+/// authored string (see [`severity_sort_value`]): two rank tables for one ladder would drift,
+/// and the drift would show up as the curator's own re-cut disagreeing with the default.
+pub fn severity_rank(severity: &str) -> u8 {
     match severity {
         "critical" => 0,
         "high" => 1,
         "medium" => 2,
         _ => 3,
     }
+}
+
+/// The four calibrated severities in ladder order — the authored vocabulary this surface
+/// orders, named once so [`severity_sort_values`] and its tests cannot drift from
+/// [`severity_rank`].
+pub const CALIBRATED_SEVERITIES: [&str; 4] = ["critical", "high", "medium", "low"];
+
+/// The Severity column's CELL VALUE: the authored severity prefixed by its calibrated ladder
+/// position, so that a plain LEXICOGRAPHIC sort of the cell is the CALIBRATED sort.
+///
+/// ## Why the sort order has to live in the cell value
+///
+/// chorale orders a column by exactly the `CellValue` the column's accessor returns
+/// (`chorale_core::views::filtered_sorted_pairs` compares `(col.accessor)(a)` against
+/// `(col.accessor)(b)`), and `chorale-core` 0.2.3 exposes no separate sort-key hook on
+/// `ColumnDef` — `sortable` is a bool, not a comparator. So for a header click to produce a
+/// correct order, the cell value IS the sort key; there is nowhere else to put it.
+///
+/// Severity is the one Queue column whose words do not sort into their own meaning:
+/// alphabetically `low` lands above `medium`, so a bare lexicographic header cut reads
+/// "critical, high, low, medium" — a visibly wrong ladder in BOTH directions. Prefixing the
+/// authored word with its rank makes chorale's own comparator right without standing up a
+/// second, parallel sort mechanism alongside it.
+///
+/// ## Why this is not a second calibration layer
+///
+/// Nothing is re-derived, re-weighted or recomputed. The prefix is [`severity_rank`] — the
+/// same ordering of the same authored string that [`queue_sort_key`] already applies — and
+/// the authored word travels through verbatim. Severity's calibration still happens entirely
+/// upstream (`max_severity` ceilings, `min_severity` floors, `deviation_ceiling`); a Deviation
+/// and a Defect that authored the same severity get byte-identical sort values here, because
+/// the kind is not an input.
+///
+/// ## Reading the value
+///
+/// Ranks are 1..=4 — single digits, so lexicographic ordering of the prefix is numeric
+/// ordering, with no zero-padding needed. The authored word stays in the string so every
+/// consumer that wants the severity itself can still read it, and an off-vocabulary severity
+/// passes through rather than being dropped or renamed: it shares rank 4 with `low` exactly as
+/// it does in the default key (`severity_rank`'s catch-all), then sub-orders alphabetically.
+///
+/// Display is NOT this string: the column maps each value back to its authored label through
+/// chorale's badge map, and the row highlight, the CSV export and the report all read
+/// `FindingView::severity` directly.
+pub fn severity_sort_value(severity: &str) -> String {
+    format!("{} {}", severity_rank(severity) + 1, severity)
+}
+
+/// The four calibrated severities as Severity-column cell values, in ladder order — the
+/// column's multi-select filter options.
+///
+/// Built from [`severity_sort_value`], the same function the accessor uses, so the filter
+/// vocabulary can never drift from the cell it filters. (A hand-written option list that fell
+/// out of sync would silently filter every row out, which is a worse failure than a wrong
+/// sort: it looks like "no findings".)
+pub fn severity_sort_values() -> Vec<String> {
+    CALIBRATED_SEVERITIES
+        .iter()
+        .map(|s| severity_sort_value(s))
+        .collect()
 }
 
 /// Ordering rank of the row's KIND within one severity band (design §5 step 3).
@@ -1005,6 +1069,120 @@ mod tests {
             out[0].rule_id, "Z-HIGH-DEVIATION",
             "the authored severity ceiling/floor is the only calibration layer; a high \
              deviation outranks a medium defect"
+        );
+    }
+
+    // ── req_pass2_8: the MANUAL severity cut (design §5, Zach 2026-10-12) ────
+    //
+    // "Keep sort with [unspecified] first, sure, as long as the table can be manually sorted
+    // by me as the user." The default order below is unchanged; these cover the cell value the
+    // Severity column hands chorale so a HEADER CLICK walks the calibrated ladder instead of
+    // the alphabet. The rank comes from `severity_rank`, the same function the default key
+    // uses, which is the whole point.
+
+    /// req_pass2_8: the manual severity cut orders the CALIBRATED ladder, not the alphabet.
+    /// Alphabetically `low` precedes `medium`; as sort values it must not.
+    #[test]
+    fn req_pass2_8_severity_sort_value_orders_the_calibrated_ladder_not_the_alphabet() {
+        let v = |s: &str| severity_sort_value(s);
+        assert!(v("critical") < v("high"), "critical above high");
+        assert!(v("high") < v("medium"), "high above medium");
+        assert!(
+            v("medium") < v("low"),
+            "medium above low — the whole reason the rank is in the cell value: the raw words \
+             sort the other way round ({:?} < {:?})",
+            "low",
+            "medium"
+        );
+        // The bug being fixed, stated outright: the authored words alone are mis-ordered.
+        assert!("low" < "medium", "the raw authored words sort low above medium");
+    }
+
+    /// req_pass2_8: ascending and descending are exact reverses of ONE ladder — a manual cut
+    /// cannot produce an order that is neither (which is what the alphabetical cut did).
+    #[test]
+    fn req_pass2_8_severity_sort_values_are_a_total_ladder_in_both_directions() {
+        let mut asc = severity_sort_values();
+        asc.sort();
+        assert_eq!(
+            asc,
+            severity_sort_values(),
+            "the option list is already in ascending sort order"
+        );
+        let mut desc = severity_sort_values();
+        desc.sort();
+        desc.reverse();
+        let mut expected = severity_sort_values();
+        expected.reverse();
+        assert_eq!(desc, expected, "descending is the exact reverse");
+    }
+
+    /// req_pass2_8: the sort value carries the AUTHORED severity verbatim and adds only its
+    /// ladder position. Nothing is renamed, bucketed or dropped — including a severity outside
+    /// the calibrated vocabulary, which passes through rather than being silently normalised.
+    #[test]
+    fn req_pass2_8_severity_sort_value_carries_the_authored_word_verbatim() {
+        for s in CALIBRATED_SEVERITIES {
+            assert!(
+                severity_sort_value(s).ends_with(s),
+                "{s}: the authored word must survive into the cell value"
+            );
+        }
+        assert!(
+            severity_sort_value("blocker").ends_with("blocker"),
+            "an off-vocabulary severity passes through rather than being renamed"
+        );
+    }
+
+    /// req_pass2_8: the manual cut never re-derives severity from kind. A Deviation and a
+    /// Defect that authored the SAME severity produce byte-identical sort values, so no header
+    /// click can introduce the kind-based discount that
+    /// `req_pass2_3_sort_never_re_derives_severity_from_kind` forbids in the default order.
+    #[test]
+    fn req_pass2_8_severity_sort_value_never_re_derives_severity_from_kind() {
+        let d = defect("A-DEFECT", "high");
+        let dev = deviation("Z-DEVIATION", "high", 19, Some(20));
+        assert_eq!(
+            severity_sort_value(&d.severity),
+            severity_sort_value(&dev.severity),
+            "kind is not an input to the severity sort — a high deviation sorts in the high \
+             band exactly like a high defect"
+        );
+    }
+
+    /// req_pass2_8 (anti-drift): the manual cut and the default order read ONE rank table.
+    /// For every ordered pair of calibrated severities, the sort-value comparison and
+    /// `severity_rank` must agree — if someone re-tabulated the ladder in one place only, this
+    /// is what catches it.
+    #[test]
+    fn req_pass2_8_severity_sort_value_agrees_with_the_default_keys_rank() {
+        for a in CALIBRATED_SEVERITIES {
+            for b in CALIBRATED_SEVERITIES {
+                assert_eq!(
+                    severity_sort_value(a).cmp(&severity_sort_value(b)),
+                    severity_rank(a).cmp(&severity_rank(b)),
+                    "{a} vs {b}: the manual cut must order exactly as the default key's \
+                     severity term does"
+                );
+            }
+        }
+    }
+
+    /// req_pass2_8: an off-vocabulary severity takes the SAME position in the manual cut that
+    /// it takes in the default key (`severity_rank`'s catch-all shares `low`'s rank), rather
+    /// than inventing a position for it. Same honesty as the unknown deviation denominator.
+    #[test]
+    fn req_pass2_8_off_vocabulary_severity_shares_lows_rank_in_both_orders() {
+        assert_eq!(severity_rank("blocker"), severity_rank("low"));
+        let (unknown, low) = (severity_sort_value("blocker"), severity_sort_value("low"));
+        assert_eq!(
+            unknown.split(' ').next(),
+            low.split(' ').next(),
+            "same ladder position as low, exactly as in the default key"
+        );
+        assert!(
+            severity_sort_value("medium") < unknown,
+            "and it still sits below every calibrated severity above low"
         );
     }
 
