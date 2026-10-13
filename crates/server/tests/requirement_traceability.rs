@@ -72,9 +72,24 @@ const REGISTRY: &[(&str, Coverage)] = &[
     ("A6", Required(&["req_a6"])),
     ("A7", Required(&["req_a7", "req_h1"])),
     ("A8", Required(&["req_a8"])),
-    ("A9", InFlight("unassigned: our export taxonomy still has no 'architecture' family; `category` \
-                     is the slugified rule domain. W4's A3 fix corrected the tier LABEL but not the \
-                     export taxonomy.")),
+    // Promoted from InFlight on 2026-10-12, by this gate's own instruction: A9 acquired
+    // `req_a9_*` tests and the second assertion fails until the row is promoted, so the
+    // countdown cannot rot into a standing allowlist.
+    //
+    // The fix went wider than the entry described. The mangled category was blamed on the
+    // AI tier, but BOTH `category_for` and `category_for_finding` terminated in
+    // `prettify_category_key(rule_id)`, which mangles three populations: native-checker
+    // rules that are never in the corpus, AI-tier invented ids, and rows predating the
+    // taxonomy backfill. `category_for` -- used for `audited_rule_ids` and `also_matches`,
+    // where no `Finding` exists -- had no mitigation at all. Resolved by one shared
+    // three-deep ladder (corpus domain, then the finding's calibrated category, then the
+    // closed taxonomy the rule id's tokens classify into) with a single generic fallback,
+    // so "Arch No" renders as "Architecture" and "Legacy Unmapped" as "Other".
+    ("A9", Required(&["req_a9"])),
+    // Determinism work that landed alongside A9: exports are byte-reproducible because all
+    // four wall-clock reads (PDF `SOURCE_DATE_EPOCH`, workbook `DocProperties`, and two raw
+    // `Utc::now()` calls in the report data itself) now derive from the scan instant.
+    ("DET", Required(&["req_det"])),
     ("A10", Exempt("a per-class verdict tally over the audited plants (1 not-armed, 4 \
                     predicate-mismatch, 3 no-rule, 2 combination). A measurement, not a behaviour.")),
     // ── AUDIT B — artifact parity, hedge counts, merge ─────────────────────────────────────────
