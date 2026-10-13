@@ -1604,6 +1604,7 @@ mod tests {
             stack_exceptions: Vec::new(),
             extra_domains: Vec::new(),
             kind: None,
+            inspectable: None,
             max_severity: None,
             min_severity: None,
             deviation_ceiling: None,

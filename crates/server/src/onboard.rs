@@ -891,8 +891,95 @@ impl SelectedRule {
     }
 }
 
+/// W16. The SCAN SET: every rule in `selected` the corpus says the scan can actually assess.
+///
+/// # What this removes, and why it is not a second prefix gate
+///
+/// A rule the corpus declares `inspectable = false` is **emitted, never scanned**. Its subject
+/// is the AUTHORING PROCESS (how an agent decides, which model tier ran, what a commit message
+/// says) or lives outside the repository entirely, so no amount of reading the file tree can
+/// establish compliance. Before W16 every such rule armed on every unattended scan, reached
+/// the semantic pass, returned nothing from the model — correctly; there is nothing to find —
+/// and was then recorded `RuleLedgerEntry::verified_clean()`, because that predicate is
+/// `ran && findings_emitted == 0 && !not_applicable` and nothing ever marked them otherwise.
+/// 14 of the 23 agentic rules carry an external source URL, so they resolved GROUNDED
+/// citations and sorted FIRST into the PDF's ten-slot "What's healthy" list. A paid client
+/// deliverable could open with "`ORCH-MODEL-TIERING-1`: verified clean" — a claim about how we
+/// run our agents, presented as a verified property of their codebase.
+///
+/// This NARROWS the W4 ruling recorded on [`semantic_rule_ids_for_repo`]; it does not reverse
+/// it. W4 was right that the old `ORCH-`/`SPIRIT-`/`PROC-` LEXICAL gate over-excluded — every
+/// one of those families is mixed, and `SPIRIT-FILE-SIZE-1`, `PROC-PR-CONCURRENCY-1`,
+/// `PROC-HIDE-DEAD-END-1` and the four pipeline-config `ORCH-*` rules all stay scannable here.
+/// The distinction is per-rule, declared in the rule's own TOML where its author can see it,
+/// and this function reads that declaration rather than re-deriving it from an id.
+///
+/// # Why HERE, before arming, rather than filtering findings afterwards
+///
+/// `audit_repos` calls this on its very first line, so an emit-only rule is gone before:
+///
+/// - `scan_cache::rules_fingerprint` (it must not perturb the incremental cache key's meaning
+///   beyond the one-time invalidation this change causes),
+/// - `ScanProvenance::audited_rule_ids` — which is what the Coverage sheet's per-rule rows and
+///   the G3 "we checked N rules" line are built from, and the pre-ledger fallback source for
+///   "What's healthy",
+/// - `repo_selected_ids`, so the deterministic architectural engine never arms for it either
+///   (none of the excluded rules has a registered checker, but the exclusion must be total
+///   rather than true-by-coincidence),
+/// - [`semantic_rule_ids_for_repo`], so it never enters the model prompt, and
+/// - every `ScanLedger::record_rule` call, all of which iterate one of the two sets above.
+///
+/// Suppressing its FINDINGS instead would leave the rule armed and recorded as having run with
+/// zero findings — which is precisely the defect, re-spelled. A rule that armed and was then
+/// silenced still pollutes the ledger's accounting.
+///
+/// # Degradation
+///
+/// `corpus == None` (a test fixture, or a checkout with no corpus) returns `selected`
+/// unchanged — today's behavior. So does a rule the corpus does not know, and a rule that does
+/// not declare the field (`Rule::is_inspectable` resolves an undeclared rule to `true`; the
+/// corpus-load gate `camerata_rules::rules_missing_inspectable` is what refuses those, at
+/// build time). The fail-safe direction throughout is KEEP SCANNING: a missing declaration
+/// must never silently delete coverage.
+pub fn inspectable_rules_for_scan(
+    selected: &[SelectedRule],
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<SelectedRule> {
+    let Some(corpus) = corpus else {
+        return selected.to_vec();
+    };
+    selected
+        .iter()
+        .filter(|r| {
+            corpus
+                .get_by_id(&r.id)
+                .map(|rule| rule.is_inspectable())
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+/// [`semantic_rule_ids_for_repo`] for callers outside this crate (the W16 end-to-end test,
+/// which drives the real arming → prompt → ledger → export chain link by link). Same function,
+/// same no-filter contract; exported separately so the internal one keeps its `pub(crate)`
+/// visibility and its call sites stay unchanged.
+pub fn semantic_rule_ids_for_repo_public(
+    selected: &[SelectedRule],
+    spec: &str,
+) -> Vec<(String, String)> {
+    semantic_rule_ids_for_repo(selected, spec)
+}
+
 /// The SEMANTIC (LLM-audited) rule set `audit_repos` hands to `ai_audit::audit_repo` for one
 /// repo: EVERY rule in `selected` that applies to `spec`. No other filter, of any kind.
+///
+/// W16 note: the rules this sees have ALREADY had the corpus's `inspectable = false` set
+/// removed, by [`inspectable_rules_for_scan`] at the top of `audit_repos` — not here. This
+/// function's "no filter of any kind" contract is intact and deliberate: the scan-vs-emit
+/// decision belongs at the point the scan set is CHOSEN, not at the point the prompt is built,
+/// so every downstream consumer (the ledger, provenance, the architectural engine) sees the
+/// same set this one does.
 ///
 /// # Why there are no exclusions left (Pass-1 W4)
 ///
@@ -1156,6 +1243,16 @@ pub async fn audit_repos(
         crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
         crate::llm::BackendResolution::Blocked { .. } => crate::llm::Backend::Cli,
     };
+    // W16: THE SCAN SET. Every rule the corpus declares `inspectable = false` is dropped
+    // HERE, before anything in this function has looked at it — before the rule fingerprint,
+    // before `audited_rule_ids`, before `repo_selected_ids`, before the semantic prompt,
+    // before any `record_rule` call. See `inspectable_rules_for_scan`'s doc comment for why
+    // this is the right seam and why the exclusion must happen before arming rather than by
+    // filtering findings afterwards. The EMIT path (`crate::arm`) is a separate flow over the
+    // project's selected rules and is deliberately untouched: an emit-only rule is still
+    // installed into the client's AGENTS.md/CONVENTIONS.md as a directive.
+    let scan_rules = inspectable_rules_for_scan(selected, corpus);
+    let selected: &[SelectedRule] = &scan_rules;
     // Provenance (P1): stamp the start time now, before any I/O, so `finished_at -
     // started_at` reflects the whole run including the git-ref capture below.
     let started_at = chrono::Utc::now().to_rfc3339();
@@ -4733,6 +4830,7 @@ mod tests {
             stack_exceptions: Vec::new(),
             extra_domains: Vec::new(),
             kind: None,
+            inspectable: None,
             max_severity: None,
             min_severity: None,
             deviation_ceiling: None,
@@ -4778,6 +4876,7 @@ mod tests {
             stack_exceptions: Vec::new(),
             extra_domains: Vec::new(),
             kind,
+            inspectable: None,
             max_severity: None,
             min_severity: None,
             deviation_ceiling: None,
