@@ -2382,6 +2382,68 @@ textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-f
 .apply-overwrite-files li { font-size: 12px; color: var(--ink-soft); }
 .apply-overwrite-files code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; background: var(--accent-wash); padding: 1px 5px; border-radius: 5px; }
 
+/* ── Pass 2: the five-kind taxonomy on the curator workbench ──────────────────────────────
+   The kind switcher is the PRIMARY axis (one tab per kind surface); the triage switch below
+   it is secondary and belongs to the Queue alone. */
+.kind-switch { display: flex; gap: 6px; margin: 4px 0 10px; flex-wrap: wrap; }
+.kind-tab {
+  display: inline-flex; align-items: center; gap: 7px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft);
+  font-size: 13px; font-weight: 700; padding: 8px 15px; border-radius: 8px; cursor: pointer;
+  transition: border-color .15s var(--ease), color .15s var(--ease), background .15s var(--ease);
+}
+.kind-tab:hover { border-color: var(--accent); color: var(--ink); }
+.kind-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.kind-tab.active .triage-tab-count { background: rgba(255,255,255,.25); color: #fff; }
+/* The alarm chip: rows with no kind at all. Red and loud, because it means an unmapped
+   emission path upstream — a pipeline bug, not a finding class. */
+.kind-unspecified-chip {
+  font-size: 10.5px; font-weight: 800; letter-spacing: .02em; white-space: nowrap;
+  padding: 1px 7px; border-radius: 999px;
+  color: #fff; background: #d4332b; border: 1px solid #d4332b;
+}
+
+/* Kind chip in the findings row. Defect = red family, Deviation = blue family; unspecified is
+   a red OUTLINE so it never reads as "just another kind". */
+.kind-chip {
+  display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
+  text-transform: uppercase; border-radius: 999px; padding: 1px 8px; white-space: nowrap;
+}
+.kind-chip.kind-defect { color: #7f1d1d; background: #fecaca; border: 1px solid #fecaca; }
+.kind-chip.kind-deviation { color: #1e3a8a; background: #bfdbfe; border: 1px solid #bfdbfe; }
+.kind-chip.kind-unspecified { color: #d4332b; background: transparent; border: 1px dashed #d4332b; }
+
+/* The three informational panels. Deliberately plain lists at this stage: their real
+   per-rule decisions (adopt, recommend) land in a later step, and a button with nothing
+   behind it is a dead affordance. NO severity is rendered on any of them — these kinds ship
+   at `info` by construction, so a severity badge would imply a ranking that does not exist. */
+.kind-panel { margin: 4px 0 14px; }
+.kind-panel-sub { font-size: 12.5px; color: var(--ink-soft); line-height: 1.55; margin: 0 0 10px; max-width: 95ch; }
+.kind-panel-empty { font-size: 12.5px; color: var(--ink-soft); margin: 10px 0 14px; }
+.kind-panel-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.kind-panel-row {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding: 7px 11px; background: var(--surface); border: 1px solid var(--line); border-radius: 7px;
+}
+.kind-panel-rule { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; font-weight: 700; }
+.kind-panel-label { font-size: 12.5px; color: var(--ink); flex: 1 1 320px; }
+.kind-panel-repo { font-size: 11px; color: var(--ink-soft); }
+.kind-panel-group { margin: 0 0 12px; }
+.kind-panel-group-h {
+  font-size: 11px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--ink-soft); margin: 0 0 5px;
+}
+
+/* One-rule-one-surface invariant violation: a PIPELINE bug, surfaced rather than tolerated. */
+.kind-conflict-banner {
+  margin: 10px 0 14px; padding: 11px 14px; border-radius: 9px;
+  background: rgba(212,51,43,0.10); border: 1px solid #d4332b;
+}
+.kind-conflict-h { margin: 0 0 5px; font-size: 13px; font-weight: 800; color: #d4332b; }
+.kind-conflict-b { margin: 0 0 7px; font-size: 12.5px; color: var(--ink-soft); line-height: 1.55; max-width: 95ch; }
+.kind-conflict-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; }
+.kind-conflict-list li { font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
 .triage-switch { display: flex; gap: 6px; margin: 4px 0 12px; flex-wrap: wrap; }
 .triage-tab {
   display: inline-flex; align-items: center; gap: 7px;

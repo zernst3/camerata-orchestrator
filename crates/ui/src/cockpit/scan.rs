@@ -440,6 +440,14 @@ pub(super) use camerata_ui_core::triage::{
     finding_key, finding_state, Disposition, FindingView, TechDebtBucket, TriageModel, TriageState,
 };
 
+// Pass 2 step 1 (docs/plans/2026-10-11_pass2-curator-ui-design.md): the five-kind taxonomy's
+// surface routing, the Kind badge's wire tag, and the one-rule-one-surface invariant. All pure,
+// all in core; this layer only renders them.
+pub(super) use camerata_ui_core::triage::{
+    findings_on_surface, kind_tag, rules_on_multiple_surfaces, surface_counts,
+    unspecified_kind_count, KindSurface,
+};
+
 /// Durable ignore: record the findings as reasoned baseline suppressions (governed PR).
 /// Returns the PR URL.
 pub(super) async fn ignore_findings(
@@ -1537,6 +1545,30 @@ pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<Colu
         .sortable()
         .filter(FilterKind::MultiSelect { options: repos })
         .initial_width(180.0),
+        // KIND — the most load-bearing new pixel on the row (design §4). Says what the row IS:
+        // an objective fault (DEFECT), an inconsistency against the codebase's own observed
+        // convention (DEVIATION), or an UNMAPPED row whose producer never assigned a kind.
+        //
+        // The cell VALUE is the stable wire tag straight from api-types (never re-derived, never
+        // parsed from prose), so the multi-select filter is exactly the wire vocabulary. The
+        // visible chip is drawn by the row renderer below, which gives `unspecified` the red
+        // outline it needs as an ALARM and keeps it visually out of the Defect family.
+        //
+        // Only the Queue's three tags appear here; the informational kinds never reach this
+        // table (they route to their own panels), so listing them as filter options would be a
+        // dead affordance.
+        ColumnDef::new(ColumnId("kind"), "Kind", |f: &FindingView| {
+            CellValue::Text(kind_tag(f).to_string())
+        })
+        .sortable()
+        .filter(FilterKind::MultiSelect {
+            options: vec![
+                "defect".to_string(),
+                "deviation".to_string(),
+                "unspecified".to_string(),
+            ],
+        })
+        .initial_width(130.0),
         ColumnDef::new(ColumnId("severity"), "Severity", |f: &FindingView| {
             CellValue::Text(f.severity.clone())
         })
@@ -1793,6 +1825,37 @@ pub(super) fn FindingsTable(
                         span { class: "finding-also-count", title: "{tip}", " +{extra}" }
                     }
                 }
+            }) as RowCellRenderer<FindingView>,
+        );
+        // KIND chip. Hand-rolled rather than a chorale `RenderKind::Badge` because the three
+        // states are not three colors of the same thing: `unspecified` is an ALARM about the
+        // pipeline (red OUTLINE, its own label), and a filled badge from the same palette would
+        // read as just another kind. Defect is the red family, Deviation the blue.
+        m.insert(
+            ColumnId("kind"),
+            std::sync::Arc::new(move |f: &FindingView, _val: &CellValue| {
+                let (cls, label, tip) = match kind_tag(f) {
+                    "defect" => (
+                        "kind-chip kind-defect",
+                        "Defect",
+                        "An objective fault.",
+                    ),
+                    "deviation" => (
+                        "kind-chip kind-deviation",
+                        "Deviation",
+                        "A consistency violation against the convention this codebase itself \
+                         predominantly follows. Same severity words as a defect, a different \
+                         claim.",
+                    ),
+                    _ => (
+                        "kind-chip kind-unspecified",
+                        "Unspecified",
+                        "PIPELINE BUG: this row reached the UI with no kind, which means an \
+                         unmapped emission path. It is NOT a defect — it is a gap to fix \
+                         upstream.",
+                    ),
+                };
+                rsx! { span { class: "{cls}", title: "{tip}", "{label}" } }
             }) as RowCellRenderer<FindingView>,
         );
         // "Needs review" flag + reason: an orange chip when the calibration pass hedged this
@@ -3286,6 +3349,200 @@ pub(super) fn AiReviewBlockedBanner(
     }
 }
 
+/// The one-rule-one-surface invariant, rendered (design §8).
+///
+/// The pipeline guarantees a rule emits deviations OR a convention row OR one no-convention row
+/// OR a not-assessed row — never two in the same scan. The UI ASSERTS that rather than
+/// defending against it: when it is violated, something upstream is mislabelling rows, and
+/// quietly picking a winner would hide the bug while corrupting the curator's counts. So this
+/// banner names the rule and the surfaces it reached, and nothing else changes — the rows still
+/// render where they routed, because suppressing them would hide evidence too.
+///
+/// Renders nothing in the healthy case, which is every case.
+#[component]
+pub(super) fn KindSurfaceConflictBanner(findings: Vec<FindingView>) -> Element {
+    let conflicts = rules_on_multiple_surfaces(&findings);
+    if conflicts.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        div { class: "kind-conflict-banner",
+            p { class: "kind-conflict-h",
+                "Pipeline bug: {conflicts.len()} rule(s) reached more than one kind surface in this scan"
+            }
+            p { class: "kind-conflict-b",
+                "A rule emits deviations OR a convention OR one no-convention row OR a not-assessed row \u{2014} never two. The counts below are therefore not trustworthy for these rules. This is an upstream emission bug, not something to triage here."
+            }
+            ul { class: "kind-conflict-list",
+                for ((repo , rule_id) , surfaces) in conflicts.iter() {
+                    {
+                        let names: Vec<&'static str> = surfaces.iter().map(|s| s.label()).collect();
+                        rsx! {
+                            li { key: "{repo}\u{0}{rule_id}", "{rule_id} ({repo}) \u{2192} {names.join(\", \")}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// CONVENTIONS panel — `ConventionObserved` rows: the codebase consistently follows a
+/// convention and there are ZERO violations. A compliment, one row per rule.
+///
+/// Deliberately a plain list, and deliberately UGLY at this stage. The real decision this panel
+/// needs (Adopt / Skip, with Zach's typed-destination commit gate) is step 2+; building a
+/// checklist with no commit behind it would be a dead affordance. What matters now is that
+/// these rows are OUT of the accusing queue.
+///
+/// NO SEVERITY is rendered, here or on the other two panels (design §9.4): informational kinds
+/// ship at `info` by construction, so a severity badge would imply a ranking decision that does
+/// not exist.
+#[component]
+pub(super) fn ConventionsPanel(findings: Vec<FindingView>) -> Element {
+    use camerata_api_types::audit::FindingKind;
+    if findings.is_empty() {
+        return rsx! {
+            p { class: "kind-panel-empty", "No conventions observed in this scan." }
+        };
+    }
+    rsx! {
+        div { class: "kind-panel",
+            p { class: "kind-panel-sub",
+                "Conventions this codebase already follows consistently, with zero violations. Adopting them into the client's derived decision set is a later step."
+            }
+            ul { class: "kind-panel-list",
+                for f in findings.iter() {
+                    {
+                        let label = match &f.kind {
+                            Some(FindingKind::ConventionObserved(c)) => c.convention_label.clone(),
+                            // Unreachable by routing; rendered rather than panicking so a
+                            // routing regression is visible instead of fatal.
+                            _ => String::new(),
+                        };
+                        rsx! {
+                            li { key: "{f.repo}\u{0}{f.rule_id}", class: "kind-panel-row",
+                                span { class: "kind-panel-rule", "{f.rule_id}" }
+                                span { class: "kind-panel-label", "{label}" }
+                                span { class: "kind-panel-repo", "{f.repo}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// NO CONVENTION panel — `NoConvention` rows: the codebase is inconsistent with no clear
+/// majority. Exactly one row per rule (A5.3), listing the options actually observed with their
+/// site counts where the producer could count them.
+///
+/// Read-only at this stage. Picking a recommended option is a CLIENT-FACING governance act
+/// (Zach's Q3 ruling) and inherits the typed-destination commit gate, which is a later step.
+#[component]
+pub(super) fn NoConventionPanel(findings: Vec<FindingView>) -> Element {
+    use camerata_api_types::audit::FindingKind;
+    if findings.is_empty() {
+        return rsx! {
+            p { class: "kind-panel-empty", "Every assessed rule reached a convention \u{2014} nothing split." }
+        };
+    }
+    rsx! {
+        div { class: "kind-panel",
+            p { class: "kind-panel-sub",
+                "Rules where the codebase is split with no clear majority. Recommending an option going forward is a governance act and is a later step."
+            }
+            ul { class: "kind-panel-list",
+                for f in findings.iter() {
+                    {
+                        let options: Vec<String> = match &f.kind {
+                            Some(FindingKind::NoConvention(n)) => n
+                                .observed_options
+                                .iter()
+                                .map(|o| match o.sites {
+                                    Some(n) => format!("{} ({n} sites)", o.label),
+                                    // "observed but not counted" is the honest rendering; a
+                                    // fabricated count here would be exactly the dishonesty
+                                    // the structured taxonomy exists to prevent.
+                                    None => o.label.clone(),
+                                })
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                        rsx! {
+                            li { key: "{f.repo}\u{0}{f.rule_id}", class: "kind-panel-row",
+                                span { class: "kind-panel-rule", "{f.rule_id}" }
+                                if options.is_empty() {
+                                    span { class: "kind-panel-label", "{f.detail}" }
+                                } else {
+                                    span { class: "kind-panel-label", "{options.join(\" \u{00b7} \")}" }
+                                }
+                                span { class: "kind-panel-repo", "{f.repo}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// NOT ASSESSED panel — `NotAssessed` rows: the rule was armed but could not be evaluated.
+/// Honesty rows, grouped by the structured [`NotAssessedReason`] vocabulary.
+///
+/// NO buttons, now or later, until a per-rule re-run mechanism actually exists. A disabled
+/// "re-run" would be the 403-button bug the standing hide-dead-end-affordances rule forbids.
+#[component]
+pub(super) fn NotAssessedPanel(findings: Vec<FindingView>) -> Element {
+    use camerata_api_types::audit::FindingKind;
+    if findings.is_empty() {
+        return rsx! {
+            p { class: "kind-panel-empty", "Every armed rule was assessed." }
+        };
+    }
+    // Group by the structured reason (a closed vocabulary, so grouping is structural, not
+    // prose-matched). BTreeMap for a stable order across renders.
+    let mut by_reason: std::collections::BTreeMap<&'static str, Vec<FindingView>> =
+        Default::default();
+    for f in &findings {
+        let reason = match &f.kind {
+            Some(FindingKind::NotAssessed(na)) => na.reason.as_str(),
+            _ => "unknown",
+        };
+        by_reason.entry(reason).or_default().push(f.clone());
+    }
+    rsx! {
+        div { class: "kind-panel",
+            p { class: "kind-panel-sub",
+                "Rules that were armed but could not be evaluated. These are honesty rows, not findings \u{2014} the scan cannot vouch for them either way."
+            }
+            for (reason , rows) in by_reason.iter() {
+                div { key: "{reason}", class: "kind-panel-group",
+                    p { class: "kind-panel-group-h", "{reason} \u{00b7} {rows.len()}" }
+                    ul { class: "kind-panel-list",
+                        for f in rows.iter() {
+                            {
+                                let detail = match &f.kind {
+                                    Some(FindingKind::NotAssessed(na)) => na.reason_detail.clone(),
+                                    _ => String::new(),
+                                };
+                                rsx! {
+                                    li { key: "{f.repo}\u{0}{f.rule_id}", class: "kind-panel-row",
+                                        span { class: "kind-panel-rule", "{f.rule_id}" }
+                                        span { class: "kind-panel-label", "{detail}" }
+                                        span { class: "kind-panel-repo", "{f.repo}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Renders one brownfield scan's results: the audit summary, the findings table,
 /// and the proposed-rules table. Keyed by the parent so a new scan remounts the
 /// chorale tables with fresh rows.
@@ -3550,6 +3807,11 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let mut finishing = use_signal(|| false);
     let mut dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
     let mut triage_view = use_signal(|| TriageState::Unresolved);
+    // Which kind surface is on screen (Pass 2 step 1). Session state, deliberately NOT
+    // persisted in the draft: it is a lens, not a decision, and the curator always wants to
+    // resume on the Queue. Adding it to `OnboardingDraft` would change a persisted wire shape
+    // for no curator benefit.
+    let mut kind_view = use_signal(|| KindSurface::Queue);
     let mut processing = use_signal(|| false);
 
     // ── Auto-save / restore the onboarding draft (issue #27) ──────────────────
@@ -3629,6 +3891,19 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
         });
     }
 
+    // ── Pass 2 step 1: the kind switcher is the PRIMARY axis ─────────────────
+    // The five-kind taxonomy splits one list into four surfaces: the Queue (the two accusing
+    // kinds plus any kind-less alarm row) and three informational panels. Everything below
+    // that is per-disposition triage belongs to the Queue ALONE — counts, sub-tabs, the table,
+    // and Process — so each is computed over `queue_findings`, not the raw set. Leaving the
+    // informational rows in the disposition tally parked them as Unresolved forever, which the
+    // Process gate blocks on.
+    let kind_counts = surface_counts(&findings);
+    let queue_findings = findings_on_surface(&findings, KindSurface::Queue);
+    // Kind-less rows are an ALARM (an unmapped emission path), surfaced as a red chip on the
+    // Queue tab. Never hidden, never folded into Defect.
+    let n_unspecified = unspecified_kind_count(&findings);
+
     // Live per-table counts (recompute reactively as dispositions change).
     let (n_unresolved, n_ignored, n_techdebt, n_falsepositive) = {
         let d = dispositions.read();
@@ -3636,7 +3911,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
         let mut i = 0usize;
         let mut t = 0usize;
         let mut fp = 0usize;
-        for f in &findings {
+        for f in &queue_findings {
             match finding_state(&d, f) {
                 TriageState::Unresolved => u += 1,
                 TriageState::Ignored => i += 1,
@@ -4437,7 +4712,11 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
             // ── Findings (after the audit runs) ────────────────────────────────
             if audited.is_some() {
                 p { class: "scan-section-h", "Findings" }
-                p { class: "scan-section-sub", "Triage every finding into one of four tables: leave it Unresolved, Ignore it (with a reason), save it as Tech debt, or mark it a False positive (with a reason — the tool was wrong; excluded from the report, never baselined). Switch tables below; selected findings move between tables. When nothing is Unresolved, Process the ignored + tech-debt buckets." }
+                p { class: "scan-section-sub", "The Queue holds what the scan ACCUSES the codebase of — defects and deviations. Triage each into one of four tables: leave it Unresolved, Ignore it (with a reason), save it as Tech debt, or mark it a False positive (with a reason — the tool was wrong; excluded from the report, never baselined). The other three tabs are informational: they assert nothing is wrong and need no triage. When nothing is Unresolved, Process the ignored + tech-debt buckets." }
+
+                // The one-rule-one-surface invariant (design §8), asserted. Silent in the
+                // healthy case, which is every case; loud when the pipeline mislabels a rule.
+                KindSurfaceConflictBanner { findings: findings.clone() }
 
                 // ── AI-review-did-not-run / AI-review-failed banner ────────────────
                 // Compliance-gate fix: a `Blocked` project (API-only, no Anthropic key) or a
@@ -4457,72 +4736,115 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                     ai_error: audited.as_ref().and_then(|a| a.ai_error.clone()),
                 }
 
-                // Single-select over the four triage tables, each with a live count.
-                div { class: "triage-switch",
-                    for st in [TriageState::Unresolved, TriageState::Ignored, TriageState::TechDebt, TriageState::FalsePositive] {
+                // PRIMARY axis: the kind switcher. Flipping it flips the action vocabulary too,
+                // because the decisions genuinely differ — the Queue disposes rows, the three
+                // informational panels decide per RULE (and `Not assessed` decides nothing).
+                div { class: "kind-switch",
+                    for (surface , count) in kind_counts.iter().copied() {
                         {
-                            let count = match st { TriageState::Unresolved => n_unresolved, TriageState::Ignored => n_ignored, TriageState::TechDebt => n_techdebt, TriageState::FalsePositive => n_falsepositive };
-                            let active = triage_view() == st;
+                            let active = kind_view() == surface;
                             rsx! {
                                 button {
-                                    key: "{st.label()}",
-                                    class: if active { "triage-tab active" } else { "triage-tab" },
-                                    onclick: move |_| triage_view.set(st),
-                                    "{st.label()} "
+                                    key: "{surface.label()}",
+                                    class: if active { "kind-tab active" } else { "kind-tab" },
+                                    onclick: move |_| kind_view.set(surface),
+                                    "{surface.label()} "
                                     span { class: "triage-tab-count", "{count}" }
+                                    // The alarm chip: rows that reached the UI with no kind at
+                                    // all. They live in the Queue, visibly flagged — an
+                                    // unmapped emission path is a bug to fix upstream, never a
+                                    // silent bucket and never a Defect.
+                                    if surface == KindSurface::Queue && n_unspecified > 0 {
+                                        span {
+                                            class: "kind-unspecified-chip",
+                                            title: "These rows reached the UI with no kind. That is an unmapped emission path in the pipeline, not a finding class.",
+                                            "{n_unspecified} unspecified"
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
-                // Rule alternatives (audit-integrated alternative recommendation): reviews
-                // every multi-option rule the audit evaluated, doubling as the informational
-                // "group header" for the findings table right below it. Keyed on the audit's
-                // own started_at stamp so a fresh audit run (a different rule selection) gets a
-                // clean remount instead of reusing stale staged-override state.
-                {
-                    let recommendations = audited
-                        .as_ref()
-                        .map(|a| a.recommendations.clone())
-                        .unwrap_or_default();
-                    let audit_stamp = audited
-                        .as_ref()
-                        .map(|a| a.provenance.started_at.clone())
-                        .unwrap_or_default();
-                    rsx! {
-                        RuleAlternativesPanel {
-                            key: "{audit_stamp}",
-                            project_id: project_id.clone(),
-                            proposed_rules: report.proposed_rules.clone(),
-                            findings: findings.clone(),
-                            repos: report.repos.clone(),
-                            recommendations,
-                            audit,
+                if kind_view() == KindSurface::Queue {
+                    // Single-select over the four triage tables, each with a live count.
+                    div { class: "triage-switch",
+                        for st in [TriageState::Unresolved, TriageState::Ignored, TriageState::TechDebt, TriageState::FalsePositive] {
+                            {
+                                let count = match st { TriageState::Unresolved => n_unresolved, TriageState::Ignored => n_ignored, TriageState::TechDebt => n_techdebt, TriageState::FalsePositive => n_falsepositive };
+                                let active = triage_view() == st;
+                                rsx! {
+                                    button {
+                                        key: "{st.label()}",
+                                        class: if active { "triage-tab active" } else { "triage-tab" },
+                                        onclick: move |_| triage_view.set(st),
+                                        "{st.label()} "
+                                        span { class: "triage-tab-count", "{count}" }
+                                    }
+                                }
+                            }
                         }
                     }
-                }
 
-                // Wrapped so the key is the first node in its block (Dioxus requirement);
-                // keying on the view remounts the table so its frozen rows reflect the switch.
-                {
-                    rsx! {
-                        FindingsTable {
-                            key: "{triage_view().label()}",
-                            findings: findings.clone(),
-                            repos: report.repos.clone(),
-                            descriptions: descriptions.clone(),
-                            triage_view: triage_view(),
-                            dispositions,
+                    // Rule alternatives (audit-integrated alternative recommendation): reviews
+                    // every multi-option rule the audit evaluated, doubling as the informational
+                    // "group header" for the findings table right below it. Keyed on the audit's
+                    // own started_at stamp so a fresh audit run (a different rule selection) gets a
+                    // clean remount instead of reusing stale staged-override state.
+                    {
+                        let recommendations = audited
+                            .as_ref()
+                            .map(|a| a.recommendations.clone())
+                            .unwrap_or_default();
+                        let audit_stamp = audited
+                            .as_ref()
+                            .map(|a| a.provenance.started_at.clone())
+                            .unwrap_or_default();
+                        rsx! {
+                            RuleAlternativesPanel {
+                                key: "{audit_stamp}",
+                                project_id: project_id.clone(),
+                                proposed_rules: report.proposed_rules.clone(),
+                                findings: findings.clone(),
+                                repos: report.repos.clone(),
+                                recommendations,
+                                audit,
+                            }
                         }
                     }
+
+                    // Wrapped so the key is the first node in its block (Dioxus requirement);
+                    // keying on the view remounts the table so its frozen rows reflect the switch.
+                    // Fed the QUEUE rows only: the informational kinds have their own panels.
+                    {
+                        rsx! {
+                            FindingsTable {
+                                key: "{triage_view().label()}",
+                                findings: queue_findings.clone(),
+                                repos: report.repos.clone(),
+                                descriptions: descriptions.clone(),
+                                triage_view: triage_view(),
+                                dispositions,
+                            }
+                        }
+                    }
+                } else if kind_view() == KindSurface::Conventions {
+                    ConventionsPanel { findings: findings_on_surface(&findings, KindSurface::Conventions) }
+                } else if kind_view() == KindSurface::NoConvention {
+                    NoConventionPanel { findings: findings_on_surface(&findings, KindSurface::NoConvention) }
+                } else {
+                    NotAssessedPanel { findings: findings_on_surface(&findings, KindSurface::NotAssessed) }
                 }
 
                 // Process: commit the ignored bucket to the baseline and file the tech-debt
                 // bucket as tickets. Enabled only once nothing remains Unresolved.
-                if triage_view() == TriageState::TechDebt || n_unresolved == 0 {
+                if kind_view() == KindSurface::Queue && (triage_view() == TriageState::TechDebt || n_unresolved == 0) {
                     {
-                    let findings_for_process = findings.clone();
+                    // QUEUE rows only. Process commits dispositions (baseline waivers,
+                    // tickets); an informational row has no disposition to commit, and
+                    // including one could only produce a waiver for a compliment.
+                    let findings_for_process = queue_findings.clone();
                     rsx! {
                     div { class: "triage-process",
                         if n_unresolved > 0 {
@@ -5468,6 +5790,54 @@ mod tests {
         }));
         assert_eq!(f.confidence.as_deref(), Some("needs-review"));
         assert_eq!(f.effort.as_deref(), Some("low"));
+    }
+
+    /// req_pass2_1 wire-contract sync, at the RESPONSE level rather than the leaf struct: the
+    /// server's `Finding::kind` is `#[serde(default, flatten)] Option<FindingKind>`, so a real
+    /// audit response carries ONE flat `"kind"` discriminator with the variant's payload as
+    /// siblings of the row's own fields (the shape pinned by api-types'
+    /// `req_a5_6_kind_serializes_internally_tagged_with_flat_payload`). This proves the kind
+    /// survives the whole `ScanReportView` -> `findings` path the UI actually reads, not just a
+    /// hand-built `FindingView`, and that a legacy row with no kind still loads as the
+    /// `unspecified` alarm rather than failing the whole response.
+    #[test]
+    fn req_pass2_1_scan_report_view_carries_the_flattened_kind_through_to_findings() {
+        use camerata_api_types::audit::FindingKind;
+        let report = scan_report_fixture(serde_json::json!({
+            "findings": [
+                {
+                    "repo": "me/api", "path": "src/routes.rs", "line": 12,
+                    "rule_id": "SUPABASE-API-VERSIONING-1", "severity": "medium",
+                    "snippet": "app.get('/users')", "detail": "no version prefix",
+                    "kind": "deviation", "deviating_sites": 2, "assessed_sites": 47,
+                    "convention_option_id": "versioned",
+                    "convention_label": "URI-versioned endpoints"
+                },
+                {
+                    "repo": "me/api", "path": "src/legacy.rs", "line": 3,
+                    "rule_id": "LEGACY-1", "severity": "high",
+                    "snippet": "s", "detail": "d"
+                }
+            ]
+        }));
+        let deviation = &report.findings[0];
+        match &deviation.kind {
+            Some(FindingKind::Deviation(d)) => {
+                assert_eq!(d.deviating_sites, 2);
+                assert_eq!(d.assessed_sites, Some(47));
+                assert_eq!(d.convention_label, "URI-versioned endpoints");
+            }
+            other => panic!("expected a Deviation off the wire, got {other:?}"),
+        }
+        assert_eq!(
+            deviation.detail, "no version prefix",
+            "the row's own fields must be untouched by the flatten"
+        );
+        assert!(
+            report.findings[1].kind.is_none(),
+            "a row whose producer assigned no kind loads as the unspecified alarm"
+        );
+        assert_eq!(super::kind_tag(&report.findings[1]), "unspecified");
     }
 
     #[test]
@@ -7306,5 +7676,251 @@ mod render_tests {
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("Rescanning"), "in-flight label; html=\n{html}");
         assert!(html.contains("disabled"), "button disabled while rescanning; html=\n{html}");
+    }
+
+    // ── Pass 2 step 1: the Kind column + the three informational panels ──────
+    // docs/plans/2026-10-11_pass2-curator-ui-design.md §11 step 1.
+
+    fn kinded_finding(rule_id: &str, severity: &str, kind: serde_json::Value) -> FindingView {
+        let mut row = serde_json::json!({
+            "repo": "me/api", "path": "src/x.rs", "line": 1, "rule_id": rule_id,
+            "severity": severity, "snippet": "s", "detail": "d", "status": "active"
+        });
+        for (k, v) in kind.as_object().expect("kind payload is an object") {
+            row[k] = v.clone();
+        }
+        serde_json::from_value(row).expect("valid FindingView fixture")
+    }
+
+    /// req_pass2_5: the Kind column exists in the findings table, carries the WIRE tag as its
+    /// cell value (so the filter vocabulary is the wire's, never re-derived prose), and its
+    /// filter offers only the three tags that can actually appear in the Queue — the
+    /// informational kinds route to their own panels, so listing them would be dead.
+    #[test]
+    fn req_pass2_5_findings_table_has_a_kind_column_carrying_the_wire_tag() {
+        let cols = finding_columns(vec!["me/api".to_string()], false);
+        let kind_col = cols
+            .iter()
+            .find(|c| c.id == ColumnId("kind"))
+            .expect("the findings table must carry a Kind column");
+        assert_eq!(kind_col.header, "Kind");
+
+        let defect = kinded_finding("SQL-INJECTION-1", "critical", serde_json::json!({"kind": "defect"}));
+        let deviation = kinded_finding(
+            "API-VERSIONING-1",
+            "medium",
+            serde_json::json!({
+                "kind": "deviation", "deviating_sites": 2, "assessed_sites": 47,
+                "convention_option_id": "versioned", "convention_label": "URI-versioned endpoints"
+            }),
+        );
+        let unmapped = kinded_finding("LEGACY-1", "high", serde_json::json!({}));
+        assert_eq!((kind_col.accessor)(&defect), CellValue::Text("defect".to_string()));
+        assert_eq!((kind_col.accessor)(&deviation), CellValue::Text("deviation".to_string()));
+        assert_eq!(
+            (kind_col.accessor)(&unmapped),
+            CellValue::Text("unspecified".to_string()),
+            "a kind-less row must read as its own explicit alarm value, never as a defect"
+        );
+    }
+
+    /// req_pass2_4: the one-rule-one-surface invariant is SILENT when healthy and LOUD when a
+    /// rule reaches two surfaces — the UI surfaces the pipeline bug rather than picking a
+    /// winner and hiding it.
+    #[test]
+    fn req_pass2_4_conflict_banner_is_silent_when_healthy_and_loud_when_violated() {
+        fn healthy() -> Element {
+            rsx! {
+                KindSurfaceConflictBanner {
+                    findings: vec![
+                        kinded_finding("D-1", "high", serde_json::json!({ "kind": "defect" })),
+                        kinded_finding(
+                            "C-1",
+                            "info",
+                            serde_json::json!({
+                                "kind": "convention_observed",
+                                "convention_option_id": "opt",
+                                "convention_label": "A convention",
+                            }),
+                        ),
+                    ],
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(healthy);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            !html.contains("kind-conflict-banner"),
+            "a healthy scan must not ring the alarm; html=\n{html}"
+        );
+
+        fn violated() -> Element {
+            rsx! {
+                KindSurfaceConflictBanner {
+                    findings: vec![
+                        kinded_finding(
+                            "API-VERSIONING-1",
+                            "info",
+                            serde_json::json!({
+                                "kind": "convention_observed",
+                                "convention_option_id": "opt",
+                                "convention_label": "URI-versioned endpoints",
+                            }),
+                        ),
+                        kinded_finding(
+                            "API-VERSIONING-1",
+                            "medium",
+                            serde_json::json!({
+                                "kind": "deviation",
+                                "deviating_sites": 2,
+                                "assessed_sites": 47,
+                                "convention_option_id": "opt",
+                                "convention_label": "URI-versioned endpoints",
+                            }),
+                        ),
+                    ],
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(violated);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("kind-conflict-banner"), "alarm rendered; html=\n{html}");
+        assert!(html.contains("Pipeline bug"), "named as upstream; html=\n{html}");
+        assert!(html.contains("API-VERSIONING-1"), "the offending rule named; html=\n{html}");
+        assert!(html.contains("Queue"), "and the surfaces it reached; html=\n{html}");
+        assert!(html.contains("Conventions"), "and the surfaces it reached; html=\n{html}");
+    }
+
+    /// req_pass2_6: the Conventions panel lists each observed convention by its AUTHORED label
+    /// and renders NO severity — these kinds ship at `info` by construction, so a severity
+    /// badge would imply a ranking decision that does not exist (design §9.4).
+    #[test]
+    fn req_pass2_6_conventions_panel_lists_labels_and_renders_no_severity() {
+        fn harness() -> Element {
+            rsx! {
+                ConventionsPanel {
+                    findings: vec![kinded_finding(
+                        "API-VERSIONING-1",
+                        "info",
+                        serde_json::json!({
+                            "kind": "convention_observed",
+                            "convention_option_id": "versioned",
+                            "convention_label": "URI-versioned endpoints",
+                        }),
+                    )],
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("API-VERSIONING-1"), "rule id; html=\n{html}");
+        assert!(html.contains("URI-versioned endpoints"), "authored label; html=\n{html}");
+        for forbidden in ["chorale-badge", "severity", "info", "critical", "Critical"] {
+            assert!(
+                !html.contains(forbidden),
+                "no severity may render on an informational panel (found {forbidden:?}); html=\n{html}"
+            );
+        }
+    }
+
+    /// req_pass2_6: the No-convention panel enumerates the options actually observed with
+    /// their site counts, and renders an uncounted option HONESTLY (label alone) rather than
+    /// fabricating a number.
+    #[test]
+    fn req_pass2_6_no_convention_panel_lists_observed_options_and_never_fabricates_counts() {
+        fn harness() -> Element {
+            rsx! {
+                NoConventionPanel {
+                    findings: vec![kinded_finding(
+                        "ERROR-HANDLING-1",
+                        "info",
+                        serde_json::json!({
+                            "kind": "no_convention",
+                            "observed_options": [
+                                { "option_id": "result", "label": "Result types", "sites": 9 },
+                                { "option_id": "panic", "label": "Panics", "sites": null },
+                            ],
+                        }),
+                    )],
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("ERROR-HANDLING-1"), "rule id; html=\n{html}");
+        assert!(html.contains("Result types (9 sites)"), "counted option; html=\n{html}");
+        assert!(html.contains("Panics"), "uncounted option still listed; html=\n{html}");
+        assert!(
+            !html.contains("Panics (0 sites)") && !html.contains("Panics ("),
+            "an uncounted option must never acquire a fabricated count; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_6: the Not-assessed panel groups by the STRUCTURED reason vocabulary, shows
+    /// the producer's detail, and offers NO buttons — there is no per-rule re-run mechanism in
+    /// the product, and a disabled one would be the 403-button bug.
+    #[test]
+    fn req_pass2_6_not_assessed_panel_groups_by_reason_and_offers_no_actions() {
+        fn harness() -> Element {
+            rsx! {
+                NotAssessedPanel {
+                    findings: vec![
+                        kinded_finding(
+                            "ESLINT-1",
+                            "info",
+                            serde_json::json!({
+                                "kind": "not_assessed",
+                                "reason": "tool_failed",
+                                "reason_detail": "eslint exited 2",
+                            }),
+                        ),
+                        kinded_finding(
+                            "TSX-1",
+                            "info",
+                            serde_json::json!({
+                                "kind": "not_assessed",
+                                "reason": "no_files_matched",
+                                "reason_detail": "no .tsx files in scan scope",
+                            }),
+                        ),
+                    ],
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("tool_failed"), "structured reason group; html=\n{html}");
+        assert!(html.contains("no_files_matched"), "structured reason group; html=\n{html}");
+        assert!(html.contains("eslint exited 2"), "producer detail; html=\n{html}");
+        assert!(
+            !html.contains("<button"),
+            "NotAssessed needs no decision, so it must offer no affordance; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_6: each panel's empty state is a sentence, not a blank area — the curator has
+    /// to be able to tell "nothing of this kind" from "this did not render".
+    #[test]
+    fn req_pass2_6_informational_panels_state_their_empty_case() {
+        fn harness() -> Element {
+            rsx! {
+                ConventionsPanel { findings: vec![] }
+                NoConventionPanel { findings: vec![] }
+                NotAssessedPanel { findings: vec![] }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert_eq!(
+            html.matches("kind-panel-empty").count(),
+            3,
+            "every panel states its own empty case; html=\n{html}"
+        );
     }
 }
