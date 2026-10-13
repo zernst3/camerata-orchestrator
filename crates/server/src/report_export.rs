@@ -2312,6 +2312,61 @@ pub(crate) fn instantiate_remediation(
     out
 }
 
+// ── Export reproducibility: one clock reading, taken from the scan ───────────────
+
+/// The strftime format every client-facing "generated at" string uses (the PDF cover's
+/// `generated_at`, the workbook Index's "Generated" row). Minute precision, explicit UTC.
+/// Shared so [`generated_at_label`] and the parse back out of it in [`compile_pdf`] can never
+/// drift apart.
+pub(crate) const GENERATED_AT_FORMAT: &str = "%Y-%m-%d %H:%M UTC";
+
+/// The instant this audit RAN, recovered from the scan's own provenance: `finished_at` when it
+/// is a real RFC3339 instant, else `started_at`, else `None` (a report whose provenance was
+/// never stamped, or was stamped with something unparseable — never a silently invented time).
+///
+/// Every timestamp a deliverable embeds derives from this, never from the wall clock at
+/// serialization time: the PDF cover's "Generated" line, the PDF's own `SOURCE_DATE_EPOCH`
+/// creation timestamp, the workbook Index's "Generated" row and the workbook's
+/// `docProps/core.xml` `dcterms:created`/`dcterms:modified`.
+///
+/// Two reasons, and the second is the stronger one:
+///   1. Reproducibility. With the clock read at serialization time, two exports of ONE report
+///      were not byte-identical, so the product could not prove two deliverables were the same
+///      report. (It also made `crates/cli/tests/inspect_export_equivalence.rs` flake about one
+///      run in four, which is how the problem was noticed rather than what it was.)
+///   2. Correctness for a client deliverable. A client reading the file's metadata wants to
+///      know when the AUDIT ran. "When the bytes happened to be serialized" is an answer to a
+///      question nobody asked, and it actively misleads on a re-export: a PDF regenerated
+///      months later from an unchanged report claimed to have been generated months after the
+///      audit it describes.
+///
+/// Deliberately NOT a constant. Pinning to a fixed epoch would buy reproducibility while
+/// throwing away the true statement, which is the half that matters to the reader.
+pub(crate) fn scan_instant(
+    provenance: &crate::onboard::ScanProvenance,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    for raw in [&provenance.finished_at, &provenance.started_at] {
+        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw.trim()) {
+            return Some(parsed.with_timezone(&chrono::Utc));
+        }
+    }
+    None
+}
+
+/// The client-facing "generated at" string for a scan: [`scan_instant`] rendered in
+/// [`GENERATED_AT_FORMAT`].
+///
+/// Falls back to the wall clock ONLY when provenance carries no parseable instant at all. That
+/// case is non-reproducible by construction and is accepted rather than papered over: a report
+/// with no recorded scan time has no true answer to give, and inventing a fixed one would
+/// print a confident lie. Every real scan path stamps `started_at`/`finished_at`.
+pub(crate) fn generated_at_label(provenance: &crate::onboard::ScanProvenance) -> String {
+    scan_instant(provenance)
+        .unwrap_or_else(chrono::Utc::now)
+        .format(GENERATED_AT_FORMAT)
+        .to_string()
+}
+
 /// A small, generic technical-acronym allowlist for cosmetic title-casing — NOT a rule
 /// taxonomy, just common initialisms that should stay upper ("RLS", not "Rls") wherever they
 /// show up in a category key, whether that key came from a corpus rule's lowercase `domain`
@@ -2349,7 +2404,9 @@ fn prettify_category_key(key: &str) -> String {
         .take(2)
         .collect();
     if tokens.is_empty() {
-        return "Other".to_string();
+        // Same generic bucket the A9 ladder ends in, named once — a key with no usable
+        // tokens and a rule id no source can categorize are the same situation to a reader.
+        return UNCATEGORIZED_CATEGORY.to_string();
     }
     tokens
         .iter()
@@ -2358,46 +2415,102 @@ fn prettify_category_key(key: &str) -> String {
         .join(" ")
 }
 
-/// Category for the scorecard: the corpus rule's own `domain` when known, else a fallback
-/// built from the rule id itself — both prettified the same way (S5), rather than a bare
-/// lowercased/raw key (`"supabase:rls"` or `"supabase"`). Still a fallback for the
-/// corpus-absent case, not a taxonomy — good enough for a scorecard grouping, not
-/// load-bearing.
-pub(crate) fn category_for(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> String {
-    if let Some(rule) = corpus.and_then(|c| c.get_by_id(rule_id)) {
-        return prettify_category_key(&rule.domain);
+/// The ONE label a category falls back to when no real category can be established: not from
+/// the corpus (the rule has no entry), not from the finding's own calibrated `category`, and
+/// not from the closed semantic taxonomy. One honest generic bucket, in client language.
+///
+/// A9: this replaced slugifying the rule id itself. The old terminal fallback was
+/// `prettify_category_key(rule_id)`, which turns `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1` into
+/// `"Arch No"` and `LEGACY-UNMAPPED-1` into `"Legacy Unmapped"`. Those strings reached the PDF
+/// scorecard's Category column AND — because `xlsx_export` names its per-area worksheets from
+/// the category — became client-facing Excel TAB names. A client opened the deliverable and
+/// saw a tab called "Arch No". A rule id is internal vocabulary; no amount of title-casing
+/// turns it into a category, and a per-rule mangled label is strictly worse than one honest
+/// generic one because it also fragments the scorecard into bogus single-row categories.
+pub(crate) const UNCATEGORIZED_CATEGORY: &str = "Other";
+
+/// Client-facing display labels for the closed semantic taxonomy
+/// (`ai_audit::KNOWN_CATEGORIES`). Only the keys whose mechanical prettification is INTERNAL
+/// vocabulary are listed; every other key already reads as client language through
+/// `prettify_category_key` (`injection` -> "Injection", `rls-policy` -> "RLS Policy",
+/// `secret-exposure` -> "Secret Exposure", ...) and is deliberately not restated here, so this
+/// table cannot drift into a second, parallel taxonomy. It RENAMES the existing taxonomy for
+/// the reader; it never adds to it.
+const CATEGORY_DISPLAY_OVERRIDES: &[(&str, &str)] = &[
+    // "Arch Conformance" is our governance vocabulary; the client's word is "Architecture".
+    ("arch-conformance", "Architecture"),
+    // "Testing Style" names an internal rule family; the client-facing subject is testing.
+    ("testing-style", "Testing"),
+];
+
+/// Render a category KEY (a corpus rule's `domain`, or a closed-taxonomy class) as the label a
+/// client reads: an explicit override where the mechanical prettification would leak internal
+/// vocabulary, otherwise [`prettify_category_key`].
+fn category_display_label(key: &str) -> String {
+    if let Some((_, label)) = CATEGORY_DISPLAY_OVERRIDES.iter().find(|(k, _)| *k == key) {
+        return (*label).to_string();
     }
-    prettify_category_key(rule_id)
+    prettify_category_key(key)
 }
 
-/// Category for a specific FINDING (C4-P2), preferred over [`category_for`] wherever a
-/// `Finding` (not just a bare rule id) is available. An AI-tier finding invents its own
-/// rule id per occurrence (`"AI-SQL-INJECTION-7"`), which has no corpus entry to join
-/// against — `category_for` alone then falls back to mangling the invented id's own tokens
-/// into a category key (`"AI-SQL-INJECTION-7"` -> `"Ai SQL"`), scattering AI findings across
-/// nonsense per-finding "categories" instead of grouping them with their real defect family,
-/// and leaving the scorecard's `audited_rules` count for that bogus category at 0 (nothing in
-/// `provenance.audited_rule_ids` was ever going to share a made-up key).
+/// Category for the scorecard: the corpus rule's own `domain` when known, else the closed
+/// semantic taxonomy the rule id's TOKENS classify into
+/// (`crate::ai_audit::categorize_rule_id` — the same repo-agnostic classifier calibration
+/// uses), else [`UNCATEGORIZED_CATEGORY`].
 ///
-/// The fix: when the finding's own rule id has no corpus entry, prefer its structured
-/// `category` field — the closed taxonomy calibration already classified it into (see
-/// `ai_audit::apply_verdicts`'s `is_known_category` gate, which only ever writes a trusted
-/// value there) — over mangling the rule id. Falls through to the rule-id mangling only when
-/// `category` is also absent, so a pre-calibration/deterministic finding with a real corpus
-/// entry is completely unaffected (first branch, unchanged from `category_for`).
+/// A9: what this function must never do is return the rule id itself with title case applied.
+/// A rule id is an internal identifier; its first two tokens are not a category, and the
+/// three-deep ladder above exists so that the only way to reach the generic bucket is for
+/// every real source of a category to have genuinely come up empty. See
+/// [`UNCATEGORIZED_CATEGORY`] for the client-facing damage the old fallback did.
+pub(crate) fn category_for(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> String {
+    if let Some(rule) = corpus.and_then(|c| c.get_by_id(rule_id)) {
+        return category_display_label(&rule.domain);
+    }
+    if let Some(class) = crate::ai_audit::categorize_rule_id(rule_id) {
+        return category_display_label(&class);
+    }
+    UNCATEGORIZED_CATEGORY.to_string()
+}
+
+/// Category for a specific FINDING, preferred over [`category_for`] wherever a `Finding` (not
+/// just a bare rule id) is available: a calibrated finding knows its own semantic class, and
+/// that first-hand answer beats anything inferred from an id.
+///
+/// An AI-tier finding invents its own rule id per occurrence (`"AI-SQL-INJECTION-7"`), which
+/// has no corpus entry to join against. Before C4-P2 the fallback mangled that invented id's
+/// own tokens into a category key (`"AI-SQL-INJECTION-7"` -> `"Ai SQL"`), scattering AI
+/// findings across nonsense per-finding "categories" instead of grouping them with their real
+/// defect family, and leaving the scorecard's `audited_rules` count for that bogus category at
+/// 0 (nothing in `provenance.audited_rule_ids` was ever going to share a made-up key).
+///
+/// C4-P2 (partial mitigation): when the finding's own rule id has no corpus entry, prefer its
+/// structured `category` field — the closed taxonomy calibration already classified it into
+/// (see `ai_audit::apply_verdicts`'s `is_known_category` gate, which only ever writes a
+/// trusted value there) — over anything derived from the rule id.
+///
+/// A9 (the rest of it): that mitigation only ever covered a CALIBRATED finding. A finding
+/// whose `category` was never populated — a native-checker finding from `crates/checks`, an
+/// AI-tier finding from a run where calibration did not write a known category, a row from a
+/// report that predates the taxonomy — still fell through to `prettify_category_key(rule_id)`
+/// and reached the client mangled. The tail is now [`category_for`]'s own three-deep ladder
+/// (corpus domain, then the closed taxonomy by rule-id TOKENS, then one honest generic
+/// bucket), so no path through this function can return a slugified rule id. The first branch
+/// is unchanged: a deterministic finding with a real corpus entry is completely unaffected.
 pub(crate) fn category_for_finding(
     finding: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> String {
     if let Some(rule) = corpus.and_then(|c| c.get_by_id(&finding.rule_id)) {
-        return prettify_category_key(&rule.domain);
+        return category_display_label(&rule.domain);
     }
     if let Some(cat) = finding.category.as_deref() {
-        if !cat.trim().is_empty() {
-            return prettify_category_key(cat);
+        let cat = cat.trim();
+        if !cat.is_empty() {
+            return category_display_label(cat);
         }
     }
-    prettify_category_key(&finding.rule_id)
+    category_for(&finding.rule_id, corpus)
 }
 
 /// Which matrix cell a finding lands in. The auditor's OWN disposition wins where one
@@ -4284,9 +4397,15 @@ pub fn build_report_json(
     healthy_rules.truncate(WHATS_HEALTHY_CAP);
 
     // ── W1: "excluded from this audit" — rules the ledger confirms did NOT run ───
-    // Only ever populated from the ledger (no pre-W1 fallback source exists for this new
-    // section — `excluded_mechanical_rules` is a different, pre-existing field with its own
-    // consumer (the Excel export) and is left untouched here).
+    // Only ever populated from the ledger. There is no pre-W1 fallback source for this
+    // section, and in particular `ScanReport::excluded_mechanical_rules` is NOT one: it is a
+    // different, older field that is now VESTIGIAL. `split_scannable_rules_from` has returned
+    // a hard-coded `Vec::new()` for it since W4 dropped CI-tier exclusion from the semantic
+    // pass ("Every selected rule reaches the semantic pass now — no CI-tier exclusion"), so
+    // nothing populates it and its two remaining readers — the cockpit scan header and
+    // `xlsx_export::write_coverage_sheet`'s "Excluded from this code-only audit" block — can
+    // only ever render empty. Left in place rather than removed: it is persisted on
+    // `ScanReport`, and a pre-W4 report loaded from disk could still carry real content.
     let mut rules_not_run: Vec<ExcludedRuleJson> = if has_rule_ledger_data {
         report_ledger
             .excluded_rules()
@@ -4556,7 +4675,8 @@ pub fn build_report_json(
         audit_model: report.provenance.audit_model.clone(),
         calibration_model: report.provenance.calibration_model.clone(),
         camerata_version: report.provenance.camerata_version.clone(),
-        generated_at: chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
+        // The SCAN time, not the wall clock at serialization — see `generated_at_label`.
+        generated_at: generated_at_label(&report.provenance),
         client_name: opts.client_name.clone(),
         project_title: opts.project_title.clone(),
         // `build_report_json` stays pure/no-I/O (per its own doc comment): it does NOT read
@@ -4642,13 +4762,29 @@ pub fn build_report_json(
 
 // ── Typst compile ────────────────────────────────────────────────────────────────
 
+/// The UNIX timestamp to stamp into the compiled PDF, read back out of the report's OWN stated
+/// generation time (`cover.generated_at`, which [`generated_at_label`] derived from the scan
+/// time).
+///
+/// Reading it back from the cover rather than taking a second `&ScanProvenance` parameter is
+/// deliberate: it makes the PDF's metadata and the PDF's printed cover line the same fact by
+/// construction, so they cannot disagree. The string was written in [`GENERATED_AT_FORMAT`],
+/// so the round-trip is exact; `None` only if a caller hand-built an `AuditReportJson` with
+/// some other string in that field.
+fn creation_epoch(json: &AuditReportJson) -> Option<i64> {
+    chrono::NaiveDateTime::parse_from_str(json.cover.generated_at.trim(), GENERATED_AT_FORMAT)
+        .ok()
+        .map(|naive| naive.and_utc().timestamp())
+}
+
 /// Compile `json` into a PDF via a bundled Typst template. Self-contained: the template
 /// text is embedded in the binary (`include_str!`), so no external file needs to ship
 /// alongside the server. Fails soft with an actionable message when `typst` isn't on PATH
 /// (matches the dep-audit coverage-note tone: name the tool, name the fix).
 ///
 /// Runs `typst compile report.typ report.pdf --root <tmpdir>` in a scratch temp dir (RAII
-/// cleanup on drop) with a 30s timeout. The template reads `data.json` via Typst's own
+/// cleanup on drop) with a 30s timeout, with `SOURCE_DATE_EPOCH` pinned to the report's own
+/// generation time (see [`creation_epoch`]). The template reads `data.json` via Typst's own
 /// `json()` builtin — no `--input` plumbing needed.
 pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
     let tmp = tempfile::tempdir().context("could not create a temp dir for the PDF export")?;
@@ -4676,6 +4812,30 @@ pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
         .arg("--root")
         .arg(tmp.path())
         .kill_on_drop(true);
+    // Reproducibility: pin the PDF's creation timestamp instead of letting Typst read the wall
+    // clock. Typst stamps that clock into FIVE places — the Info dict's `/CreationDate` and
+    // `/ModDate`, the XMP packet's `xmp:CreateDate`, `xmp:ModifyDate`, `xmpMM:InstanceID` and
+    // `xmpMM:DocumentID`, and the trailer's `/ID` (which it derives from content AND time) — so
+    // two compiles of one report were never byte-identical and the product could not prove two
+    // deliverables were the same report.
+    //
+    // `SOURCE_DATE_EPOCH` (the reproducible-builds standard) rather than the equivalent
+    // `--creation-timestamp` flag: both exist on the installed Typst 0.15.0 and the flag is
+    // documented as reading this very variable as its default, but an env var a Typst that
+    // does not support the feature simply ignores, where an unrecognised ARGUMENT makes it exit
+    // non-zero. A client machine on an older Typst degrades to today's behaviour instead of
+    // failing the export outright.
+    //
+    // Verified against the installed Typst 0.15.0, not assumed: two compiles of identical
+    // source two seconds apart are byte-for-byte identical with the variable set (XMP packet,
+    // Info dict and trailer `/ID` all included) and differ without it.
+    //
+    // Set UNCONDITIONALLY. On the degenerate path where the report carries no parseable time,
+    // an explicit `now` is still better than leaving the variable unset, because the server
+    // process could otherwise inherit an unrelated `SOURCE_DATE_EPOCH` from its environment and
+    // silently stamp a client deliverable with a build timestamp from somewhere else entirely.
+    let epoch = creation_epoch(json).unwrap_or_else(|| chrono::Utc::now().timestamp());
+    cmd.env("SOURCE_DATE_EPOCH", epoch.to_string());
 
     let output = match tokio::time::timeout(Duration::from_secs(30), cmd.output()).await {
         Ok(Ok(out)) => out,
@@ -6273,7 +6433,135 @@ mod tests {
         let f = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "critical");
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
-        assert_eq!(json.scorecard.rows[0].category, "Supabase RLS");
+        // A9: the label is the closed taxonomy's, not the rule id's own first two tokens.
+        // Before A9 this read "Supabase RLS" — which happens to be readable only because
+        // this rule id is domain-first; the SAME mechanism produced "Arch No" for
+        // `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1`. See `req_a9_*`.
+        assert_eq!(json.scorecard.rows[0].category, "RLS Policy");
+    }
+
+    // ── A9: a category is never a slugified rule id ───────────────────────────
+
+    /// Rule ids whose own first two tokens are NOT a category. Each one is a real shape the
+    /// product emits: a native-checker id (`crates/checks`), an AI-tier id invented per
+    /// occurrence, and a rule that predates the taxonomy backfill. None has a corpus entry,
+    /// which is exactly the condition the old fallback mangled.
+    const A9_UNMAPPED_RULE_IDS: &[&str] = &[
+        "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1",
+        "SEC-INJECTION-RAW-SQL-BUILD-1",
+        "LEGACY-UNMAPPED-1",
+    ];
+
+    /// req_a9: no category that reaches a client is the rule id's own tokens with title case
+    /// applied.
+    ///
+    /// FAILS BEFORE THE CHANGE: `category_for`/`category_for_finding` both terminated in
+    /// `prettify_category_key(rule_id)`, so these three ids produced the scorecard categories
+    /// "Arch No", "Sec Injection" and "Legacy Unmapped" — and because `xlsx_export` names its
+    /// per-area worksheets from the category, "Arch No" was a client-facing Excel tab name.
+    /// Red output was three assertion failures of the form `scorecard category "Arch No" is
+    /// ARCH-NO-CROSS-BOUNDARY-IMPORTS-1 slugified`.
+    #[test]
+    fn req_a9_no_scorecard_category_is_a_slugified_rule_id() {
+        let findings: Vec<Finding> = A9_UNMAPPED_RULE_IDS
+            .iter()
+            .enumerate()
+            .map(|(i, id)| finding(id, &format!("src/a9_{i}.rs"), i + 1, "high"))
+            .collect();
+        let report = report_with(findings, A9_UNMAPPED_RULE_IDS.to_vec());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        let categories: Vec<&str> = json
+            .scorecard
+            .rows
+            .iter()
+            .map(|r| r.category.as_str())
+            .collect();
+        assert!(
+            !categories.is_empty(),
+            "the fixture must produce scorecard rows, or this test proves nothing"
+        );
+        for rule_id in A9_UNMAPPED_RULE_IDS {
+            let slug = prettify_category_key(rule_id);
+            assert!(
+                !categories.contains(&slug.as_str()),
+                "scorecard category {slug:?} is {rule_id} slugified — a rule id is internal \
+                 vocabulary and must never reach a client as a category. All rows: {categories:?}"
+            );
+        }
+    }
+
+    /// req_a9: when NO real category can be established — no corpus entry, no calibrated
+    /// `category`, nothing the closed taxonomy recognises — the label is ONE honest generic
+    /// bucket, not a per-rule invention.
+    ///
+    /// FAILS BEFORE THE CHANGE: `LEGACY-UNMAPPED-1` and `VENDOR-THING-2` produced two
+    /// different mangled categories ("Legacy Unmapped" and "Vendor Thing") instead of both
+    /// landing in one.
+    #[test]
+    fn req_a9_unmappable_rule_ids_share_one_generic_category() {
+        assert_eq!(category_for("LEGACY-UNMAPPED-1", None), UNCATEGORIZED_CATEGORY);
+        assert_eq!(category_for("VENDOR-THING-2", None), UNCATEGORIZED_CATEGORY);
+    }
+
+    /// req_a9: a rule id the closed semantic taxonomy DOES recognise gets that taxonomy's
+    /// client label, not the generic bucket — the fallback must not be a blanket "Other" that
+    /// throws away a category we can actually establish.
+    #[test]
+    fn req_a9_taxonomy_recognised_rule_ids_get_their_real_category() {
+        assert_eq!(category_for("ARCH-NO-CROSS-BOUNDARY-IMPORTS-1", None), "Architecture");
+        assert_eq!(category_for("SEC-INJECTION-RAW-SQL-BUILD-1", None), "Injection");
+        assert_eq!(category_for("ARCH-NO-SECRETS-IN-URL-1", None), "Secret Exposure");
+    }
+
+    // ── req_det: the cover's generated-at is the scan time, not the wall clock ─
+
+    /// req_det: `cover.generated_at` is derived from the scan's own provenance, so building
+    /// the same report twice produces the same string. Everything downstream (the workbook's
+    /// Index row and `docProps/core.xml`, the PDF's creation timestamp) is pinned from this
+    /// one value, so this is the root of export reproducibility.
+    ///
+    /// FAILS BEFORE THE CHANGE: `generated_at` was `chrono::Utc::now()`, so it read today's
+    /// date rather than the 2026-07-23 scan this fixture describes.
+    #[test]
+    fn req_det_cover_generated_at_is_the_scan_time() {
+        let report = report_with(vec![finding("SEC-1", "a.rs", 1, "high")], vec![]);
+        let sealed = report.clone().seal();
+        let first = build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+        let second = build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            first.cover.generated_at, "2026-07-23 00:05 UTC",
+            "the cover must state when the AUDIT ran (provenance.finished_at), not when the \
+             bytes were serialized"
+        );
+        assert_eq!(first.cover.generated_at, second.cover.generated_at);
+    }
+
+    /// req_det: `scan_instant` prefers `finished_at`, falls back to `started_at`, and reports
+    /// `None` only when neither is a real instant — the three cases every pinned timestamp
+    /// downstream depends on.
+    #[test]
+    fn req_det_scan_instant_prefers_finished_then_started_then_none() {
+        let mut p = report_with(Vec::new(), Vec::new()).provenance;
+        assert_eq!(
+            scan_instant(&p).map(|t| t.timestamp()),
+            chrono::DateTime::parse_from_rfc3339("2026-07-23T00:05:00Z")
+                .ok()
+                .map(|t| t.timestamp())
+        );
+        p.finished_at = String::new();
+        assert_eq!(
+            scan_instant(&p).map(|t| t.timestamp()),
+            chrono::DateTime::parse_from_rfc3339("2026-07-23T00:00:00Z")
+                .ok()
+                .map(|t| t.timestamp()),
+            "an unfinished/unstamped run must fall back to when it STARTED"
+        );
+        p.started_at = "not a timestamp".to_string();
+        assert!(
+            scan_instant(&p).is_none(),
+            "neither field parseable must report None, never a silently invented instant"
+        );
     }
 
     // ── S6: what's-healthy caps long lists and reports a remainder count ──────
@@ -6722,8 +7010,13 @@ mod tests {
 
     #[test]
     fn scorecard_rows_are_ordered_action_needed_before_clean() {
-        let action_needed = finding("ZZZ-1", "a.rs", 1, "critical");
-        let clean_category_finding = finding("AAA-1", "b.rs", 2, "critical");
+        // A9: the two rule ids must land in DIFFERENT categories for this test to have two
+        // rows to order. Before A9 any two distinct ids did, because each was slugified into
+        // its own category; now an id the taxonomy cannot place falls into the shared generic
+        // bucket, so the fixture names two ids the taxonomy genuinely separates (the old
+        // `ZZZ-1`/`AAA-1` both resolve to "Other" and collapse into one row).
+        let action_needed = finding("SEC-NO-HARDCODED-SECRETS-1", "a.rs", 1, "critical");
+        let clean_category_finding = finding("PERF-N-PLUS-ONE-1", "b.rs", 2, "critical");
         let mut dispositions = HashMap::new();
         // The AAA-1 finding is accepted, so its category's status is "Clean" (no OPEN
         // high/critical exposure) even though a critical finding exists in it.
@@ -6734,7 +7027,7 @@ mod tests {
         let report = report_with(vec![action_needed, clean_category_finding], vec![]);
         let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.scorecard.rows[0].status, "Action-needed");
-        assert_eq!(json.scorecard.rows[0].category, "Zzz");
+        assert_eq!(json.scorecard.rows[0].category, "Secret Exposure");
         assert_eq!(json.scorecard.rows[1].status, "Clean");
     }
 
@@ -6772,22 +7065,28 @@ mod tests {
         // — otherwise a fully clean category is silently invisible instead of visibly
         // reading "Clean", and there is nothing for the Action-needed -> Clean ordering to
         // place at the bottom.
-        let flagged = finding("ZZZ-1", "a.rs", 1, "critical");
-        let clean_only = finding("AAA-1", "b.rs", 2, "high");
+        // A9: two ids the taxonomy genuinely separates, for the same reason as
+        // `scorecard_rows_are_ordered_action_needed_before_clean` — the old `ZZZ-1`/`AAA-1`
+        // now share the generic bucket and would collapse these two rows into one.
+        let flagged = finding("SEC-NO-HARDCODED-SECRETS-1", "a.rs", 1, "critical");
+        let clean_only = finding("PERF-N-PLUS-ONE-1", "b.rs", 2, "high");
         let mut dispositions = HashMap::new();
         dispositions.insert(
             finding_key(&clean_only),
             wire("FalsePositive", "not exploitable", ""),
         );
-        let report = report_with(vec![flagged, clean_only], vec!["ZZZ-1", "AAA-1"]);
+        let report = report_with(
+            vec![flagged, clean_only],
+            vec!["SEC-NO-HARDCODED-SECRETS-1", "PERF-N-PLUS-ONE-1"],
+        );
         let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.scorecard.rows.len(), 2, "{:?}", json.scorecard.rows);
         let clean_row = json
             .scorecard
             .rows
             .iter()
-            .find(|r| r.category == "Aaa")
-            .expect("AAA-1's category must still get a row despite zero real findings");
+            .find(|r| r.category == "Performance")
+            .expect("the clean rule's category must still get a row despite zero real findings");
         assert_eq!(clean_row.status, "Clean");
         assert_eq!(clean_row.audited_rules, 1);
         assert_eq!(clean_row.clean_rules, 1);
@@ -9571,6 +9870,94 @@ mod tests {
         assert!(
             pdf.starts_with(b"%PDF"),
             "output must start with the PDF magic bytes"
+        );
+    }
+
+    // ── req_det: two exports of ONE report are byte-identical ─────────────────
+
+    /// req_det: compiling the SAME report twice, across a second boundary, must produce
+    /// byte-identical PDFs.
+    ///
+    /// This is the property the product needs in order to claim two deliverables ARE the same
+    /// report. Without it the claim is unverifiable: you cannot diff two PDFs and say anything.
+    ///
+    /// FAILS BEFORE THE CHANGE: `compile_pdf` set neither `SOURCE_DATE_EPOCH` nor
+    /// `--creation-timestamp`, so typst stamped the wall clock into five places — the Info
+    /// dict's `/CreationDate` and `/ModDate`, the XMP packet's `xmp:CreateDate`,
+    /// `xmp:ModifyDate`, `xmpMM:InstanceID` and `xmpMM:DocumentID`, and the trailer's `/ID`.
+    /// Red output was `the two PDFs must be byte-identical … first difference at byte 10029`
+    /// inside the XMP packet, with the two windows showing `08:49:30` and `08:49:32`.
+    ///
+    /// The sleep is deliberate and is why this test is trustworthy: without it the two
+    /// compiles usually land in the same second and the OLD code passes, which is precisely
+    /// how this defect survived — a test that is usually green teaches you to rerun, not to
+    /// look.
+    #[tokio::test]
+    async fn req_det_two_compiles_of_one_report_are_byte_identical() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping req_det_two_compiles_of_one_report_are_byte_identical: typst not on PATH"
+            );
+            return;
+        }
+        let report = report_with(
+            vec![finding(
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "src/a.rs",
+                10,
+                "critical",
+            )],
+            vec!["SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        let first = compile_pdf(&json).await.expect("first compile must succeed");
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let second = compile_pdf(&json).await.expect("second compile must succeed");
+
+        assert!(first.starts_with(b"%PDF") && !first.is_empty());
+        let first_diff = first
+            .iter()
+            .zip(&second)
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| first.len().min(second.len()));
+        assert_eq!(
+            first, second,
+            "two compiles of ONE report must be byte-identical; lengths {} vs {}, first \
+             difference at byte {first_diff}",
+            first.len(),
+            second.len()
+        );
+    }
+
+    /// req_det: the PDF's embedded creation timestamp is the SCAN time — not a constant, and
+    /// not the moment the bytes were serialized. A client reading the file's metadata must be
+    /// told when the audit ran.
+    ///
+    /// FAILS BEFORE THE CHANGE: the Info dict carried the wall clock at compile time, which
+    /// for this fixture (a scan stamped `2026-07-23T00:05:00Z`) is years off.
+    #[tokio::test]
+    async fn req_det_pdf_creation_timestamp_is_the_scan_time() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping req_det_pdf_creation_timestamp_is_the_scan_time: typst not on PATH"
+            );
+            return;
+        }
+        let report = report_with(
+            vec![finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 10, "critical")],
+            vec!["SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        // `report_with` stamps finished_at = 2026-07-23T00:05:00Z; the cover string is
+        // minute-precision, so the pinned instant is 00:05:00 of that day.
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.cover.generated_at, "2026-07-23 00:05 UTC");
+
+        let pdf = compile_pdf(&json).await.expect("compile must succeed");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(
+            text.contains("D:20260723000500"),
+            "the PDF must carry the SCAN instant as its creation date, not the wall clock"
         );
     }
 

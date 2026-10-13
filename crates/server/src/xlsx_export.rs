@@ -1577,6 +1577,14 @@ fn write_coverage_sheet(
 
     let mut next_r = last_row + 2;
 
+    // VESTIGIAL in practice, kept deliberately. `split_scannable_rules_from` has returned a
+    // hard-coded empty `excluded_mechanical` since W4 dropped CI-tier exclusion from the
+    // semantic pass, so for any report produced by today's pipeline this block cannot render.
+    // It stays because `excluded_mechanical_rules` is persisted on `ScanReport` and a pre-W4
+    // report re-exported from disk can still carry real content — and because the honest
+    // reading of a live-looking block that can only ever be empty is "dead", which is exactly
+    // the thing worth writing down rather than leaving the next reader to rediscover. The
+    // modern equivalent is the `rules_not_run` section below, sourced from the scan ledger.
     if !excluded_mechanical_rules.is_empty() {
         ws.write_string_with_format(
             next_r,
@@ -1775,7 +1783,16 @@ fn write_index_sheet(
     ws.write_string(r, 1, &report.provenance.camerata_version)?;
     r += 1;
     ws.write_string(r, 0, "Generated")?;
-    ws.write_string(r, 1, chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string())?;
+    // The SCAN time, the SAME string the PDF cover prints — not the wall clock at
+    // serialization. See `report_export::generated_at_label`: a workbook re-exported months
+    // later used to claim it was generated months after the audit it describes, and the cell
+    // straddled a minute boundary under load (source 2 in
+    // `crates/cli/tests/inspect_export_equivalence.rs`'s normalization).
+    ws.write_string(
+        r,
+        1,
+        crate::report_export::generated_at_label(&report.provenance),
+    )?;
     r += 1;
     ws.write_string(r, 0, "Files scanned")?;
     ws.write_number(r, 1, report.files_scanned as f64)?;
@@ -2140,6 +2157,27 @@ pub fn build_workbook(
         .collect();
 
     let mut wb = Workbook::new();
+    // Reproducibility: pin the workbook's document properties to the SCAN time.
+    // `rust_xlsxwriter`'s `DocProperties::default` stamps `ExcelDateTime::utc_now()` at second
+    // precision and writes it to `docProps/core.xml` as BOTH `dcterms:created` and
+    // `dcterms:modified`, so with nothing set, two exports of one report differed there — the
+    // workbook half of the same "cannot prove two deliverables are the same report" problem as
+    // the PDF's creation timestamp (see `report_export::compile_pdf`). It is also the more
+    // honest metadata: a client inspecting the file's properties is asking when the audit ran.
+    //
+    // `ExcelDateTime::from_timestamp` rather than handing over the `chrono` value directly,
+    // because `rust_xlsxwriter`'s optional `chrono` feature is not enabled for this crate and
+    // enabling it to save one conversion is not worth a dependency-surface change.
+    //
+    // Left at the library default when provenance carries no parseable instant: that path is
+    // non-reproducible by construction, exactly as `generated_at_label` documents, and
+    // stamping an invented constant on a client deliverable would be worse than admitting it.
+    if let Some(scan_time) = crate::report_export::scan_instant(&report.provenance) {
+        if let Ok(created) = rust_xlsxwriter::ExcelDateTime::from_timestamp(scan_time.timestamp())
+        {
+            wb.set_properties(&rust_xlsxwriter::DocProperties::new().set_creation_datetime(&created));
+        }
+    }
     let fmts = Formats::new();
 
     write_index_sheet(
@@ -2210,10 +2248,23 @@ pub fn build_workbook(
 // ── `findings.json` (product export, machine-readable sibling of the workbook) ────────
 
 /// The `findings.json` payload bundled into the product-export zip: the machine-readable
-/// version of the Excel data. `findings` is the SAME (non-FP, severity-desc-then-repo/path/
-/// line-sorted) [`FindingRow`] set that becomes the workbook's "All Findings" sheet — see
-/// [`build_findings_export`] — so the JSON and the xlsx can never disagree on a row count or
-/// a field value; both come from one `partition_rows` pass.
+/// version of the Excel data. `findings` is the WHOLE non-FP (severity-desc-then-repo/path/
+/// line-sorted) [`FindingRow`] set — the same `partition_rows` output the workbook is built
+/// from, so the two can never disagree on a field value.
+///
+/// It is NOT the same set as the workbook's "All Findings" sheet, and this comment claimed it
+/// was until 2026-10-12. Since the Pass-3 restructure the workbook PARTITIONS that set across
+/// three destinations by [`FindingKind`] (see `kind_sheet`): "All Findings" takes only
+/// Defect/Deviation/absent-kind rows, Conventions takes the informational ones, and Coverage's
+/// "could not complete" section takes the not-assessed ones. `findings.json` is deliberately
+/// unpartitioned — a machine-readable export exists to be filtered by its consumer, and
+/// dropping the informational rows from it would make the JSON a lossy subset of the workbook
+/// it is supposed to be the complete sibling of.
+///
+/// That distinction is the whole point of writing it down: the code is right and the comment
+/// was wrong, and someone trusting the comment would "restore parity" by DELETING rows from
+/// the JSON. `req_pass3_every_exported_row_lands_on_exactly_one_sheet` pins the real
+/// invariant — every row here lands on exactly one of the three sheets.
 ///
 /// `provenance` and `summary` are reused VERBATIM from the already-built
 /// [`crate::report_export::AuditReportJson`] (`cover` and `executive_summary` respectively)
@@ -2559,7 +2610,10 @@ mod tests {
             "name=\"Dependencies\"",
             "name=\"False Positives\"",
             "name=\"Coverage\"",
-            "name=\"Supabase RLS\"",
+            // A9: the per-area tab is named from the CATEGORY. Without a corpus,
+            // `SUPABASE-RLS-ENABLED-1` now resolves through the closed taxonomy to
+            // "RLS Policy" rather than through its own first two tokens to "Supabase RLS".
+            "name=\"RLS Policy\"",
         ] {
             assert!(
                 workbook_xml.contains(expected),
@@ -2707,20 +2761,153 @@ mod tests {
         let bytes =
             build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
         let workbook_xml = read_zip_entry(&bytes, "xl/workbook.xml");
-        assert!(workbook_xml.contains("name=\"Supabase RLS\""), "{workbook_xml}");
-        assert!(workbook_xml.contains("name=\"Arch\""), "{workbook_xml}");
+        // A9: both tabs are named from the CATEGORY, which now comes from the closed
+        // taxonomy rather than the rule id's own first two tokens — "RLS Policy" not
+        // "Supabase RLS", "Architecture" not "Arch".
+        assert!(workbook_xml.contains("name=\"RLS Policy\""), "{workbook_xml}");
+        assert!(workbook_xml.contains("name=\"Architecture\""), "{workbook_xml}");
+    }
+
+    // ── A9: a worksheet TAB NAME is never a slugified rule id ─────────────────
+
+    /// req_a9: the per-area worksheets are named from the category, so a mangled category is
+    /// not merely an ugly cell — it is the tab the client clicks on. This is the client-facing
+    /// consequence the A9 scorecard fix exists to close, asserted at the surface a client
+    /// actually sees.
+    ///
+    /// FAILS BEFORE THE CHANGE: `xl/workbook.xml` contained `name="Arch No"` and
+    /// `name="Legacy Unmapped"` — the first two tokens of `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1`
+    /// and `LEGACY-UNMAPPED-1`, title-cased. Red output was
+    /// `a worksheet tab is named "Arch No" — the rule id ARCH-NO-CROSS-BOUNDARY-IMPORTS-1
+    /// slugified`.
+    #[test]
+    fn req_a9_no_worksheet_tab_is_named_after_a_slugified_rule_id() {
+        let report = report_with(
+            vec![
+                finding("ARCH-NO-CROSS-BOUNDARY-IMPORTS-1", "src/a.rs", 1, "high"),
+                finding("LEGACY-UNMAPPED-1", "src/b.rs", 2, "high"),
+            ],
+            vec![],
+        );
+        let bytes =
+            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let workbook_xml = read_zip_entry(&bytes, "xl/workbook.xml");
+        for slug in ["Arch No", "Legacy Unmapped"] {
+            assert!(
+                !workbook_xml.contains(&format!("name=\"{slug}\"")),
+                "a worksheet tab is named {slug:?} — a rule id slugified. A client opening the \
+                 deliverable must never see internal vocabulary on a tab: {workbook_xml}"
+            );
+        }
+        // Positive half: the real categories DID get their tabs, so this is not green merely
+        // because the sheets vanished.
+        assert!(workbook_xml.contains("name=\"Architecture\""), "{workbook_xml}");
+        assert!(workbook_xml.contains("name=\"Other\""), "{workbook_xml}");
+    }
+
+    // ── req_det: two workbook builds of ONE report are byte-identical ─────────
+
+    /// req_det: building the SAME report twice, across a second boundary, must produce
+    /// byte-identical workbooks.
+    ///
+    /// FAILS BEFORE THE CHANGE: `rust_xlsxwriter`'s `DocProperties` default stamps
+    /// `ExcelDateTime::utc_now()` at second precision into `docProps/core.xml` as BOTH
+    /// `dcterms:created` and `dcterms:modified`, and nothing pinned it. Red output was
+    /// `two builds of ONE report must be byte-identical; … first difference at byte 1247`,
+    /// the two windows reading `2026-10-12T14:02:58Z` and `2026-10-12T14:03:00Z`.
+    ///
+    /// The sleep is what makes this test honest — two builds in the same second passed under
+    /// the OLD code, which is exactly why the export-equivalence test flaked about one run in
+    /// four instead of failing outright.
+    #[test]
+    fn req_det_two_workbook_builds_of_one_report_are_byte_identical() {
+        let report = report_with(
+            vec![finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 1, "high")],
+            vec!["SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let sealed = report.clone().seal();
+        let first = build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        let second = build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+
+        let first_diff = first
+            .iter()
+            .zip(&second)
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| first.len().min(second.len()));
+        assert_eq!(
+            first, second,
+            "two builds of ONE report must be byte-identical; lengths {} vs {}, first \
+             difference at byte {first_diff}",
+            first.len(),
+            second.len()
+        );
+    }
+
+    /// req_det: the workbook's document properties state when the AUDIT ran, not when the
+    /// bytes were written — the same correctness argument as the PDF's creation timestamp.
+    /// `rust_xlsxwriter` writes `dcterms:created` and `dcterms:modified` from this one value,
+    /// so both are checked.
+    ///
+    /// FAILS BEFORE THE CHANGE: both carried the wall clock at build time.
+    #[test]
+    fn req_det_workbook_doc_properties_carry_the_scan_time() {
+        let report = report_with(
+            vec![finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 1, "high")],
+            vec!["SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let bytes =
+            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let core = read_zip_entry(&bytes, "docProps/core.xml");
+        // `report_with` stamps finished_at = 2026-07-23T00:05:00Z.
+        assert!(
+            core.contains("<dcterms:created xsi:type=\"dcterms:W3CDTF\">2026-07-23T00:05:00Z"),
+            "dcterms:created must be the scan instant: {core}"
+        );
+        assert!(
+            core.contains("<dcterms:modified xsi:type=\"dcterms:W3CDTF\">2026-07-23T00:05:00Z"),
+            "dcterms:modified must be the scan instant too: {core}"
+        );
+    }
+
+    /// req_det: the Index sheet's human-readable "Generated" row states the scan time, so the
+    /// workbook a client reads agrees with the PDF cover rather than contradicting it.
+    ///
+    /// FAILS BEFORE THE CHANGE: that cell was `chrono::Utc::now()`, so a workbook re-exported
+    /// months later claimed to have been generated months after the audit it describes — and
+    /// it straddled a minute boundary under load, which is source 2 in
+    /// `crates/cli/tests/inspect_export_equivalence.rs`'s normalization.
+    #[test]
+    fn req_det_index_generated_row_is_the_scan_time() {
+        let report = report_with(
+            vec![finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 1, "high")],
+            vec!["SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let bytes =
+            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let shared = read_zip_entry(&bytes, "xl/sharedStrings.xml");
+        assert!(
+            shared.contains("2026-07-23 00:05 UTC"),
+            "the Index 'Generated' row must state the scan time: {shared}"
+        );
     }
 
     #[test]
     fn categories_with_zero_findings_get_no_sheet() {
-        // ZZZ-1 is audited but never fires — it must show up in Coverage/Index only, never
-        // as its own (empty, broken-looking) sheet.
-        let report = report_with(vec![], vec!["ZZZ-1"]);
+        // SUPABASE-RLS-ENABLED-1 is audited but never fires — it must show up in
+        // Coverage/Index only, never as its own (empty, broken-looking) sheet.
+        //
+        // A9: the audited id is a real one now. The old fixture used `ZZZ-1` and asserted no
+        // `name="Zzz"` tab; since `ZZZ-1` resolves to the generic "Other" bucket, that
+        // assertion would have passed without the sheet-suppression logic doing anything —
+        // a guard that cannot fail. The id below has a category ("RLS Policy") that WOULD
+        // be a tab if the suppression broke.
+        let report = report_with(vec![], vec!["SUPABASE-RLS-ENABLED-1"]);
         let bytes =
             build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
         let workbook_xml = read_zip_entry(&bytes, "xl/workbook.xml");
         assert!(
-            !workbook_xml.contains("name=\"Zzz\""),
+            !workbook_xml.contains("name=\"RLS Policy\""),
             "an audited-but-empty category must not get its own sheet: {workbook_xml}"
         );
     }
