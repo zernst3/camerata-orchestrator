@@ -23,6 +23,13 @@
 //!   `[[sources]].note` field to hold them, is a corpus-content decision for the owner —
 //!   `req_w14_the_misplaced_qualifies_roster_has_not_grown` pins them at 19/7 meanwhile.
 //!
+//!   **Superseded by W18** (prose only; no assertion in this file changed). The owner ruled
+//!   "retain it if it would be useful", so `[[sources]]` got a real field — `relevance`, not
+//!   `note` — and all 19 were migrated into it. The corpus now carries ZERO nested `qualifies`
+//!   and `crates/rules/tests/w18_source_relevance.rs` fails the build on any new one. The
+//!   paragraph above is kept as the record of WHY the 19 could not simply move up a level,
+//!   which is still the reason they needed a field of their own.
+//!
 //! ## Why `summary` matters
 //!
 //! `Rule::summary` is derived `qualifies` -> `[decision].why` -> `title` (lib.rs, "Derive

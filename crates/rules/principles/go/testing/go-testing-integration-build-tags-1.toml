@@ -13,12 +13,12 @@ qualifies = "Integration tests — tests that require a live database, external 
 [[sources]]
 url = "https://pkg.go.dev/cmd/go#hdr-Build_constraints"
 title = "cmd/go — Build constraints (//go:build)"
-qualifies = "cmd/go documents the //go:build directive: custom tags specified via -tags flag at build/test time. A file with //go:build integration is only compiled when go test -tags=integration is passed."
+relevance = "cmd/go documents the //go:build directive: custom tags specified via -tags flag at build/test time. A file with //go:build integration is only compiled when go test -tags=integration is passed."
 
 [[sources]]
 url = "https://pkg.go.dev/cmd/go#hdr-Test_packages"
 title = "cmd/go — Test packages"
-qualifies = "go test documentation: build tags (//go:build) control which files are compiled for a given test run, enabling separation of fast unit tests from slow integration tests."
+relevance = "go test documentation: build tags (//go:build) control which files are compiled for a given test run, enabling separation of fast unit tests from slow integration tests."
 
 [decision]
 question = "How are tests that require external infrastructure (DB, network, queues) separated from unit tests?"

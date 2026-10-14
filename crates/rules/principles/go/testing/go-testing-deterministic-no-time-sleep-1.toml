@@ -13,23 +13,23 @@ qualifies = "A Go test that calls time.Sleep is a flaky test waiting to happen: 
 [[sources]]
 url = "https://pkg.go.dev/testing#T.TempDir"
 title = "pkg.go.dev/testing — T.TempDir"
-qualifies = "t.TempDir() returns a temporary directory unique to each test, cleaned up automatically when the test ends. Tests that write to the filesystem use t.TempDir() instead of os.MkdirTemp with manual cleanup."
+relevance = "t.TempDir() returns a temporary directory unique to each test, cleaned up automatically when the test ends. Tests that write to the filesystem use t.TempDir() instead of os.MkdirTemp with manual cleanup."
 
 [[sources]]
 url = "https://pkg.go.dev/testing#T.Setenv"
 title = "pkg.go.dev/testing — T.Setenv"
-qualifies = "t.Setenv(key, value) sets an environment variable for the test duration and restores it via t.Cleanup when the test ends. Cannot be used in parallel tests (panics if t.Parallel has been called)."
+relevance = "t.Setenv(key, value) sets an environment variable for the test duration and restores it via t.Cleanup when the test ends. Cannot be used in parallel tests (panics if t.Parallel has been called)."
 
 [[sources]]
 url = "https://pkg.go.dev/testing#T.Cleanup"
 title = "pkg.go.dev/testing — T.Cleanup"
-qualifies = "t.Cleanup(f) registers f to run when the test ends in LIFO order. Guarantees teardown even if the test panics. The idiomatic replacement for defer in test helper functions."
+relevance = "t.Cleanup(f) registers f to run when the test ends in LIFO order. Guarantees teardown even if the test panics. The idiomatic replacement for defer in test helper functions."
 
 [[sources]]
 url = "https://golangci-lint.run/docs/linters/"
 title = "golangci-lint linters"
 linter = "golangci-lint: tparallel"
-qualifies = "golangci-lint tparallel detects inappropriate usage of t.Parallel() that can cause data races when tests mutate shared state. Used alongside t.Setenv restrictions to prevent race conditions in parallel tests."
+relevance = "golangci-lint tparallel detects inappropriate usage of t.Parallel() that can cause data races when tests mutate shared state. Used alongside t.Setenv restrictions to prevent race conditions in parallel tests."
 
 [decision]
 question = "How do tests avoid flakiness from time, randomness, environment, and filesystem side effects?"

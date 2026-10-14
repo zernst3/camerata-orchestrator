@@ -502,6 +502,8 @@ impl std::fmt::Display for Verification {
 /// url = "https://errcheck.dev"
 /// title = "errcheck — unchecked errors"
 /// # linter omitted for a style-guide/doc-only source
+/// relevance = "errcheck's own docs state the default is to report every unchecked error \
+///              return, which is exactly the check this rule mirrors."
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct RuleSource {
@@ -514,6 +516,38 @@ pub struct RuleSource {
     /// `None` for a style-guide / documentation-only source that no tool enforces.
     #[serde(default)]
     pub linter: Option<String>,
+    /// Author-facing provenance: what THIS source actually states, and how that
+    /// bears on the rule. Absent → `None`, which is the normal case; 19 sources
+    /// across 7 `go/testing/` rules carried one as of W18.
+    ///
+    /// # Why the field exists (W18)
+    ///
+    /// Rule authors were already writing this content — they just had nowhere to
+    /// put it, so 19 paragraphs went into a `qualifies` key nested inside the
+    /// `[[sources]]` block, where this struct had no field for them and serde
+    /// dropped every one silently. The owner's ruling was to keep the content, so
+    /// it got a field. See [`SOURCE_FIELDS`] for the full history and
+    /// [`corpus_rules_with_qualifies_nested_in_sources`] for the gate that stops
+    /// the old spelling returning.
+    ///
+    /// # Why `relevance` and not `qualifies`
+    ///
+    /// This is NOT the rule-level `qualifies`/[`Rule::summary`] and must never be
+    /// folded into it. `qualifies` says *when the rule applies*; `relevance` says
+    /// *why this citation supports it*. Reusing one name for both meanings at two
+    /// nesting levels is what produced the silent drop in the first place.
+    ///
+    /// # Consumption
+    ///
+    /// Deliberately none, today. It is author/reviewer-facing provenance for
+    /// re-verifying a citation without re-reading the source, not client-facing
+    /// deliverable text; the shipped artifacts cap what they say about a rule, and
+    /// a paragraph per citation is an internal dump by any measure. Declared
+    /// accepted-and-unconsumed in that sense — but, unlike `layer`/`emits`, it is
+    /// at least PARSED and reachable, so a future rule-detail page can render it
+    /// without another corpus migration.
+    #[serde(default)]
+    pub relevance: Option<String>,
 }
 
 /// Provenance for a human verification: who verified the rule, when, and which
@@ -2114,9 +2148,9 @@ const OPTION_LEVEL_FIELDS: &[&str] = &[
 /// `[decision]` keys. Mirrors `DecisionToml`.
 const DECISION_FIELDS: &[&str] = &["question", "why", "default"];
 
-/// `[[sources]]` keys. Mirrors [`RuleSource`] — PLUS `qualifies`, which is accepted here and is
-/// reported by [`corpus_rules_with_qualifies_misplaced_into_sources`] /
-/// [`corpus_rules_losing_qualifies_text_to_sources`].
+/// `[[sources]]` keys. Mirrors [`RuleSource`] — PLUS `qualifies`, which is accepted here so that
+/// [`corpus_rules_with_qualifies_nested_in_sources`] can be the gate that rejects it, with a
+/// message that says what to do instead.
 ///
 /// What W14 found: `qualifies` is a RULE-level field, but in 17 `go/` rules it is authored on a
 /// line that sits BELOW a `[[sources]]` header, so TOML scopes it into the source table and
@@ -2134,20 +2168,26 @@ const DECISION_FIELDS: &[&str] = &["question", "why", "default"];
 ///   `qualifies`.** These are not misplaced rule-level text at all: each one annotates the SOURCE
 ///   it sits under ("t.TempDir() returns a temporary directory unique to each test…",
 ///   "golangci-lint thelper: 'Detects tests helpers which do not start with…'"). They are per-
-///   source notes wearing a rule-level field's name. They were deliberately NOT moved: the
-///   rule-level slot already holds the correct rule-level text, TOML forbids the duplicate keys
-///   that 2-to-4-per-file would require, and concatenating source trivia into a rule's derived
-///   `summary` would corrupt text that currently reads correctly. The rule-level `qualifies` was
-///   kept in all 7 cases; deleting 19 paragraphs of authored prose, or adding a real
-///   `[[sources]].note` field for them, is a corpus-content decision for the owner.
+///   source notes wearing a rule-level field's name, and W17 left them in place pending an owner
+///   ruling on whether to delete them or give `[[sources]]` a field of its own.
 ///
-/// `qualifies` therefore stays in this vocabulary (the 19 must still parse), and the regression
-/// guard for the fixed shape is the gate above plus
-/// `req_w14_the_misplaced_qualifies_roster_has_not_grown`. `qualifies` is still deliberately NOT
-/// added to [`RuleSource`] as a struct field: that struct has public fields and is
-/// literal-constructed in `crates/server/src/scan_tools.rs`, so adding one would be a breaking
-/// change to a crate this workstream does not own.
-const SOURCE_FIELDS: &[&str] = &["url", "title", "linter", "qualifies"];
+/// **W18 is that ruling, and it is "keep them".** [`RuleSource::relevance`] now exists, all 19
+/// were migrated into it, and the corpus carries ZERO nested `qualifies` keys. The naming (W18):
+/// `relevance`, not a second `note` (`[[stack_exception]].note` already owns that word for a
+/// different scope) and not a verb like `substantiates`/`grounds` (`qualifies`/`violates` are
+/// the corpus's verb-shaped keys and both read as claims about the RULE, which is the exact
+/// level ambiguity being retired; `grounding` additionally collides with `verification =
+/// "grounded"`).
+///
+/// `qualifies` stays in this vocabulary ON PURPOSE even though no corpus file uses it here any
+/// more. Dropping it would make [`corpus_files_with_unknown_fields`] report it as a typo, which
+/// is both wrong (it is a correctly-spelled key in the wrong place) and a worse message than the
+/// dedicated gate's. That is the same non-overlap reasoning this module already applies to
+/// unparseable TOML and to `rules_with_invalid_severity_floor`: one defect, one gate, one
+/// message. The enforcement did not weaken — it moved from
+/// [`corpus_rules_with_qualifies_nested_in_sources`], which fails the build on ANY nested
+/// occurrence.
+const SOURCE_FIELDS: &[&str] = &["url", "title", "linter", "relevance", "qualifies"];
 
 /// `[verified]` keys. Mirrors [`VerifiedProvenance`].
 const VERIFIED_FIELDS: &[&str] = &["by", "at", "against"];
@@ -2199,11 +2239,13 @@ fn collect_unknown_keys(
 ///
 /// W17 narrowed that list. `tag` was DELETED from all 417 files and from the schema, so this
 /// gate now REJECTS it (417 offenders if it ever returns). `sources.qualifies` stays in
-/// [`SOURCE_FIELDS`] — the 29 occurrences were MOVED to the rule level, and the regression guard
-/// is `req_w14_the_misplaced_qualifies_roster_has_not_grown` now asserting an EMPTY roster rather
-/// than this gate, which keeps this gate's synthetic fixtures (and `RuleSource`'s tolerance of a
-/// stray key) unchanged. `layer` (417) and `emits` (2) remain accepted-and-unconsumed, both
-/// awaiting an owner ruling.
+/// [`SOURCE_FIELDS`] — the 29 occurrences were MOVED (10 to the rule level by W17, the other 19
+/// to [`RuleSource::relevance`] by W18), and the regression guard is the dedicated
+/// [`corpus_rules_with_qualifies_nested_in_sources`] rather than this gate, so that a
+/// correctly-spelled key in the wrong place gets a message about placement rather than about
+/// spelling. That keeps this gate's synthetic fixtures (and `RuleSource`'s tolerance of a stray
+/// key) unchanged. `layer` (417) and `emits` (2) remain accepted-and-unconsumed, both awaiting
+/// an owner ruling; `relevance` (19) is accepted and PARSED, which is a different thing.
 #[cfg_attr(not(test), allow(dead_code))]
 pub async fn corpus_files_with_unknown_fields(
     corpus_dir: &Path,
@@ -2301,13 +2343,19 @@ fn array_tables<'a>(root: &'a toml::value::Table, key: &str) -> Vec<&'a toml::va
 /// `"<rule id> (sources[<i>], rule-level qualifies: present|ABSENT)"`. Sorted for stable output.
 ///
 /// See [`SOURCE_FIELDS`] for the full story, including W17's finding that the original count of
-/// 29 covered TWO different shapes. This function still reports BOTH, because the per-source
-/// annotation shape (19 occurrences, 7 rules) is unresolved and must not spread. The shape that
-/// actually loses authored text is split out into
-/// [`corpus_rules_losing_qualifies_text_to_sources`], which IS build-failing.
+/// 29 covered TWO different shapes. This function still reports BOTH. The shape that actually
+/// loses a rule its summary is split out into [`corpus_rules_losing_qualifies_text_to_sources`],
+/// which IS build-failing.
 ///
 /// `req_w14_the_misplaced_qualifies_roster_has_not_grown` pins this roster's exact composition so
 /// neither shape can change silently.
+///
+/// W18 note: the roster is now EMPTY — the 19 per-source annotations moved to
+/// [`RuleSource::relevance`] — and the build-failing gate for the general shape is
+/// [`corpus_rules_with_qualifies_nested_in_sources`]. This function is kept as the roster
+/// REPORTER it has always been (it is the only one of the three that states, per occurrence,
+/// whether the rule has a rule-level `qualifies`), and it stays advisory so that the gate which
+/// fails the build is the one with the actionable message.
 #[cfg_attr(not(test), allow(dead_code))]
 pub async fn corpus_rules_with_qualifies_misplaced_into_sources(
     corpus_dir: &Path,
@@ -2359,12 +2407,18 @@ pub async fn corpus_rules_with_qualifies_misplaced_into_sources(
 /// outside. 10 `go/*.toml` rules were in that state; W17 moved all 10 to the rule level.
 ///
 /// Build-failing, where [`corpus_rules_with_qualifies_misplaced_into_sources`] stays advisory,
-/// because the two shapes have different owners. This one has a mechanical, text-preserving fix
-/// (move the line up), so a new occurrence is always an author error and should stop the build.
-/// The other shape — a per-source annotation on a rule whose rule-level `qualifies` is already
-/// correct — loses nothing and its resolution is a corpus-content decision (delete the 19
-/// paragraphs, or give `[[sources]]` a real `note` field), so failing the build on it would
-/// force a choice the owner has not made.
+/// because when this was written the two shapes had different owners. This one has a mechanical,
+/// text-preserving fix (move the line up), so a new occurrence is always an author error and
+/// should stop the build. The other shape — a per-source annotation on a rule whose rule-level
+/// `qualifies` is already correct — lost nothing a client could see, and its resolution was a
+/// corpus-content decision the owner had not yet made.
+///
+/// W18 made it: [`RuleSource::relevance`] holds that content, so the other shape is now an author
+/// error too and [`corpus_rules_with_qualifies_nested_in_sources`] fails the build on BOTH. This
+/// gate is retained rather than folded in, because it is the one that names the CONSEQUENCE
+/// (`Rule::summary` silently became `[decision].why`) rather than the mistake, and that
+/// consequence is the reason any of this is gated at all. It can only ever report a subset of
+/// the W18 gate's offenders.
 #[cfg_attr(not(test), allow(dead_code))]
 pub async fn corpus_rules_losing_qualifies_text_to_sources(
     corpus_dir: &Path,
@@ -2383,6 +2437,82 @@ pub async fn corpus_rules_losing_qualifies_text_to_sources(
             )
         })
         .collect())
+}
+
+/// GATE (W18). Every `[[sources]]` block in the corpus that authors a `qualifies` key, as
+/// `"<rule id> (sources[<i>] \"<title>\"): …"`. Sorted for stable output.
+/// `req_w18_no_corpus_rule_authors_qualifies_inside_a_sources_block` asserts this is EMPTY.
+///
+/// **This is the general shape, and until W18 it had no guard.** The two older gates are each
+/// narrower, and the 19 per-source annotations lived in the gap between them:
+///
+/// - [`corpus_rules_with_qualifies_misplaced_into_sources`] reports exactly this shape but is
+///   ADVISORY — it is pinned to a roster COUNT, so 19 known occurrences were a passing state and
+///   only a 20th would have failed.
+/// - [`corpus_rules_losing_qualifies_text_to_sources`] fails the build, but only on the subset
+///   that ALSO has no rule-level `qualifies`. The 19 all had one, so it never fired on them.
+///
+/// The gap was deliberate while nested `qualifies` had two possible meanings and only one of them
+/// was clearly an error. [`RuleSource::relevance`] removed the ambiguity: a nested `qualifies` is
+/// now always one of two author mistakes, both with a mechanical fix, so it stops the build.
+///
+/// Why this and not simply deleting `qualifies` from [`SOURCE_FIELDS`] (which would make
+/// [`corpus_files_with_unknown_fields`] reject it for free): that gate's message is "unknown
+/// field — check the spelling", and the spelling is not the problem. An author who meant
+/// `relevance` and an author who meant the rule's summary need two different instructions, and
+/// this gate's offender line carries both.
+#[cfg_attr(not(test), allow(dead_code))]
+pub async fn corpus_rules_with_qualifies_nested_in_sources(
+    corpus_dir: &Path,
+) -> Result<Vec<String>, RulesError> {
+    let paths = collect_toml_paths(corpus_dir).await?;
+    let mut out: Vec<String> = Vec::new();
+    for path in paths {
+        let bytes = tokio::fs::read(&path).await.map_err(|e| RulesError::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        // A hard TOML syntax error is gotcha 10's finding, not this gate's — skip quietly.
+        let Ok(value) = text.parse::<toml::Value>() else {
+            continue;
+        };
+        let Some(root) = value.as_table() else {
+            continue;
+        };
+        let id = root
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<no id>")
+            .to_owned();
+        let rule_level = root.contains_key("qualifies");
+        for (i, src) in array_tables(root, "sources").into_iter().enumerate() {
+            if !src.contains_key("qualifies") {
+                continue;
+            }
+            let title = src
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<no title>");
+            // The two mistakes need two different instructions, so say which one this looks
+            // like: a rule that already has its own `qualifies` cannot have meant a second one.
+            let fix = if rule_level {
+                "the rule already has a rule-level `qualifies`, so this is an annotation about \
+                 the SOURCE — rename the key to `relevance`"
+            } else {
+                "the rule has NO rule-level `qualifies`, so this is either the rule's own summary \
+                 written one level too deep (move the line ABOVE the first `[[sources]]` header) \
+                 or an annotation about the source (rename the key to `relevance`)"
+            };
+            out.push(format!(
+                "{id} (sources[{i}] {title:?}): `qualifies` is not a `[[sources]]` field, so \
+                 `RuleSource` parses it into nothing and the authored text is lost silently — \
+                 {fix}."
+            ));
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// The COMPLETE severity vocabulary a corpus-authored ceiling ([`Rule::max_severity`],

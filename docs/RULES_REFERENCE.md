@@ -674,7 +674,7 @@ role.
 
 ### 3.9 `[[sources]]`
 
-- **Type / default.** Array of `{ url, title, linter? }` tables; absent -> empty
+- **Type / default.** Array of `{ url, title, linter?, relevance? }` tables; absent -> empty
   (`lib.rs:507-523, 598-601`).
 - **What the engine does with them:**
   - **Citations.** `resolve_citation` joins the finding's rule id to the corpus and cites
@@ -699,16 +699,36 @@ role.
   - **Grounding status.** Sources are what justify `verification = "grounded"`; the
     `verification` field, not the sources list, is what the engine reads for arming
     (section 3.8).
-- **`qualifies` inside a `[[sources]]` block is a real trap, and it bit 10 rules.**
-  `SOURCE_FIELDS` (`lib.rs:2149`) accepts a `qualifies` key at source level, so the
-  unknown-field gate does not complain - but `RuleSource` does not carry it, so the text is
-  parsed and discarded. Ten `go/` rules had their authored `qualifies` written one level too
-  deep that way; the rules loaded cleanly, and their `summary` silently fell back to
-  `[decision].why` (section 3.14). Fixed by moving the text to rule level. Two gates now
-  exist: `corpus_rules_with_qualifies_misplaced_into_sources` (`lib.rs:2312`, advisory) and
-  `corpus_rules_losing_qualifies_text_to_sources` (`lib.rs:2369`, build-failing - it fires
-  only when the misplacement actually COSTS the rule its authored summary). Author
-  `qualifies` at rule level, always.
+- **`relevance` is per-source provenance, and it is the ONLY place a per-source note goes.**
+  Optional string on each `[[sources]]` block: what that source actually states, and how it
+  bears on the rule (e.g. *"cmd/go documents the //go:build directive: custom tags specified
+  via -tags flag at build/test time..."*). 19 sources across the 7 `go/testing/` rules carry
+  one. **Parsed and reachable, but deliberately consumed by nothing today** - it is
+  author/reviewer-facing provenance for re-verifying a citation without re-reading the source,
+  not deliverable text. It does NOT reach the PDF, xlsx, `findings.json`, the proposal
+  `RuleSourceView`, or `Rule::summary`, and it must never be concatenated into any of them.
+  Added by W18; see the "artifact reach" note at the end of this bullet list.
+- **`qualifies` inside a `[[sources]]` block is a real trap, it bit 10 rules, and it is now a
+  build failure.** `SOURCE_FIELDS` (`lib.rs:2149`) still accepts a `qualifies` key at source
+  level so that the gate rejecting it can give a placement message rather than a spelling one
+  - but `RuleSource` does not carry it, so the text is parsed and discarded. Two shapes
+  existed:
+  - Ten `go/` rules had their authored *rule-level* `qualifies` written one level too deep;
+    the rules loaded cleanly and their `summary` silently fell back to `[decision].why`
+    (section 3.14). W17 fixed them by moving the text to rule level.
+  - Nineteen more, across 7 `go/testing/` rules that already had a correct rule-level
+    `qualifies`, were per-source annotations wearing a rule-level field's name. W18 migrated
+    all 19 to `relevance`. The corpus now has ZERO nested `qualifies`.
+
+  Three gates exist, narrowest first:
+  `corpus_rules_losing_qualifies_text_to_sources` (build-failing; fires only when the
+  misplacement actually COSTS the rule its authored summary),
+  `corpus_rules_with_qualifies_misplaced_into_sources` (advisory roster; the only one that
+  reports, per occurrence, whether the rule has a rule-level `qualifies`), and
+  `corpus_rules_with_qualifies_nested_in_sources` (W18, build-failing on ANY nested
+  occurrence - the general shape, which until W18 had no guard; the 19 lived in the gap
+  between the other two). **Author `qualifies` at rule level and `relevance` at source level,
+  always.**
 - **Absent / malformed.** No sources -> citation kind degrades to `"preview"` (when a
   `preview_tool` produced the row) or `"advisory"` (`report_export.rs:1701-1720`); for an
   AI-tier finding that stays advisory after the class fallback, the row is EXCLUDED from
@@ -774,7 +794,9 @@ role.
 - **Author it at rule level or it is discarded.** A `qualifies` key written inside a
   `[[sources]]` block parses, passes the unknown-field gate, and is thrown away, so the rule
   falls through to `[decision].why` with nothing to signal the loss. Ten `go/` rules shipped
-  in that state. See section 3.9 for the two gates that now catch it.
+  in that state. See section 3.9 for the three gates that now catch it - since W18 ANY nested
+  `qualifies` fails the build, whether or not it costs the rule its summary. If what you are
+  writing is about the SOURCE rather than the rule, the field is `[[sources]].relevance`.
 - **Where `summary` goes.** It is the FALLBACK directive text when a rule has no resolvable
   option: the arm/emit path (`server/src/lib.rs:8663-8676`), and the rule-drift diff's
   `resolved_directive` (`server/src/lib.rs:15083-15088`); it is also hashed into the
@@ -1315,6 +1337,7 @@ What reaches which artifact, per corpus field: see the per-field sections; summa
 |---|---|---|---|---|
 | `title`, `id` | yes | yes | yes | |
 | `sources` (url/title/linter) | yes (citations) | yes | | linter also drives tooling |
+| `sources.relevance` | NEVER | NEVER | NEVER | parsed, reachable, consumed by nothing - author-facing provenance (section 3.9) |
 | option `label` | yes (via kind payloads, snippets) | yes | yes | |
 | option `why` | yes (violates-finding detail) | yes | yes | |
 | option `directive` | NEVER | NEVER | yes | emit/diff |
@@ -1474,11 +1497,15 @@ closed** by gates or by W13's failure routing.
     this scan". That last one surprises people: a rule excluded from the scan by design is
     not reported as excluded, because it was never a scan rule. Section 3.6a.
 
-17. **`qualifies` is accepted inside `[[sources]]` and means nothing there.** `SOURCE_FIELDS`
-    (`lib.rs:2149`) lists it, so the unknown-field gate stays quiet, but `RuleSource` does not
-    carry it and the text is discarded - the rule's summary then silently falls back to
-    `[decision].why`. Ten `go/` rules shipped that way. Two gates now catch it
-    (`lib.rs:2312`, `lib.rs:2369`), the second build-failing. Section 3.9.
+17. **`qualifies` is accepted inside `[[sources]]` and means nothing there - but it now fails
+    the build.** `SOURCE_FIELDS` (`lib.rs:2149`) still lists it, so the unknown-field gate
+    stays quiet (deliberately: the problem is placement, not spelling, and the dedicated gate
+    says so), but `RuleSource` does not carry it and the text is discarded - the rule's
+    summary then silently falls back to `[decision].why`. Ten `go/` rules shipped that way and
+    19 more per-source annotations sat in the same key harmlessly-but-uselessly. Three gates
+    now catch it (`lib.rs:2312` advisory, `lib.rs:2369` and W18's
+    `corpus_rules_with_qualifies_nested_in_sources` build-failing, the last on ANY
+    occurrence). The per-source content has its own field, `relevance`. Section 3.9.
 
 18. **A `decision_with_floor` rule has no "no convention" exit, by design.** Its genuine
     options are equal-weight exactly like a `decision` rule's, so the absence of the escape
@@ -1826,6 +1853,7 @@ gates, never runtime refusals (a scan must never refuse to run over corpus state
 | `decision_kind_rules_with_violates_flag` (`lib.rs:2007`) + `req_w14_no_decision_kind_rule_carries_a_violates_flag` | a `decision`-kind rule carries any `violates` option | the flag is live at runtime regardless of kind, so a stray one manufactures a high-severity defect on an equal-weight rule (gotcha 3) |
 | `corpus_files_with_unknown_fields` (`lib.rs:2208`) + `req_w14_no_corpus_rule_carries_an_unknown_field` | any TOML key outside the declared vocabulary, at seven nesting levels | `deny_unknown_fields` is off by design; this is the stronger replacement (gotcha 9) |
 | `corpus_rules_losing_qualifies_text_to_sources` (`lib.rs:2369`) | a rule's authored `qualifies` sits inside `[[sources]]` AND the rule therefore loses its summary | ten `go/` rules shipped with a discarded summary (gotcha 17) |
+| `corpus_rules_with_qualifies_nested_in_sources` + `req_w18_no_corpus_rule_authors_qualifies_inside_a_sources_block` | ANY `[[sources]]` block authors `qualifies`, summary-losing or not | the general shape, which the two narrower gates left a gap in: 19 annotations sat in it as a passing state until W18 gave them `relevance` (gotcha 17) |
 | `req_w17_decision_with_floor_has_exactly_one_member` (`crates/rules/tests/w17_decision_with_floor_kind.rs:212`) | the `decision_with_floor` population differs from the approved roster | adding a rule to the fourth kind is a classification decision with recorded self-evidence, not a drive-by (section 3.6) |
 | `req_w17_no_corpus_rule_carries_a_tag_field` (`crates/rules/tests/w17_tag_field_deleted.rs:85`) | any rule re-adds `tag` | the field was deleted on measured grounds; the unknown-field gate also rejects it (section 3.18) |
 | `rules_disarmed_by_verification` (`lib.rs:1807`) + `req_h1_...` | any rule's `verification` makes it unarmable everywhere | the A7/A8 class: a repo-independent value disarming a rule forever (gotcha 4) |
@@ -1918,9 +1946,11 @@ block above so an old cross-reference still resolves.
 
 4. **The unknown-field gate cannot catch a correctly-spelled key in the WRONG place.**
    `qualifies` is in both `RULE_LEVEL_FIELDS` and `SOURCE_FIELDS`, and means nothing at the
-   second. Two targeted gates now cover that one case (`lib.rs:2312`, `lib.rs:2369`), but the
-   general shape - a vocabulary that is per-level yet overlapping - has no general guard.
-   Gotcha 17.
+   second. THAT one case is now fully gated: three targeted gates cover it (`lib.rs:2312`
+   advisory, `lib.rs:2369`, and W18's `corpus_rules_with_qualifies_nested_in_sources`, which
+   fails the build on any occurrence). What remains open is the GENERAL shape - a vocabulary
+   that is per-level yet overlapping gets a hand-written gate per overlap, and nothing
+   enumerates the overlaps. Today `qualifies` is the only one. Gotcha 17.
 
 5. **Cross-artifact severity asymmetry for unlocated rows.** The PDF/JSON partition applies
    the C4-R1 unlocated downgrade; the xlsx/`findings.json` partition does not

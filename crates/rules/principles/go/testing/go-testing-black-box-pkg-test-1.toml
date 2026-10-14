@@ -13,13 +13,13 @@ qualifies = "Go allows two package declarations in _test.go files: package foo (
 [[sources]]
 url = "https://pkg.go.dev/testing"
 title = "pkg.go.dev/testing — Go testing package"
-qualifies = "The testing package documentation describes the two legal package declarations for _test.go files: the package under test (white-box) and the package under test with _test suffix (black-box), compiled as a separate package linked with the main test binary."
+relevance = "The testing package documentation describes the two legal package declarations for _test.go files: the package under test (white-box) and the package under test with _test suffix (black-box), compiled as a separate package linked with the main test binary."
 
 [[sources]]
 url = "https://pkg.go.dev/cmd/go#hdr-Test_packages"
 title = "cmd/go — Test packages"
 linter = "golangci-lint: testpackage"
-qualifies = "cmd/go documents: 'Files declaring package name_test are compiled as a separate package, then linked and run with the main test binary.' golangci-lint testpackage enforces the use of separate _test packages."
+relevance = "cmd/go documents: 'Files declaring package name_test are compiled as a separate package, then linked and run with the main test binary.' golangci-lint testpackage enforces the use of separate _test packages."
 
 [[sources]]
 url = "https://golangci-lint.run/docs/linters/"

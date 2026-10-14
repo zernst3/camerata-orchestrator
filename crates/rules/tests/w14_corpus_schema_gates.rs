@@ -580,8 +580,17 @@ scope = "repo"
 ///   awaiting an owner ruling on whether to delete them or give `[[sources]]` a real `note`
 ///   field. 29 -> 19 and 17 -> 7 are that subset standing alone.
 ///
-/// What this test carries is unchanged: the shape cannot SPREAD silently. Growth in either half
-/// fails here.
+/// TEST DISCIPLINE exception (a), W18: the owner ruled — keep the content, give it a field. All
+/// 19 were migrated to the new `[[sources]].relevance`, so the roster this test pins is now
+/// EMPTY and the pinned numbers drop 19 -> 0 and 7 -> 0. The DATA changed again; nothing this
+/// test asserts about the defect changed.
+///
+/// What this test carries is unchanged across both edits: the shape cannot SPREAD silently.
+/// Growth in either half fails here. It is now the third guard on that shape rather than the
+/// loosest — `req_w18_no_corpus_rule_authors_qualifies_inside_a_sources_block` fails the build on
+/// any occurrence — and it is kept because it is the only one that asserts the roster's
+/// COMPOSITION (which rules, and whether each has a rule-level `qualifies`) rather than just its
+/// emptiness.
 #[tokio::test]
 async fn req_w14_the_misplaced_qualifies_roster_has_not_grown() {
     let Some(dir) = corpus_dir() else {
@@ -592,10 +601,10 @@ async fn req_w14_the_misplaced_qualifies_roster_has_not_grown() {
         .expect("corpus is readable");
     assert_eq!(
         found.len(),
-        19,
-        "the `qualifies`-in-`[[sources]]` roster must not change silently (19 per-source \
-         annotations across 7 `go/testing/` rules after W17 moved the 10 harmful ones); a NEW one \
-         means the shape is spreading:\n{found:#?}"
+        0,
+        "the `qualifies`-in-`[[sources]]` roster must not change silently (ZERO since W18 \
+         migrated the last 19 per-source annotations to `[[sources]].relevance`); a NEW one means \
+         the shape is spreading:\n{found:#?}"
     );
     let distinct: std::collections::BTreeSet<&str> = found
         .iter()
@@ -603,8 +612,8 @@ async fn req_w14_the_misplaced_qualifies_roster_has_not_grown() {
         .collect();
     assert_eq!(
         distinct.len(),
-        7,
-        "expected 7 distinct rules in the `qualifies`-in-`[[sources]]` roster: {distinct:#?}"
+        0,
+        "expected 0 distinct rules in the `qualifies`-in-`[[sources]]` roster: {distinct:#?}"
     );
     // The harmful subset — a nested `qualifies` on a rule with no rule-level one — is now zero
     // and gated. Kept here as well so a partial regression is visible from either test.

@@ -13,17 +13,17 @@ qualifies = "When a test exercises the same function across many input/output co
 [[sources]]
 url = "https://go.dev/wiki/TableDrivenTests"
 title = "Go Wiki — Table Driven Tests"
-qualifies = "Canonical Go Wiki guidance: 'Table driven testing is not a tool, package or anything else, it's just a way and perspective to write cleaner tests.' Recommends a slice/map of structs with t.Run for each case. Shows the tt / tc loop variable convention."
+relevance = "Canonical Go Wiki guidance: 'Table driven testing is not a tool, package or anything else, it's just a way and perspective to write cleaner tests.' Recommends a slice/map of structs with t.Run for each case. Shows the tt / tc loop variable convention."
 
 [[sources]]
 url = "https://pkg.go.dev/testing#hdr-Subtests_and_Sub_benchmarks"
 title = "pkg.go.dev/testing — Subtests and Sub-benchmarks"
-qualifies = "Official testing package docs for t.Run: each subtest has a hierarchical name (TestFoo/A=1), runs in its own goroutine, and can be run in isolation via -run TestFoo/A=1."
+relevance = "Official testing package docs for t.Run: each subtest has a hierarchical name (TestFoo/A=1), runs in its own goroutine, and can be run in isolation via -run TestFoo/A=1."
 
 [[sources]]
 url = "https://go.dev/wiki/TestComments"
 title = "Go Wiki — Test Comments (testing conventions)"
-qualifies = "Go testing wiki guidance: use t.Run subtests for table-driven tests; use t.Error not t.Fatal inside the loop so all cases are reported in one run."
+relevance = "Go testing wiki guidance: use t.Run subtests for table-driven tests; use t.Error not t.Fatal inside the loop so all cases are reported in one run."
 
 [decision]
 question = "How are tests with many similar cases structured?"
