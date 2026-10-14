@@ -1,6 +1,12 @@
 # Pass 2 - Curator UI design for the five-kind finding taxonomy (2026-10-11)
 
-Design document only. No code in this pass. Builds on:
+> **STATUS, 2026-10-14: PARTLY BUILT.** This was a design document with no code when it was
+> written. Step 1 of section 11 is now shipped end to end, and so is the manual-sort
+> requirement section 5 mentions in passing. Steps 2 and 3 have zero code. The full
+> built-versus-designed inventory, with file:line, is section 14 at the bottom; read it before
+> treating any paragraph here as a description of the product.
+
+Design document, written before any code existed. Builds on:
 
 - `crates/api-types/src/audit.rs` - `FindingKind` and its payloads (the data model this designs for)
 - `crates/server/src/onboard.rs` - `Finding` (the wire row: flattened `kind`, `also_locations`, `confidence`, `effort`, `evaluated_option_id`, `captures`)
@@ -512,11 +518,109 @@ fallback-to-modal risk is closed:
 
 ### Nothing remains open
 
-- **Q2** what `Confirmed` means downstream (local export-readable state, or a durable
-  per-finding record across engagements). Recommendation: keep it local for Pass 2.
-- **Q3** whether a `NoConvention` option pick is a client-facing recommendation or curator
-  scratch. Recommendation: client-facing, which means it inherits Q4's gating.
-- **Q5** single-key dispositions. Recommendation: build them, scoped to the focused detail
-  pane, with a five-second undo toast.
+All five of section 12's questions are decided above. For the record, these were the last
+three to close, each decided in line with the recommendation stated with it:
+
+- **Q2** what `Confirmed` means downstream. Decided: local, export-readable draft state.
+- **Q3** whether a `NoConvention` option pick is client-facing. Decided: client-facing, and
+  it inherits Q4's gating.
+- **Q5** single-key dispositions. Decided: build them, scoped to the focused detail pane,
+  with a five-second undo toast.
 
 Layout mockups for all four screens were produced and reviewed on 2026-10-12.
+
+---
+
+## 14. Build status (recorded 2026-10-14)
+
+Established by reading the tree at `feat/audit-report-export`, not from the commit messages.
+Every line reference is to the current tree.
+
+### BUILT - section 11 step 1, in full
+
+Commits `01f74a6`, `a26996a`, `62249c9`.
+
+| Design item | Where it landed |
+|---|---|
+| `kind` mirrored into `FindingView` | `crates/ui-core/src/triage.rs:131-143`, `Option<FindingKind>` with `#[serde(default, flatten)]`. Accessors `kind_tag` `:211`, `is_unspecified_kind` `:217`, `unspecified_kind_count` `:222` |
+| Kind badge column (section 4) | Column def `crates/ui/src/cockpit/scan.rs:1570-1581` (sortable, multi-select filter over `defect`/`deviation`/`unspecified`); chip renderer `:1997-2023`; styles `crates/ui/src/style.rs:2425-2431`, with the dashed red outline for `unspecified` the design asked for |
+| Kind-aware default sort (section 5) | `queue_sort_key`, `crates/ui-core/src/triage.rs:417-428`, applied in `TriageModel::visible` `:528`. Order is exactly as designed: status, severity, kind rank (`:371-382`), ascending deviation ratio with unknown denominator last (`:394-405`), then rule/path/line |
+| Three informational kinds routed out of the Queue (section 1) | `kind_surface` `crates/ui-core/src/triage.rs:196-206`; `KindSurface` `:154-164`. Panels: `ConventionsPanel` `scan.rs:3576-3609`, `NoConventionPanel` `:3618-3663`, `NotAssessedPanel` `:3671-3718` |
+| The kind switcher (section 2) | Inline in `ScanResults`, `scan.rs:4913-4942`, driven by the `kind_view` signal at `:3988`. Not a named component |
+| The `unspecified` alarm chip (section 3) | `scan.rs:4931-4937`, count at `:4079` |
+| One-rule-one-surface invariant (section 8) | Beyond what step 1 scoped: `rules_on_multiple_surfaces` `triage.rs:264-278` plus `KindSurfaceConflictBanner` `scan.rs:3537-3562`, mounted at `:4893`. The design said the UI "should assert it rather than defend against it"; it does |
+
+### BUILT - the manual-sort requirement (section 5's closing sentence)
+
+Commits `fc621e2`, `a4a5612`, `c3f8330`. The design mentioned this only in passing ("the
+default is opinionated, the table is not locked"); it shipped as its own increment, tagged
+`req_pass2_8`, outside the section 11 step numbering.
+
+- `QueueOrderBar` component `crates/ui/src/cockpit/scan.rs:1826-1852`, rendered above the
+  table at `:2288-2292`.
+- Nine sortable columns: repo, kind, severity, authority, type, needs_review, status, file,
+  line. Snippet and bucket are deliberately not sortable.
+- Visible indicator in two layers: chorale's own header arrows, plus the bar's sentence -
+  `DEFAULT_ORDER_LABEL` (`:1744-1745`) when untouched, "Your sort: {Header} ..." when manual
+  (`:1784-1787`).
+- Explicit "Default order" control at `:1842-1849`, rendered ONLY in the manual state (its
+  absence is itself the indicator), calling `handle.clear_sort()`.
+- Calibrated severity sort value `severity_sort_value`
+  (`crates/ui-core/src/triage.rs:343-345`), so a header sort on Severity orders
+  critical/high/medium/low rather than alphabetically, while the rendered cell keeps the
+  authored word.
+
+### BUILT - a live bug this work exposed and fixed
+
+The Process gate was counting informational rows. The disposition tally at
+`crates/ui/src/cockpit/scan.rs:4082-4097` looped the RAW finding set; `a26996a` changed the
+loop header at `:4088` to iterate `queue_findings` (defined `:4076`). Before that change,
+every `ConventionObserved` / `NoConvention` / `NotAssessed` row counted as Unresolved
+permanently, because those rows have no disposition and no triage table in which to acquire
+one. The gate at `:5029` disables Process on `n_unresolved > 0`, so **a row saying "your
+codebase does this correctly" blocked sign-off**, and the hint at `:5024-5025` told the
+curator to resolve rows he had no way to resolve. The same narrowing was applied to the rows
+Process commits (`findings_for_process`, `:5021`) and the block is additionally scoped to the
+Queue surface (`:5016`).
+
+Test coverage, with a caveat worth recording: `req_pass2_2_informational_rows_cannot_block_the_process_gate`
+(`crates/ui-core/src/triage.rs:1235-1246`) covers the PURE derivation in ui-core. The Dioxus
+`ScanResults` tally and gate condition are not themselves exercised, because `ScanResults`
+sits behind `use_resource` network resources and is not SSR-testable; the render tests target
+`FindingsTable` and the panels directly.
+
+### NOT BUILT - section 11 step 2
+
+No deviation group-header sentence anywhere: `convention_label` is read in exactly one place
+(`ConventionsPanel`, `scan.rs:3592`), and `deviating_sites` / `assessed_sites` appear only in
+test fixtures and in `deviation_ratio_ppm`. No `Confirm all N` / `FP all N` control exists.
+The table still uses chorale's stock group headers (`group_by` at `scan.rs:2300`); none of
+`render_grouped_row` / `group_header_tr` / `group_header_class` is used, even though the
+2026-10-12 dependency check above confirmed chorale 0.2.3 exposes them. `RuleAlternativesPanel`
+is still a standalone panel above the table (`scan.rs:4979-4987`), so section 9.1's relocation
+has not happened.
+
+### NOT BUILT - section 11 step 3
+
+`TriageState` still has exactly four variants (`crates/ui-core/src/triage.rs:30-36`),
+`label()` has four arms (`:39-46`), `TriageModel::counts` returns a 4-tuple (`:533`), and the
+Process gate is still `n_unresolved == 0`. No `Confirmed` disposition, no `C`/`I`/`T`/`F`
+keystrokes, no undo toast. Nothing in the tree references `Confirmed`.
+
+### NOT BUILT - the later layers, as expected
+
+Docked detail pane (section 2; `detail_renderer` unused, the row-click modal at
+`scan.rs:4105-4175` is still the Queue's detail surface), merged-site disclosure (section 6),
+coverage drawer (section 7), rule hub (section 8), and section 9's removals 1, 2, 3, 5 and 6.
+
+### PARTIAL, and worth knowing before step 2 starts
+
+- **Section 10's enabling work is half done.** `kind` is mirrored with round-trip contract
+  tests, but **`also_locations` and `site_count` are not mirrored at all** - neither appears
+  anywhere in `crates/ui-core/src` or `crates/ui/src`. Section 4's Sites column and the whole
+  of section 6 depend on that data, so they are blocked on plumbing the design already
+  identified, not on new design.
+- **Section 4's column table is one row done of four changed.** Kind badge shipped. The Sites
+  column does not exist; the 300px "Needs review" column with inline prose is still there
+  (`scan.rs:1660-1683`), so section 9.3's `confidence`-chip replacement is undone; and the
+  Authority column has not been narrowed.

@@ -1,5 +1,29 @@
 # Agentic and process rules: scan target or emitted directive?
 
+> **STATUS, 2026-10-14: the recommendation in section 1.5 was ACCEPTED and BUILT (W16).**
+> This document is the analysis that led to `inspectable`, and it is preserved as written.
+> Two of its claims are now historical rather than current, and both are load-bearing:
+>
+> - **"The product does NOT currently distinguish the two roles"** and **"There is no field,
+>   flag, or mechanism anywhere that says 'emit this rule as a directive but do not scan for
+>   it'"** (section 1.2) were true on 2026-10-12 and are false now. `inspectable` is that
+>   field. It is required on all 417 rules, `false` on 26, and the exclusion happens before
+>   arming via `inspectable_rules_for_scan` (`crates/server/src/onboard.rs:944-961`) and the
+>   `selected` shadow in `audit_repos` (`:1254-1255`).
+> - **The false-claim consequence described in section 1.4** - a governance rule running,
+>   finding nothing, and being recorded `verified_clean` into a client's "What's healthy"
+>   list - is closed for the 26. They now get no ledger entry at all, so they cannot be
+>   verified clean, cannot be counted in "we checked N rules", and do not appear in "rules
+>   not run this scan" either.
+>
+> What this document got right and is still the reference for: the per-rule triage of the 23
+> `SPIRIT-`/`ORCH-`/`AGENTIC-` rules and the `PROC-*`/`PROCESS-*` families, and the argument
+> that the distinction has to be per-rule rather than lexical because every one of those
+> families is MIXED. The shipped population reflects that: `PROC-*` ids appear on both sides
+> of the flag, and `SPIRIT-FILE-SIZE-1` stayed scannable.
+>
+> Field reference: `docs/RULES_REFERENCE.md` section 3.6a.
+
 Analysis for the owner's question of 2026-10-12: *"analyze those rules and determine if they
 should even be a part of the inspection at all; they are development process rules, so it
 isn't really something determined by the code itself."* Reached from `SPIRIT-ROBUSTNESS-1`.

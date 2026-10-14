@@ -43,6 +43,35 @@ guessed into `defect`/`default_with_exceptions`.
 > severity-ceiling work touched zero `kind` fields by construction, enforced by
 > `req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling`.
 
+> **Second drift note, 2026-10-14. THE TAXONOMY ITSELF GREW: there are now FOUR kinds, not
+> three.** W17 added `decision_with_floor` (`crates/rules/src/lib.rs:263`) for the shape this
+> classification pass had no slot for - a rule with SEVERAL equally legitimate options PLUS
+> options that are genuine faults under all of them. The method described above could
+> therefore only ever force such a rule into `decision` (dropping real fault flags) or
+> `default_with_exceptions` (fabricating a default). A candidate sweep over the corpus found
+> exactly ONE member, `RUST-DOMAIN-6`, which moved out of `default_with_exceptions`; the
+> membership is asserted as an EQUALITY by
+> `req_w17_decision_with_floor_has_exactly_one_member`
+> (`crates/rules/tests/w17_decision_with_floor_kind.rs:212`), and the 17 near-miss `decision`
+> rules examined and rejected by that sweep are pinned to stay `decision` at `:239`.
+>
+> Measured distribution on 2026-10-14: `decision` 154, `defect` 152,
+> `default_with_exceptions` 110, `decision_with_floor` 1. Total still 417.
+>
+> Two further corpus-wide changes landed since the first drift note and are relevant to
+> anyone working this hold list:
+> - **A `decision`-kind rule may no longer carry a `violates` flag at all** - it is a build
+>   failure (`decision_kind_rules_with_violates_flag`, `crates/rules/src/lib.rs:2007`). A
+>   `decision`-kind rule whose option prose opens with `Rejected:` is reported by an
+>   ADVISORY gate instead (`decision_kind_rules_with_rejected_prose`, `:1963`), pinned to an
+>   equality roster precisely because the A5.7 hold below is still open. Read that roster as
+>   a shortlist of rules whose kind is probably wrong.
+> - **Every rule now also declares `inspectable`** (W16), which is orthogonal to `kind`: it
+>   says whether a scan can assess the rule at all. 26 rules are emit-only. Classification
+>   decisions below do not change it and are not changed by it.
+>
+> Semantics for all four kinds, with consumers cited: `docs/RULES_REFERENCE.md` section 3.6.
+
 ---
 
 ## NEEDS OWNER DECISION (58 rules)

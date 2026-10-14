@@ -1425,3 +1425,34 @@ definition of Defect ("every option other than the correct one describes the abs
 form"). No behavioural risk today, since defect-kind rules never enter the alternatives pass and the flag
 is inert. But the option text is product configuration in a client-facing costume and needs removing from
 the rule, not reclassifying.
+
+---
+
+# Pointer (docs pass, 2026-10-14) -- no rulings changed
+
+Appended by a documentation pass. Nothing above was edited; no `[ ]` / `[x]` mark was touched.
+This note only records where the reference documentation now stands relative to this log, so a
+reader arriving here does not have to re-derive it.
+
+Three items recorded above as open are now closed in code, and `docs/RULES_REFERENCE.md` has
+been updated to match:
+
+- The **`decision`-kind / `violates` invariant** is now a build gate,
+  `decision_kind_rules_with_violates_flag` (`crates/rules/src/lib.rs:2007`).
+- The **`Rejected:` convention** is now a build gate in one direction (prose implies flag),
+  `options_with_rejected_prose_but_no_violates_flag` (`crates/rules/src/lib.rs:1916`). The
+  `decision`-kind case routes to an advisory roster instead, deliberately, because the A5.7
+  hold is still open.
+- The **`RUST-DOMAIN-6` taxonomy gap** is closed by a fourth `RuleKind`,
+  `decision_with_floor`, with `RUST-DOMAIN-6` as its sole member asserted by equality.
+
+Two corrections recorded above have been carried into `docs/RULES_REFERENCE.md`, which had
+printed both of the superseded claims: the `default = false` + `default_with_exceptions`
+"contradiction" is retracted there (gotcha 2, including the heuristic that survived it), and
+the "19 silent security rules" figure is corrected to 8 with the enforcement-tier reasoning
+(gotcha 3).
+
+Still open per this log and reflected as open in the reference: the dangling
+`[decision].default` gate, the `effort` vocabulary gate, the `stack_exception.framework`
+vocabulary gate, the proposal path still discarding corpus parse errors (W13 fixed the scan
+path only), and the 9 detector-precision rules in the item directly above.
