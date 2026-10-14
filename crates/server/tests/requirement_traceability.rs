@@ -202,6 +202,13 @@ const REGISTRY: &[(&str, Coverage)] = &[
     // `Verification::Policy` comment, which had claimed `policy` keeps a rule out of the
     // armed ruleset -- false since A8, and that belief had disarmed 17 shipped rules.
     ("W17", Required(&["req_w17"])),
+    // W18, 2026-10-14: the other half of W17's 29. Nineteen `qualifies` keys nested in
+    // `[[sources]]` were per-source provenance with nowhere to live -- `RuleSource` had no
+    // such field, so serde dropped every one silently. Zach ruled "I'd rather retain it if
+    // it would be useful", and it is: each explains why its cited source supports the rule.
+    // Adds `[[sources]].relevance`, migrates all 19, and closes the gap the two narrower
+    // gates left with a build-failing one on ANY nested `qualifies`.
+    ("W18", Required(&["req_w18"])),
     // W8-Q4, found 2026-10-11: the D5 severity floor matched its phrase tables against the
     // MODEL'S PROSE with a bare `text.contains(phrase)`, and the tables contain one-syllable
     // entries ("read", "view", "list", "see", "rls"). So al`read`y, re`view`, allow`list`,

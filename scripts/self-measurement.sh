@@ -78,6 +78,17 @@ cargo test -p camerata-rules --test w14_corpus_schema_gates
 echo
 echo "── W16: scan-vs-emit (every rule declares \`inspectable\`; the population is pinned) ──"
 cargo test -p camerata-rules --test w16_inspectable_gate
+# W17/W18 corpus gates. These were enforced only by `cargo test --workspace`, so a
+# pre-push run could pass while the corpus carried a deleted field, an unhandled rule
+# kind, a summary silently falling back to `decision.why`, or a dropped source
+# annotation. Every one of those is a silent-no-op shape this effort exists to close.
+cargo test -p camerata-rules --test w17_tag_field_deleted
+cargo test -p camerata-rules --test w17_decision_with_floor_kind
+cargo test -p camerata-rules --test w17_qualifies_at_rule_level
+cargo test -p camerata-rules --test w17_policy_arms_the_rule
+cargo test -p camerata-rules --test w18_source_relevance
+cargo test -p camerata-rules --test w11_kind_taxonomy
+cargo test -p camerata-rules --test w15_a57_reclassifications
 cargo test -p camerata-server --test w16_emit_only_rules_e2e
 
 if [ "$INCLUDE_KNOWN_RED" -eq 1 ]; then
