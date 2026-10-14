@@ -194,6 +194,14 @@ const REGISTRY: &[(&str, Coverage)] = &[
     // the capped "What's healthy" list of a paid deliverable. Closed by a required per-rule
     // `inspectable` flag plus exclusion before arming.
     ("W16", Required(&["req_w16"])),
+    // W17, 2026-10-13: the approved-but-undelivered backlog. Deletes the dead `tag` field
+    // from all 417 rules and the schema; adds `RuleKind::DecisionWithFloor` for the shape
+    // the three-kind taxonomy had no slot for (several equal options PLUS named faults);
+    // moves 10 `go/` rules' authored `qualifies` out of `[[sources]]`, where it was being
+    // discarded and their summaries silently fell back to `decision.why`; and corrects the
+    // `Verification::Policy` comment, which had claimed `policy` keeps a rule out of the
+    // armed ruleset -- false since A8, and that belief had disarmed 17 shipped rules.
+    ("W17", Required(&["req_w17"])),
     // W8-Q4, found 2026-10-11: the D5 severity floor matched its phrase tables against the
     // MODEL'S PROSE with a bare `text.contains(phrase)`, and the tables contain one-syllable
     // entries ("read", "view", "list", "see", "rls"). So al`read`y, re`view`, allow`list`,
