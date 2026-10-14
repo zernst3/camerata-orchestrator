@@ -31,7 +31,7 @@ described in `docs/ARCHITECTURE.md` that does not exist yet.
 | `camerata-intake` | lib | PO-mode intake form schema + LeadEngineer (architect-abstracted second level). |
 | `camerata-gateway` | lib + bin (`camerata-gateway`) | Layer-1 real-time governance gate. A Rust MCP server; also usable in-process. |
 | `camerata-agent` | lib | Agent runtime: drives `claude -p` subprocesses, parses stream-json. Implements `AgentDriver`. |
-| `camerata-rules` | lib | Rule corpus loader, rule-subset selection, and the corpus-load build gates. Carries two independent classification axes: `EnforcementKind` (prose / structured / mechanical / architectural - what kind of conformance check the rule needs) and, since 2026-10-09, `RuleKind` (defect / decision / default_with_exceptions - whether the rule can accuse a codebase of a fault at all). Also owns the authored severity bounds (`max_severity`, `min_severity`, `deviation_ceiling`) and the `Verification` provenance ladder. Field-by-field reference: `docs/RULES_REFERENCE.md`. |
+| `camerata-rules` | lib | Rule corpus loader, rule-subset selection, and the corpus-load build gates. Carries two independent classification axes: `EnforcementKind` (prose / structured / mechanical / architectural - what kind of conformance check the rule needs) and, since 2026-10-09, `RuleKind` (defect / decision / default_with_exceptions, plus `decision_with_floor` since 2026-10-13 - whether the rule can accuse a codebase of a fault at all). Also owns `inspectable` (W16: whether a scan may assess the rule at all, or it is emit-only), the authored severity bounds (`max_severity`, `min_severity`, `deviation_ceiling`) and the `Verification` provenance ladder. Field-by-field reference: `docs/RULES_REFERENCE.md`. |
 | `camerata-orchestrator-core` | lib | The confidence-dial engine: a pure effect-signature decision-CLASS classifier that never relies on a model's self-report. Named `-core` to avoid colliding with the repo and binary name `camerata-orchestrator`. |
 | `camerata-check` | lib + bin (`camerata-check`) | Layer-3 CI-parity: a standalone binary distributing the native architectural-checker registry (`camerata_checks::arch_checker`) so a CLIENT's own CI can run the same checks with no Camerata server or cockpit. Depends on `camerata-checks` + `camerata-rules` only, NEVER on `camerata-server`. See `crates/camerata-check/README.md`. |
 | `camerata-preview` | lib | Local-first `dx serve` live-preview adapter: status parser, process manager, and the edit-verify fallback. See `crates/preview/README.md`. |
@@ -2188,6 +2188,21 @@ PR (catching non-Camerata changes too). See
 > describes the PIPELINE those fields feed and the finding data model that comes out
 > of it. Where the two disagree about a rule field, `docs/RULES_REFERENCE.md` is
 > right and this section is stale.
+>
+> **Addendum, 2026-10-13. Two changes to the pipeline's INPUTS, both upstream of
+> everything below.** First, `RuleKind` now has FOUR variants, not three: W17 added
+> `decision_with_floor` for a rule whose options hold genuinely equal weight AND which
+> separately names shapes that are faults under all of them. It permits `violates`
+> flags and is denied the no-convention escape. `RUST-DOMAIN-6` is its sole member,
+> asserted as an equality. Second, **not every selected rule is scanned any more.**
+> `Rule::inspectable` (W16) is required on all 417 corpus rules, and the 26 that
+> declare `false` are removed from the selected set BEFORE arming, by
+> `inspectable_rules_for_scan` plus a `selected` shadow in `audit_repos`
+> (`crates/server/src/onboard.rs:944-961, 1254-1255`). Those rules are still emitted
+> into the client's `AGENTS.md`/`CONVENTIONS.md`; they simply acquire no ledger entry,
+> so they can never be recorded verified clean, never enter `audited_rule_ids`, and
+> never reach the Coverage sheet's "we checked N rules" line. That line's value on a
+> TypeScript stack fell from 167 to 145 as a result.
 
 ### The five-kind taxonomy
 

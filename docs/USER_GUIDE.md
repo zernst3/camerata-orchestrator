@@ -540,6 +540,31 @@ Every corpus rule carries a **scope**, set by the rule's author. It is inherent 
 
 **Adopting a rule by picking an option:** click a rule and choose an option. For a **project-level** rule the target is unambiguous (the whole project), so the pick alone selects it and it appears in the **Project rules** table. For a **repo-local** rule the pick does **not** select it on its own (there would be no way to know which repo you meant), so you choose repos separately (see §10).
 
+### Some rules are emitted but never scanned, on purpose
+
+A handful of corpus rules govern **how a team or an agent works**, not what the code looks
+like: model tiering, budget self-monitoring, commit-message format, "document the decision when
+you make it". Nothing in a file tree can confirm or refute those, so scanning for them produces
+silence, and silence used to be indistinguishable from "we checked and it was clean" - which
+meant a client report could open its healthy list with a rule about how *Camerata* runs its
+agents, presented as a verified property of *their* codebase.
+
+Those rules now carry a flag (`inspectable = false`) that separates the two roles. **26 of the
+417 corpus rules are emit-only.** For you, that means:
+
+- They are still proposed, still selectable, and still written verbatim into the repo's
+  `AGENTS.md` / `CONVENTIONS.md`. As governance directives they are unchanged.
+- They are **not** scanned, so they never appear in a finding, never appear in "what's
+  healthy", and are not counted in the Coverage sheet's "we checked N rules" line. They are
+  also not listed under "rules that did not run this scan" - they were never scan rules.
+- So the number of rules you selected and the number the report says were checked will
+  legitimately differ, and the second is the honest one. On a TypeScript repo the checked
+  count dropped from 167 to 145 when this landed; nothing stopped working, the report stopped
+  over-claiming.
+
+The flag is set by the rule's author in the corpus, not per project. It is not a switch in the
+Rules view.
+
 ### Emit rules locally (with optional escalation to a branch / push / PR)
 
 The **"Emit rules locally"** button in the Rules view regenerates `AGENTS.md`, `CONVENTIONS.md`,

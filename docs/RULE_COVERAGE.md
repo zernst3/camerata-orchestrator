@@ -70,9 +70,12 @@ this build reads.
 
 The gateway's enforced arms (Layer 1) and the `CheckRunner` implementations (Layer 2) consume them.
 
-**Two things the authoring checklist above predates, and both will fail your build if you skip
-them.** A rule now also needs a `kind` (the build gate `rules_missing_kind` fails on an absent one,
-with no permissive default), and if its prose names a severity, that severity belongs in a
+**Three things the authoring checklist above predates, and all of them will fail your build if you
+skip them.** A rule now also needs a `kind` (the build gate `rules_missing_kind` fails on an absent
+one, with no permissive default; there are FOUR values since 2026-10-13) and an `inspectable`
+boolean (`rules_missing_inspectable`, also with no default - it declares whether a scan of a repo
+can assess the rule at all, or whether the rule is emitted into the client's governance files
+without ever being scanned). And if its prose names a severity, that severity belongs in a
 structured bound rather than in prose the pipeline cannot read. The authoring workflow is
 [`RULE_AUTHORING.md`](RULE_AUTHORING.md); the field-by-field schema reference is
 [`RULES_REFERENCE.md`](RULES_REFERENCE.md). Neither is restated here, deliberately.

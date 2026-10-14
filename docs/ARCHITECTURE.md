@@ -79,8 +79,8 @@ boundary moved.
 > to the chat assistant only. See
 > [`docs/design/2026-09-22_per-project-backend.md`](design/2026-09-22_per-project-backend.md).
 
-> **Update (2026-10-09 to 2026-10-11, the inspection data model).** Five architecturally significant
-> additions, all with code and tests behind them. Mechanics are in
+> **Update (2026-10-09 to 2026-10-13, the inspection data model).** Six architecturally
+> significant additions, all with code and tests behind them. Mechanics are in
 > [`docs/TECHNICAL.md`](TECHNICAL.md) sections 6a and 6b; this block records the shape change.
 >
 > 1. **A five-kind finding taxonomy replaced a binary one.** `FindingKind` in
@@ -97,7 +97,9 @@ boundary moved.
 >    `&SealedReport`. The evidence gate moved out of the export pipeline and into the scan pipeline,
 >    upstream of the seal. Post-seal row injection is now a compile error rather than a convention.
 > 3. **Rules gained a second classification axis and three authored severity bounds.** `RuleKind`
->    (`defect` / `decision` / `default_with_exceptions`) sits alongside the long-standing
+>    (`defect` / `decision` / `default_with_exceptions`, joined on 2026-10-13 by a fourth,
+>    `decision_with_floor`, for a rule with several equal-weight options PLUS named faults)
+>    sits alongside the long-standing
 >    `EnforcementKind`, and `RuleOption::violates` marks an option as the rule's own degenerate form.
 >    `Rule::min_severity` / `max_severity` / `deviation_ceiling` move severity bounds out of prose
 >    the pipeline could not read and into structured corpus data applied at the export choke-point.
@@ -106,6 +108,15 @@ boundary moved.
 >    audit of the `violates` flags is in progress. The mechanisms are settled; those data values are
 >    not, so do not quote a count of them from any document. See
 >    [`docs/plans/2026-10-09_rule-kind-classification.md`](plans/2026-10-09_rule-kind-classification.md).
+> 3a. **A rule can now be EMITTED without being SCANNED.** `Rule::inspectable` (W16,
+>    2026-10-12) is a required boolean on all 417 corpus rules. `false` means the rule still
+>    ships into the client's `AGENTS.md`/`CONVENTIONS.md` as a directive, but is removed from
+>    the scan BEFORE arming, so it can never be recorded verified clean against a codebase that
+>    could not have been checked for it. 26 rules are emit-only - the process and agent-conduct
+>    rules whose subject is how a team works, not what the artifact looks like. The exclusion
+>    point is one line: `audit_repos` shadows its own `selected` binding with
+>    `inspectable_rules_for_scan(...)`, so the coverage ledger, `audited_rule_ids`, the semantic
+>    prompt and the architectural engine all inherit it.
 > 4. **Self-measurement became a first-class surface.** `camerata_server::integrity_gate` plus the
 >    `camerata integrity-gate` CLI command turn the pipeline-integrity ledger into a verdict with an
 >    exit code, and `camerata inspect` now persists that ledger to `<repo>/.camerata-scan-ledger.json`
@@ -322,7 +333,7 @@ the audit trail that makes the gate's decisions readable after the fact. Full de
 | Core | `camerata-app-core` | **(#117)** Backend domain types + pure state transitions |
 | Core | `camerata-ui-core` | **(#116)** Framework-agnostic UI logic + state, including the `GovDevState` TEA model (governed-dev poll/change-detection) |
 | Core | `camerata-llm` | The `LlmPort` seam (formerly `Completer` in `camerata-server`): provider stack (Llm/OpenRouter, credential store, model registry, rate limiter, usage ledger); depends only on `camerata-api-types` |
-| Core (support) | `camerata-rules` | Rule corpus loader, rule-subset selection, and the corpus-load build gates. Two independent classification axes: `EnforcementKind` (prose / structured / mechanical / architectural) and `RuleKind` (defect / decision / default_with_exceptions, added 2026-10-09). Also owns the authored severity bounds and the `Verification` provenance ladder. Fields: `docs/RULES_REFERENCE.md` |
+| Core (support) | `camerata-rules` | Rule corpus loader, rule-subset selection, and the corpus-load build gates. Two independent classification axes: `EnforcementKind` (prose / structured / mechanical / architectural) and `RuleKind` (defect / decision / default_with_exceptions, added 2026-10-09; decision_with_floor added 2026-10-13). Also owns `inspectable` (scan target or emit-only), the authored severity bounds and the `Verification` provenance ladder. Fields: `docs/RULES_REFERENCE.md` |
 | Core (support) | `camerata-checks` | Layer-2 post-task gate logic (CheckRunner), plus the deterministic architectural-checker registry (`arch_checker`), the AST extractor layer (`extract`), and the architecture boundary map (`architecture_config`), which is INFERRED from the repo when `.camerata/architecture.toml` is absent |
 | Core (support) | `camerata-orchestrator-core` | The confidence-dial engine: a pure effect-signature decision-CLASS classifier that never relies on a model's self-report. Named `-core` so it does not collide with the repo and binary name `camerata-orchestrator` |
 | Core (support) | `camerata-preview` | Local-first `dx serve` live-preview adapter: status parser, process manager, edit-verify fallback |

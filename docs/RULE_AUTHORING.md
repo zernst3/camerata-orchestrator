@@ -37,7 +37,8 @@ id = "DOMAIN-SHORT-NAME-N"     # stable, traceable, UPPER-KEBAB + trailing -N
 title = "One-line human title"
 enforcement = "prose" | "structured" | "mechanical" | "architectural"
 domain = "agentic"             # also derived from the folder; keep them agreed
-kind = "…"                     # REQUIRED since 2026-10-09; see docs/RULES_REFERENCE.md
+kind = "…"                     # REQUIRED since 2026-10-09; FOUR values; see docs/RULES_REFERENCE.md
+inspectable = true | false     # REQUIRED since 2026-10-12 (W16); see below
 ```
 
 - **`id` is forever.** It is referenced by selections, grounding, role subsets, code, and the user's
@@ -51,12 +52,34 @@ kind = "…"                     # REQUIRED since 2026-10-09; see docs/RULES_REF
   fault, so defaulting it would let a classification nobody made produce a finding. For which value
   to pick, and what each one makes the engine do, read `docs/RULES_REFERENCE.md` - that is the
   single source of truth for the taxonomy and should not be restated here.
-- **Two more corpus-load gates will fail your build** if a severity bound is malformed:
+- **`inspectable` is mandatory too, and the build enforces it.** It answers one question: can a
+  scan of a repository say anything true about this rule at all? `false` means EMITTED, NEVER
+  SCANNED - the rule still ships into the client's `AGENTS.md`/`CONVENTIONS.md` as a directive
+  governing future work, but it is removed from the scan before arming, so it never claims a
+  verified-clean result on a codebase it cannot be checked against. Like `kind`, there is
+  deliberately no default: `rules_missing_inspectable` in `crates/rules/src/lib.rs` fails the build
+  on an absent value, because guessing `true` would ship an unassessable rule as "verified clean"
+  in a paid deliverable and guessing `false` would silently stop a real check from running. 26 of
+  417 rules are currently `false`. If you are unsure, `true` is the reversible choice. Semantics
+  and the full consumer list: `docs/RULES_REFERENCE.md` section 3.6a.
+- **Do not add a `tag` field.** It was deleted from all 417 rules and from the schema on
+  2026-10-12, and the unknown-field gate now fails the build if it reappears. `layer` is still
+  authored on every rule and is still read by nothing; keep it accurate for human readers and do
+  not expect it to do anything.
+- **Write `qualifies` at RULE level, never inside a `[[sources]]` block.** A `qualifies` key inside
+  `[[sources]]` parses, passes the unknown-field gate, and is discarded, after which the rule's
+  summary silently falls back to `[decision].why`. Ten `go/` rules shipped that way before two
+  gates were added for it.
+- **More corpus-load gates will fail your build.** If a severity bound is malformed:
   `rules_with_invalid_severity_ceiling` and `rules_with_invalid_severity_floor`. Both exist because
   `report_export::normalize_severity` maps every unrecognised severity string to `low`, so a typo in
   a bound does not error and does not no-op; it silently becomes the harshest possible ceiling, or
-  silently evaporates as a floor. Again: the fields and their accepted values are documented in
-  `docs/RULES_REFERENCE.md`.
+  silently evaporates as a floor. Since 2026-10-12 three more will too:
+  `corpus_files_with_unknown_fields` (any misspelled or undeclared key, at seven nesting levels),
+  `options_with_rejected_prose_but_no_violates_flag` (an option whose `why` opens with `Rejected:`
+  must carry `violates = true`), and `decision_kind_rules_with_violates_flag` (a `decision`-kind
+  rule may carry no `violates` option at all). Again: the fields and their accepted values are
+  documented in `docs/RULES_REFERENCE.md`.
 
 ## What a rule CAN have
 
@@ -208,8 +231,10 @@ specifically "a human decides."
 
 ## The checklist for adding a rule
 
-1. **Id + title + domain + enforcement + `kind`** filled, id is new + stable, domain agrees with the
-   folder. The build fails without `kind`; pick its value from `docs/RULES_REFERENCE.md`.
+1. **Id + title + domain + enforcement + `kind` + `inspectable`** filled, id is new + stable,
+   domain agrees with the folder. The build fails without either `kind` or `inspectable`; pick
+   `kind` from the four values documented in `docs/RULES_REFERENCE.md`, and set `inspectable`
+   honestly (can a scan of a repo assess this rule at all?).
 1b. **If the rule's prose names a severity, author it as a structured bound** rather than leaving it
    in prose the pipeline cannot read. The corpus went through a transcription pass for exactly this
    reason: the bounds had been authored all along, in sentences no code could parse. Which field,
