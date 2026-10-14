@@ -454,6 +454,15 @@ pub(super) use camerata_ui_core::triage::{
 // the function's docs in core for why that is not a second calibration layer.
 pub(super) use camerata_ui_core::triage::{severity_sort_value, severity_sort_values};
 
+// Pass 2 step 2: the DEVIATION GROUP HEADER. `rule_group_label` is the Queue's group-by value
+// (rule id, plus the structured sentence when the row is a deviation), so chorale renders the
+// sentence as the group header's own label; `deviation_groups` is the same partition lifted out
+// for the rule-level bulk actions. Both are pure and structured-fields-only — there is no prose
+// path in either, and there must never be one.
+pub(super) use camerata_ui_core::triage::{
+    deviation_groups, rule_group_label, DeviationGroup,
+};
+
 /// Durable ignore: record the findings as reasoned baseline suppressions (governed PR).
 /// Returns the PR URL.
 pub(super) async fn ignore_findings(
@@ -1535,6 +1544,21 @@ pub(super) fn DeterministicProgress(progress: DetProgressView) -> Element {
 /// Friendly label for a deterministic tool name. `floor` is the always-on security scanner;
 /// the rest are the scan-preview linters; `unrouted` collects rules with no driveable tool.
 
+/// The Queue's GROUP-BY column: invisible, and the reason the deviation sentence appears on
+/// the group header at all.
+///
+/// chorale 0.2.3 renders a group header's text from the group-by column's cell value
+/// (`build_group_rows` takes `label` straight from `(col.accessor)(row)`), and it exposes NO
+/// content-injection hook for that row — `group_header_tr` is private and `group_header_class`
+/// is a CSS class, not a slot. So the way to put Camerata's own sentence on a chorale group
+/// header, without standing up a parallel grouped renderer beside chorale's, is to make the
+/// grouped-on VALUE be the sentence. See [`RULE_GROUP_COLUMN`]'s use in `finding_columns`.
+///
+/// The column is hidden (`column_visibility`), never sortable and never filterable: it is a
+/// grouping key, not data. `build_group_rows` resolves it out of `state.columns` directly, so
+/// hiding it does not disturb the grouping.
+pub(super) const RULE_GROUP_COLUMN: ColumnId = ColumnId("rule_group");
+
 pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<FindingView>> {
     // chorale 0.2.3's palette has a native orange, so each severity gets a distinct color
     // straight from RenderKind::Badge — no custom cell renderer needed (Critical = red,
@@ -1719,6 +1743,15 @@ pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<Colu
             CellValue::Text(f.snippet.clone())
         })
         .initial_width(380.0),
+        // The hidden rule-group key — the deviation sentence's delivery mechanism. See
+        // `RULE_GROUP_COLUMN`. Not `.sortable()`, no `.filter(...)`: the curator never
+        // interacts with it, and it is excluded from the rendered columns by
+        // `finding_table_state`. Its value is `rule_group_label`, which is the bare rule id
+        // for a defect and `rule id · N of M sites deviate from "<convention>"` for a
+        // deviation, so grouping by it partitions exactly as grouping by the rule id did.
+        ColumnDef::new(RULE_GROUP_COLUMN, "Rule group", |f: &FindingView| {
+            CellValue::Text(rule_group_label(f))
+        }),
     ];
     // The tech-debt bucket flag (resolve later / now). Drawn by a row renderer that reads the
     // live disposition map; the accessor is a placeholder. Only present in the tech-debt view.
@@ -1731,6 +1764,27 @@ pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<Colu
         );
     }
     cols
+}
+
+/// The Queue's `TableState` exactly as `FindingsTable` mounts it: the real column set, with
+/// the grouping key hidden.
+///
+/// One function rather than an inline construction so the render path and the tests mount the
+/// SAME state. A test that forgot the visibility line would be asserting against a table with
+/// a stray "Rule group" column the product never shows.
+pub(super) fn finding_table_state(
+    rows: Vec<(RowId, FindingView)>,
+    repos: Vec<String>,
+    show_bucket: bool,
+) -> TableState<FindingView> {
+    let mut state = TableState::new(rows, finding_columns(repos, show_bucket));
+    // Set directly on the state rather than through `handle.set_column_visibility` after
+    // mount: the column must never be visible, not even for the first frame, and a transition
+    // fired from an effect is one render too late.
+    state
+        .column_visibility
+        .insert(RULE_GROUP_COLUMN, false);
+    state
 }
 
 /// What the Queue's order indicator says when NO manual column sort is active: the curated
@@ -1851,6 +1905,100 @@ pub(super) fn QueueOrderBar(
     }
 }
 
+/// One deviation rule group as the bulk bar shows it.
+///
+/// Flat, owned, `PartialEq` data rather than the `DeviationGroup` itself, so the bar is a
+/// props-only component that renders (and is therefore testable) without a chorale table, a
+/// disposition map or a VirtualDom-minted handle.
+#[derive(Clone, PartialEq)]
+pub(super) struct DeviationBulkRow {
+    /// The rule id, as the group header shows it.
+    pub rule_id: String,
+    /// The structured sentence (see `DeviationHeadline::sentence`) — the claim the bulk action
+    /// is accepting or rejecting. Repeated here rather than only on the group header because
+    /// a bulk button whose subject is somewhere else on screen is exactly the "confident
+    /// click, unread claim" failure the convention-commit gate exists to prevent.
+    pub sentence: String,
+    /// How many rows in THIS view the action would move. Not `deviating_sites` — see
+    /// `DeviationGroup::row_count`.
+    pub row_count: usize,
+}
+
+impl DeviationBulkRow {
+    /// Flatten one group into the bar's props. The ONLY place `DeviationBulkRow` is built, so
+    /// the bar's sentence is always the group's own `headline.sentence()` — the same builder
+    /// the group header's label goes through — and its count is always `row_count()`.
+    pub(super) fn from_group(g: &DeviationGroup) -> Self {
+        Self {
+            rule_id: g.rule_id.clone(),
+            sentence: g.headline.sentence(),
+            row_count: g.row_count(),
+        }
+    }
+}
+
+/// RULE-LEVEL BULK ACTIONS for deviation groups (design §2/§4, Pass 2 step 2).
+///
+/// "The natural unit of a deviation decision is the rule, not the site: if the curator
+/// believes the convention is real, all N sites are confirmed together far more often than
+/// not." So the deviation decision gets one gesture; the per-site gestures in the toolbar stay
+/// for the minority case where one of the N exceptions is itself a false positive.
+///
+/// ## Why this is a bar and not content inside the group-header `<tr>`
+///
+/// The design's 2026-10-12 dependency check recorded `render_grouped_row` / `group_header_tr`
+/// / `group_header_class` as a chorale 0.2.3 group-header content hook. They are not one:
+/// in `chorale-dioxus` 0.2.3 the first two are PRIVATE functions and the third is a `String`
+/// CSS class on the `<tr>`. The crate exports only `Table`, `use_table`, `UseTableHandle`,
+/// the cell/row renderer types and `RowClass` — there is no slot for host content on a group
+/// header, and no `Send + Sync` cell renderer could carry an onclick over a Dioxus `Signal`
+/// anyway. The SENTENCE still reaches the real header, through the grouped-on value
+/// (`RULE_GROUP_COLUMN`); the BUTTONS cannot, so they sit immediately above the table where
+/// every deviation group is visible at once, including on mount when every group is collapsed.
+///
+/// ## Why there is no `Confirm all N` here yet
+///
+/// `TriageState` has four variants; `Confirmed` is section 11 step 3. A `Confirm all` button
+/// today could only write one of the four existing dispositions, none of which means "yes,
+/// this is real, it ships in the report" — `Unresolved` is a no-op that lies and `Ignored` is
+/// its opposite. So the bulk PLUMBING landed (the group partition, the row set, and the
+/// equivalence test) and `False positive all N` ships on it, while `Confirm all N` waits for
+/// the disposition it needs. Step 3 adds it here as one more button over the same
+/// `DeviationBulkRow` and the same `TriageModel::move_to(&group.rows, …)` call.
+#[component]
+pub(super) fn DeviationBulkBar(
+    /// The deviation groups in the current view, in table order.
+    groups: Vec<DeviationBulkRow>,
+    /// Invoked with the index into `groups` when `False positive all N` is clicked. The call
+    /// site owns the reason, the require-reason invariant and the disposition write.
+    on_false_positive_all: Callback<usize>,
+) -> Element {
+    // No deviations in this view means no decisions of this shape to make. An empty bar with
+    // a heading would be a standing reminder of nothing.
+    if groups.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        div { class: "deviation-bulk",
+            span { class: "deviation-bulk-eyebrow",
+                "Rule-level decisions"
+            }
+            for (i, g) in groups.iter().enumerate() {
+                div { key: "{g.rule_id}-{i}", class: "deviation-bulk-group",
+                    span { class: "deviation-bulk-rule", "{g.rule_id}" }
+                    span { class: "deviation-bulk-sentence", "{g.sentence}" }
+                    button {
+                        class: "btn-restart deviation-bulk-fp",
+                        title: "Mark every one of this rule's {g.row_count} row(s) in this table as a false positive, in one act. Identical to selecting them and marking each. Uses the false-positive reason above; it is required here, same as for a single row.",
+                        onclick: move |_| on_false_positive_all.call(i),
+                        "False positive all {g.row_count}"
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The findings table with TRIAGE: sort by repo/severity/type, filter, select rows
 /// and Ignore / Resolve / Accept-as-tech-debt (open a ticket) them. Virtualized by
 /// chorale, so a large audit doesn't choke the UI.
@@ -1902,10 +2050,7 @@ pub(super) fn FindingsTable(
     // before `use_table` takes ownership of its copy.
     let indicator_repos = filter_repos.clone();
     let handle = use_table(move || {
-        TableState::new(
-            rows.clone(),
-            finding_columns(filter_repos.clone(), in_techdebt),
-        )
+        finding_table_state(rows.clone(), filter_repos.clone(), in_techdebt)
     });
     // ── The ORDER BAR: which order is on screen, and one click back to the default ───────
     //
@@ -1958,6 +2103,31 @@ pub(super) fn FindingsTable(
     let id_map_e = id_map.clone();
     // The (sorted) rows for CSV export.
     let csv_rows = findings.clone();
+
+    // ── RULE-LEVEL BULK over deviation groups (design §2/§4) ────────────────
+    //
+    // The groups are derived from THIS table's visible row set, so a group's count is exactly
+    // the number of rows its button will move. `bulk_groups` keeps the full rows (for the
+    // disposition write); `bulk_rows` is the flat props the bar renders.
+    //
+    // Unresolved only. The bar's one action is False positive, which requires the reason
+    // textarea that exists only in the Unresolved toolbar, and a deviation already moved to
+    // Ignored or Tech debt has had its rule-level decision made. Rendering a dead bar in the
+    // other three tables would be the 403-button shape the standing rule forbids.
+    let bulk_groups = std::rc::Rc::new(if triage_view == TriageState::Unresolved {
+        deviation_groups(&findings)
+    } else {
+        Vec::new()
+    });
+    let bulk_rows: Vec<DeviationBulkRow> =
+        bulk_groups.iter().map(DeviationBulkRow::from_group).collect();
+    // `finding_key` -> `RowId`, so a bulk action can drop exactly its own group's rows from
+    // the table. Built from the same `id_map` the per-row buttons use, so the two paths
+    // resolve rows identically.
+    let key_to_row_id: std::collections::HashMap<String, RowId> = id_map
+        .iter()
+        .map(|(rid, f)| (finding_key(f), *rid))
+        .collect();
 
     // SECURITY findings (the deterministic floor — the only tier ranked "critical") get a
     // red full-row highlight so they're unmistakable beyond the badge text. This now uses
@@ -2289,15 +2459,48 @@ pub(super) fn FindingsTable(
             order: queue_order(&active_sort(), &order_columns),
             on_reset: Callback::new(move |()| handle.clear_sort()),
         }
+        // The rule-level deviation decisions, one row per group. Renders nothing when the
+        // view holds no deviations.
+        DeviationBulkBar {
+            groups: bulk_rows,
+            on_false_positive_all: Callback::new({
+                let bulk_groups = std::rc::Rc::clone(&bulk_groups);
+                let key_to_row_id = key_to_row_id.clone();
+                move |i: usize| {
+                    let Some(group) = bulk_groups.get(i) else { return };
+                    let reason = fp_reason();
+                    let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                    // The require-reason invariant and the write both live in core's
+                    // `bulk_false_positive`, which is a thin wrapper over the SAME
+                    // `mark_false_positive` the per-row button calls — so one click here is
+                    // provably identical to N individual gestures rather than a second,
+                    // parallel write path. `None` means it refused and wrote nothing.
+                    let Some(moved) = model.bulk_false_positive(group, &reason) else {
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "A reason is required to mark a false positive (it's excluded + counted in the report's methodology section).");
+                        return;
+                    };
+                    dispositions.set(model.dispositions);
+                    let ids: Vec<RowId> = group.rows.iter().filter_map(|f| key_to_row_id.get(&finding_key(f)).copied()).collect();
+                    handle.remove_rows(&ids);
+                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Marked all {moved} {} row(s) as false positive.", group.rule_id));
+                }
+            }),
+        }
         CamerataTable {
             handle,
             sort_enabled: true,
             filter_enabled: true,
             selection_enabled: true,
             resize_enabled: true,
-            // Grouped by rule -> file; the wrapper collapses every group on mount so a
+            // Grouped by RULE GROUP -> file; the wrapper collapses every group on mount so a
             // long audit opens collapsed and the architect drills in deliberately.
-            group_by: vec![ColumnId("type"), ColumnId("file")],
+            //
+            // The outer key is `RULE_GROUP_COLUMN`, not the visible "type" column, because the
+            // group header's text IS that column's cell value in chorale — so grouping on
+            // `rule_group_label` is what puts the deviation sentence on the header (design
+            // §2/§4). It partitions identically to the rule id: the sentence's numbers are
+            // group-level and repeat verbatim on every row of a rule.
+            group_by: vec![RULE_GROUP_COLUMN, ColumnId("file")],
             // 0.2.3: an expand-all / collapse-all control in the grouped header (the
             // findings table groups by rule -> file), so a long audit collapses at once.
             group_expand_toggle: true,
@@ -8143,8 +8346,16 @@ mod render_tests {
         // And the curated default sort survives into the real table: critical defect, then
         // the kind-less ALARM row (high), then the medium deviation. If the UI re-derived
         // severity or ranked the alarm as a plain defect, this order would change.
+        //
+        // Scoped to the GROUP HEADERS rather than the whole document (Pass 2 step 2): the
+        // rule-level decision bar now also names each deviation rule, above the table, so a
+        // first-occurrence search over the full html would be measuring the bar's position
+        // instead of the group order. Narrowing it makes the assertion say what it always
+        // meant.
+        let table = group_header_region(&html);
         let at = |needle: &str| {
-            html.find(needle)
+            table
+                .find(needle)
                 .unwrap_or_else(|| panic!("{needle} missing from the queue; html=\n{html}"))
         };
         assert!(
@@ -8803,5 +9014,474 @@ mod render_tests {
             vec!["B-DEFECT", "C-DEVIATION", "A-UNMAPPED"],
             "the manual Kind cut is the wire tags' own order: defect, deviation, unspecified"
         );
+    }
+
+    // ── Pass 2 step 2: the deviation group header ────────────────────────────
+    // docs/plans/2026-10-11_pass2-curator-ui-design.md §2/§4/§11-step-2: "Group headers carry
+    // the Deviation sentence ... rendered from data: 'N of M sites deviate from
+    // <convention_label>'. No prose parsing" and "Group headers carry rule-level bulk
+    // actions for deviations ... because the natural unit of a deviation decision is the
+    // rule, not the site."
+
+    /// A deviation rule with two sites, plus a defect rule, as `FindingsTable` receives them.
+    /// Paths differ so the two deviating sites have distinct `finding_key`s (a collision would
+    /// make the bulk-equivalence assertions vacuous).
+    fn deviation_queue_rows() -> Vec<FindingView> {
+        let mut dev_a = kinded_finding(
+            "API-VERSIONING-1",
+            "medium",
+            serde_json::json!({
+                "kind": "deviation",
+                "deviating_sites": 2,
+                "assessed_sites": 47,
+                "convention_option_id": "versioned",
+                "convention_label": "URI-versioned endpoints",
+            }),
+        );
+        dev_a.path = "src/routes.rs".to_string();
+        dev_a.line = 12;
+        let mut dev_b = dev_a.clone();
+        dev_b.line = 40;
+        let mut defect = kinded_finding(
+            "SQL-INJECTION-1",
+            "critical",
+            serde_json::json!({ "kind": "defect" }),
+        );
+        defect.path = "src/handlers.rs".to_string();
+        defect.line = 88;
+        vec![dev_a, dev_b, defect]
+    }
+
+    fn deviation_table_html() -> String {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(|| Signal::new(None::<FindingView>));
+            let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
+            rsx! {
+                FindingsTable {
+                    findings: deviation_queue_rows(),
+                    repos: vec!["me/api".to_string()],
+                    descriptions: std::collections::HashMap::new(),
+                    triage_view: TriageState::Unresolved,
+                    dispositions,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        dioxus_ssr::render(&vdom)
+    }
+
+    /// The rendered table from its FIRST group-header `<tr>` onwards.
+    ///
+    /// Load-bearing, not tidiness: the bulk bar above the table also names the rule and
+    /// repeats the sentence, so an assertion made against the whole document could be
+    /// satisfied by the bar while chorale's group header still showed a bare rule id. Every
+    /// "the group header carries X" claim below is checked against this slice only.
+    fn group_header_region(html: &str) -> &str {
+        let at = html
+            .find("class=\"chorale-group-header\"")
+            .unwrap_or_else(|| panic!("no chorale group header rendered; html=\n{html}"));
+        &html[at..]
+    }
+
+    /// The rendered document BEFORE the table — where the bulk bar lives.
+    fn above_table_region(html: &str) -> &str {
+        let at = html
+            .find("class=\"chorale-group-header\"")
+            .unwrap_or_else(|| panic!("no chorale group header rendered; html=\n{html}"));
+        &html[..at]
+    }
+
+    /// req_pass2_9: the deviation rule group STATES ITS CLAIM on chorale's own group header,
+    /// assembled from the row's structured fields.
+    ///
+    /// The table mounts collapsed, so the group header is the only thing the curator sees
+    /// before drilling in — and a bare rule id there says nothing about whether the convention
+    /// behind it is near-unanimous (2 of 47, decide in one look) or barely a majority (19 of
+    /// 47, think about it). The numbers exist on every deviation row as `deviating_sites` /
+    /// `assessed_sites` / `convention_label`; until this shipped, nothing in the UI read them
+    /// and the header rendered exactly `▶API-VERSIONING-1(2)`.
+    #[test]
+    fn req_pass2_9_deviation_group_header_carries_the_structured_sentence() {
+        let html = deviation_table_html();
+        let headers = group_header_region(&html);
+        assert!(
+            headers.contains("2 of 47 sites deviate from"),
+            "the deviation group header must carry the structured numerator/denominator \
+             sentence; group headers=\n{headers}"
+        );
+        // dioxus_ssr escapes the quotes around the label, so the label is asserted on its own
+        // rather than as part of the quoted clause.
+        assert!(
+            headers.contains("URI-versioned endpoints"),
+            "and name the convention verbatim from `convention_label`; group headers=\n{headers}"
+        );
+        assert!(
+            headers.contains("API-VERSIONING-1 \u{b7} 2 of 47"),
+            "the rule id and its claim are one header line; group headers=\n{headers}"
+        );
+    }
+
+    /// req_pass2_9: the deviation group offers the RULE-LEVEL bulk disposition, so the common
+    /// case is one gesture rather than N.
+    ///
+    /// The count on the button is the number of ROWS the click will move (2), which is the
+    /// honest label for what it does — deliberately not the site count in the sentence, which
+    /// counts sites across the whole scan including merged ones.
+    #[test]
+    fn req_pass2_9_deviation_group_offers_a_rule_level_bulk_action() {
+        let html = deviation_table_html();
+        let bar = above_table_region(&html);
+        assert!(
+            bar.contains("deviation-bulk"),
+            "a view with deviations must render the rule-level decision bar; above table=\n{bar}"
+        );
+        assert!(
+            bar.contains("False positive all 2"),
+            "the bulk action is labelled with the row count it will move; above table=\n{bar}"
+        );
+        assert!(
+            bar.contains("2 of 47 sites deviate from"),
+            "and states the claim it is acting on; above table=\n{bar}"
+        );
+    }
+
+    /// req_pass2_9: a DEFECT group gets the plain header and no rule-level bulk action.
+    ///
+    /// Design §4: "Defect group headers are plainer: `rule-id · DEFECT · worst-severity ·
+    /// (n)`", and §2's sketch puts the bulk pair on the deviation group only — the `(3)` on
+    /// its defect group is chorale's row count, not a `Confirm all 3`. The reason is in the
+    /// data, not in taste: every row of a deviation rule repeats the SAME group-level claim,
+    /// so the rule is the decision unit; a defect group is N independent accusations that
+    /// merely share a rule id, and one click asserting all N would be asserting facts the
+    /// curator has not looked at. A curator who genuinely wants to bulk-dispose a defect group
+    /// still can — chorale's per-group checkbox plus the toolbar — but it costs two deliberate
+    /// gestures, which is the right price for that claim.
+    #[test]
+    fn req_pass2_9_defect_group_header_is_plain_and_has_no_bulk_action() {
+        let html = deviation_table_html();
+        let headers = group_header_region(&html);
+        assert!(
+            headers.contains("SQL-INJECTION-1"),
+            "the defect group still has its header; group headers=\n{headers}"
+        );
+        assert!(
+            !headers.contains("SQL-INJECTION-1 \u{b7}"),
+            "but carries no sentence after it; group headers=\n{headers}"
+        );
+
+        let bar = above_table_region(&html);
+        assert_eq!(
+            bar.matches("deviation-bulk-group").count(),
+            1,
+            "exactly one rule-level decision row — the deviation's; above table=\n{bar}"
+        );
+        assert!(
+            !bar.contains("SQL-INJECTION-1"),
+            "the defect rule is not offered a rule-level bulk action; above table=\n{bar}"
+        );
+    }
+
+    /// req_pass2_9: the header sentence survives a MANUAL column cut and the collapsed mount.
+    ///
+    /// The sentence rides the group-by VALUE, which is chorale's own machinery, so a re-sort
+    /// reorders the groups and carries each header's text with it rather than stranding a
+    /// separately-rendered banner against a group that moved. This drives chorale's real
+    /// pipeline (`toggle_sort` + `visible_grouped_view`) over the real column set, the same
+    /// way the req_pass2_8 sort tests do.
+    #[test]
+    fn req_pass2_9_group_header_sentence_survives_a_manual_re_sort() {
+        use chorale_core::{toggle_sort, visible_grouped_view, GroupedRow, SortAction};
+
+        let findings = TriageModel::new().visible(&deviation_queue_rows());
+        let mut state = finding_table_state(
+            sort_rows(&findings),
+            vec!["me/api".to_string()],
+            false,
+        );
+        state.grouping = vec![RULE_GROUP_COLUMN];
+        state.grouped_pagination = chorale_core::GroupedPaginationMode::Virtualized;
+
+        let labels = |s: &chorale_core::TableState<FindingView>| -> Vec<String> {
+            visible_grouped_view(s)
+                .iter()
+                .filter_map(|r| match r {
+                    GroupedRow::Header { label, .. } => Some(label.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let before = labels(&state);
+        assert_eq!(
+            before,
+            vec![
+                "SQL-INJECTION-1".to_string(),
+                "API-VERSIONING-1 \u{b7} 2 of 47 sites deviate from \"URI-versioned endpoints\""
+                    .to_string(),
+            ],
+            "default order: the critical defect's plain header, then the deviation's claim"
+        );
+
+        // Descending Severity puts the medium deviation first. The header text must travel
+        // with its group, not stay behind.
+        let asc = toggle_sort(&state, ColumnId("severity"), SortAction::Replace);
+        let desc = toggle_sort(&asc, ColumnId("severity"), SortAction::Replace);
+        let after = labels(&desc);
+        assert_eq!(after.len(), 2, "still exactly two groups; no flattening");
+        assert_eq!(
+            after[0],
+            "API-VERSIONING-1 \u{b7} 2 of 47 sites deviate from \"URI-versioned endpoints\"",
+            "the deviation group led the reversed cut, sentence intact"
+        );
+        assert_eq!(after[1], "SQL-INJECTION-1");
+    }
+
+    /// req_pass2_9 (THE HONESTY CASE, UNDER RENDER): a deviation whose producer could not
+    /// count the total renders the numerator ALONE on the real group header.
+    ///
+    /// The pure sentence builder is unit-tested in ui-core; this proves the honest string is
+    /// what the product actually puts on screen. `assessed_sites: None` is the case most
+    /// likely to be quietly wrong, because the two ways to break it — fabricate a total, or
+    /// let an `unwrap_or(0)` print "3 of 0" — both still render something plausible-looking.
+    #[test]
+    fn req_pass2_9_absent_denominator_renders_the_numerator_alone_on_the_header() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(|| Signal::new(None::<FindingView>));
+            let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
+            rsx! {
+                FindingsTable {
+                    findings: vec![kinded_finding(
+                        "NAMING-1",
+                        "medium",
+                        serde_json::json!({
+                            "kind": "deviation",
+                            "deviating_sites": 3,
+                            "assessed_sites": serde_json::Value::Null,
+                            "convention_option_id": serde_json::Value::Null,
+                            "convention_label": "snake_case table names",
+                        }),
+                    )],
+                    repos: vec!["me/api".to_string()],
+                    descriptions: std::collections::HashMap::new(),
+                    triage_view: TriageState::Unresolved,
+                    dispositions,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        let headers = group_header_region(&html);
+        assert!(
+            headers.contains("NAMING-1 \u{b7} 3 sites deviate from"),
+            "numerator alone on the header; group headers=\n{headers}"
+        );
+        assert!(
+            headers.contains("snake_case table names"),
+            "the convention is still named; group headers=\n{headers}"
+        );
+        assert!(
+            !headers.contains("3 of "),
+            "no fabricated denominator anywhere on the header; group headers=\n{headers}"
+        );
+        // The bar repeats the same honest sentence — one builder, two surfaces.
+        let bar = above_table_region(&html);
+        assert!(
+            bar.contains("3 sites deviate from") && !bar.contains("3 of "),
+            "and the bulk bar states it the same way; above table=\n{bar}"
+        );
+    }
+
+    /// req_pass2_9: the grouping key stays INVISIBLE. It is a delivery mechanism for the
+    /// header text, not a column; shipping it as a visible "Rule group" column would put the
+    /// sentence on every single row as well.
+    #[test]
+    fn req_pass2_9_the_rule_group_key_is_never_a_visible_column() {
+        let state = finding_table_state(
+            sort_rows(&TriageModel::new().visible(&deviation_queue_rows())),
+            vec!["me/api".to_string()],
+            false,
+        );
+        assert_eq!(
+            state.column_visibility.get(&RULE_GROUP_COLUMN),
+            Some(&false),
+            "the grouping key is hidden in the state the product mounts"
+        );
+        let col = state
+            .columns
+            .iter()
+            .find(|c| c.id == RULE_GROUP_COLUMN)
+            .expect("the grouping key column exists");
+        assert!(!col.sortable, "it is not a column the curator sorts by");
+        assert!(
+            matches!(col.filter, chorale_core::FilterKind::None),
+            "nor filters by"
+        );
+
+        let html = deviation_table_html();
+        assert!(
+            !html.contains(">Rule group<"),
+            "and its header label never reaches the DOM; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_9: the bar renders one decision row per group, props-only.
+    ///
+    /// `DeviationBulkBar` is its own component for the same reason `QueueOrderBar` is: SSR
+    /// cannot click, and a bar built inline in `FindingsTable` could only ever be observed in
+    /// whatever state that table happens to mount in. As props-only data it can be rendered
+    /// in any state, including the multi-group one a real audit produces.
+    #[test]
+    fn req_pass2_9_bulk_bar_renders_one_decision_row_per_group() {
+        #[component]
+        fn BarHarness(groups: Vec<DeviationBulkRow>) -> Element {
+            rsx! {
+                DeviationBulkBar {
+                    groups,
+                    on_false_positive_all: Callback::new(move |_: usize| {}),
+                }
+            }
+        }
+        let groups = vec![
+            DeviationBulkRow {
+                rule_id: "API-VERSIONING-1".into(),
+                sentence: "2 of 47 sites deviate from \"URI-versioned endpoints\"".into(),
+                row_count: 2,
+            },
+            DeviationBulkRow {
+                rule_id: "NAMING-1".into(),
+                sentence: "3 sites deviate from \"snake_case table names\"".into(),
+                row_count: 3,
+            },
+        ];
+        let mut vdom = VirtualDom::new_with_props(BarHarness, BarHarnessProps { groups });
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert_eq!(
+            html.matches("deviation-bulk-group").count(),
+            2,
+            "one decision row per group; html=\n{html}"
+        );
+        assert!(html.contains("False positive all 2"), "html=\n{html}");
+        assert!(html.contains("False positive all 3"), "html=\n{html}");
+        assert!(
+            html.contains("2 of 47 sites deviate from") && html.contains("3 sites deviate from"),
+            "each row states its own claim, including the uncounted one; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_9: no deviations means no bar at all — not an empty one.
+    ///
+    /// Unlike the informational panels (whose empty state is a sentence, because "nothing of
+    /// this kind" is itself information the curator needs), this is a list of ACTIONS. An
+    /// empty action bar with a heading is a standing reminder of nothing.
+    #[test]
+    fn req_pass2_9_bulk_bar_renders_nothing_when_there_are_no_deviations() {
+        #[component]
+        fn EmptyBarHarness() -> Element {
+            rsx! {
+                DeviationBulkBar {
+                    groups: Vec::<DeviationBulkRow>::new(),
+                    on_false_positive_all: Callback::new(move |_: usize| {}),
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(EmptyBarHarness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            !html.contains("deviation-bulk"),
+            "no deviations, no bar; html=\n{html}"
+        );
+        assert!(
+            !html.contains("Rule-level decisions"),
+            "and no orphan heading; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_9: a defect-only Queue gets no bulk bar at all.
+    #[test]
+    fn req_pass2_9_defect_only_queue_renders_no_bulk_bar() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(|| Signal::new(None::<FindingView>));
+            let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
+            rsx! {
+                FindingsTable {
+                    findings: vec![kinded_finding(
+                        "SQL-INJECTION-1",
+                        "critical",
+                        serde_json::json!({ "kind": "defect" }),
+                    )],
+                    repos: vec!["me/api".to_string()],
+                    descriptions: std::collections::HashMap::new(),
+                    triage_view: TriageState::Unresolved,
+                    dispositions,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            !html.contains("deviation-bulk"),
+            "defects alone offer no rule-level decision; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_9: the bulk bar is not rendered in the triage tables where it would be dead.
+    ///
+    /// Its one action is False positive, which needs the reason textarea that exists only in
+    /// the Unresolved toolbar — and a deviation already moved to Ignored or Tech debt has had
+    /// its rule-level decision made. A bar of buttons that cannot complete is the 403-button
+    /// shape the standing hide-dead-end-affordances rule forbids.
+    #[test]
+    fn req_pass2_9_bulk_bar_is_absent_from_the_non_unresolved_tables() {
+        #[component]
+        fn Harness(view: TriageState) -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(|| Signal::new(None::<FindingView>));
+            let mut dispositions =
+                use_signal(std::collections::HashMap::<String, Disposition>::new);
+            // Park every row in the table under test, so the rows are actually present.
+            use_hook(move || {
+                let mut model = TriageModel::new();
+                model.move_to(&deviation_queue_rows(), view);
+                dispositions.set(model.dispositions);
+            });
+            rsx! {
+                FindingsTable {
+                    findings: deviation_queue_rows(),
+                    repos: vec!["me/api".to_string()],
+                    descriptions: std::collections::HashMap::new(),
+                    triage_view: view,
+                    dispositions,
+                }
+            }
+        }
+        for view in [
+            TriageState::Ignored,
+            TriageState::TechDebt,
+            TriageState::FalsePositive,
+        ] {
+            let mut vdom = VirtualDom::new_with_props(Harness, HarnessProps { view });
+            vdom.rebuild_in_place();
+            let html = dioxus_ssr::render(&vdom);
+            assert!(
+                !html.contains("deviation-bulk"),
+                "{} must not render the rule-level bulk bar; html=\n{html}",
+                view.label()
+            );
+            // The group header's sentence is NOT view-scoped — the claim is true wherever the
+            // row sits, so it still rides the header here.
+            assert!(
+                group_header_region(&html).contains("2 of 47 sites deviate from"),
+                "{}'s group header still states the claim; html=\n{html}",
+                view.label()
+            );
+        }
     }
 }

@@ -1173,6 +1173,31 @@ html, body {
 .queue-order-value.manual { color: var(--ink); font-weight: 600; }
 .findings-toolbar + .queue-order { margin-top: 2px; }
 
+/* Rule-level deviation decisions (Pass 2 step 2, design §2/§4). One line per deviation rule
+   group in the current view: the rule, its structured sentence, and the bulk action. Styled to
+   read as an extension of the group headers below it — same accent family, same density —
+   because that is conceptually where it belongs; chorale 0.2.3 has no group-header content
+   slot, so it sits above the table instead (see `DeviationBulkBar`'s docs). The sentence is
+   allowed to wrap and the button never shrinks, so a long convention label pushes the row
+   taller rather than squeezing the control. */
+.deviation-bulk {
+  display: flex; flex-direction: column; gap: 4px;
+  margin: 0 0 8px; padding: 8px 10px;
+  border: 1px solid var(--line); border-left: 3px solid #4a90e2;
+  border-radius: 4px; background: var(--surface);
+}
+.deviation-bulk-eyebrow {
+  text-transform: uppercase; letter-spacing: 0.06em;
+  font-size: 10px; font-weight: 700; color: var(--ink-faint);
+}
+.deviation-bulk-group {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px;
+  font-size: 12px; line-height: 1.45;
+}
+.deviation-bulk-rule { font-weight: 700; color: var(--ink); flex: none; }
+.deviation-bulk-sentence { color: var(--ink-soft); flex: 1 1 260px; min-width: 0; }
+.deviation-bulk-fp { flex: none; }
+
 /* Rule-alternatives review panel (audit-integrated alternative recommendation,
    docs/design/2026-09-22_audit-integrated-alternatives.md). Lists every multi-option rule the
    audit evaluated, including zero-violation ones, with its recommended option, a Why
