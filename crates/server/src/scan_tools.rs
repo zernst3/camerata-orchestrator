@@ -1596,6 +1596,9 @@ mod tests {
                     url: "https://example".to_string(),
                     title: "src".to_string(),
                     linter: Some(l.to_string()),
+                    // W18 added `relevance` (author-facing source provenance). Nothing in
+                    // `scan_tools` reads it; `None` keeps this fixture at its prior behaviour.
+                    relevance: None,
                 })
                 .collect(),
             verified: None,
