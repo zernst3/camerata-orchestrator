@@ -277,6 +277,189 @@ pub fn rules_on_multiple_surfaces(
         .collect()
 }
 
+/// THE DEVIATION SENTENCE, as structured values (design §2/§4, Pass 2 step 2).
+///
+/// A `Deviation` row carries its whole claim as fields — numerator, denominator, convention
+/// label — specifically so a renderer never has to recover any of it from English. This struct
+/// is those three values lifted off one row, plus [`DeviationHeadline::sentence`], the single
+/// place the words are chosen.
+///
+/// Why one row suffices: `DeviationKind`'s own doc says the counts are GROUP-level (per rule,
+/// across the whole scan) and are "repeated verbatim on every deviating row for that rule", so
+/// no join and no aggregation is needed to state the group's claim.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DeviationHeadline {
+    /// NUMERATOR: sites that deviate, verbatim from `DeviationKind::deviating_sites`.
+    pub deviating_sites: usize,
+    /// DENOMINATOR: sites the rule's decision applies to, verbatim from
+    /// `DeviationKind::assessed_sites`. `None` = the producer could not count honestly.
+    pub assessed_sites: Option<usize>,
+    /// The convention's human label, verbatim from `DeviationKind::convention_label` (authored
+    /// corpus text). May be empty when the producer established a majority outside the
+    /// authored option set.
+    pub convention_label: String,
+}
+
+impl DeviationHeadline {
+    /// Whether a denominator may be PRINTED.
+    ///
+    /// `None` is the field's own "could not count honestly" signal. `Some(0)` is a producer
+    /// contradiction (a rule whose decision applies to nothing cannot have deviating sites),
+    /// and "2 of 0" is not a sentence worth putting in front of a curator — so both render the
+    /// numerator alone. This is deliberately the SAME rule [`deviation_ratio_ppm`] already
+    /// applies when it declines to place such a row in the cheapness ordering; two different
+    /// answers to "is this denominator usable" would be a drift waiting to happen.
+    fn printable_denominator(&self) -> Option<usize> {
+        self.assessed_sites.filter(|m| *m > 0)
+    }
+
+    /// The canonical sentence, assembled from the fields above and NOTHING else.
+    ///
+    /// Three shapes, one per honesty case:
+    ///
+    /// * denominator known — `2 of 47 sites deviate from "URI-versioned endpoints"`
+    /// * denominator absent — `3 sites deviate from "URI-versioned endpoints"`, the numerator
+    ///   alone. Never a fabricated total, never a printed zero: the field's doc is explicit
+    ///   that `None` means the producer could not count, and inventing 47 or printing 0 would
+    ///   both be the UI asserting something no producer said. The workbook's "not counted"
+    ///   renders the same refusal.
+    /// * convention unnamed — `… deviate from the observed convention`. `convention_label` is
+    ///   authored corpus text; when the producer established a majority outside the authored
+    ///   option set it arrives empty, and `deviate from ""` would read as a bug. Naming the
+    ///   thing generically states exactly what is known (a convention was observed) without
+    ///   inventing a name for it.
+    ///
+    /// The word is **sites**, not "endpoints": the design's worked example happened to be API
+    /// endpoints, but the fields count sites and the module doc in `audit.rs` states the
+    /// contract as "N of M sites deviate from <convention>". Printing a domain noun the data
+    /// does not carry would be the smallest possible version of the prose-invention this whole
+    /// taxonomy exists to end.
+    pub fn sentence(&self) -> String {
+        let n = self.deviating_sites;
+        let subject = match self.printable_denominator() {
+            // "1 of 47 sites deviates" — the verb agrees with the one, not with the forty-seven.
+            Some(m) if n == 1 => format!("1 of {m} sites deviates"),
+            Some(m) => format!("{n} of {m} sites deviate"),
+            None if n == 1 => "1 site deviates".to_string(),
+            None => format!("{n} sites deviate"),
+        };
+        if self.convention_label.is_empty() {
+            format!("{subject} from the observed convention")
+        } else {
+            format!("{subject} from \"{}\"", self.convention_label)
+        }
+    }
+}
+
+/// This row's deviation headline, or `None` for every other kind.
+///
+/// Reads [`FindingKind::Deviation`](camerata_api_types::audit::FindingKind::Deviation)'s
+/// payload fields directly. There is no prose path here and there must never be one.
+pub fn deviation_headline(f: &FindingView) -> Option<DeviationHeadline> {
+    use camerata_api_types::audit::FindingKind;
+    match &f.kind {
+        Some(FindingKind::Deviation(d)) => Some(DeviationHeadline {
+            deviating_sites: d.deviating_sites,
+            assessed_sites: d.assessed_sites,
+            convention_label: d.convention_label.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// Separator between the rule id and its sentence on a group header. A middle dot, matching
+/// the design's own sketch — and deliberately not a dash of any width.
+pub const RULE_GROUP_SEPARATOR: &str = " \u{b7} ";
+
+/// THE GROUP-HEADER LINE for a row: the rule id, plus the deviation sentence when the row is a
+/// deviation.
+///
+/// This is the value the Queue table GROUPS BY, which is what puts the sentence on the header
+/// without a parallel rendering mechanism: chorale builds each group header's label from the
+/// group-by column's cell value, so making the cell value the full header line makes chorale
+/// render it — surviving collapse, manual re-sorts and group reordering for free, because they
+/// are all chorale's own machinery operating on its own view.
+///
+/// Grouping is unaffected. The sentence's values are group-level and identical on every row of
+/// a rule, so `rule_id` and `rule_id + sentence` partition the rows identically. If two rows of
+/// one rule ever DID disagree, they would split into two visibly-contradictory headers rather
+/// than one of the two numbers silently winning — which is the honest failure for a pipeline
+/// invariant the UI is told to assert rather than defend against (design §8).
+///
+/// A defect (or kind-less) row yields the bare rule id, so defect headers stay plain — design
+/// §4, and the data's own reason: a defect group is N independent accusations that merely share
+/// a rule id, with no group-level claim to state.
+pub fn rule_group_label(f: &FindingView) -> String {
+    match deviation_headline(f) {
+        Some(h) => format!("{}{RULE_GROUP_SEPARATOR}{}", f.rule_id, h.sentence()),
+        None => f.rule_id.clone(),
+    }
+}
+
+/// One deviation rule group in the current view: its header line, and the rows a rule-level
+/// bulk action would move.
+///
+/// `rows` is the group as it exists IN THIS VIEW (one triage table, after filtering), because
+/// that is exactly the set a bulk button can honestly claim to act on.
+#[derive(Clone, PartialEq)]
+pub struct DeviationGroup {
+    /// The group-by value — identical to [`rule_group_label`] of every row in `rows`, and
+    /// therefore identical to the label chorale renders on the group header.
+    pub label: String,
+    /// The rule id, for the action's own label.
+    pub rule_id: String,
+    /// The structured claim (see [`DeviationHeadline`]).
+    pub headline: DeviationHeadline,
+    /// Every row of this group in this view, in view order.
+    pub rows: Vec<FindingView>,
+}
+
+impl DeviationGroup {
+    /// How many rows a bulk action on this group would dispose.
+    ///
+    /// NOT the same number as `headline.deviating_sites`, and the difference is real rather
+    /// than a bug: the headline counts SITES across the whole scan (including sites absorbed
+    /// into a merged row, and rows the curator has already moved to another triage table),
+    /// while this counts the rows in front of him right now. The button is labelled with THIS
+    /// number because it is what the click will actually touch.
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+}
+
+/// The deviation rule groups in `findings`, in first-occurrence order.
+///
+/// Keyed on [`rule_group_label`] — the same key chorale partitions on — so a group here is
+/// precisely a group there, with the same membership and the same count. Keying on the rule id
+/// instead would silently merge two headers chorale shows separately.
+///
+/// `findings` is expected to be the already-filtered, already-ordered view (what
+/// [`TriageModel::visible`] returns), so the groups come out in the order the table shows them.
+pub fn deviation_groups(findings: &[FindingView]) -> Vec<DeviationGroup> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_label: HashMap<String, DeviationGroup> = HashMap::new();
+    for f in findings {
+        let Some(headline) = deviation_headline(f) else {
+            continue;
+        };
+        let label = rule_group_label(f);
+        let entry = by_label.entry(label.clone()).or_insert_with(|| {
+            order.push(label.clone());
+            DeviationGroup {
+                label: label.clone(),
+                rule_id: f.rule_id.clone(),
+                headline,
+                rows: Vec::new(),
+            }
+        });
+        entry.rows.push(f.clone());
+    }
+    order
+        .into_iter()
+        .filter_map(|l| by_label.remove(&l))
+        .collect()
+}
+
 /// Ordering rank of the severity string as the pipeline CALIBRATED it (critical > high >
 /// medium > everything else).
 ///
@@ -499,6 +682,33 @@ impl TriageModel {
             e.state = TriageState::FalsePositive;
             e.reason = reason.to_string();
         }
+    }
+
+    /// RULE-LEVEL BULK: mark every row of a deviation group as a false positive, in one act.
+    ///
+    /// Returns `Some(n)` with the number of rows moved, or `None` when the call was REFUSED
+    /// and nothing was written. There are exactly two refusals, and both are silent-failure
+    /// risks worth making explicit rather than leaving to the call site:
+    ///
+    /// * a blank reason — the same require-reason invariant as the per-row button. A bulk
+    ///   gesture is where a reasonless disposition would be cheapest and most costly: one
+    ///   click, N rows excluded from the report with no audit trail.
+    /// * an empty group — nothing to move, so nothing is claimed to have moved.
+    ///
+    /// It is deliberately a thin wrapper over [`TriageModel::mark_false_positive`] given the
+    /// group's rows, NOT a second write path. That is what makes "one click equals N
+    /// gestures" a property of the code rather than a hope (see
+    /// `req_pass2_9_bulk_false_positive_equals_marking_each_row_individually`).
+    ///
+    /// Step 3's `Confirm all N` is the same shape against `TriageState::Confirmed`, which does
+    /// not exist yet — so it is not written here, because the four states that DO exist offer
+    /// nothing that honestly means "yes, this is real, it ships".
+    pub fn bulk_false_positive(&mut self, group: &DeviationGroup, reason: &str) -> Option<usize> {
+        if reason.trim().is_empty() || group.rows.is_empty() {
+            return None;
+        }
+        self.mark_false_positive(&group.rows, reason);
+        Some(group.rows.len())
     }
 
     /// Bucket each tech-debt finding (resolve later / now). Leaves the state unchanged; only the
@@ -1243,5 +1453,264 @@ mod tests {
             unresolved, 0,
             "a scan whose only rows are informational is fully triaged on arrival"
         );
+    }
+
+    // ── Pass 2 step 2: the deviation sentence + rule-level bulk ──────────────
+
+    /// A deviation row with an explicit convention label (the `deviation` helper above fixes
+    /// the label at "A convention"; these cases need to vary it).
+    fn deviation_labelled(
+        rule_id: &str,
+        num: usize,
+        den: Option<usize>,
+        label: &str,
+    ) -> FindingView {
+        kinded(
+            rule_id,
+            "medium",
+            serde_json::json!({
+                "kind": "deviation", "deviating_sites": num, "assessed_sites": den,
+                "convention_option_id": "opt", "convention_label": label
+            }),
+        )
+    }
+
+    /// req_pass2_9: the sentence is assembled from the three STRUCTURED fields.
+    ///
+    /// The canonical form the owner asked for, verbatim: numerator, denominator, and the
+    /// convention named from `convention_label` rather than recovered from `detail`.
+    #[test]
+    fn req_pass2_9_deviation_sentence_is_built_from_structured_fields() {
+        let f = deviation_labelled("API-VERSIONING-1", 2, Some(47), "URI-versioned endpoints");
+        let h = deviation_headline(&f).expect("a deviation row has a headline");
+        assert_eq!(h.deviating_sites, 2);
+        assert_eq!(h.assessed_sites, Some(47));
+        assert_eq!(h.convention_label, "URI-versioned endpoints");
+        assert_eq!(
+            h.sentence(),
+            "2 of 47 sites deviate from \"URI-versioned endpoints\""
+        );
+        assert_eq!(
+            rule_group_label(&f),
+            "API-VERSIONING-1 \u{b7} 2 of 47 sites deviate from \"URI-versioned endpoints\"",
+            "the group header line is the rule id plus its own claim"
+        );
+    }
+
+    /// req_pass2_9 (THE HONESTY CASE): `assessed_sites: None` renders the NUMERATOR ALONE.
+    ///
+    /// `None` is the producer saying it could not count the total honestly. The two ways to
+    /// get this wrong are both silent: fabricate a denominator, or let `unwrap_or(0)` print
+    /// "3 of 0". Neither may ever appear, so both are asserted against explicitly.
+    #[test]
+    fn req_pass2_9_absent_denominator_renders_the_numerator_alone() {
+        let f = deviation_labelled("DRIFT-1", 3, None, "snake_case table names");
+        let h = deviation_headline(&f).expect("a deviation row has a headline");
+        assert_eq!(h.assessed_sites, None);
+        assert_eq!(
+            h.sentence(),
+            "3 sites deviate from \"snake_case table names\"",
+            "numerator alone — no denominator was established"
+        );
+        let s = h.sentence();
+        assert!(!s.contains(" of "), "no fabricated denominator in `{s}`");
+        assert!(!s.contains('0'), "and no printed zero in `{s}`");
+    }
+
+    /// req_pass2_9: a ZERO denominator is treated exactly like an absent one.
+    ///
+    /// `Some(0)` with deviating sites is a producer contradiction; "2 of 0 sites deviate" is
+    /// not a sentence to put in front of a curator, and the brief forbids printing the zero.
+    /// This is the same rule `deviation_ratio_ppm` already applies when it refuses to place
+    /// such a row in the cheapness ordering — asserted together so the two cannot drift.
+    #[test]
+    fn req_pass2_9_zero_denominator_is_treated_as_absent() {
+        let f = deviation_labelled("DRIFT-2", 2, Some(0), "a convention");
+        let s = deviation_headline(&f).expect("headline").sentence();
+        assert_eq!(s, "2 sites deviate from \"a convention\"");
+        assert!(!s.contains(" of "), "no `of 0` clause in `{s}`");
+        assert_eq!(
+            deviation_ratio_ppm(&f),
+            u64::MAX,
+            "and the default sort declines to place it, by the same rule"
+        );
+    }
+
+    /// req_pass2_9: an UNNAMED convention is stated generically, never as `from ""`.
+    #[test]
+    fn req_pass2_9_unnamed_convention_is_not_rendered_as_empty_quotes() {
+        let f = deviation_labelled("DRIFT-3", 2, Some(9), "");
+        let s = deviation_headline(&f).expect("headline").sentence();
+        assert_eq!(s, "2 of 9 sites deviate from the observed convention");
+        assert!(!s.contains("\"\""), "no empty quotes in `{s}`");
+    }
+
+    /// req_pass2_9: the verb agrees with a single deviating site, in both denominator cases.
+    #[test]
+    fn req_pass2_9_single_deviating_site_reads_as_one() {
+        assert_eq!(
+            deviation_headline(&deviation_labelled("R", 1, Some(47), "L"))
+                .expect("headline")
+                .sentence(),
+            "1 of 47 sites deviates from \"L\""
+        );
+        assert_eq!(
+            deviation_headline(&deviation_labelled("R", 1, None, "L"))
+                .expect("headline")
+                .sentence(),
+            "1 site deviates from \"L\""
+        );
+    }
+
+    /// req_pass2_9: a DEFECT (or kind-less) row has no headline and keeps a bare group label.
+    ///
+    /// This is what keeps defect group headers plain, and it is also the guard that the
+    /// sentence can never be synthesized for a row that does not carry the numbers.
+    #[test]
+    fn req_pass2_9_non_deviation_rows_have_no_sentence() {
+        for f in [
+            defect("SQL-INJECTION-1", "critical"),
+            kinded("LEGACY-1", "high", serde_json::json!({})),
+            convention("ALREADY-GOOD-1"),
+        ] {
+            assert!(deviation_headline(&f).is_none(), "{} has no headline", f.rule_id);
+            assert_eq!(
+                rule_group_label(&f),
+                f.rule_id,
+                "{}'s group header is the bare rule id",
+                f.rule_id
+            );
+        }
+    }
+
+    /// req_pass2_9: deviation groups partition on exactly the key chorale groups on, in view
+    /// order, and carry every row a bulk action would touch.
+    #[test]
+    fn req_pass2_9_deviation_groups_match_the_group_header_partition() {
+        let mut a1 = deviation_labelled("API-VERSIONING-1", 2, Some(47), "URI-versioned");
+        a1.path = "src/routes.rs".into();
+        a1.line = 12;
+        let mut a2 = a1.clone();
+        a2.line = 40;
+        let b = deviation_labelled("NAMING-1", 5, None, "snake_case");
+        let groups = deviation_groups(&[a1.clone(), defect("D", "high"), a2.clone(), b.clone()]);
+
+        assert_eq!(groups.len(), 2, "one group per deviation rule; the defect is not one");
+        assert_eq!(groups[0].rule_id, "API-VERSIONING-1");
+        assert_eq!(groups[0].row_count(), 2);
+        assert_eq!(groups[0].label, rule_group_label(&a1));
+        assert_eq!(
+            groups[0].rows.iter().map(|f| f.line).collect::<Vec<_>>(),
+            vec![12, 40],
+            "rows in view order"
+        );
+        assert_eq!(groups[1].rule_id, "NAMING-1");
+        assert_eq!(groups[1].label, rule_group_label(&b));
+
+        // The button's count is the ROW count, which is allowed to differ from the site count
+        // in the sentence — merged sites and already-dispositioned rows are both real reasons.
+        assert_eq!(groups[1].row_count(), 1);
+        assert_eq!(groups[1].headline.deviating_sites, 5);
+    }
+
+    /// req_pass2_9 (THE BULK EQUIVALENCE): `FP all N` on a group leaves EXACTLY the state that
+    /// marking its N rows one at a time leaves.
+    ///
+    /// This is the whole claim of a bulk action. If it ever stopped holding — a row skipped, a
+    /// reason not recorded on every row, a key computed differently in the bulk path — the
+    /// curator would have a one-click gesture that quietly means something other than the N
+    /// gestures it replaces, and the first evidence would be a report with a hole in it.
+    #[test]
+    fn req_pass2_9_bulk_false_positive_equals_marking_each_row_individually() {
+        let mut a1 = deviation_labelled("API-VERSIONING-1", 3, Some(47), "URI-versioned");
+        a1.path = "src/routes.rs".into();
+        a1.line = 12;
+        let mut a2 = a1.clone();
+        a2.line = 40;
+        let mut a3 = a1.clone();
+        a3.path = "src/admin.rs".into();
+        let other = defect("SQL-INJECTION-1", "critical");
+        let all = vec![a1, a2, a3, other];
+        let group = deviation_groups(&all).remove(0);
+        assert_eq!(group.row_count(), 3, "three distinct rows, no key collision");
+
+        // One act on the group — through the SHIPPED entry point, not a hand-rolled loop, so
+        // this proves the product's own path rather than a convenient stand-in for it.
+        let mut bulk = TriageModel::new();
+        assert_eq!(
+            bulk.bulk_false_positive(&group, "the linter mis-parsed the router macro"),
+            Some(3),
+            "the bulk call reports exactly the rows it moved"
+        );
+
+        // The same thing, one row at a time.
+        let mut by_row = TriageModel::new();
+        for row in &group.rows {
+            by_row.mark_false_positive(
+                std::slice::from_ref(row),
+                "the linter mis-parsed the router macro",
+            );
+        }
+
+        assert_eq!(
+            bulk.dispositions.len(),
+            by_row.dispositions.len(),
+            "same number of dispositions written"
+        );
+        for (key, d) in &by_row.dispositions {
+            let other = bulk.dispositions.get(key).expect("bulk wrote the same key");
+            assert_eq!(other.state, d.state);
+            assert_eq!(other.reason, d.reason);
+            // `TechDebtBucket` is deliberately not `Debug` (it is a two-state flag on a serde
+            // DTO), so this is an `assert!` rather than an `assert_eq!`.
+            assert!(other.bucket == d.bucket, "bucket differs for {key}");
+        }
+        // And nothing outside the group moved.
+        for f in &all {
+            let expected = if group.rows.iter().any(|r| finding_key(r) == finding_key(f)) {
+                TriageState::FalsePositive
+            } else {
+                TriageState::Unresolved
+            };
+            assert_eq!(bulk.state_of(f), expected, "{} moved correctly", f.rule_id);
+        }
+    }
+
+    /// req_pass2_9: the bulk action REFUSES a blank reason and writes nothing.
+    ///
+    /// Same invariant as the per-row false positive, enforced at the same point. The failure
+    /// this guards against is not a wrong reason but an absent one on N rows at once: the
+    /// report's methodology section counts false positives, and a silent reasonless bulk
+    /// would leave N exclusions with no audit trail behind them.
+    #[test]
+    fn req_pass2_9_bulk_false_positive_refuses_a_blank_reason() {
+        let f = deviation_labelled("API-VERSIONING-1", 2, Some(47), "URI-versioned");
+        let group = deviation_groups(std::slice::from_ref(&f)).remove(0);
+        let mut m = TriageModel::new();
+        for blank in ["", "   ", "\n\t "] {
+            assert_eq!(m.bulk_false_positive(&group, blank), None, "refused: {blank:?}");
+            assert!(m.dispositions.is_empty(), "and nothing was written");
+            assert_eq!(m.state_of(&f), TriageState::Unresolved);
+        }
+        assert_eq!(m.bulk_false_positive(&group, "tool mis-parse"), Some(1));
+        assert_eq!(m.state_of(&f), TriageState::FalsePositive);
+    }
+
+    /// req_pass2_9: a bulk call over an EMPTY group moves nothing and says so.
+    #[test]
+    fn req_pass2_9_bulk_false_positive_on_an_empty_group_is_a_no_op() {
+        let mut m = TriageModel::new();
+        let empty = DeviationGroup {
+            label: "R".to_string(),
+            rule_id: "R".to_string(),
+            headline: DeviationHeadline {
+                deviating_sites: 0,
+                assessed_sites: None,
+                convention_label: "L".to_string(),
+            },
+            rows: Vec::new(),
+        };
+        assert_eq!(m.bulk_false_positive(&empty, "a real reason"), None);
+        assert!(m.dispositions.is_empty());
     }
 }
