@@ -201,8 +201,61 @@ pub struct FindingView {
     /// producer never assigned a kind, i.e. an unmapped emission path. See
     /// [`kind_surface`] (such a row stays in the Queue, visibly flagged) and
     /// [`is_unspecified_kind`].
+    /// Evidence sites ABSORBED into this row when the server merged several findings at
+    /// (or around) one location — mirrors `camerata_server::onboard::Finding::also_locations`
+    /// verbatim, as [`MergedSiteView`].
+    ///
+    /// This is C5's field. Pass-1 W7 added it because an absorbed site was reaching NO
+    /// artifact: a three-site defect exported as one row naming one file, and the other two
+    /// places the bug lives simply vanished. The UI carrying the wire's `kind` but dropping
+    /// `also_locations` would re-open that hole on the surface the curator actually reads,
+    /// which is the worst place to have it — so it is mirrored with the same round-trip
+    /// contract test the other mirrored fields have.
+    ///
+    /// Empty for an un-merged finding (back-compatible serde default). Note that this is NOT
+    /// [`FindingView::also_matches`]: that is the set of other RULE IDS violated at this same
+    /// location, while this is the set of other LOCATIONS this one defect touches.
+    #[serde(default)]
+    pub also_locations: Vec<MergedSiteView>,
     #[serde(default, flatten)]
     pub kind: Option<camerata_api_types::audit::FindingKind>,
+}
+
+/// One evidence site absorbed into a merged finding — the view-model mirror of
+/// `camerata_server::onboard::MergedLocation`, field for field.
+///
+/// Re-declared here rather than imported because `camerata-ui-core` must not depend on
+/// `camerata-server` (the crate is the BFF; the UI is its HTTP client). The shape is pinned
+/// against the wire by the round-trip contract tests, which is the same seam
+/// `Disposition`/`TriageState` already live on.
+#[derive(Clone, PartialEq, Eq, Debug, serde::Deserialize, serde::Serialize)]
+pub struct MergedSiteView {
+    /// `owner/repo` this site lives in — may differ from the primary's in a multi-repo scan.
+    #[serde(default)]
+    pub repo: String,
+    /// File path within `repo`.
+    pub path: String,
+    /// 1-based line number.
+    pub line: usize,
+    /// The rule id this site was originally flagged under, before it was absorbed.
+    pub rule_id: String,
+    /// The offending line this site cited.
+    #[serde(default)]
+    pub snippet: String,
+    /// True when this site is a pure CONSEQUENCE of the primary's root cause rather than an
+    /// additional place that needs the same fix. The detail pane subordinates these under an
+    /// "also affects" sub-label, which is exactly what the server field's doc says it means.
+    #[serde(default)]
+    pub consequence: bool,
+}
+
+/// How many places this one finding touches: its own site, plus every absorbed one.
+///
+/// Computed rather than read off a wire field, per design §10: "the UI can compute
+/// `1 + also_locations.len()` identically, which is the better choice — one source of truth,
+/// no new wire field." Never zero: a finding always has its own site.
+pub fn site_count(f: &FindingView) -> usize {
+    1 + f.also_locations.len()
 }
 
 /// Which of the curator workbench's four kind surfaces a finding row belongs on
@@ -2230,5 +2283,79 @@ mod tests {
             assert_ne!(d.state, TriageState::Confirmed);
         }
         assert_eq!(TriageState::default(), TriageState::Unresolved);
+    }
+
+    // ── req_pass2_11: the docked detail pane (design §2/§4, §6; Q5 ruling §13) ──────────
+    //
+    // RED BEFORE THE FIX, all of them. The absorbed-sites group fails at RUNTIME on
+    // `d70d669` (`FindingView` silently drops `also_locations`, so a merged row's other
+    // sites reach the curator's detail surface nowhere); the cursor, scoping and undo
+    // groups fail to COMPILE, because none of that API exists yet.
+
+    /// req_pass2_11: a merged row's ABSORBED evidence sites survive the trip into the view
+    /// model. `camerata_server::onboard::Finding::also_locations` is the field W7 added to
+    /// close C5 ("an absorbed site reaching NO artifact"); the UI dropping it on the floor
+    /// re-opens exactly that hole on the one surface the curator actually reads.
+    #[test]
+    fn req_pass2_11_finding_view_mirrors_absorbed_sites_from_the_wire() {
+        let f = finding(serde_json::json!({
+            "repo": "me/api", "path": "src/handlers.rs", "line": 88,
+            "rule_id": "SQL-INJECTION-1", "severity": "critical", "snippet": "query(fmt!(..))",
+            "detail": "", "kind": "defect",
+            "also_locations": [
+                { "repo": "me/api", "path": "src/export.rs", "line": 31,
+                  "rule_id": "SQL-INJECTION-1", "snippet": "query(fmt!(..))",
+                  "consequence": false },
+                { "repo": "me/api", "path": "docs/threat.md", "line": 4,
+                  "rule_id": "DATA-EXFIL-1", "snippet": "customer rows readable",
+                  "consequence": true }
+            ]
+        }));
+        assert_eq!(f.also_locations.len(), 2, "both absorbed sites must reach the view model");
+        assert_eq!(f.also_locations[0].path, "src/export.rs");
+        assert_eq!(f.also_locations[0].line, 31);
+        assert_eq!(f.also_locations[0].rule_id, "SQL-INJECTION-1");
+        assert!(!f.also_locations[0].consequence, "a peer evidence site");
+        assert!(
+            f.also_locations[1].consequence,
+            "a CONSEQUENCE site — the pane subordinates it under \"also affects\""
+        );
+        // And back out again, the same round-trip contract `kind`/`confidence`/`effort` hold.
+        let back = serde_json::to_value(&f).expect("FindingView serializes");
+        assert_eq!(back["also_locations"].as_array().map(Vec::len), Some(2));
+        assert_eq!(back["also_locations"][1]["rule_id"], "DATA-EXFIL-1");
+    }
+
+    /// req_pass2_11: `site_count` is 1 + the absorbed sites, computed here rather than taken
+    /// from a new wire field — design §10 chose that deliberately ("one source of truth, no
+    /// new wire field").
+    #[test]
+    fn req_pass2_11_site_count_is_one_plus_the_absorbed_sites() {
+        let plain = finding(serde_json::json!({
+            "repo": "r", "path": "p", "line": 1, "rule_id": "R",
+            "severity": "high", "snippet": "s", "detail": ""
+        }));
+        assert_eq!(site_count(&plain), 1, "an un-merged row is one site, never zero");
+        let merged = finding(serde_json::json!({
+            "repo": "r", "path": "p", "line": 1, "rule_id": "R",
+            "severity": "high", "snippet": "s", "detail": "",
+            "also_locations": [
+                { "repo": "r", "path": "q", "line": 2, "rule_id": "R", "snippet": "s2",
+                  "consequence": false },
+                { "repo": "r", "path": "t", "line": 3, "rule_id": "R", "snippet": "s3",
+                  "consequence": false }
+            ]
+        }));
+        assert_eq!(site_count(&merged), 3);
+    }
+
+    /// req_pass2_11: a row from before the field existed still loads, with no sites absorbed.
+    #[test]
+    fn req_pass2_11_absent_also_locations_defaults_to_empty() {
+        let f = finding(serde_json::json!({
+            "repo": "r", "path": "p", "line": 1, "rule_id": "R",
+            "severity": "low", "snippet": "s", "detail": ""
+        }));
+        assert!(f.also_locations.is_empty());
     }
 }
