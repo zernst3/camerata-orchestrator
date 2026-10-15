@@ -718,21 +718,72 @@ is gone:
   disposition case that IS the burn-down gesture. Focus is never left on a row that is not on
   screen, and an emptied view clears it rather than keeping a stale key.
 
+### BUILT - the RULE HUB (section 8), 2026-10-15
+
+Commit `5029289`. `rule_hub` / `RuleHubView` / `ConformingSites` in core, `RuleHubStrip` /
+`RuleHubModal` / `RuleHubRequest` in `scan.rs`. One join, scoped per `(repo, rule)`, reachable
+from the three informational panels, the docked detail pane and the deviation bulk bar. The
+conforming count is two integers with nothing to click, and the three paths section 8 refuses
+are asserted absent.
+
+### BUILT - the REMOVALS SWEEP (section 9), 2026-10-15
+
+Commits `7e11ac8`, `06fb0b2`, `3eaac42`, `cc0b26c`, `3de74ef`, `3c832d4`, over `ed50b74`'s
+`confidence_tag`. Taken in the order the risk allowed rather than the order of conviction, and
+each one proved its replacement covered the affordance BEFORE deleting it.
+
+| § | Item | Outcome |
+|---|---|---|
+| 9.1 | `RuleAlternativesPanel` as a standalone panel | **PARTLY REMOVED.** See the block below - the panel is still here, and the reason is a capability the hub provably cannot reach |
+| 9.2 | The two always-visible reason textareas | **REMOVED.** `QueueReasonPrompt`, raised by the gesture, heading from core's `bulk_reason_heading` (names the disposition AND the count). The bulk-FP bar's reason source changed with it: it raised its own prompt instead of reading the shared textarea |
+| 9.3 | The 300px "Needs review" prose column | **REMOVED.** Header now `Confidence`, 130px, cell value `confidence_tag`, filter `confidence_tags()`, chip by chorale badge. The hedging sentence relocated to the detail pane, asserted in both directions |
+| 9.4 | Severity on informational surfaces | **ALREADY SATISFIED**, now PINNED with a `critical`/`high`/`medium` fixture that would leak one, across all three panels plus the hub strip |
+| 9.5 | The findings-key legend | **REMOVED.** Superseded by the Severity + Authority badges, which also fix the legend's own false claim (it called the red row "deterministic security"; the predicate is `severity == "critical"` and always was). Red full-row highlight stays, now as the named `finding_row_class` so "it stays" is assertable |
+| 9.6 | The row-click modal for Queue rows | **ALREADY REMOVED** by the detail-pane step; verified, not re-removed |
+| 9.7 | "What's healthy" as a ledger-driven list | **LEFT ALONE**, per its own "eventually" and the open owner ruling it sits against |
+
+**`split_needs_review` is NOT fully retired from the UI, and section 9.3's own condition says
+why** - it asks for retirement "once the structured field is universal", and `confidence` is
+`Option<String>` with legacy rows carrying only the prose marker. The line is drawn where the
+principle is: prose must not DECIDE. Retired from the Queue column, where a regex drove a cell
+value, a filter vocabulary and a sort key. Kept in `DetailPaneRow::from_finding` and the
+finding modal, which only split already-written text so a human reader sees the marker in bold.
+Deleting those two would drop a legacy row's only disclosure of its hedge.
+
+### 9.1 IS BLOCKED, and the blocker is structural
+
+The Evaluated-against line and the Why? ANSWER did move into `RuleHubStrip`, built by the same
+pure `alternative_controls_row` the panel uses so the two cannot disagree, and read-only so
+section 8's one-navigation invariant survives. The rest cannot follow:
+
+- **The group headers take no content.** Already established in section 13's retraction.
+  `render_grouped_row` / `group_header_tr` are private in `chorale-dioxus` 0.2.3 and
+  `group_header_class` is a CSS class string. A `<select>` cannot be a grouped-on cell value.
+- **The hub cannot reach a rule with no findings.** `rule_hub` returns `None` for it, by its
+  own design ("there is no '0 findings' hub - an empty strip is a dead affordance"). But the
+  panel exists to list every multi-option rule the audit evaluated *including those with zero
+  violations*, and a clean rule is the one whose option choice is least visible. Deleting the
+  panel would leave those rules with no Queue row, no panel row and no hub.
+
+So the Change select, the staged-override map and the rescan/accept flow stay on the panel; the
+sticky rescan bar survives as section 9.1 says it should; and the hub names the panel rather
+than leaving a curator who just read "Override, pending rescan" to hunt for the control.
+Finishing 9.1 needs a surface enumerating the rules the scan found nothing for - a new thing to
+build, not a relocation, and section 9 does not describe one.
+`req_pass2_13_the_hub_cannot_reach_a_clean_multi_option_rule_so_the_panel_stays` pins it.
+
 ### NOT BUILT - the later layers, as expected
 
-Coverage drawer (section 7), rule hub (section 8), and section 9's removals 1, 2, 3 and 5.
-Section 4's Sites COLUMN still does not exist (the data it needs is now mirrored; only the
-column is missing), the 300px "Needs review" column with inline prose is still there, and the
-Authority column has not been narrowed.
+Coverage drawer (section 7). Section 4's Sites COLUMN still does not exist (the data it needs
+is mirrored; only the column is missing) and the Authority column has not been narrowed. The
+convention commit dialog (Q4's typed-destination gate) is the next step.
 
-### PARTIAL, and worth knowing before step 2 starts
+### PARTIAL, and worth knowing before the next step starts
 
 - ~~**Section 10's enabling work is half done.**~~ **CLOSED 2026-10-15** by the detail-pane
   step: `also_locations` is mirrored as `MergedSiteView` with round-trip contract tests, and
   `site_count` is computed in core. Section 6 is built; section 4's Sites COLUMN is still
   unbuilt, but is no longer blocked on data.
-- **Section 4's column table is one row done of four changed.** Kind badge shipped. The Sites
-  column does not exist; the 300px "Needs review" column with inline prose is still there
-  (`scan.rs:1660-1683`), so section 9.3's `confidence`-chip replacement is undone; and the
-  Authority column has not been narrowed. (The pane DOES render the structured `confidence`
-  and `effort` values, so the data half of 9.3 is proven to arrive.)
+- **Section 4's column table is two rows done of four changed.** Kind badge shipped; the
+  Confidence column replaced "Needs review" (9.3). The Sites column does not exist and the
+  Authority column has not been narrowed.
