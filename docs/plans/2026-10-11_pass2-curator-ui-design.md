@@ -1,11 +1,16 @@
 # Pass 2 - Curator UI design for the five-kind finding taxonomy (2026-10-11)
 
-> **STATUS, 2026-10-14: PARTLY BUILT.** This was a design document with no code when it was
-> written. Steps 1, 2 and 3 of section 11 are now shipped (step 3 minus the keystroke, which is
-> deferred to the detail-pane step for a stated reason), and so is the manual-sort requirement
-> section 5 mentions in passing. The full built-versus-designed inventory, with file:line, is
-> section 14 at the bottom; read it before treating any paragraph here as a description of the
-> product.
+> **STATUS, 2026-10-15: PARTLY BUILT.** This was a design document with no code when it was
+> written. Steps 1, 2 and 3 of section 11 are shipped, so is the manual-sort requirement
+> section 5 mentions in passing, and so is the docked detail pane of section 2 — with the
+> `C`/`I`/`T`/`F` keystroke step 3 deferred to it, its Q5 scoping, and the five-second undo.
+> The full built-versus-designed inventory, with file:line, is section 14 at the bottom; read
+> it before treating any paragraph here as a description of the product.
+>
+> **Section 13's chorale dependency check is RETRACTED.** Both of its headline claims were
+> wrong, and both were discovered at build time rather than by review. See the retraction
+> note in that section before relying on any chorale capability named anywhere in this
+> document.
 
 Design document, written before any code existed. Builds on:
 
@@ -507,6 +512,34 @@ fine as is."* Dropped; the kind switcher keeps one tab per kind.
 
 ### Dependency check (2026-10-12): chorale 0.2.3 already has everything
 
+> **RETRACTED, 2026-10-15. Both headline claims in this block are WRONG.** They were made by
+> matching symbol names against the design's asks, not by reading the installed source. Steps
+> 2 and 4 each discovered the error at build time, and each routed around it in Camerata. The
+> corrected reading is recorded immediately below; the original text is kept so the mistake is
+> legible rather than quietly overwritten.
+>
+> - **`detail_renderer` / `set_detail_column_enabled` / `detail_column_enabled` are NOT a
+>   docked pane.** `detail_renderer` is an EXPANDABLE INLINE ROW DETAIL: `chorale-dioxus`
+>   0.2.3 renders it in `detail_panel_tr` (`components.rs:1998`) as
+>   `<tr class="chorale-detail-panel"><td colspan=N>…</td></tr>` immediately BENEATH its
+>   parent row, with a chevron column to expand it. `set_detail_column_enabled` /
+>   `detail_column_enabled` just keep that chevron column in chorale's own keyboard
+>   navigation. An inline panel pushes every row below it down the page, so
+>   cursor-down-read-decide would reflow the table under the cursor on every move — the
+>   opposite of what §2 asks for. **Built in Camerata** (`FindingDetailPane`, step 4 below).
+> - **`render_grouped_row` / `group_header_tr` / `group_header_class` are NOT a group-header
+>   content hook.** The first two are private `fn`s in `chorale-dioxus` 0.2.3; the third is a
+>   CSS class string. Step 2 found this and routed around it by grouping on a hidden column
+>   whose cell value IS the header text.
+>
+> What chorale 0.2.3 genuinely does provide, and what step 4 used instead, is
+> **`chorale_core::visible_grouped_view`** — public, and post-filter, post-sort AND
+> post-collapse. Expressing row focus as a position in that list is what makes "focus survives
+> a re-sort" and "focus survives a collapse" one rule rather than two features.
+>
+> The remaining two lines below (grouping/expand/collapse, selection) were checked and are
+> correct.
+
 The design named the group-header content hook as "the one chorale ask" and flagged
 master/detail as needing verification. Both are present in the installed registry version
 (`chorale-core` / `chorale-dioxus` `0.2.3`), so nothing needs requesting upstream and the
@@ -636,20 +669,70 @@ and the undo toast all arrive together. The rationale is repeated at the Confirm
 
 Still not built from this step's neighbourhood: the undo toast (it arrives with the keys).
 
+### BUILT - the DOCKED DETAIL PANE (2026-10-15), with the keystroke and the undo
+
+Commits `9f19f30`, `6300913`, `6a8f2c2`, `97b93af`. Section 2's pane, section 6's
+merged-site disclosure, and the Q5 ruling in full — the keys, their scoping, and the
+five-second undo that step 3 deferred to this step.
+
+| Design item | Where it landed |
+|---|---|
+| `also_locations` mirrored (section 10's undone half) | `MergedSiteView` + the `FindingView` field + `site_count` (`1 + also_locations.len()`, computed here per §10's own ruling), `crates/ui-core/src/triage.rs`. Round-trip contract tests, same as `kind`/`confidence`/`effort` |
+| The docked pane | `FindingDetailPane` + `DetailPaneRow` + `PaneSiteRow` + `UndoBanner`, `crates/ui/src/cockpit/scan.rs`. Props-only, like `ProcessGate` and `DeviationBulkBar`, so SSR can render it in every state. Mounted in a `.queue-split` beside the table, sticky, with its own scroll context |
+| Arrow-key row focus | `RowCursor` (core) over the keys of `chorale_core::visible_grouped_view`'s data rows. Pure and non-mutating — the cursor is RESOLVED during render against the current frame's row list, so resolution is a read and cannot loop |
+| Single-key dispositions, SCOPED | `pane_command(focus, key, mods)` (core). The scope gate is the first thing it does and is unconditional: anything but `PaneFocus::Cursor` returns `None` for every key. `ctrl`/`alt`/`meta` disarm too (Cmd-C is copy over a snippet the pane is showing); shift does not |
+| The armed indicator | `pane_keys_armed(focus)`, DEFINED as `pane_command(focus, "c", …).is_some()` rather than as a second read of the enum — so a pane claiming "armed" while the handler refuses is unreachable |
+| `I` / `F` | `PaneCommand::PromptFor`, never `Dispose`. See the ruling below |
+| The five-second undo | `UNDO_WINDOW_MS`, `UndoEntry`, `TriageModel::dispose_with_undo` / `undo` -> `UndoOutcome` (core). Timestamps are caller-supplied `u64` ms against a MONOTONIC `Instant`, so the window is tested without sleeping and an NTP step cannot move it |
+| Section 9.6's removal | A Queue row click now FOCUSES the pane instead of opening the finding modal. The modal is one deliberate click away, from the pane's `Full detail` button; it keeps the on-demand enclosing-code-block fetch, far too expensive to re-run on every cursor-down. It never served the informational panels, so section 2's "the modal remains for the informational panels" is unaffected |
+| Section 6's disclosure | The pane's `Sites (N)` list: primary first, then every absorbed site with its own original rule id and snippet, `consequence: true` entries subordinated under an `also affects` sub-label. Rendered only when N > 1 |
+
+**The reason-carrying keys PROMPT, they do not apply.** `I` and `F` open the on-demand reason
+prompt (pre-focused, Enter commits, Esc cancels) — which is what section 3 already specified
+for the buttons. Apply-then-collect was rejected on a concrete failure rather than on taste:
+it parks a row in `Ignored` with an empty reason for as long as the curator takes to type one,
+and the curator's next gesture in this UI is cursor-down. A reasonless `Ignored` row is a
+baseline waiver with no audit trail, which is the hole the require-reason invariant and
+`bulk_false_positive`'s refusal both exist to close. Keys-only-for-the-reasonless was rejected
+because it drops two of the four keys the ruling names. The prompt also COMPOSES with the
+scoping instead of fighting it: opening it moves focus to `PaneFocus::ReasonPrompt`, so the
+keys disarm for exactly as long as the curator is typing.
+
+**Focus never asserts, it always moves.** Every path that wants the keys armed calls
+`focus_detail_pane()` (a DOM focus against the shared `DETAIL_PANE_ID`) and lets the pane's
+own `focusin` set the state. Writing `PaneFocus::Cursor` directly — which the first cut of the
+row-click handler did — would let the pane report its keys armed while real focus sat in the
+table and the keydown handler, which lives on the pane, received nothing.
+
+**What happens to focus on a re-sort and on a collapse.** The cursor is anchored to the row's
+`finding_key`, never to its index, with the index kept only as the fallback for when that key
+is gone:
+
+- **Re-sort** permutes the visible list without removing anything, so the SAME finding stays
+  focused at its new position. An index-anchored cursor would silently re-point at whatever
+  row landed under it, and the pane would start describing a different finding with no gesture
+  from the curator — the worst failure for a surface whose whole job is "read this, press a
+  key".
+- **Collapse, filter, or the disposition itself** removes the focused row, and focus clamps to
+  the row that took the vacated index (or the last row, when the tail went). For the
+  disposition case that IS the burn-down gesture. Focus is never left on a row that is not on
+  screen, and an emptied view clears it rather than keeping a stale key.
+
 ### NOT BUILT - the later layers, as expected
 
-Docked detail pane (section 2; `detail_renderer` unused, the row-click modal at
-`scan.rs:4105-4175` is still the Queue's detail surface), merged-site disclosure (section 6),
-coverage drawer (section 7), rule hub (section 8), and section 9's removals 1, 2, 3, 5 and 6.
+Coverage drawer (section 7), rule hub (section 8), and section 9's removals 1, 2, 3 and 5.
+Section 4's Sites COLUMN still does not exist (the data it needs is now mirrored; only the
+column is missing), the 300px "Needs review" column with inline prose is still there, and the
+Authority column has not been narrowed.
 
 ### PARTIAL, and worth knowing before step 2 starts
 
-- **Section 10's enabling work is half done.** `kind` is mirrored with round-trip contract
-  tests, but **`also_locations` and `site_count` are not mirrored at all** - neither appears
-  anywhere in `crates/ui-core/src` or `crates/ui/src`. Section 4's Sites column and the whole
-  of section 6 depend on that data, so they are blocked on plumbing the design already
-  identified, not on new design.
+- ~~**Section 10's enabling work is half done.**~~ **CLOSED 2026-10-15** by the detail-pane
+  step: `also_locations` is mirrored as `MergedSiteView` with round-trip contract tests, and
+  `site_count` is computed in core. Section 6 is built; section 4's Sites COLUMN is still
+  unbuilt, but is no longer blocked on data.
 - **Section 4's column table is one row done of four changed.** Kind badge shipped. The Sites
   column does not exist; the 300px "Needs review" column with inline prose is still there
   (`scan.rs:1660-1683`), so section 9.3's `confidence`-chip replacement is undone; and the
-  Authority column has not been narrowed.
+  Authority column has not been narrowed. (The pane DOES render the structured `confidence`
+  and `effort` values, so the data half of 9.3 is proven to arrive.)
