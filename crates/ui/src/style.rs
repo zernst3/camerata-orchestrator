@@ -2561,6 +2561,43 @@ textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-f
 .kind-chip.kind-defect { color: #7f1d1d; background: #fecaca; border: 1px solid #fecaca; }
 .kind-chip.kind-deviation { color: #1e3a8a; background: #bfdbfe; border: 1px solid #bfdbfe; }
 .kind-chip.kind-unspecified { color: #d4332b; background: transparent; border: 1px dashed #d4332b; }
+/* The three informational kinds share ONE neutral treatment. They are not a severity ladder
+   and not an accusation; giving each its own colour would imply a ranking between "you follow
+   this convention", "you are split" and "we could not look". */
+.kind-chip.kind-informational { color: #334155; background: #e2e8f0; border: 1px solid #e2e8f0; }
+
+/* ── THE RULE HUB (design §8) ────────────────────────────────────────────────
+   One join, reached from every surface that shows a rule id. `.rule-hub-link` is that door:
+   a button that reads as the rule id it names, so the affordance is the identifier itself
+   rather than a separate icon the eye has to find 400 times in a sitting. */
+.rule-hub-link {
+  appearance: none; background: none; border: none; padding: 0; margin: 0;
+  font: inherit; color: var(--accent); cursor: pointer;
+  text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;
+}
+.rule-hub-link:hover { text-decoration-style: solid; }
+.rule-hub { display: flex; flex-direction: column; gap: 8px; }
+.rule-hub-eyebrow {
+  margin: 0; font-size: 10.5px; font-weight: 800; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--ink-soft);
+}
+.rule-hub-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.rule-hub-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-weight: 800; }
+.rule-hub-outcome { margin: 0; font-size: 13.5px; line-height: 1.5; color: var(--ink); }
+.rule-hub-meta { display: flex; gap: 6px; flex-wrap: wrap; }
+/* The conforming count, and the sentence that says there is nothing behind it. Styled as a
+   note rather than as a link-looking row precisely because it is NOT clickable: the
+   conforming sites are not in the scan data, only their count. */
+.rule-hub-conforming {
+  margin: 0; font-size: 12px; color: var(--ink-soft); line-height: 1.5;
+  border-left: 2px solid var(--line); padding-left: 9px;
+}
+.rule-hub-conflict {
+  margin: 0; font-size: 12px; line-height: 1.5; color: #7f1d1d;
+  background: #fef2f2; border: 1px solid #fecaca; border-radius: 7px; padding: 8px 10px;
+}
+.rule-hub-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+.rule-hub-modal { max-width: 620px; }
 
 /* The three informational panels. Deliberately plain lists at this stage: their real
    per-rule decisions (adopt, recommend) land in a later step, and a button with nothing

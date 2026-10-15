@@ -408,6 +408,149 @@ pub fn rules_on_multiple_surfaces(
         .collect()
 }
 
+/// THE RULE HUB (design §8): everything this scan knows about ONE rule, in one place.
+///
+/// > Rule -> everything about that rule. This is THE join, and it gets the investment.
+///
+/// The design is explicit that the alternative — point-to-point cross-links between every pair
+/// of surfaces — is n-squared noise. So this is the only join built, and it is built once: a
+/// pure derivation over the scan's own rows, with no second source and no second ranking.
+///
+/// ## What it refuses to say
+///
+/// Two refusals are load-bearing, and both are the design's own words:
+///
+/// * **Conforming sites are not in the data, only counts.** [`ConformingSites`] is two
+///   integers; there is no list, no link, and no field that could grow into one.
+/// * **A rule appears in exactly one kind surface per scan.** When it does not, that is a
+///   pipeline bug to surface rather than to resolve, so [`RuleHubView::conflict_surfaces`]
+///   carries [`rules_on_multiple_surfaces`]'s own verdict verbatim instead of this function
+///   re-deciding which surface "really" owns the rule.
+#[derive(Clone, PartialEq, Debug)]
+pub struct RuleHubView {
+    /// `owner/repo` this hub is scoped to.
+    pub repo: String,
+    pub rule_id: String,
+    /// The ONE kind surface this rule's rows reached — and, when the invariant is violated,
+    /// the surface of the rule's FIRST row rather than a winner picked by this function.
+    pub surface: KindSurface,
+    /// The wire tag of the first row's kind, from [`kind_tag`] — never re-derived.
+    pub kind_tag: &'static str,
+    /// The kind outcome as one sentence. For a deviation this is
+    /// [`DeviationHeadline::sentence`] verbatim, the same words the group header carries.
+    pub outcome: String,
+    /// How many ROWS this rule has in this scan, within this repo.
+    pub row_count: usize,
+    /// How many SITES those rows touch — [`site_count`] summed, so an absorbed merge site is
+    /// counted once as a site and never as an extra row (design §6's conservation rule).
+    pub site_count: usize,
+    /// The observed convention's authored label, for the two kinds that carry one.
+    pub convention_label: Option<String>,
+    /// The alternative option the audit evaluated this rule against, when it is multi-option.
+    /// Relocated here from the standalone `RuleAlternativesPanel` (design §9.1).
+    pub evaluated_option_id: Option<String>,
+    /// Counts only. See [`ConformingSites`].
+    pub conforming: Option<ConformingSites>,
+    /// Empty in the healthy case. See [`rules_on_multiple_surfaces`].
+    pub conflict_surfaces: Vec<KindSurface>,
+    /// Where "take me to this rule" goes: the Queue (filtered to the rule) or the panel that
+    /// holds it. Exactly one destination, because the rule has exactly one surface.
+    pub jump: KindSurface,
+}
+
+/// Build the hub for one `(repo, rule_id)` out of the scan's rows.
+///
+/// Scoped per `(repo, rule_id)` — the SAME key [`rules_on_multiple_surfaces`] uses — because
+/// in a multi-repo scan one repo can honestly follow a convention while another deviates from
+/// it, and merging those two assessments into one "this rule in this scan" strip would state a
+/// contradiction as a fact.
+///
+/// `None` when the rule has no rows in that repo: the hub describes what a scan FOUND, and a
+/// rule it never touched has nothing to describe. (That is also why there is no "0 findings"
+/// hub — an empty strip is a dead affordance.)
+pub fn rule_hub(findings: &[FindingView], repo: &str, rule_id: &str) -> Option<RuleHubView> {
+    use camerata_api_types::audit::FindingKind;
+    let rows: Vec<&FindingView> = findings
+        .iter()
+        .filter(|f| f.repo == repo && f.rule_id == rule_id)
+        .collect();
+    let first = *rows.first()?;
+    let surface = kind_surface(first);
+    let conflict_surfaces = rules_on_multiple_surfaces(findings)
+        .into_iter()
+        .find(|((r, rid), _)| r == repo && rid == rule_id)
+        .map(|(_, surfaces)| surfaces)
+        .unwrap_or_default();
+    let headline = deviation_headline(first);
+    let convention_label = match &first.kind {
+        Some(FindingKind::Deviation(d)) => Some(d.convention_label.clone()),
+        Some(FindingKind::ConventionObserved(c)) => Some(c.convention_label.clone()),
+        _ => None,
+    }
+    .filter(|l| !l.is_empty());
+    let row_count = rows.len();
+    let site_count: usize = rows.iter().copied().map(site_count).sum();
+    let outcome = match &first.kind {
+        // The deviation sentence, verbatim. Not a second phrasing of the same numbers: the
+        // curator reads this strip right after reading the group header, and two wordings of
+        // one claim is how a reader starts wondering which one is the real number.
+        Some(FindingKind::Deviation(_)) => headline
+            .as_ref()
+            .map(DeviationHeadline::sentence)
+            .unwrap_or_default(),
+        Some(FindingKind::Defect) => {
+            if site_count == row_count {
+                format!("{row_count} defect row(s)")
+            } else {
+                // Named separately because the difference is C5's whole point: a three-site
+                // defect that exports as one row is exactly the shape that lost two sites.
+                format!("{row_count} defect row(s) across {site_count} site(s)")
+            }
+        }
+        Some(FindingKind::ConventionObserved(c)) => format!(
+            "Convention observed with zero violations: \"{}\"",
+            c.convention_label
+        ),
+        Some(FindingKind::NoConvention(n)) => format!(
+            "No convention \u{2014} the codebase is split across {} observed option(s)",
+            n.observed_options.len()
+        ),
+        Some(FindingKind::NotAssessed(na)) => format!(
+            "Not assessed \u{2014} {}{}",
+            na.reason.as_str(),
+            if na.reason_detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", na.reason_detail)
+            }
+        ),
+        // The ALARM. Deliberately does not use the word "defect": an unmapped emission path is
+        // a pipeline bug, and describing it as the kind it most resembles is precisely the
+        // silent backfill the taxonomy's own rule forbids.
+        None => format!(
+            "UNSPECIFIED \u{2014} {row_count} row(s) reached the UI with no kind. An unmapped \
+             emission path upstream, not a finding class."
+        ),
+    };
+    Some(RuleHubView {
+        repo: repo.to_string(),
+        rule_id: rule_id.to_string(),
+        surface,
+        kind_tag: kind_tag(first),
+        outcome,
+        row_count,
+        site_count,
+        convention_label,
+        evaluated_option_id: rows
+            .iter()
+            .find_map(|f| f.evaluated_option_id.clone())
+            .filter(|o| !o.is_empty()),
+        conforming: headline.as_ref().and_then(DeviationHeadline::conforming),
+        conflict_surfaces,
+        jump: surface,
+    })
+}
+
 /// THE DEVIATION SENTENCE, as structured values (design §2/§4, Pass 2 step 2).
 ///
 /// A `Deviation` row carries its whole claim as fields — numerator, denominator, convention
@@ -480,6 +623,45 @@ impl DeviationHeadline {
             format!("{subject} from \"{}\"", self.convention_label)
         }
     }
+
+    /// How many sites CONFORM, when the denominator is printable.
+    ///
+    /// This is a subtraction over two authored numbers and nothing more. It exists so the rule
+    /// hub can state "45 of 47 conform" without re-deriving the denominator rule: the guard is
+    /// [`DeviationHeadline::printable_denominator`], the same one [`DeviationHeadline::sentence`]
+    /// uses, so the hub and the group header can never disagree about whether a denominator is
+    /// usable.
+    ///
+    /// `None` when the producer could not count (design §4's "never a fabricated denominator")
+    /// and also when the numerator EXCEEDS the denominator — that is a producer contradiction,
+    /// and an underflowed "conforming" count would be a fabricated number wearing arithmetic's
+    /// authority.
+    ///
+    /// What this deliberately does NOT do is make the conforming sites reachable. Design §8:
+    /// "conforming sites are not in the data (only counts), so there is no 'show me the 45
+    /// conforming endpoints' link to offer. Do not fabricate one." This returns two integers.
+    pub fn conforming(&self) -> Option<ConformingSites> {
+        let assessed = self.printable_denominator()?;
+        let conforming = assessed.checked_sub(self.deviating_sites)?;
+        Some(ConformingSites {
+            conforming,
+            assessed,
+        })
+    }
+}
+
+/// How many sites of a deviation's assessed total conform, as COUNTS ONLY.
+///
+/// A deliberately inert pair of integers. The conforming sites themselves are not in the scan
+/// data — the pipeline reports the deviating sites and a total, never the conforming set — so
+/// this type carries no identifiers, no locations and no handle of any kind. Design §8 names
+/// fabricating one as the thing not to do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ConformingSites {
+    /// `assessed - deviating`.
+    pub conforming: usize,
+    /// The producer's own denominator.
+    pub assessed: usize,
 }
 
 /// This row's deviation headline, or `None` for every other kind.
@@ -3352,5 +3534,255 @@ mod tests {
         let mut m = TriageModel::new();
         assert!(m.dispose_with_undo(&[], TriageState::Confirmed, "", 0).is_none());
         assert!(m.dispositions.is_empty());
+    }
+
+    // ── req_pass2_12: THE RULE HUB (design §8) ───────────────────────────────
+    //
+    // "Rule -> everything about that rule. This is THE join, and it gets the investment."
+    // These tests pin the DERIVATION: what the hub knows about one rule in one scan, and —
+    // just as load-bearing — what it refuses to claim.
+
+    fn hub_row(repo: &str, rule_id: &str, path: &str, kind: serde_json::Value) -> FindingView {
+        let mut v = serde_json::json!({
+            "repo": repo, "path": path, "line": 3, "rule_id": rule_id,
+            "severity": "medium", "snippet": "x", "detail": "d"
+        });
+        if let Some(obj) = kind.as_object() {
+            for (k, val) in obj {
+                v[k] = val.clone();
+            }
+        }
+        finding(v)
+    }
+
+    /// req_pass2_12: the hub states the rule's kind OUTCOME for this scan, its counts, and the
+    /// surface it lives on — the four things §8 names, derived rather than re-stated.
+    #[test]
+    fn req_pass2_12_hub_states_the_kind_outcome_and_counts_for_a_deviation() {
+        let rows = vec![
+            hub_row(
+                "o/r",
+                "API-VERSIONING-1",
+                "src/routes.rs",
+                serde_json::json!({
+                    "kind": "deviation", "deviating_sites": 2, "assessed_sites": 47,
+                    "convention_label": "URI-versioned endpoints",
+                    "evaluated_option_id": "uri-versioned"
+                }),
+            ),
+            hub_row(
+                "o/r",
+                "API-VERSIONING-1",
+                "src/other.rs",
+                serde_json::json!({
+                    "kind": "deviation", "deviating_sites": 2, "assessed_sites": 47,
+                    "convention_label": "URI-versioned endpoints",
+                    "evaluated_option_id": "uri-versioned"
+                }),
+            ),
+        ];
+        let hub = rule_hub(&rows, "o/r", "API-VERSIONING-1").expect("the rule is in this scan");
+        assert_eq!(hub.surface, KindSurface::Queue);
+        assert_eq!(hub.kind_tag, "deviation");
+        assert_eq!(hub.row_count, 2);
+        assert_eq!(hub.site_count, 2);
+        assert_eq!(
+            hub.convention_label.as_deref(),
+            Some("URI-versioned endpoints")
+        );
+        assert_eq!(hub.evaluated_option_id.as_deref(), Some("uri-versioned"));
+        assert!(
+            hub.outcome.contains("2 of 47"),
+            "the outcome must be the structured deviation sentence, got {:?}",
+            hub.outcome
+        );
+    }
+
+    /// req_pass2_12: THE HONESTY CONSTRAINT, stated in §8. Conforming sites are not in the
+    /// data — only counts. The hub may state the count; it must expose no handle that implies
+    /// the 45 conforming endpoints can be listed.
+    #[test]
+    fn req_pass2_12_hub_counts_conforming_sites_but_offers_no_way_to_list_them() {
+        let rows = vec![hub_row(
+            "o/r",
+            "API-VERSIONING-1",
+            "src/routes.rs",
+            serde_json::json!({
+                "kind": "deviation", "deviating_sites": 2, "assessed_sites": 47,
+                "convention_label": "URI-versioned endpoints"
+            }),
+        )];
+        let hub = rule_hub(&rows, "o/r", "API-VERSIONING-1").expect("present");
+        let c = hub.conforming.expect("a known denominator yields a count");
+        assert_eq!((c.conforming, c.assessed), (45, 47));
+        // The ONE jump the hub offers is its own surface. There is no second target, and in
+        // particular no conforming-sites target, because that data does not exist.
+        assert_eq!(hub.jump, KindSurface::Queue);
+    }
+
+    /// req_pass2_12: an unknown denominator yields NO conforming count. The producer could not
+    /// count honestly, so neither can the hub.
+    #[test]
+    fn req_pass2_12_hub_claims_no_conforming_count_without_a_denominator() {
+        let rows = vec![hub_row(
+            "o/r",
+            "API-VERSIONING-1",
+            "src/routes.rs",
+            serde_json::json!({
+                "kind": "deviation", "deviating_sites": 2, "assessed_sites": null,
+                "convention_label": "URI-versioned endpoints"
+            }),
+        )];
+        let hub = rule_hub(&rows, "o/r", "API-VERSIONING-1").expect("present");
+        assert!(hub.conforming.is_none());
+        assert!(
+            !hub.outcome.contains("of "),
+            "no fabricated denominator in the sentence: {:?}",
+            hub.outcome
+        );
+    }
+
+    /// req_pass2_12: the hub reaches the informational surfaces too — §8 says it is reachable
+    /// from every surface showing a rule id, which means it must have something to say about
+    /// a rule whose only row is a compliment.
+    #[test]
+    fn req_pass2_12_hub_describes_each_informational_surface() {
+        let conv = vec![hub_row(
+            "o/r",
+            "SQL-STYLE-1",
+            "-",
+            serde_json::json!({
+                "kind": "convention_observed", "convention_option_id": "opt-a",
+                "convention_label": "Parameterized queries"
+            }),
+        )];
+        let h = rule_hub(&conv, "o/r", "SQL-STYLE-1").expect("present");
+        assert_eq!(h.surface, KindSurface::Conventions);
+        assert_eq!(h.convention_label.as_deref(), Some("Parameterized queries"));
+        assert!(h.outcome.contains("Parameterized queries"), "{:?}", h.outcome);
+
+        let none = vec![hub_row(
+            "o/r",
+            "SPLIT-1",
+            "-",
+            serde_json::json!({
+                "kind": "no_convention",
+                "observed_options": [
+                    {"option_id": "a", "label": "A", "sites": 3},
+                    {"option_id": "b", "label": "B", "sites": null}
+                ]
+            }),
+        )];
+        let h = rule_hub(&none, "o/r", "SPLIT-1").expect("present");
+        assert_eq!(h.surface, KindSurface::NoConvention);
+        assert!(h.conforming.is_none());
+
+        let na = vec![hub_row(
+            "o/r",
+            "NA-1",
+            "-",
+            serde_json::json!({
+                "kind": "not_assessed", "reason": "tool_failed",
+                "reason_detail": "eslint exited 2"
+            }),
+        )];
+        let h = rule_hub(&na, "o/r", "NA-1").expect("present");
+        assert_eq!(h.surface, KindSurface::NotAssessed);
+        assert!(h.outcome.contains("tool_failed"), "{:?}", h.outcome);
+    }
+
+    /// req_pass2_12: the hub SURFACES the one-rule-one-surface invariant rather than
+    /// re-deriving it. The conflict list it carries is exactly what
+    /// [`rules_on_multiple_surfaces`] reports for that `(repo, rule)`.
+    #[test]
+    fn req_pass2_12_hub_surfaces_the_cross_surface_conflict_it_does_not_redecide_it() {
+        let rows = vec![
+            hub_row("o/r", "DUP-1", "src/a.rs", serde_json::json!({"kind": "defect"})),
+            hub_row(
+                "o/r",
+                "DUP-1",
+                "-",
+                serde_json::json!({
+                    "kind": "convention_observed", "convention_option_id": "o",
+                    "convention_label": "L"
+                }),
+            ),
+        ];
+        let hub = rule_hub(&rows, "o/r", "DUP-1").expect("present");
+        let expected: Vec<KindSurface> = rules_on_multiple_surfaces(&rows)
+            .into_iter()
+            .find(|((repo, rid), _)| repo == "o/r" && rid == "DUP-1")
+            .expect("the invariant fires")
+            .1;
+        assert_eq!(hub.conflict_surfaces, expected);
+        // Healthy rules say nothing.
+        let clean = vec![hub_row(
+            "o/r",
+            "OK-1",
+            "src/a.rs",
+            serde_json::json!({"kind": "defect"}),
+        )];
+        assert!(rule_hub(&clean, "o/r", "OK-1")
+            .expect("present")
+            .conflict_surfaces
+            .is_empty());
+    }
+
+    /// req_pass2_12: the hub is scoped per `(repo, rule)`, the same key the invariant uses. A
+    /// second repo's rows for the same rule are a different assessment and must not be counted
+    /// into this one.
+    #[test]
+    fn req_pass2_12_hub_is_scoped_per_repo_like_the_invariant() {
+        let rows = vec![
+            hub_row("o/a", "R-1", "src/a.rs", serde_json::json!({"kind": "defect"})),
+            hub_row("o/b", "R-1", "src/b.rs", serde_json::json!({"kind": "defect"})),
+            hub_row("o/b", "R-1", "src/c.rs", serde_json::json!({"kind": "defect"})),
+        ];
+        assert_eq!(rule_hub(&rows, "o/a", "R-1").expect("present").row_count, 1);
+        assert_eq!(rule_hub(&rows, "o/b", "R-1").expect("present").row_count, 2);
+        assert!(rule_hub(&rows, "o/c", "R-1").is_none());
+    }
+
+    /// req_pass2_12: a merged row's absorbed sites are counted as SITES, never as extra rows —
+    /// the same conservation discipline §6 imposed on the detail pane.
+    #[test]
+    fn req_pass2_12_hub_counts_absorbed_sites_without_doubling_rows() {
+        let mut f = hub_row("o/r", "R-1", "src/a.rs", serde_json::json!({"kind": "defect"}));
+        f.also_locations = vec![
+            MergedSiteView {
+                repo: "o/r".to_string(),
+                path: "src/b.rs".to_string(),
+                line: 9,
+                rule_id: "R-1".to_string(),
+                snippet: String::new(),
+                consequence: false,
+            },
+            MergedSiteView {
+                repo: "o/r".to_string(),
+                path: "src/c.rs".to_string(),
+                line: 11,
+                rule_id: "R-1".to_string(),
+                snippet: String::new(),
+                consequence: true,
+            },
+        ];
+        let hub = rule_hub(&[f], "o/r", "R-1").expect("present");
+        assert_eq!(hub.row_count, 1);
+        assert_eq!(hub.site_count, 3);
+    }
+
+    /// req_pass2_12: a kind-less row keeps its ALARM identity inside the hub too — it is not
+    /// quietly described as a defect.
+    #[test]
+    fn req_pass2_12_hub_keeps_the_unspecified_alarm_an_alarm() {
+        let rows = vec![hub_row("o/r", "R-1", "src/a.rs", serde_json::json!({}))];
+        let hub = rule_hub(&rows, "o/r", "R-1").expect("present");
+        assert_eq!(hub.kind_tag, "unspecified");
+        assert_eq!(hub.surface, KindSurface::Queue);
+        assert!(
+            !hub.outcome.to_lowercase().contains("defect"),
+            "an unmapped emission path must never be described as a defect: {:?}",
+            hub.outcome
+        );
     }
 }

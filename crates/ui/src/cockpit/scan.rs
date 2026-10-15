@@ -452,6 +452,12 @@ pub(super) use camerata_ui_core::triage::{
     unspecified_kind_count, KindSurface,
 };
 
+// Pass 2, design §8: THE RULE HUB. `rule_hub` is the one join — everything this scan knows
+// about one (repo, rule) — and `RuleHubView` is already the flat owned props shape, so the
+// strip that renders it needs no second DTO. The conforming count comes through as two
+// integers deliberately: the conforming sites are not in the data, only the counts.
+pub(super) use camerata_ui_core::triage::{rule_hub, RuleHubView};
+
 // Pass 2 step 2: the MANUAL column sort over the curated default. `severity_sort_value` is the
 // Severity column's cell value — the authored severity carrying its calibrated ladder position,
 // because chorale sorts a column by exactly that value and 0.2.3 offers no sort-key hook. See
@@ -1989,6 +1995,14 @@ pub(super) fn DeviationBulkBar(
     /// Invoked with the index into `groups` when `False positive all N` is clicked. The call
     /// site owns the reason, the require-reason invariant and the disposition write.
     on_false_positive_all: Callback<usize>,
+    /// Open the RULE HUB on this group's rule (design §8). This bar IS the deviation group
+    /// header's reachable surface — chorale's real `<tr>` header takes no host content — so
+    /// the hub hangs off it rather than off a header that cannot carry a button.
+    ///
+    /// Defaulted rather than required so the bar's existing render tests, which care about the
+    /// bulk decisions and not about navigation, keep compiling and asserting unchanged.
+    #[props(default)]
+    on_open_hub: Callback<usize>,
 ) -> Element {
     // No deviations in this view means no decisions of this shape to make. An empty bar with
     // a heading would be a standing reminder of nothing.
@@ -2002,7 +2016,15 @@ pub(super) fn DeviationBulkBar(
             }
             for (i, g) in groups.iter().enumerate() {
                 div { key: "{g.rule_id}-{i}", class: "deviation-bulk-group",
-                    span { class: "deviation-bulk-rule", "{g.rule_id}" }
+                    // The rule id is the hub's door here, as it is on every surface that shows
+                    // one (design §8). A button rather than the plain span it used to be, so
+                    // the gesture is the same one the panels and the detail pane offer.
+                    button {
+                        class: "rule-hub-link deviation-bulk-rule",
+                        title: "Everything this scan knows about {g.rule_id}.",
+                        onclick: move |_| on_open_hub.call(i),
+                        "{g.rule_id}"
+                    }
                     span { class: "deviation-bulk-sentence", "{g.sentence}" }
                     button {
                         class: "btn-run deviation-bulk-confirm",
@@ -2080,14 +2102,37 @@ pub(super) fn ProcessGate(
 
 /// The Kind chip's `(class, label, tooltip)` for a wire kind tag.
 ///
-/// One function, two renderers: the Queue's Kind column cell and the docked detail pane's
-/// header both call it, so the badge a curator sees in the row and the badge he sees in the
-/// pane describing that same row can never say different things. The three states are not
-/// three colours of one thing — `unspecified` is an ALARM about the pipeline and gets a red
-/// OUTLINE and its own label, which is why this is hand-rolled rather than a chorale
-/// `RenderKind::Badge`.
+/// One function, THREE renderers: the Queue's Kind column cell, the docked detail pane's
+/// header, and the rule hub strip all call it, so the badge a curator sees in the row, the
+/// badge he sees in the pane describing that same row, and the badge in the hub joining them
+/// can never say different things. The states are not colours of one thing — `unspecified` is
+/// an ALARM about the pipeline and gets a red OUTLINE and its own label, which is why this is
+/// hand-rolled rather than a chorale `RenderKind::Badge`.
+///
+/// The three INFORMATIONAL tags are listed here even though the Queue never shows one, because
+/// the hub does: it is reachable from the Conventions, No convention and Not assessed panels,
+/// and a convention row falling into the catch-all would be labelled "Unspecified" — an alarm
+/// raised about a perfectly healthy row. Listing them also narrows the catch-all to what it
+/// should always have been: a tag this UI does not recognise.
 pub(super) fn kind_chip_parts(tag: &str) -> (&'static str, &'static str, &'static str) {
     match tag {
+        "convention_observed" => (
+            "kind-chip kind-informational",
+            "Convention observed",
+            "The codebase follows this convention consistently, with zero violations. \
+             Informational — there is nothing here to dispose.",
+        ),
+        "no_convention" => (
+            "kind-chip kind-informational",
+            "No convention",
+            "The codebase is split with no clear majority. One informational row per rule.",
+        ),
+        "not_assessed" => (
+            "kind-chip kind-informational",
+            "Not assessed",
+            "The rule was armed but could not be evaluated. An honesty row: the scan cannot \
+             vouch for it either way.",
+        ),
         "defect" => ("kind-chip kind-defect", "Defect", "An objective fault."),
         "deviation" => (
             "kind-chip kind-deviation",
@@ -2101,6 +2146,145 @@ pub(super) fn kind_chip_parts(tag: &str) -> (&'static str, &'static str, &'stati
             "PIPELINE BUG: this row reached the UI with no kind, which means an unmapped \
              emission path. It is NOT a defect — it is a gap to fix upstream.",
         ),
+    }
+}
+
+// ── THE RULE HUB (design §8) ─────────────────────────────────────────────────────────────
+
+/// WHICH RULE the hub is open on, scoped exactly as `camerata_ui_core::triage::rule_hub` is.
+///
+/// Carries the repo as well as the rule id because the hub is a per-`(repo, rule)` view: in a
+/// multi-repo scan one repo can honestly follow a convention while another deviates from it,
+/// and a hub keyed on the rule id alone would merge two different assessments into one strip
+/// that states a contradiction as a fact.
+#[derive(Clone, PartialEq, Debug)]
+pub(super) struct RuleHubRequest {
+    pub repo: String,
+    pub rule_id: String,
+}
+
+/// THE "THIS RULE IN THIS SCAN" STRIP (design §8) — the one join the workbench builds.
+///
+/// > Rule -> everything about that rule. This is THE join, and it gets the investment.
+///
+/// Props-only over `camerata_ui_core::triage::RuleHubView`, which is already the flat owned
+/// shape (the same discipline as `DeviationBulkRow` and `DetailPaneRow`): every judgement —
+/// which surface the rule is on, what its outcome sentence is, how many sites it touches,
+/// whether the invariant is violated — is made in core and unit-tested there. This component
+/// chooses words and pixels. SSR can therefore render it in every state, including the two
+/// that matter most and are hardest to reach by clicking: a conflicting rule, and a deviation
+/// whose denominator the producer could not establish.
+///
+/// ## The one honesty constraint, rendered
+///
+/// §8: "conforming sites are not in the data (only counts), so there is no 'show me the 45
+/// conforming endpoints' link to offer. Do not fabricate one." The conforming count is
+/// therefore rendered as TEXT that says so in the same breath, and the strip offers exactly
+/// ONE navigation control: `hub.jump`, the single surface this rule lives on.
+#[component]
+pub(super) fn RuleHubStrip(
+    hub: RuleHubView,
+    /// "Take me to this rule." Invoked with `hub.jump` — never with a surface the caller
+    /// chose, so the button and the derivation cannot disagree about where the rule is.
+    on_jump: Callback<KindSurface>,
+) -> Element {
+    let (kind_class, kind_label, kind_tip) = kind_chip_parts(hub.kind_tag);
+    let jump = hub.jump;
+    let jump_label = match jump {
+        KindSurface::Queue => "Show in the Queue, filtered to this rule".to_string(),
+        other => format!("Show in \u{201c}{}\u{201d}", other.label()),
+    };
+    rsx! {
+        div { class: "rule-hub",
+            p { class: "rule-hub-eyebrow", "This rule in this scan" }
+            div { class: "rule-hub-head",
+                span { class: "rule-hub-id", "{hub.rule_id}" }
+                span { class: "{kind_class}", title: "{kind_tip}", "{kind_label}" }
+                if !hub.repo.is_empty() {
+                    span { class: "rule-modal-tag", "{hub.repo}" }
+                }
+            }
+            p { class: "rule-hub-outcome", "{hub.outcome}" }
+            div { class: "rule-hub-meta",
+                span { class: "rule-modal-tag", "{hub.row_count} row(s)" }
+                // Sites, not rows. A merged finding touches several places and is still ONE
+                // decision; conflating the two is the shape C5 shipped.
+                span { class: "rule-modal-tag", "{hub.site_count} site(s)" }
+                if let Some(label) = hub.convention_label.clone() {
+                    span { class: "rule-modal-tag rule-hub-convention", "convention \u{b7} {label}" }
+                }
+                // The Evaluated-against fact, relocated from `RuleAlternativesPanel`
+                // (design §9.1) to the surface that is reachable from every rule id.
+                if let Some(opt) = hub.evaluated_option_id.clone() {
+                    span { class: "rule-modal-tag rule-hub-evaluated", "evaluated against \u{b7} {opt}" }
+                }
+            }
+            // COUNTS ONLY, and the sentence says why. Offering a link here would be inventing
+            // a data set: the pipeline reports deviating sites and a total, never the
+            // conforming set.
+            if let Some(c) = hub.conforming {
+                p { class: "rule-hub-conforming",
+                    "{c.conforming} of {c.assessed} assessed sites conform. The conforming sites are not in the scan data \u{2014} only the counts \u{2014} so there is nothing here to open."
+                }
+            }
+            // The invariant, surfaced rather than re-decided. `conflict_surfaces` is
+            // `rules_on_multiple_surfaces`' own verdict for this (repo, rule).
+            if !hub.conflict_surfaces.is_empty() {
+                {
+                    let names: Vec<&'static str> =
+                        hub.conflict_surfaces.iter().map(|s| s.label()).collect();
+                    rsx! {
+                        p { class: "rule-hub-conflict",
+                            "Pipeline bug: this rule reached {hub.conflict_surfaces.len()} kind surfaces in this scan ({names.join(\", \")}). A rule emits deviations OR a convention OR one no-convention row OR a not-assessed row \u{2014} never two, so these counts are not trustworthy."
+                        }
+                    }
+                }
+            }
+            div { class: "rule-hub-actions",
+                button {
+                    class: "btn-edit-sm rule-hub-jump",
+                    onclick: move |_| on_jump.call(jump),
+                    "{jump_label}"
+                }
+            }
+        }
+    }
+}
+
+/// THE RULE HUB MODAL: the strip in an overlay, reachable from every surface that shows a
+/// rule id.
+///
+/// ## Why this is not a strip bolted onto `RuleDetailModal`
+///
+/// Design §8 says "the existing rule detail modal gains a 'this rule in this scan' strip".
+/// The existing modal is [`crate::cockpit::rules::RuleDetailModal`], and it is driven by a
+/// `ProposedRuleView` — the corpus row for a rule the scan PROPOSED. A scan's findings include
+/// rule ids with no proposed-rule row at all (the deterministic content-rule floor, external
+/// tool previews, the model's advisory ids), so hanging the hub off that modal would make the
+/// hub unreachable for exactly the rules whose provenance a curator is most likely to question.
+/// The hub is therefore its own overlay over core's `rule_hub` derivation, which needs nothing
+/// but the scan's own rows; where a `ProposedRuleView` does exist, the full rule detail stays
+/// one further click away, the same relationship the detail pane has with the finding modal.
+#[component]
+pub(super) fn RuleHubModal(
+    hub: RuleHubView,
+    on_jump: Callback<KindSurface>,
+    on_close: Callback<()>,
+) -> Element {
+    rsx! {
+        div { class: "rule-modal-overlay", onclick: move |_| on_close.call(()),
+            div { class: "rule-modal rule-hub-modal", onclick: move |e| e.stop_propagation(),
+                div { class: "rule-modal-head",
+                    span { class: "rule-modal-id", "{hub.rule_id}" }
+                    button {
+                        class: "rule-modal-close",
+                        onclick: move |_| on_close.call(()),
+                        "\u{2715}"
+                    }
+                }
+                RuleHubStrip { hub, on_jump }
+            }
+        }
     }
 }
 
@@ -2317,6 +2501,19 @@ pub(super) fn FindingDetailPane(
     /// on-demand enclosing-code-block fetch, which is far too expensive to re-run on every
     /// cursor-down and so stays one deliberate click away.
     on_open_detail: Callback<()>,
+    /// Open the RULE HUB on the focused row's rule (design §8).
+    ///
+    /// This is how a QUEUE ROW reaches the hub. The rule id in the row's own "Finding type"
+    /// cell cannot be the door: a chorale cell renderer is an `Arc<dyn Fn(..) + Send + Sync>`
+    /// and a Dioxus `Callback` is neither `Send` nor `Sync` — the same constraint that put the
+    /// deviation bulk actions in a bar instead of inside the group header `<tr>`. The pane IS
+    /// the Queue row's detail surface and it opens on the very click that focuses the row, so
+    /// the hub sits one further click from any row, at exactly the place the curator is
+    /// already reading.
+    ///
+    /// Defaulted so the pane's existing render tests keep compiling and asserting unchanged.
+    #[props(default)]
+    on_open_hub: Callback<()>,
 ) -> Element {
     let armed = pane_keys_armed(focus);
     rsx! {
@@ -2351,7 +2548,13 @@ pub(super) fn FindingDetailPane(
 
             if let Some(r) = row.clone() {
                 div { class: "pane-head",
-                    span { class: "pane-rule", "{r.rule_id}" }
+                    // The rule id is the hub's door from a Queue row (see `on_open_hub`).
+                    button {
+                        class: "rule-hub-link pane-rule",
+                        title: "Everything this scan knows about {r.rule_id}: its kind outcome, its counts, the convention behind it, and where it lives.",
+                        onclick: move |_| on_open_hub.call(()),
+                        "{r.rule_id}"
+                    }
                     span { class: "{r.kind_class}", title: "{r.kind_tip}", "{r.kind_label}" }
                     span { class: "pane-pos", "{r.position} of {r.total}" }
                     button {
@@ -2578,6 +2781,16 @@ pub(super) fn FindingsTable(
     // The lifted finding -> disposition map. Move actions write here; the row is then dropped
     // from this table (remove_rows) and reappears under its new table on the next switch.
     #[props(default)] dispositions: Signal<std::collections::HashMap<String, Disposition>>,
+    /// Open the RULE HUB (design §8). Raised from the two surfaces inside this table that
+    /// carry a rule id and CAN carry a click: the docked detail pane (which is how a Queue row
+    /// reaches it) and the deviation bulk bar (which is how a deviation group header does).
+    #[props(default)] on_open_hub: Callback<RuleHubRequest>,
+    /// THE HUB'S QUEUE JUMP, arriving as state rather than as a call: "show me this rule in
+    /// the Queue" is a column filter, exactly as design §8 describes the File join — "a
+    /// filter, not a hyperlink graph". The parent writes a rule id here; the effect below
+    /// applies it to chorale's own `type` column filter, so the jump leaves the curator in a
+    /// normal, visibly-filtered table he can clear with the controls already on screen.
+    #[props(default)] queue_rule_filter: Signal<Option<String>>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     // Filter to THIS table's triage state + apply the default triage order (enforced/new before
@@ -2617,6 +2830,24 @@ pub(super) fn FindingsTable(
     let handle = use_table(move || {
         finding_table_state(rows.clone(), filter_repos.clone(), in_techdebt)
     });
+    // ── THE HUB'S QUEUE JUMP, applied to chorale's own column filter ────────────────────
+    //
+    // `applied` is PEEKED, never read, so this effect subscribes to exactly one signal
+    // (`queue_rule_filter`) and cannot re-trigger itself by recording what it just did. The
+    // alternative — clearing the source signal after applying it — would have the effect
+    // write the thing it reads, which is how a render loop starts.
+    //
+    // Re-jumping to a rule the table is ALREADY filtered to is correctly a no-op: the curator
+    // is looking at exactly what the jump promises.
+    let mut applied_rule_filter = use_signal(|| Option::<String>::None);
+    use_effect(move || {
+        let want = queue_rule_filter();
+        if want != *applied_rule_filter.peek() {
+            applied_rule_filter.set(want.clone());
+            handle.set_filter(ColumnId("type"), want.map(FilterValue::Text));
+        }
+    });
+
     // ── The ORDER BAR: which order is on screen, and one click back to the default ───────
     //
     // Pass 2 step 2 (design §5; Zach 2026-10-12: "Keep sort with [unspecified] first, sure, as
@@ -2755,6 +2986,9 @@ pub(super) fn FindingsTable(
     // A second handle on the focused row for the "Full detail" callback: `focused_finding`
     // is move-captured by `apply_disposition` below.
     let focused_for_modal = focused_finding.clone();
+    // And a third, for the rule-hub door in the pane's header. Each `move` closure owns its
+    // own copy; there is no shared borrow to hand round.
+    let focused_for_hub = focused_finding.clone();
     // THE FOCUSED RULE, as a MEMO. It has to be one: `use_resource` re-runs when a signal
     // read inside its closure changes, and a plain captured `Option<String>` is not one — a
     // resource built over the captured value would fetch the first focused rule's fix once
@@ -3268,6 +3502,20 @@ pub(super) fn FindingsTable(
                     crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Confirmed all {moved} {} row(s).", group.rule_id));
                 }
             }),
+            // The rule id on a bulk row opens the hub. The repo comes off the group's own
+            // first row rather than from a table-level guess: `rule_hub` is scoped per
+            // (repo, rule) and a wrong repo would silently describe a different assessment.
+            on_open_hub: Callback::new({
+                let bulk_groups = std::rc::Rc::clone(&bulk_groups);
+                move |i: usize| {
+                    let Some(group) = bulk_groups.get(i) else { return };
+                    let Some(first) = group.rows.first() else { return };
+                    on_open_hub.call(RuleHubRequest {
+                        repo: first.repo.clone(),
+                        rule_id: group.rule_id.clone(),
+                    });
+                }
+            }),
             on_false_positive_all: Callback::new({
                 let bulk_groups = std::rc::Rc::clone(&bulk_groups);
                 let key_to_row_id = key_to_row_id.clone();
@@ -3459,6 +3707,14 @@ pub(super) fn FindingsTable(
             on_open_detail: Callback::new(move |()| {
                 if let Some(f) = focused_for_modal.clone() {
                     detail_finding.set(Some(f));
+                }
+            }),
+            on_open_hub: Callback::new(move |()| {
+                if let Some(f) = focused_for_hub.clone() {
+                    on_open_hub.call(RuleHubRequest {
+                        repo: f.repo.clone(),
+                        rule_id: f.rule_id.clone(),
+                    });
                 }
             }),
         }
@@ -4723,7 +4979,14 @@ pub(super) fn KindSurfaceConflictBanner(findings: Vec<FindingView>) -> Element {
 /// ship at `info` by construction, so a severity badge would imply a ranking decision that does
 /// not exist.
 #[component]
-pub(super) fn ConventionsPanel(findings: Vec<FindingView>) -> Element {
+pub(super) fn ConventionsPanel(
+    findings: Vec<FindingView>,
+    /// Open the RULE HUB on a listed rule (design §8: "reachable from every surface that
+    /// shows a rule id"). Defaulted so the panel's existing render tests keep compiling and
+    /// asserting unchanged.
+    #[props(default)]
+    on_open_hub: Callback<RuleHubRequest>,
+) -> Element {
     use camerata_api_types::audit::FindingKind;
     if findings.is_empty() {
         return rsx! {
@@ -4746,7 +5009,20 @@ pub(super) fn ConventionsPanel(findings: Vec<FindingView>) -> Element {
                         };
                         rsx! {
                             li { key: "{f.repo}\u{0}{f.rule_id}", class: "kind-panel-row",
-                                span { class: "kind-panel-rule", "{f.rule_id}" }
+                                {
+                                    let req = RuleHubRequest {
+                                        repo: f.repo.clone(),
+                                        rule_id: f.rule_id.clone(),
+                                    };
+                                    rsx! {
+                                        button {
+                                            class: "rule-hub-link kind-panel-rule",
+                                            title: "Everything this scan knows about {f.rule_id}.",
+                                            onclick: move |_| on_open_hub.call(req.clone()),
+                                            "{f.rule_id}"
+                                        }
+                                    }
+                                }
                                 span { class: "kind-panel-label", "{label}" }
                                 span { class: "kind-panel-repo", "{f.repo}" }
                             }
@@ -4765,7 +5041,12 @@ pub(super) fn ConventionsPanel(findings: Vec<FindingView>) -> Element {
 /// Read-only at this stage. Picking a recommended option is a CLIENT-FACING governance act
 /// (Zach's Q3 ruling) and inherits the typed-destination commit gate, which is a later step.
 #[component]
-pub(super) fn NoConventionPanel(findings: Vec<FindingView>) -> Element {
+pub(super) fn NoConventionPanel(
+    findings: Vec<FindingView>,
+    /// Open the RULE HUB on a listed rule. See [`ConventionsPanel`].
+    #[props(default)]
+    on_open_hub: Callback<RuleHubRequest>,
+) -> Element {
     use camerata_api_types::audit::FindingKind;
     if findings.is_empty() {
         return rsx! {
@@ -4796,7 +5077,20 @@ pub(super) fn NoConventionPanel(findings: Vec<FindingView>) -> Element {
                         };
                         rsx! {
                             li { key: "{f.repo}\u{0}{f.rule_id}", class: "kind-panel-row",
-                                span { class: "kind-panel-rule", "{f.rule_id}" }
+                                {
+                                    let req = RuleHubRequest {
+                                        repo: f.repo.clone(),
+                                        rule_id: f.rule_id.clone(),
+                                    };
+                                    rsx! {
+                                        button {
+                                            class: "rule-hub-link kind-panel-rule",
+                                            title: "Everything this scan knows about {f.rule_id}.",
+                                            onclick: move |_| on_open_hub.call(req.clone()),
+                                            "{f.rule_id}"
+                                        }
+                                    }
+                                }
                                 if options.is_empty() {
                                     span { class: "kind-panel-label", "{f.detail}" }
                                 } else {
@@ -4818,7 +5112,12 @@ pub(super) fn NoConventionPanel(findings: Vec<FindingView>) -> Element {
 /// NO buttons, now or later, until a per-rule re-run mechanism actually exists. A disabled
 /// "re-run" would be the 403-button bug the standing hide-dead-end-affordances rule forbids.
 #[component]
-pub(super) fn NotAssessedPanel(findings: Vec<FindingView>) -> Element {
+pub(super) fn NotAssessedPanel(
+    findings: Vec<FindingView>,
+    /// Open the RULE HUB on a listed rule. See [`ConventionsPanel`].
+    #[props(default)]
+    on_open_hub: Callback<RuleHubRequest>,
+) -> Element {
     use camerata_api_types::audit::FindingKind;
     if findings.is_empty() {
         return rsx! {
@@ -4853,7 +5152,20 @@ pub(super) fn NotAssessedPanel(findings: Vec<FindingView>) -> Element {
                                 };
                                 rsx! {
                                     li { key: "{f.repo}\u{0}{f.rule_id}", class: "kind-panel-row",
-                                        span { class: "kind-panel-rule", "{f.rule_id}" }
+                                        {
+                                            let req = RuleHubRequest {
+                                                repo: f.repo.clone(),
+                                                rule_id: f.rule_id.clone(),
+                                            };
+                                            rsx! {
+                                                button {
+                                                    class: "rule-hub-link kind-panel-rule",
+                                                    title: "Everything this scan knows about {f.rule_id}.",
+                                                    onclick: move |_| on_open_hub.call(req.clone()),
+                                                    "{f.rule_id}"
+                                                }
+                                            }
+                                        }
                                         span { class: "kind-panel-label", "{detail}" }
                                         span { class: "kind-panel-repo", "{f.repo}" }
                                     }
@@ -5136,6 +5448,11 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // resume on the Queue. Adding it to `OnboardingDraft` would change a persisted wire shape
     // for no curator benefit.
     let mut kind_view = use_signal(|| KindSurface::Queue);
+    // THE RULE HUB (design §8): which (repo, rule) the hub is open on, and the Queue jump it
+    // can perform. Both session-local lenses like `kind_view`, and deliberately not persisted
+    // for the same reason: an open modal is not a decision.
+    let mut hub_open = use_signal(|| Option::<RuleHubRequest>::None);
+    let mut queue_rule_filter = use_signal(|| Option::<String>::None);
     let mut processing = use_signal(|| false);
 
     // ── Auto-save / restore the onboarding draft (issue #27) ──────────────────
@@ -5240,10 +5557,41 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     }
     .counts(&queue_findings);
 
+    // THE RULE HUB's data for whichever rule is open, derived once per render from the scan's
+    // own rows by core's `rule_hub`. A request for a rule with no rows in that repo resolves
+    // to `None` and the modal simply does not mount — the hub describes what a scan FOUND, and
+    // an empty strip would be a dead affordance.
+    let open_hub: Option<RuleHubView> = hub_open
+        .read()
+        .as_ref()
+        .and_then(|r| rule_hub(&findings, &r.repo, &r.rule_id));
+
     rsx! {
         // Row-detail modal: hosted here, at the results-subtree root, so it is NOT a
         // sibling of the chorale table (see RuleDetailModal for why).
         RuleDetailModal {}
+        // THE RULE HUB (design §8). Hosted at the same root and for the same reason: it is an
+        // overlay, and an overlay that is a sibling of a chorale table left a ghost
+        // click-eater in the desktop webview.
+        if let Some(hub) = open_hub {
+            RuleHubModal {
+                hub,
+                // ONE jump, and it is the derivation's own `hub.jump`. Into the Queue it is a
+                // COLUMN FILTER — design §8's "a filter, not a hyperlink graph" — so the
+                // curator lands in a normal, visibly filtered table with the controls to clear
+                // it already on screen, rather than in a special mode he has to find his way
+                // out of. Into a panel it is just the kind switcher, flipped.
+                on_jump: Callback::new(move |surface: KindSurface| {
+                    if surface == KindSurface::Queue {
+                        queue_rule_filter
+                            .set(hub_open.peek().as_ref().map(|r| r.rule_id.clone()));
+                    }
+                    kind_view.set(surface);
+                    hub_open.set(None);
+                }),
+                on_close: Callback::new(move |()| hub_open.set(None)),
+            }
+        }
         // Finding-detail modal: click any findings row to read the violated rule's full
         // directive + the complete explanation the row cell truncates.
         if let Some(f) = detail_finding() {
@@ -6147,15 +6495,26 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 descriptions: descriptions.clone(),
                                 triage_view: triage_view(),
                                 dispositions,
+                                on_open_hub: Callback::new(move |r: RuleHubRequest| hub_open.set(Some(r))),
+                                queue_rule_filter,
                             }
                         }
                     }
                 } else if kind_view() == KindSurface::Conventions {
-                    ConventionsPanel { findings: findings_on_surface(&findings, KindSurface::Conventions) }
+                    ConventionsPanel {
+                        findings: findings_on_surface(&findings, KindSurface::Conventions),
+                        on_open_hub: Callback::new(move |r: RuleHubRequest| hub_open.set(Some(r))),
+                    }
                 } else if kind_view() == KindSurface::NoConvention {
-                    NoConventionPanel { findings: findings_on_surface(&findings, KindSurface::NoConvention) }
+                    NoConventionPanel {
+                        findings: findings_on_surface(&findings, KindSurface::NoConvention),
+                        on_open_hub: Callback::new(move |r: RuleHubRequest| hub_open.set(Some(r))),
+                    }
                 } else {
-                    NotAssessedPanel { findings: findings_on_surface(&findings, KindSurface::NotAssessed) }
+                    NotAssessedPanel {
+                        findings: findings_on_surface(&findings, KindSurface::NotAssessed),
+                        on_open_hub: Callback::new(move |r: RuleHubRequest| hub_open.set(Some(r))),
+                    }
                 }
 
                 // Process: commit the ignored bucket to the baseline and file the tech-debt
@@ -9225,10 +9584,34 @@ mod render_tests {
         assert!(html.contains("tool_failed"), "structured reason group; html=\n{html}");
         assert!(html.contains("no_files_matched"), "structured reason group; html=\n{html}");
         assert!(html.contains("eslint exited 2"), "producer detail; html=\n{html}");
-        assert!(
-            !html.contains("<button"),
-            "NotAssessed needs no decision, so it must offer no affordance; html=\n{html}"
+        // EDITED for design §8 (exception (a)): this assertion was `!html.contains("<button")`.
+        //
+        // Design §3 says "NotAssessed gets no buttons … A disabled 're-run' would be exactly
+        // the 403-button bug", and design §8 says the rule hub is reachable "from every
+        // surface that shows a rule id (… Not assessed list …)". Both are the design's own
+        // words and they collide only on the literal element name. What §3 forbids is a
+        // DECISION the curator cannot make; the hub link is navigation, and it is the one
+        // affordance §8 requires here.
+        //
+        // So the assertion now says what it always meant, and says it more strictly than the
+        // string it replaces: every control on this panel is a hub door, exactly one per row,
+        // and none of them is an action. Rendering the door as a `<span onclick>` to keep the
+        // old string green would have been dodging the test rather than answering it — and
+        // would have cost the keyboard the control, which a `<button>` gives for free.
+        let buttons = html.matches("<button").count();
+        assert_eq!(
+            buttons,
+            html.matches("rule-hub-link").count(),
+            "every control on the Not assessed panel must be a rule-hub door; html=\n{html}"
         );
+        assert_eq!(buttons, 2, "one door per listed rule, and nothing else; html=\n{html}");
+        for forbidden in ["btn-run", "btn-restart", "btn-edit-sm", "Re-run", "Adopt", "Skip"] {
+            assert!(
+                !html.contains(forbidden),
+                "NotAssessed needs no decision, so it must offer no {forbidden} affordance; \
+                 html=\n{html}"
+            );
+        }
     }
 
     /// req_pass2_7 (END-TO-END through the real table): the live `FindingsTable` carries the
@@ -10934,6 +11317,404 @@ mod pane_render_tests {
             TriageState::FalsePositive,
         ] {
             assert!(html.contains(s.label()), "{} button; html=\n{html}", s.label());
+        }
+    }
+}
+
+#[cfg(test)]
+mod rule_hub_tests {
+    use super::*;
+    use camerata_ui_core::triage::rule_hub;
+
+    fn row(repo: &str, rule_id: &str, path: &str, kind: serde_json::Value) -> FindingView {
+        let mut v = serde_json::json!({
+            "repo": repo, "path": path, "line": 4, "rule_id": rule_id,
+            "severity": "medium", "snippet": "s", "detail": "d", "status": "active"
+        });
+        for (k, val) in kind.as_object().expect("kind payload is an object") {
+            v[k] = val.clone();
+        }
+        serde_json::from_value(v).expect("valid FindingView fixture")
+    }
+
+    fn deviation_rows() -> Vec<FindingView> {
+        vec![
+            row(
+                "me/api",
+                "API-VERSIONING-1",
+                "src/routes.rs",
+                serde_json::json!({
+                    "kind": "deviation", "deviating_sites": 2, "assessed_sites": 47,
+                    "convention_option_id": "uri", "convention_label": "URI-versioned endpoints",
+                    "evaluated_option_id": "uri"
+                }),
+            ),
+            row(
+                "me/api",
+                "API-VERSIONING-1",
+                "src/admin.rs",
+                serde_json::json!({
+                    "kind": "deviation", "deviating_sites": 2, "assessed_sites": 47,
+                    "convention_option_id": "uri", "convention_label": "URI-versioned endpoints",
+                    "evaluated_option_id": "uri"
+                }),
+            ),
+        ]
+    }
+
+    fn strip_html(hub: RuleHubView) -> String {
+        #[component]
+        fn Harness(hub: RuleHubView) -> Element {
+            rsx! {
+                RuleHubStrip { hub, on_jump: Callback::new(|_: KindSurface| {}) }
+            }
+        }
+        let mut vdom = VirtualDom::new_with_props(Harness, HarnessProps { hub });
+        vdom.rebuild_in_place();
+        dioxus_ssr::render(&vdom)
+    }
+
+    /// req_pass2_12: the hub strip is the JOIN §8 asks for — it states the rule's kind
+    /// outcome, its counts, the convention behind it, the option it was evaluated against,
+    /// and offers one way in. Before this, a curator holding a rule id had nothing that
+    /// answered "and what happened to this rule in this scan" short of re-reading four
+    /// surfaces.
+    #[test]
+    fn req_pass2_12_the_hub_states_the_whole_of_one_rule_in_one_strip() {
+        let rows = deviation_rows();
+        let hub = rule_hub(&rows, "me/api", "API-VERSIONING-1").expect("the rule is in the scan");
+        let html = strip_html(hub);
+        assert!(html.contains("This rule in this scan"), "the strip names itself; html=\n{html}");
+        assert!(html.contains("API-VERSIONING-1"), "the rule id; html=\n{html}");
+        assert!(html.contains("Deviation"), "the kind chip; html=\n{html}");
+        assert!(
+            html.contains("2 of 47 sites deviate"),
+            "the structured outcome sentence, verbatim; html=\n{html}"
+        );
+        assert!(html.contains("2 row(s)"), "the row count; html=\n{html}");
+        assert!(html.contains("2 site(s)"), "the site count; html=\n{html}");
+        assert!(
+            html.contains("URI-versioned endpoints"),
+            "the convention label; html=\n{html}"
+        );
+        assert!(
+            html.contains("evaluated against"),
+            "the Evaluated-against fact, relocated here from RuleAlternativesPanel; html=\n{html}"
+        );
+        assert!(
+            html.contains("Show in the Queue, filtered to this rule"),
+            "the one jump, naming where it goes; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_12: THE HONESTY CONSTRAINT (§8). The hub may state how many sites conform,
+    /// because that number is in the data. It must not offer to show them, because they are
+    /// not. The strip therefore says so in the same sentence, and carries exactly ONE
+    /// clickable control — the jump.
+    #[test]
+    fn req_pass2_12_the_hub_counts_conforming_sites_and_offers_nothing_to_click_for_them() {
+        let rows = deviation_rows();
+        let hub = rule_hub(&rows, "me/api", "API-VERSIONING-1").expect("present");
+        let html = strip_html(hub);
+        assert!(
+            html.contains("45 of 47 assessed sites conform"),
+            "the count, which IS in the data; html=\n{html}"
+        );
+        assert!(
+            html.contains("not in the scan data"),
+            "the strip says why there is nothing to open; html=\n{html}"
+        );
+        assert_eq!(
+            html.matches("<button").count(),
+            1,
+            "exactly one control: the jump. A second one here would be a fabricated \
+             navigation into data that does not exist. html=\n{html}"
+        );
+        assert!(
+            !html.contains("<a "),
+            "and no anchors either; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_12: an unknown denominator yields no conforming sentence at all. The
+    /// producer could not count honestly, so the hub says nothing rather than inventing a
+    /// total to subtract from.
+    #[test]
+    fn req_pass2_12_the_hub_is_silent_about_conformance_without_a_denominator() {
+        let rows = vec![row(
+            "me/api",
+            "API-VERSIONING-1",
+            "src/routes.rs",
+            serde_json::json!({
+                "kind": "deviation", "deviating_sites": 3, "assessed_sites": null,
+                "convention_label": "URI-versioned endpoints"
+            }),
+        )];
+        let hub = rule_hub(&rows, "me/api", "API-VERSIONING-1").expect("present");
+        let html = strip_html(hub);
+        assert!(!html.contains("conform"), "no conformance claim; html=\n{html}");
+        assert!(
+            html.contains("3 sites deviate"),
+            "the numerator alone, as the group header renders it; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_12: the hub works for the informational surfaces too, and names the PANEL it
+    /// would take you to rather than the Queue. A convention row has no Queue to jump into.
+    #[test]
+    fn req_pass2_12_the_hub_names_the_panel_for_an_informational_rule() {
+        let rows = vec![row(
+            "me/api",
+            "SQL-PARAM-1",
+            "-",
+            serde_json::json!({
+                "kind": "convention_observed", "convention_option_id": "p",
+                "convention_label": "Parameterized queries"
+            }),
+        )];
+        let hub = rule_hub(&rows, "me/api", "SQL-PARAM-1").expect("present");
+        let html = strip_html(hub);
+        assert!(
+            html.contains("Convention observed"),
+            "the informational chip, not the Unspecified alarm; html=\n{html}"
+        );
+        assert!(
+            html.contains("Show in \u{201c}Conventions\u{201d}"),
+            "the jump names the panel; html=\n{html}"
+        );
+        assert!(
+            !html.contains("Show in the Queue"),
+            "there is no Queue for a compliment; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_12: the hub SURFACES the one-rule-one-surface violation (§8: "the UI should
+    /// assert it rather than defend against it"), naming the surfaces, and stays silent on a
+    /// healthy rule.
+    #[test]
+    fn req_pass2_12_the_hub_surfaces_a_cross_surface_conflict_and_is_quiet_otherwise() {
+        let conflicted = vec![
+            row("me/api", "DUP-1", "src/a.rs", serde_json::json!({"kind": "defect"})),
+            row(
+                "me/api",
+                "DUP-1",
+                "-",
+                serde_json::json!({
+                    "kind": "convention_observed", "convention_option_id": "o",
+                    "convention_label": "L"
+                }),
+            ),
+        ];
+        let html = strip_html(rule_hub(&conflicted, "me/api", "DUP-1").expect("present"));
+        assert!(html.contains("rule-hub-conflict"), "the conflict is rendered; html=\n{html}");
+        assert!(html.contains("Queue"), "names the surfaces; html=\n{html}");
+        assert!(html.contains("Conventions"), "names the surfaces; html=\n{html}");
+
+        let clean = vec![row("me/api", "OK-1", "src/a.rs", serde_json::json!({"kind": "defect"}))];
+        let html = strip_html(rule_hub(&clean, "me/api", "OK-1").expect("present"));
+        assert!(
+            !html.contains("rule-hub-conflict"),
+            "a healthy rule must not ring the alarm; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_12: the kind-less ALARM keeps its identity inside the hub. The hub is the
+    /// surface a curator reaches for when a row confuses him, so it is the LAST place an
+    /// unmapped emission path should be quietly described as a defect.
+    #[test]
+    fn req_pass2_12_the_hub_keeps_an_unmapped_row_an_alarm() {
+        let rows = vec![row("me/api", "LEGACY-1", "src/a.rs", serde_json::json!({}))];
+        let html = strip_html(rule_hub(&rows, "me/api", "LEGACY-1").expect("present"));
+        assert!(html.contains("Unspecified"), "the alarm chip; html=\n{html}");
+        assert!(
+            html.contains("unmapped emission path"),
+            "and the sentence says what it means; html=\n{html}"
+        );
+        assert!(!html.contains("Defect"), "never dressed as a defect; html=\n{html}");
+    }
+
+    // ── REACHABILITY: §8's "from every surface that shows a rule id" ─────────
+    //
+    // The hub is only a hub if a curator can get to it from wherever he is holding the rule
+    // id. These render each such surface and assert the rule id is the door — a
+    // `rule-hub-link` control carrying that exact id — rather than inert text.
+
+    fn panel_html(which: KindSurface, findings: Vec<FindingView>) -> String {
+        #[component]
+        fn Harness(which: KindSurface, findings: Vec<FindingView>) -> Element {
+            let cb = Callback::new(|_: RuleHubRequest| {});
+            match which {
+                KindSurface::Conventions => rsx! { ConventionsPanel { findings, on_open_hub: cb } },
+                KindSurface::NoConvention => {
+                    rsx! { NoConventionPanel { findings, on_open_hub: cb } }
+                }
+                _ => rsx! { NotAssessedPanel { findings, on_open_hub: cb } },
+            }
+        }
+        let mut vdom = VirtualDom::new_with_props(Harness, HarnessProps { which, findings });
+        vdom.rebuild_in_place();
+        dioxus_ssr::render(&vdom)
+    }
+
+    #[test]
+    fn req_pass2_12_every_informational_panel_makes_its_rule_ids_the_door_to_the_hub() {
+        let conventions = panel_html(
+            KindSurface::Conventions,
+            vec![row(
+                "me/api",
+                "SQL-PARAM-1",
+                "-",
+                serde_json::json!({
+                    "kind": "convention_observed", "convention_option_id": "p",
+                    "convention_label": "Parameterized queries"
+                }),
+            )],
+        );
+        let no_convention = panel_html(
+            KindSurface::NoConvention,
+            vec![row(
+                "me/api",
+                "SPLIT-1",
+                "-",
+                serde_json::json!({
+                    "kind": "no_convention",
+                    "observed_options": [{"option_id": "a", "label": "A", "sites": 2}]
+                }),
+            )],
+        );
+        let not_assessed = panel_html(
+            KindSurface::NotAssessed,
+            vec![row(
+                "me/api",
+                "NA-1",
+                "-",
+                serde_json::json!({
+                    "kind": "not_assessed", "reason": "tool_failed",
+                    "reason_detail": "eslint exited 2"
+                }),
+            )],
+        );
+        for (name, html, rule) in [
+            ("Conventions", &conventions, "SQL-PARAM-1"),
+            ("No convention", &no_convention, "SPLIT-1"),
+            ("Not assessed", &not_assessed, "NA-1"),
+        ] {
+            assert!(
+                html.contains("rule-hub-link"),
+                "{name} panel must make its rule id the hub's door; html=\n{html}"
+            );
+            assert!(
+                html.contains(rule),
+                "{name} panel must name the rule on that door; html=\n{html}"
+            );
+        }
+    }
+
+    /// req_pass2_12: the DETAIL PANE's rule id is the hub's door — which is how a QUEUE ROW
+    /// reaches the hub. A chorale cell renderer is `Send + Sync` and a Dioxus `Callback` is
+    /// not, so the row's own "Finding type" cell cannot carry the click; the pane opens on
+    /// the same click that focuses the row, so the hub is one further click from any row.
+    #[test]
+    fn req_pass2_12_the_detail_pane_is_how_a_queue_row_reaches_the_hub() {
+        let f = row("me/api", "SQL-INJECTION-1", "src/a.rs", serde_json::json!({"kind": "defect"}));
+        let pane_row = DetailPaneRow::from_finding(&f, None, None, 0, 1);
+        #[component]
+        fn Harness(row: DetailPaneRow) -> Element {
+            rsx! {
+                FindingDetailPane {
+                    row: Some(row),
+                    focus: PaneFocus::Cursor,
+                    prompt: None,
+                    prompt_reason: String::new(),
+                    undo: None,
+                    on_key: Callback::new(|_: (String, KeyMods)| {}),
+                    on_focus: Callback::new(|_: PaneFocus| {}),
+                    on_prompt_reason: Callback::new(|_: String| {}),
+                    on_prompt_commit: Callback::new(|()| {}),
+                    on_prompt_cancel: Callback::new(|()| {}),
+                    on_undo: Callback::new(|()| {}),
+                    on_dispose: Callback::new(|_: TriageState| {}),
+                    on_open_detail: Callback::new(|()| {}),
+                    on_open_hub: Callback::new(|()| {}),
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new_with_props(Harness, HarnessProps { row: pane_row });
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("rule-hub-link"),
+            "the pane's rule id must be the hub's door; html=\n{html}"
+        );
+        assert!(html.contains("SQL-INJECTION-1"), "naming the rule; html=\n{html}");
+    }
+
+    /// req_pass2_12: the DEVIATION BULK BAR's rule id is the hub's door — which is how a
+    /// deviation GROUP HEADER reaches it. chorale's real group-header `<tr>` takes no host
+    /// content (step 2 established this), and the bar is the header's reachable stand-in.
+    #[test]
+    fn req_pass2_12_the_bulk_bar_is_how_a_deviation_group_header_reaches_the_hub() {
+        #[component]
+        fn Harness(groups: Vec<DeviationBulkRow>) -> Element {
+            rsx! {
+                DeviationBulkBar {
+                    groups,
+                    on_confirm_all: Callback::new(|_: usize| {}),
+                    on_false_positive_all: Callback::new(|_: usize| {}),
+                    on_open_hub: Callback::new(|_: usize| {}),
+                }
+            }
+        }
+        let groups = deviation_groups(&deviation_rows());
+        let rows: Vec<DeviationBulkRow> = groups.iter().map(DeviationBulkRow::from_group).collect();
+        let mut vdom = VirtualDom::new_with_props(Harness, HarnessProps { groups: rows });
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("rule-hub-link"),
+            "the bar's rule id must be the hub's door; html=\n{html}"
+        );
+        assert!(html.contains("API-VERSIONING-1"), "naming the rule; html=\n{html}");
+    }
+
+    /// req_pass2_12: §8 names three navigation paths and says the rest are "a page of
+    /// plumbing for a navigation the curator has never needed". This pins the refusal: the
+    /// hub's ONE control is its jump, and in particular there is no sibling-deviation link,
+    /// no tool-log link and no similar-findings link.
+    #[test]
+    fn req_pass2_12_the_hub_builds_exactly_one_navigation_and_no_link_graph() {
+        for rows in [
+            deviation_rows(),
+            vec![row("me/api", "D-1", "src/a.rs", serde_json::json!({"kind": "defect"}))],
+            vec![row(
+                "me/api",
+                "C-1",
+                "-",
+                serde_json::json!({
+                    "kind": "convention_observed", "convention_option_id": "o",
+                    "convention_label": "L"
+                }),
+            )],
+            vec![row(
+                "me/api",
+                "N-1",
+                "-",
+                serde_json::json!({"kind": "not_assessed", "reason": "no_files_matched", "reason_detail": ""}),
+            )],
+        ] {
+            let rule_id = rows[0].rule_id.clone();
+            let html = strip_html(rule_hub(&rows, "me/api", &rule_id).expect("present"));
+            assert_eq!(
+                html.matches("<button").count(),
+                1,
+                "{rule_id}: one jump and nothing else; html=\n{html}"
+            );
+            for forbidden in ["sibling", "tool log", "similar", "conforming endpoints"] {
+                assert!(
+                    !html.to_lowercase().contains(forbidden),
+                    "{rule_id}: §8 explicitly does not build a {forbidden} path; html=\n{html}"
+                );
+            }
         }
     }
 }
