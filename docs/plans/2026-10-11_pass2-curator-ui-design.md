@@ -2,10 +2,13 @@
 
 > **STATUS, 2026-10-15: PARTLY BUILT.** This was a design document with no code when it was
 > written. Steps 1, 2 and 3 of section 11 are shipped, so is the manual-sort requirement
-> section 5 mentions in passing, and so is the docked detail pane of section 2 — with the
-> `C`/`I`/`T`/`F` keystroke step 3 deferred to it, its Q5 scoping, and the five-second undo.
-> The full built-versus-designed inventory, with file:line, is section 14 at the bottom; read
-> it before treating any paragraph here as a description of the product.
+> section 5 mentions in passing, so is the docked detail pane of section 2 — with the
+> `C`/`I`/`T`/`F` keystroke step 3 deferred to it, its Q5 scoping, and the five-second undo —
+> the rule hub of section 8, the section 9 removals sweep (9.1 partly, and the blocker is
+> structural), and the **gated convention commit** of Q3 + Q4. Still unbuilt: the coverage
+> drawer (section 7) and two of section 4's column changes. The full built-versus-designed
+> inventory, with file:line, is section 14 at the bottom; read it before treating any
+> paragraph here as a description of the product.
 >
 > **Section 13's chorale dependency check is RETRACTED.** Both of its headline claims were
 > wrong, and both were discovered at build time rather than by review. See the retraction
@@ -772,11 +775,72 @@ Finishing 9.1 needs a surface enumerating the rules the scan found nothing for -
 build, not a relocation, and section 9 does not describe one.
 `req_pass2_13_the_hub_cannot_reach_a_clean_multi_option_rule_so_the_panel_stays` pins it.
 
+### BUILT - the GATED CONVENTION COMMIT (Q3 + Q4), 2026-10-15
+
+Commits `ea8e639`, `43caa61`, `ea4aeb4`, `32e7daa`. The last piece of Pass 2: the moment a
+curator decision reaches a client's repository.
+
+| Ruling | Where it landed |
+|---|---|
+| **Q4 opt-out** | `AdoptionModel` (`crates/ui-core/src/adopt.rs`) stores SKIPS, so an untouched convention is adopted and the default is a property of the data structure rather than of whichever renderer reads it. Adopt is pre-checked in `ConventionsPanel`; Skip is the gesture |
+| **A convention with live deviations IS adoptable** (section 13, against this document's own section 12 recommendation) | `adoptable_conventions` draws from BOTH `ConventionObserved` rows and the convention BEHIND a rule's `Deviation` rows. `deviating_sites` is carried as context and **no code reads it to decide anything**. Labelled "observed with N exceptions"; the opened detail names the Queue rows and says in words that dispositioning them does not gate the adoption |
+| **Q3 the `NoConvention` pick is client-facing** | A pick produces the identical `AdoptedRule`, travels the identical `CommitPlan` and passes the identical gate. The panel's subhead states the governance nature. Only the DEFAULT differs: "Leave as reported" is pre-selected, because the audit found a split rather than an answer, and inventing a default would be the UI choosing the client's standard for them |
+| **The gate** | `ConventionCommitDialog`. Names the destination, the adopted count and the skipped count; states how many were adopted by default and never opened; requires the repository name TYPED, not a checkbox; three exits (Cancel / Review the unopened set / Commit). The button's only predicate is core's `commit_gate`, and the click handler RE-CHECKS it, because a `disabled` attribute is a hint to the eye rather than an enforcement |
+
+**The only honest disqualifier is a missing authored option id.** A `DeviationKind` whose
+producer established a majority convention outside the authored option set has nothing
+structured to write; such a row is listed, marked "Cannot write", explained, and given no
+toggle. Writing the rule's DEFAULT option instead would install a position the audit never
+observed.
+
+**"Never opened" is a recorded gesture, not an inference.** `AdoptionModel::mark_opened` has
+exactly ONE caller in `scan.rs` - the panel's Open button, which reveals the row's detail.
+Rendering a row is not opening it; adopting, skipping and toggling do not open it; and the
+dialog's own "Review the unopened set" exit deliberately does not open them either, since that
+would be the gate clearing its own warning. The record is session state and deliberately NOT
+persisted in `OnboardingDraft`: "I opened this one" is a claim about THIS sitting, and a
+restored one would quietly shrink the number the whole gate exists to show.
+
+#### How an adoption reaches AGENTS.md - the EXISTING path, no new server surface
+
+1. `GET /api/projects/:id/ruleset` (`export_project_ruleset`)
+2. `adopt::merge_adoptions` folds the adopted rules in - **pure, so the thing that decides what
+   a client's AGENTS.md will say is unit-tested rather than inferred from a network trace**
+3. `POST /api/projects/:id/ruleset` (`import_project_ruleset` -> `upsert_base_rules`)
+4. `POST /api/projects/:id/emit-local`, cascade all-false - `camerata_server::arm` rendering
+   `AGENTS.md` / `CONVENTIONS.md` / the gate config into the repo's local checkout
+
+An adopted convention is a `RuleSelection` with a `chosen_option`, which `arm` already knows
+how to render, so nothing was invented. **Zero lines changed in `crates/server/**`.**
+
+Step 1 is not an optimization, it is the contract: step 3 REPLACES `selections` wholesale, so
+posting only the adopted rules would delete every other selection the project has.
+`commit_adoptions` therefore STOPS at a failed read rather than pressing on, which is the one
+failure mode on this path that destroys data rather than merely not doing anything.
+`RuleSelectionView` mirrors `RuleSelection` field for field for the same reason - a field the
+mirror forgets is a field the commit silently erases, and `applied_hash` / `applied_directive`
+are the rule-drift baseline.
+
+#### What is deliberately NOT here
+
+- **No branch, no push, no PR.** The emit cascade is all-false: adoption decides what the
+  standard IS, and shipping it is a separate act with its own controls on the Rules screen.
+- **The commit is per DESTINATION REPO**, one group and one bar per repo, because one commit
+  writes one `AGENTS.md` and the typed gate asks for one repository name. A multi-repo scan
+  gets N commits, which is N honest confirmations rather than one ambiguous one.
+- **The Conventions TAB COUNT still counts rows on the Conventions surface**, so it can read
+  lower than the panel's list when deviation-backed conventions are present. Changing it would
+  mean changing `surface_counts`, which is a row-routing function three pinned tests depend on.
+  The panel states the difference in a line instead.
+
+45 tests (23 core, 22 rendered). Both load-bearing numbers were mutation-checked: weakening the
+commit button to `disabled: busy` fails four tests, and making `unopened_count` return the
+adopted total fails six across the two crates.
+
 ### NOT BUILT - the later layers, as expected
 
 Coverage drawer (section 7). Section 4's Sites COLUMN still does not exist (the data it needs
-is mirrored; only the column is missing) and the Authority column has not been narrowed. The
-convention commit dialog (Q4's typed-destination gate) is the next step.
+is mirrored; only the column is missing) and the Authority column has not been narrowed.
 
 ### PARTIAL, and worth knowing before the next step starts
 
