@@ -854,6 +854,88 @@ pub fn severity_sort_values() -> Vec<String> {
         .collect()
 }
 
+/// THE CONFIDENCE COLUMN's cell value — STRUCTURED FIELDS ONLY (design §9.3).
+///
+/// > The "Needs review" 300px column with inline prose … Superseded by the structured
+/// > `confidence` chip … a UI parsing model prose violates the same principle the backend just
+/// > spent a whole pass eliminating ("structured identity, never prose").
+///
+/// What the column it replaces read was `in_test || needs_review || split_needs_review(detail)
+/// .1.is_some()` — two structured flags OR'd with a regex over the model's own English. This
+/// reads the two structured flags and the structured `confidence` field, and nothing else.
+///
+/// ## Why dropping the prose term loses nothing a current scan carries
+///
+/// `camerata_server::ai_audit::apply_verdicts` writes the `[needs review: …]` detail tag and
+/// sets `needs_review` in the same pass: the tag reads `"needs review"` exactly when
+/// `low_conf` is true, and `f.needs_review = low_conf` is set UNCONDITIONALLY two lines above
+/// it. The two are a biconditional by construction (the server's own comment says so), so for
+/// every row the pipeline produces today, `detail` carrying the marker implies `needs_review`.
+/// The regex was reading a shadow of the field beside it.
+///
+/// A LEGACY row — one serialized before the structured fields existed, carrying the prose and
+/// nothing else — now reads `unrated` here rather than `needs-review`. That is deliberate and
+/// it is not a loss of disclosure: the hedge still reaches the curator, in the detail pane,
+/// which is exactly where §9.3 puts it ("the reason text lives in the detail pane"). What it
+/// stops doing is minting a structured-looking chip out of a sentence.
+///
+/// ## The values
+///
+/// * `test` — the finding is in test/fixture scope. Kept from the old column: `in_test` is a
+///   structured flag, it answers a different question from confidence, and it is the one the
+///   curator triages first.
+/// * `needs-review` — calibration hedged this finding.
+/// * `high` — calibration looked and did not hedge.
+/// * `unrated` — calibration never saw it (the deterministic floor, preview findings) or the
+///   row predates the field. NOT a synonym for `high`: "we did not judge this" and "we judged
+///   it confidently" are different statements and the chip must not merge them.
+pub fn confidence_tag(f: &FindingView) -> &'static str {
+    if f.in_test {
+        return "test";
+    }
+    // The structured flag and the structured field are a biconditional upstream; either one
+    // alone is enough here, and taking both means a desync between them resolves toward
+    // DISCLOSING the hedge rather than hiding it.
+    if f.needs_review || f.confidence.as_deref() == Some("needs-review") {
+        return "needs-review";
+    }
+    match f.confidence.as_deref() {
+        Some("high") => "high",
+        _ => "unrated",
+    }
+}
+
+/// The Confidence column's multi-select filter vocabulary, in the order the chip ladder reads.
+///
+/// Built from the same closed set [`confidence_tag`] returns, so the filter cannot drift from
+/// the cell it filters — the identical discipline [`severity_sort_values`] exists for, and for
+/// the identical reason: a stale option list silently filters every row out and reads as "no
+/// findings".
+pub fn confidence_tags() -> Vec<String> {
+    ["test", "needs-review", "high", "unrated"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// The heading an on-demand reason prompt shows (design §3, §9.2).
+///
+/// > Reason capture moves out of the toolbar. The two permanently visible textareas (ignore
+/// > reason, FP reason) become an on-demand inline prompt that appears when the action is
+/// > invoked … Same require-reason invariant, enforced at the same point.
+///
+/// It NAMES THE COUNT, which the two textareas it replaces never did. A textarea sitting
+/// beside a selection says nothing about how many rows the button next to it will move; a
+/// prompt raised BY the gesture knows, and a bulk disposition is exactly where "I thought that
+/// was three rows" is expensive.
+pub fn bulk_reason_heading(state: TriageState, count: usize) -> String {
+    let noun = if count == 1 { "finding" } else { "findings" };
+    format!(
+        "Reason for \u{201c}{}\u{201d} \u{2014} {count} {noun} (required)",
+        state.label()
+    )
+}
+
 /// Ordering rank of the row's KIND within one severity band (design §5 step 3).
 ///
 /// `Defect` before `Deviation`: an accusation of objective fault outranks an accusation of
@@ -3769,6 +3851,124 @@ mod tests {
         let hub = rule_hub(&[f], "o/r", "R-1").expect("present");
         assert_eq!(hub.row_count, 1);
         assert_eq!(hub.site_count, 3);
+    }
+
+    // ── req_pass2_13: the REMOVALS sweep (design §9) ─────────────────────────
+    //
+    // Each of these proves the REPLACEMENT reaches the information the removed affordance
+    // carried. A removal whose replacement falls short is a capability loss dressed as
+    // cleanup, which is the specific risk of a sweep like this.
+
+    fn conf_row(json: serde_json::Value) -> FindingView {
+        let mut v = serde_json::json!({
+            "repo": "o/r", "path": "src/a.rs", "line": 1, "rule_id": "R-1",
+            "severity": "medium", "snippet": "s", "detail": "d"
+        });
+        for (k, val) in json.as_object().expect("object") {
+            v[k] = val.clone();
+        }
+        finding(v)
+    }
+
+    /// req_pass2_13 (§9.3): the structured Confidence chip reads the STRUCTURED fields and
+    /// reports every state the "Needs review" column reported — test scope, hedged, confident
+    /// — plus one the old column could not say at all: "calibration never looked".
+    #[test]
+    fn req_pass2_13_confidence_reads_structured_fields_and_keeps_every_old_state() {
+        assert_eq!(
+            confidence_tag(&conf_row(serde_json::json!({"in_test": true}))),
+            "test"
+        );
+        assert_eq!(
+            confidence_tag(&conf_row(serde_json::json!({"needs_review": true}))),
+            "needs-review"
+        );
+        assert_eq!(
+            confidence_tag(&conf_row(serde_json::json!({"confidence": "needs-review"}))),
+            "needs-review"
+        );
+        assert_eq!(
+            confidence_tag(&conf_row(serde_json::json!({"confidence": "high"}))),
+            "high"
+        );
+        // The deterministic floor: calibration never saw it. Distinct from "high" on purpose.
+        assert_eq!(confidence_tag(&conf_row(serde_json::json!({}))), "unrated");
+    }
+
+    /// req_pass2_13 (§9.3): the chip never parses prose. A row whose `detail` carries the
+    /// legacy `[needs review: …]` marker but whose STRUCTURED verdict is `high` reads `high`.
+    ///
+    /// This is the removal's whole point, so it is asserted in the direction that would hurt:
+    /// if the regex were still in the path, this row would be chipped "needs review" on the
+    /// authority of a sentence the calibration pass itself has since contradicted.
+    #[test]
+    fn req_pass2_13_confidence_never_parses_the_prose_marker() {
+        let contradicted = conf_row(serde_json::json!({
+            "detail": "Debatable on a small app. [needs review: premature for a mini app]",
+            "confidence": "high",
+            "needs_review": false
+        }));
+        assert_eq!(confidence_tag(&contradicted), "high");
+        // A row carrying BOTH, as the current pipeline emits them, reads the same either way
+        // — the regex was reading a shadow of the field beside it.
+        let agreeing = conf_row(serde_json::json!({
+            "detail": "Hedged. [needs review: premature for a mini app]",
+            "confidence": "needs-review",
+            "needs_review": true
+        }));
+        assert_eq!(confidence_tag(&agreeing), "needs-review");
+        // The legacy shape: prose only, no structured verdict. It reads `unrated` rather than
+        // `needs-review`, and the hedge still reaches the curator through the detail pane's
+        // own `split_needs_review` rendering of the body — §9.3's "the reason text lives in
+        // the detail pane".
+        let legacy = conf_row(serde_json::json!({
+            "detail": "Old report. [needs review: no structured verdict here]"
+        }));
+        assert_eq!(confidence_tag(&legacy), "unrated");
+        assert!(
+            crate::rules::split_needs_review(&legacy.detail).1.is_some(),
+            "the pane must still be able to surface a legacy row's hedge"
+        );
+    }
+
+    /// req_pass2_13 (anti-drift): the Confidence filter vocabulary is exactly the set the
+    /// accessor can emit. A stale option list filters every row out and reads as "no
+    /// findings", which is a worse failure than a wrong order.
+    #[test]
+    fn req_pass2_13_confidence_filter_vocabulary_matches_the_cell_it_filters() {
+        let rows = [
+            conf_row(serde_json::json!({"in_test": true})),
+            conf_row(serde_json::json!({"needs_review": true})),
+            conf_row(serde_json::json!({"confidence": "high"})),
+            conf_row(serde_json::json!({})),
+        ];
+        let vocab = confidence_tags();
+        for r in &rows {
+            assert!(
+                vocab.contains(&confidence_tag(r).to_string()),
+                "{} is emitted but not filterable",
+                confidence_tag(r)
+            );
+        }
+        assert_eq!(vocab.len(), 4, "and nothing filterable that is never emitted");
+    }
+
+    /// req_pass2_13 (§9.2): the on-demand reason prompt NAMES the disposition and the count.
+    /// The two always-visible textareas it replaces named neither — a textarea beside a
+    /// selection cannot say how many rows the button next to it will move, and a bulk
+    /// disposition is exactly where that gap is expensive.
+    #[test]
+    fn req_pass2_13_the_reason_prompt_names_the_disposition_and_the_count() {
+        let one = bulk_reason_heading(TriageState::Ignored, 1);
+        assert!(one.contains("Ignored"), "{one}");
+        assert!(one.contains("1 finding"), "{one}");
+        assert!(!one.contains("1 findings"), "singular agreement; {one}");
+        let many = bulk_reason_heading(TriageState::FalsePositive, 7);
+        assert!(many.contains("False positive"), "{many}");
+        assert!(many.contains("7 findings"), "{many}");
+        for h in [&one, &many] {
+            assert!(h.contains("required"), "the invariant is stated up front; {h}");
+        }
     }
 
     /// req_pass2_12: a kind-less row keeps its ALARM identity inside the hub too — it is not
