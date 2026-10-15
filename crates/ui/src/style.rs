@@ -1278,6 +1278,17 @@ html, body {
 }
 .pane-reason-input { width: 100%; }
 .pane-prompt-actions { display: flex; gap: 6px; }
+/* THE QUEUE TOOLBAR'S ON-DEMAND REASON PROMPT (design §3, §9.2) — the replacement for the two
+   always-visible textareas. Deliberately the SAME amber-edged card as the pane's prompt: it is
+   the same act (a required justification, raised by the gesture that needs it), and giving one
+   of them its own look would suggest they are two different mechanisms. */
+.queue-reason-prompt {
+  display: flex; flex-direction: column; gap: 4px;
+  margin: 8px 0; padding: 8px; border-radius: 3px;
+  border: 1px solid var(--line); border-left: 3px solid #d4a017;
+}
+.queue-reason-input { width: 100%; min-width: 220px; resize: vertical; font-family: inherit; }
+.queue-prompt-actions { display: flex; gap: 6px; }
 .pane-actions {
   display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
   margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line);
@@ -1959,7 +1970,8 @@ html, body {
 .addressee-input:focus { outline: none; border-color: var(--accent); }
 /* The findings-table "reason to ignore" box is a recorded justification — same treatment
    as .uow-waive-reason (a small labeled textarea), not a cramped single-line input. */
-textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-family: inherit; }
+/* `.ignore-reason` went out with the two always-visible Queue textareas (design §9.2). The
+   on-demand prompt that replaces them styles itself through `.queue-reason-prompt` below. */
 .clarify-thread { display: flex; flex-direction: column; gap: 9px; margin-top: 14px; }
 .clar-card { border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; background: var(--surface); }
 .clar-card.open { border-left: 3px solid #d9a441; }
@@ -2381,8 +2393,8 @@ textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-f
 .sup-ticket { font-size: 11px; font-weight: 600; color: var(--accent-ink); }
 .sup-who { font-size: 11px; color: var(--ink-faint); }
 .sup-stale-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; color: #c0392b; border: 1px solid #e3b7ac; border-radius: 5px; padding: 2px 6px; }
-.ignore-reason { flex: 1; min-width: 160px; }
-.ignore-ticket { width: 130px; flex: none; }
+/* `.ignore-reason` / `.ignore-ticket`: removed with the §9.2 textareas. `.ignore-ticket` had
+   already outlived its markup. */
 /* Suppressions registry — read-only table with its OWN scroll (so it never stretches the page),
    a sticky header, and a table-row override for .sup-row (which is flex in the legacy list view). */
 .sups-scroll { max-height: 320px; overflow-y: auto; margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; }
