@@ -106,6 +106,22 @@ impl TriageState {
     pub fn is_decided(self) -> bool {
         !matches!(self, Self::Unresolved)
     }
+
+    /// Whether moving a row HERE requires a recorded reason.
+    ///
+    /// `Ignored` and `FalsePositive` do, and for the same underlying cause: each makes a
+    /// claim BEYOND the finding — that the risk is accepted, or that the tool was wrong — and
+    /// the report has to be able to say why. `Confirmed` and `TechDebt` do not: confirming
+    /// agrees with a finding that already states its own case, and tech debt schedules it
+    /// rather than disputing it. See [`TriageModel::confirm`]'s doc for the long form.
+    ///
+    /// Named once, here, because three call sites now enforce it — the per-row buttons, the
+    /// bulk bar, and (since the detail pane) the keyboard. The keyboard is the one where
+    /// dropping it would be cheapest and least visible, which is exactly why the rule is the
+    /// enum's own answer rather than a condition repeated at each gesture.
+    pub fn requires_reason(self) -> bool {
+        matches!(self, Self::Ignored | Self::FalsePositive)
+    }
 }
 
 /// Which tech-debt bucket a finding is in: resolve LATER (file a tracked ticket) or NOW (pull
@@ -987,6 +1003,286 @@ impl Default for TriageModel {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE DOCKED DETAIL PANE: row focus, keystroke scoping, undo (design §2, §13 Q5)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A note on chorale, because the design document is wrong about it and the wrong version is
+// what a future reader will find first. Design §13's dependency check recorded
+// `detail_renderer` / `set_detail_column_enabled` / `detail_column_enabled` as "the docked
+// pane" in chorale 0.2.3. They are not. `detail_renderer` is an EXPANDABLE INLINE ROW DETAIL:
+// `chorale-dioxus` renders it as `<tr class="chorale-detail-panel"><td colspan=N>…</td></tr>`
+// directly beneath its parent row (`detail_panel_tr`, components.rs:1998), with a chevron
+// column to expand it. That is a different thing from a pane docked beside the table, and it
+// does not deliver the gesture this step exists for: an inline panel pushes every row below
+// it down the page, so cursor-down-read-decide would reflow the table under the cursor on
+// every move. So the pane is built in Camerata. This mirrors step 2's finding that the
+// group-header "content hook" in the same dependency check was also not one.
+//
+// What chorale DOES give, and what these types are shaped around, is the ordered list of rows
+// it is actually showing: `chorale_core::visible_grouped_view` is public and returns the
+// post-filter, post-sort, post-COLLAPSE sequence. Expressing focus as a position in that list
+// is what makes "focus survives a re-sort" and "focus survives a collapse" one rule instead of
+// two features.
+
+/// Which way an arrow key moves the row cursor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FocusMove {
+    Up,
+    Down,
+}
+
+/// THE ROW CURSOR: which Queue row the docked detail pane is describing.
+///
+/// Anchored to the row's [`finding_key`] and NOT to its index, with the index kept only as
+/// the fallback for when that key is gone. That one choice answers both coexistence
+/// questions this step had to settle:
+///
+/// * **A re-sort** permutes the visible list without removing anything, so the focused key is
+///   still there and the same finding stays focused at its new position. An index-anchored
+///   cursor would silently re-point at whatever row landed under it, and the pane would start
+///   describing a different finding without the curator touching anything — the worst
+///   possible failure for a surface whose entire job is "read this, then press a key".
+/// * **A collapse, a filter, or the disposition itself** removes the focused row from the
+///   list. Then the index is the honest fallback: focus clamps to the row that took the
+///   vacated position (or to the last row, when the tail went away). For the disposition case
+///   that IS the burn-down gesture — decide the row, and its successor is already focused.
+///
+/// Every method is pure and returns a new cursor; nothing here mutates, so the adapter can
+/// resolve the cursor against the current frame's row list during render without writing to a
+/// signal mid-render.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct RowCursor {
+    /// The focused row's [`finding_key`]. `None` before anything is focused, and after the
+    /// view empties.
+    key: Option<String>,
+    /// The focused row's position the last time this cursor was resolved. The fallback anchor
+    /// when `key` is no longer on screen.
+    index: usize,
+}
+
+impl RowCursor {
+    /// A cursor focused on nothing. The first [`RowCursor::resolve`] against a non-empty list
+    /// lands it on the first row.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A cursor aimed at a specific row — what a row CLICK produces, so the mouse and the
+    /// keyboard drive one cursor rather than two competing ones. If that key turns out not to
+    /// be on screen, [`RowCursor::resolve`] applies the usual clamp.
+    pub fn focused_on(key: impl Into<String>) -> Self {
+        Self {
+            key: Some(key.into()),
+            index: 0,
+        }
+    }
+
+    /// The focused row's key, or `None` when nothing is focused.
+    pub fn key(&self) -> Option<&str> {
+        self.key.as_deref()
+    }
+
+    /// The focused row's position in the list this cursor was last resolved against.
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Re-anchor against the rows currently on screen, in the order they are on screen.
+    ///
+    /// `visible` is the list of [`finding_key`]s for chorale's own
+    /// [`visible_grouped_view`](https://docs.rs/chorale-core) data rows, so EVERY table
+    /// operation — manual re-sort, column filter, group collapse, the disposition removing
+    /// the row — reaches the cursor as a change to this one argument, and is answered by this
+    /// one function.
+    ///
+    /// Total: an empty list yields an unfocused cursor, and a cursor is never left pointing at
+    /// a key that is not in `visible`.
+    pub fn resolve(&self, visible: &[String]) -> Self {
+        if visible.is_empty() {
+            return Self {
+                key: None,
+                index: 0,
+            };
+        }
+        if let Some(k) = self.key.as_deref() {
+            if let Some(pos) = visible.iter().position(|v| v == k) {
+                return Self {
+                    key: Some(k.to_string()),
+                    index: pos,
+                };
+            }
+        }
+        // Either nothing was focused, or the focused row is gone (collapsed, filtered, or
+        // dispositioned out of this table). Take whatever now occupies its index, clamped.
+        let idx = self.index.min(visible.len() - 1);
+        Self {
+            key: Some(visible[idx].clone()),
+            index: idx,
+        }
+    }
+
+    /// Move one row in `dir`, CLAMPED at both ends.
+    ///
+    /// Deliberately no wrap-around. At 400 rows a held cursor-down that silently restarts at
+    /// the top is indistinguishable from one that has stopped, and the curator would re-review
+    /// rows believing he was making progress. Resolves first, so moving from a stale cursor
+    /// starts from a real on-screen position.
+    pub fn moved(&self, visible: &[String], dir: FocusMove) -> Self {
+        let here = self.resolve(visible);
+        if visible.is_empty() {
+            return here;
+        }
+        let idx = match dir {
+            FocusMove::Up => here.index.saturating_sub(1),
+            FocusMove::Down => (here.index + 1).min(visible.len() - 1),
+        };
+        Self {
+            key: Some(visible[idx].clone()),
+            index: idx,
+        }
+    }
+}
+
+/// WHERE KEYBOARD FOCUS IS, as far as the detail pane is concerned. The whole of the owner's
+/// Q5 scoping clause is carried by this enum.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PaneFocus {
+    /// The pane's row cursor holds focus. Keys are COMMANDS.
+    Cursor,
+    /// A text input inside the pane — the on-demand reason prompt — holds focus. Keys are
+    /// TEXT. This is the case the scoping clause was written for: the prompt sits inches from
+    /// the row it describes, `I` and `F` are what OPEN it, and the very next thing the
+    /// curator does is type a sentence into it.
+    ReasonPrompt,
+    /// Focus is outside the pane: the table, a column filter, the toolbar, the rescan bar,
+    /// nothing at all. Keys are not ours.
+    Elsewhere,
+}
+
+/// Modifier keys held with a press.
+///
+/// `shift` is tracked but is NOT a blocker — it is how a capital `C` gets typed. `ctrl`,
+/// `alt` and `meta` are, because Cmd-C is copy and Ctrl-C is interrupt, and copying a snippet
+/// out of the pane is a thing a curator does constantly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct KeyMods {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub meta: bool,
+    pub shift: bool,
+}
+
+impl KeyMods {
+    /// No modifiers held.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Whether a modifier that changes what the press MEANS is held.
+    fn claims_the_press(self) -> bool {
+        self.ctrl || self.alt || self.meta
+    }
+}
+
+/// What a press in the detail pane asks for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PaneCommand {
+    /// Apply this disposition to the focused row NOW. Only ever a state that needs no reason.
+    Dispose(TriageState),
+    /// Open the on-demand reason prompt for this disposition. NOTHING is written yet — see
+    /// the module note on why the reason-carrying keys prompt rather than apply.
+    PromptFor(TriageState),
+    /// Move the row cursor.
+    MoveFocus(FocusMove),
+}
+
+/// The single-key hotkey for a disposition, or `None` for a state that has none.
+///
+/// `C` / `I` / `T` / `F`, exactly the owner's four. `Unresolved` has none deliberately: it is
+/// the state rows START in rather than a decision, and a key that silently un-decides a row is
+/// not something to hand someone reviewing 400 findings at 1am.
+pub fn state_hotkey(state: TriageState) -> Option<&'static str> {
+    match state {
+        TriageState::Unresolved => None,
+        TriageState::Confirmed => Some("c"),
+        TriageState::Ignored => Some("i"),
+        TriageState::TechDebt => Some("t"),
+        TriageState::FalsePositive => Some("f"),
+    }
+}
+
+/// THE SCOPED KEY HANDLER, as a pure function (owner's Q5 ruling, design §13).
+///
+/// > `C` / `I` / `T` / `F` on the focused row, **scoped so the keys only fire while the detail
+/// > pane holds focus**, plus a **five-second undo toast**.
+///
+/// The scoping is the first thing this does and it is unconditional: anything but
+/// [`PaneFocus::Cursor`] returns `None` for every key there is. It is a whitelist rather than
+/// a blacklist of known-bad inputs, because the failure mode being prevented is a keystroke
+/// reaching a row from somewhere nobody thought of.
+///
+/// ## Why `I` and `F` prompt instead of applying
+///
+/// Those two dispositions require a reason, and the report export reads it. There were three
+/// honest options: prompt, apply-then-collect the reason, or give keys only to the two
+/// reasonless states. This is the prompt, which is also what design §3 already specified for
+/// the buttons ("an on-demand inline prompt that appears when the action is invoked
+/// (keystroke or button), pre-focused, Enter to commit, Esc to cancel. Same require-reason
+/// invariant, enforced at the same point").
+///
+/// Apply-then-collect was rejected on a concrete failure rather than on taste: it puts the row
+/// into `Ignored` with an empty reason for as long as it takes the curator to type one, and
+/// the curator's next gesture in this UI is cursor-down. A reasonless `Ignored` row is a
+/// baseline waiver with no audit trail — the exact hole the require-reason invariant and
+/// [`TriageModel::bulk_false_positive`]'s refusal both exist to close. Keys-only-for-the-
+/// reasonless was rejected because it drops two of the four keys the ruling names.
+///
+/// The prompt also composes with the scoping instead of fighting it: opening it moves focus to
+/// [`PaneFocus::ReasonPrompt`], so the keys disarm for exactly as long as the curator is
+/// typing, and re-arm when the prompt closes.
+pub fn pane_command(focus: PaneFocus, key: &str, mods: KeyMods) -> Option<PaneCommand> {
+    // THE SCOPE GATE. Everything below is unreachable from anywhere but the pane's cursor.
+    if focus != PaneFocus::Cursor {
+        return None;
+    }
+    if mods.claims_the_press() {
+        return None;
+    }
+    match key {
+        "ArrowDown" => return Some(PaneCommand::MoveFocus(FocusMove::Down)),
+        "ArrowUp" => return Some(PaneCommand::MoveFocus(FocusMove::Up)),
+        _ => {}
+    }
+    // One character only, matched case-insensitively against the disposition hotkeys. Looping
+    // `TriageState::all()` rather than spelling out four arms keeps the key set and the
+    // prompt/apply split derived from the enum: a sixth disposition with a hotkey gets both
+    // for free, and one without a hotkey stays keyless.
+    if key.chars().count() != 1 {
+        return None;
+    }
+    let pressed = key.to_ascii_lowercase();
+    let state = TriageState::all()
+        .into_iter()
+        .find(|s| state_hotkey(*s) == Some(pressed.as_str()))?;
+    Some(if state.requires_reason() {
+        PaneCommand::PromptFor(state)
+    } else {
+        PaneCommand::Dispose(state)
+    })
+}
+
+/// Whether the disposition keys will fire under this focus — what the pane's armed/off
+/// indicator renders.
+///
+/// Defined as "would `C` produce a command" rather than as a second match on [`PaneFocus`],
+/// so what the curator is TOLD about the keys and what the handler actually does cannot drift
+/// apart. A pane claiming "keys armed" while [`pane_command`] silently refuses would be the
+/// ships-inert shape in miniature.
+pub fn pane_keys_armed(focus: PaneFocus) -> bool {
+    pane_command(focus, "c", KeyMods::none()).is_some()
 }
 
 #[cfg(test)]
@@ -2357,5 +2653,322 @@ mod tests {
             "severity": "low", "snippet": "s", "detail": ""
         }));
         assert!(f.also_locations.is_empty());
+    }
+
+    // ── req_pass2_11: the ROW CURSOR (arrow-key focus; what survives a re-sort) ─────────
+    //
+    // The cursor walks the keys of the rows chorale is actually showing, in the order it is
+    // showing them, so these tests express every coexistence requirement as a change to that
+    // list: a re-sort PERMUTES it, a group collapse REMOVES a contiguous run, a disposition
+    // REMOVES one row, a filter REMOVES several.
+
+    fn keys(ks: &[&str]) -> Vec<String> {
+        ks.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// req_pass2_11: with nothing focused yet, the cursor lands on the FIRST row, so the pane
+    /// is never blank while the table has rows.
+    #[test]
+    fn req_pass2_11_focus_lands_on_the_first_row_when_nothing_is_focused() {
+        let c = RowCursor::new().resolve(&keys(&["a", "b", "c"]));
+        assert_eq!(c.key(), Some("a"));
+        assert_eq!(c.index(), 0);
+    }
+
+    /// req_pass2_11 (THE RE-SORT CASE): focus is anchored to the row's IDENTITY, not to its
+    /// position. A manual column re-sort moves the focused row to a different index and the
+    /// SAME row stays focused — the pane does not silently start describing whatever row
+    /// happens to have landed under the cursor.
+    #[test]
+    fn req_pass2_11_focus_follows_the_row_itself_across_a_re_sort() {
+        let before = keys(&["a", "b", "c", "d"]);
+        let c = RowCursor::new().resolve(&before).moved(&before, FocusMove::Down);
+        assert_eq!(c.key(), Some("b"), "cursor-down from the first row");
+        assert_eq!(c.index(), 1);
+
+        // The curator clicks a column header; chorale hands back the same rows reversed.
+        let after = keys(&["d", "c", "b", "a"]);
+        let c = c.resolve(&after);
+        assert_eq!(c.key(), Some("b"), "the SAME finding is still focused");
+        assert_eq!(c.index(), 2, "at its new position in the re-cut order");
+
+        // And the next cursor-down moves to its new neighbour, not to its old one.
+        assert_eq!(c.moved(&after, FocusMove::Down).key(), Some("a"));
+    }
+
+    /// req_pass2_11 (THE DISPOSITION CASE): when the focused row LEAVES the view — the usual
+    /// way, by being dispositioned out of this triage table — focus falls to whatever row
+    /// took its index. That is the burn-down gesture: decide the top row, and the next row is
+    /// already focused, with no mouse.
+    #[test]
+    fn req_pass2_11_focus_falls_to_the_row_that_took_its_place() {
+        let before = keys(&["a", "b", "c"]);
+        let c = RowCursor::new().resolve(&before).moved(&before, FocusMove::Down);
+        assert_eq!(c.key(), Some("b"));
+        // `b` is confirmed and drops out of the Unresolved table.
+        let after = keys(&["a", "c"]);
+        let c = c.resolve(&after);
+        assert_eq!(c.key(), Some("c"), "the row that took index 1");
+        assert_eq!(c.index(), 1);
+    }
+
+    /// req_pass2_11 (THE COLLAPSE CASE): collapsing the focused row's group removes a whole
+    /// run of rows at once. Focus does not stay on a row nobody can see and does not reset to
+    /// the top of the table — it clamps forward to the first row still on screen at or after
+    /// the vacated index, which for a collapsed trailing group is the group header's
+    /// successor, and for a collapsed tail is the last visible row.
+    #[test]
+    fn req_pass2_11_collapsing_the_focused_group_moves_focus_to_a_row_still_on_screen() {
+        // Two rule groups: RULE-A has three rows, RULE-B has two.
+        let expanded = keys(&["a1", "a2", "a3", "b1", "b2"]);
+        let c = RowCursor::new()
+            .resolve(&expanded)
+            .moved(&expanded, FocusMove::Down)
+            .moved(&expanded, FocusMove::Down);
+        assert_eq!(c.key(), Some("a3"), "focused on the last row of RULE-A");
+
+        // The curator collapses RULE-A. chorale's grouped view drops all three of its rows.
+        let collapsed = keys(&["b1", "b2"]);
+        let c = c.resolve(&collapsed);
+        assert_eq!(
+            c.key(),
+            Some("b2"),
+            "index 2 no longer exists, so focus clamps to the last visible row"
+        );
+        assert_eq!(c.index(), 1);
+        assert!(
+            collapsed.iter().any(|k| Some(k.as_str()) == c.key()),
+            "focus is ALWAYS on a row that is actually on screen"
+        );
+    }
+
+    /// req_pass2_11: collapsing every group empties the view, and focus goes to nothing
+    /// rather than to a stale key the pane would keep rendering.
+    #[test]
+    fn req_pass2_11_focus_clears_when_the_view_empties() {
+        let before = keys(&["a", "b"]);
+        let c = RowCursor::new().resolve(&before);
+        assert_eq!(c.key(), Some("a"));
+        let c = c.resolve(&[]);
+        assert_eq!(c.key(), None, "nothing on screen means nothing focused");
+    }
+
+    /// req_pass2_11: and it comes back. Expanding the groups again re-focuses, so the pane
+    /// recovers rather than staying blank until the curator clicks a row.
+    #[test]
+    fn req_pass2_11_focus_recovers_when_rows_come_back() {
+        let c = RowCursor::new().resolve(&keys(&["a", "b"])).resolve(&[]);
+        assert_eq!(c.key(), None);
+        assert_eq!(c.resolve(&keys(&["a", "b"])).key(), Some("a"));
+    }
+
+    /// req_pass2_11: the arrow keys walk the list and STOP at both ends. Wrapping would mean
+    /// a curator holding cursor-down silently restarts a 400-row queue from the top.
+    #[test]
+    fn req_pass2_11_arrow_movement_stops_at_both_ends() {
+        let ks = keys(&["a", "b", "c"]);
+        let top = RowCursor::new().resolve(&ks);
+        assert_eq!(top.moved(&ks, FocusMove::Up).key(), Some("a"), "no wrap at the top");
+        let bottom = top
+            .moved(&ks, FocusMove::Down)
+            .moved(&ks, FocusMove::Down)
+            .moved(&ks, FocusMove::Down);
+        assert_eq!(bottom.key(), Some("c"), "no wrap at the bottom");
+    }
+
+    /// req_pass2_11: clicking a row focuses it, so the mouse and the keyboard drive one
+    /// cursor rather than two competing ones.
+    #[test]
+    fn req_pass2_11_clicking_a_row_moves_the_same_cursor() {
+        let ks = keys(&["a", "b", "c"]);
+        let c = RowCursor::focused_on("c").resolve(&ks);
+        assert_eq!(c.key(), Some("c"));
+        assert_eq!(c.index(), 2);
+        assert_eq!(c.moved(&ks, FocusMove::Up).key(), Some("b"));
+    }
+
+    /// req_pass2_11: focusing a key that is not on screen (a stale click, a row filtered away
+    /// between the click and the resolve) degrades to the clamp rule rather than leaving the
+    /// pane pointed at nothing.
+    #[test]
+    fn req_pass2_11_focusing_an_off_screen_row_degrades_to_the_clamp() {
+        let ks = keys(&["a", "b"]);
+        let c = RowCursor::focused_on("zzz").resolve(&ks);
+        assert_eq!(c.key(), Some("a"));
+    }
+
+    // ── req_pass2_11: KEYSTROKE SCOPING (owner's Q5 ruling, design §13) ────────────────
+    //
+    // > `C` / `I` / `T` / `F` on the focused row, **scoped so the keys only fire while the
+    // > detail pane holds focus**, plus a **five-second undo toast**.
+    //
+    // The scoping is the requirement, not the keystroke. Every one of these asks whether a
+    // press PRODUCES A COMMAND, because that is the only question the live handler asks.
+
+    /// req_pass2_11: with the pane's row cursor focused, each of the four keys produces its
+    /// disposition command. Case-insensitive: a capital C from a held shift is still C.
+    #[test]
+    fn req_pass2_11_the_four_keys_fire_while_the_pane_cursor_holds_focus() {
+        let m = KeyMods::none();
+        for (key, want) in [
+            ("c", PaneCommand::Dispose(TriageState::Confirmed)),
+            ("C", PaneCommand::Dispose(TriageState::Confirmed)),
+            ("t", PaneCommand::Dispose(TriageState::TechDebt)),
+            ("T", PaneCommand::Dispose(TriageState::TechDebt)),
+            ("i", PaneCommand::PromptFor(TriageState::Ignored)),
+            ("f", PaneCommand::PromptFor(TriageState::FalsePositive)),
+        ] {
+            assert_eq!(
+                pane_command(PaneFocus::Cursor, key, m),
+                Some(want),
+                "{key} must fire while the pane cursor holds focus"
+            );
+        }
+        assert_eq!(
+            pane_command(PaneFocus::Cursor, "ArrowDown", m),
+            Some(PaneCommand::MoveFocus(FocusMove::Down))
+        );
+        assert_eq!(
+            pane_command(PaneFocus::Cursor, "ArrowUp", m),
+            Some(PaneCommand::MoveFocus(FocusMove::Up))
+        );
+    }
+
+    /// req_pass2_11 — **THE SCOPING TEST.** A `c` typed into the reason prompt is the letter
+    /// c. It is not a Confirm, and it is not any other command either.
+    ///
+    /// This is the clause's whole reason for existing: the prompt sits inches from the row it
+    /// describes, `I` and `F` are the keys that OPEN it, and the very next thing the curator
+    /// does is type a sentence into it. An unscoped handler would dispose a row on the first
+    /// `c` of "cannot reproduce" — a reasonless Confirm over the Ignore the curator was
+    /// mid-way through writing.
+    #[test]
+    fn req_pass2_11_a_key_typed_into_the_reason_prompt_is_text_not_a_disposition() {
+        let m = KeyMods::none();
+        for key in ["c", "C", "i", "I", "t", "T", "f", "F", "ArrowDown", "ArrowUp"] {
+            assert_eq!(
+                pane_command(PaneFocus::ReasonPrompt, key, m),
+                None,
+                "{key} must be TEXT while the reason prompt holds focus, never a command"
+            );
+        }
+        // Every letter of a real reason, start to finish, writes nothing.
+        for ch in "cannot reproduce; the fixture is test-only".chars() {
+            assert_eq!(
+                pane_command(PaneFocus::ReasonPrompt, &ch.to_string(), m),
+                None,
+                "typing {ch:?} into a reason must not dispose anything"
+            );
+        }
+    }
+
+    /// req_pass2_11: focus anywhere else on the page — the table's own filter boxes, the
+    /// ignore textarea in the toolbar, the rescan bar — fires nothing either. "Only while the
+    /// detail pane holds focus" is a whitelist, not a blacklist of known-bad inputs.
+    #[test]
+    fn req_pass2_11_keys_do_nothing_while_focus_is_outside_the_pane() {
+        let m = KeyMods::none();
+        for key in ["c", "i", "t", "f", "ArrowDown", "ArrowUp"] {
+            assert_eq!(pane_command(PaneFocus::Elsewhere, key, m), None, "{key} outside the pane");
+        }
+    }
+
+    /// req_pass2_11: a MODIFIED press is never a disposition. Cmd-C is copy, Ctrl-C is
+    /// interrupt, and both are things a curator does over a snippet he is reading in the
+    /// pane. Shift is not a modifier for this purpose — it is how a capital letter is typed.
+    #[test]
+    fn req_pass2_11_modified_presses_are_never_dispositions() {
+        for m in [
+            KeyMods { ctrl: true, ..KeyMods::none() },
+            KeyMods { alt: true, ..KeyMods::none() },
+            KeyMods { meta: true, ..KeyMods::none() },
+        ] {
+            for key in ["c", "i", "t", "f"] {
+                assert_eq!(
+                    pane_command(PaneFocus::Cursor, key, m),
+                    None,
+                    "a modified {key} is a shortcut, not a disposition"
+                );
+            }
+        }
+        assert_eq!(
+            pane_command(PaneFocus::Cursor, "c", KeyMods { shift: true, ..KeyMods::none() }),
+            Some(PaneCommand::Dispose(TriageState::Confirmed)),
+            "shift is how a capital C is typed, not a modifier that cancels it"
+        );
+    }
+
+    /// req_pass2_11: the keys the pane does not claim stay unclaimed, so Tab, Escape, Enter
+    /// and ordinary typing keep their browser meaning.
+    #[test]
+    fn req_pass2_11_unclaimed_keys_produce_no_command() {
+        let m = KeyMods::none();
+        for key in ["a", "x", "Tab", "Escape", "Enter", " ", "ArrowLeft", "ArrowRight", "1"] {
+            assert_eq!(pane_command(PaneFocus::Cursor, key, m), None, "{key} is not ours");
+        }
+    }
+
+    /// req_pass2_11: the pane's own armed/off indicator is DEFINED as "would a key fire",
+    /// not as a second reading of the focus enum — so the thing the curator sees and the
+    /// thing the handler does cannot drift apart.
+    #[test]
+    fn req_pass2_11_the_armed_indicator_is_the_handlers_own_gate() {
+        assert!(pane_keys_armed(PaneFocus::Cursor));
+        assert!(!pane_keys_armed(PaneFocus::ReasonPrompt));
+        assert!(!pane_keys_armed(PaneFocus::Elsewhere));
+        for focus in [PaneFocus::Cursor, PaneFocus::ReasonPrompt, PaneFocus::Elsewhere] {
+            assert_eq!(
+                pane_keys_armed(focus),
+                pane_command(focus, "c", KeyMods::none()).is_some(),
+                "the indicator must be the gate itself"
+            );
+        }
+    }
+
+    /// req_pass2_11: `I` and `F` PROMPT; they never dispose. The two reason-carrying
+    /// dispositions keep their require-reason invariant under the keyboard exactly as they do
+    /// under the buttons — the export reads those reasons, and a keystroke is not a licence
+    /// to drop them.
+    #[test]
+    fn req_pass2_11_reason_carrying_keys_prompt_rather_than_dispose() {
+        let m = KeyMods::none();
+        assert_eq!(
+            pane_command(PaneFocus::Cursor, "i", m),
+            Some(PaneCommand::PromptFor(TriageState::Ignored))
+        );
+        assert_eq!(
+            pane_command(PaneFocus::Cursor, "f", m),
+            Some(PaneCommand::PromptFor(TriageState::FalsePositive))
+        );
+        // And the split is driven by the state's own answer, not by a second list of keys.
+        for state in TriageState::all() {
+            let prompts = matches!(
+                pane_command(PaneFocus::Cursor, state_hotkey(state).unwrap_or("x"), m),
+                Some(PaneCommand::PromptFor(_))
+            );
+            if state_hotkey(state).is_some() {
+                assert_eq!(
+                    prompts,
+                    state.requires_reason(),
+                    "{} must prompt iff it requires a reason",
+                    state.label()
+                );
+            }
+        }
+    }
+
+    /// req_pass2_11: `Unresolved` has no hotkey. It is the state rows START in, not a
+    /// decision, and a key that un-decides a row is not something to hand a curator at 1am.
+    #[test]
+    fn req_pass2_11_unresolved_has_no_hotkey() {
+        assert_eq!(state_hotkey(TriageState::Unresolved), None);
+        for s in TriageState::all() {
+            assert_eq!(
+                state_hotkey(s).is_some(),
+                s.is_decided(),
+                "{} — exactly the decisions get keys",
+                s.label()
+            );
+        }
     }
 }
