@@ -261,6 +261,30 @@ pub fn finding_key(f: &Finding) -> String {
 pub(crate) enum Disposition {
     /// No triage decision yet this session (the default for an absent/unrecognized entry).
     Unresolved,
+    /// THE AFFIRMATIVE DISPOSITION (Pass 2 step 3): the auditor read this finding, judged it
+    /// REAL, and it ships in the report as a live finding.
+    ///
+    /// Before this existed, every exit from `Unresolved` was a way of NOT shipping a row
+    /// (`Ignored` accepts the risk, `TechDebt*` defers the fix, `FalsePositive` excludes it
+    /// outright), so the only way to keep a finding live was to leave it undecided — and the
+    /// export could not tell a finding the auditor had read and confirmed from one he had
+    /// never opened. The product's first promise is that one person reads every finding and
+    /// signs; this is the variant that puts data behind it.
+    ///
+    /// Semantically it is "real", NOT "scheduled" and NOT "accepted":
+    ///
+    /// * [`matrix_bucket`] gives it the SAME severity-derived quadrant an `Unresolved` row
+    ///   gets. Confirming states that the finding is genuine, which is exactly what the
+    ///   quadrant already assumed; it says nothing about when or whether to fix it.
+    /// * it counts as STILL OPEN in the executive summary and the category scorecard, because
+    ///   a confirmed-and-unfixed finding is outstanding work for the client.
+    /// * it DOES flip [`ReviewState`] to `Reviewed` — unlike `BaselineAccepted`/`WaivedInline`
+    ///   it is this session's human judgment, which is the whole point of it.
+    ///
+    /// Client-local, like `FalsePositive`: it is read out of the draft's disposition map by
+    /// the export and commits nothing at Process (owner's Q2 ruling, 2026-10-12 — a durable
+    /// per-finding record across engagements is a backend surface Pass 2 must not invent).
+    Confirmed,
     /// Real, accepted risk — the client's `Ignored` disposition, this session.
     Ignored,
     /// Tech debt, pulled into the do-now bucket.
@@ -317,6 +341,7 @@ pub(crate) enum Disposition {
 pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Disposition {
     match wire {
         Some(d) => match d.state.as_str() {
+            "Confirmed" => Disposition::Confirmed,
             "Ignored" => Disposition::Ignored,
             "TechDebt" => {
                 if d.bucket == "Now" {
@@ -424,6 +449,16 @@ pub(crate) fn disposition_label(
             "Convention to consider (informational)".to_string()
         }
         Disposition::Unresolved => format!("Open (recommended: {})", bucket_title(bucket)),
+        // The affirmative call, stated as the auditor's own and nobody else's. It names the
+        // same recommended bucket an open row names — confirming establishes that the finding
+        // is real, not when it gets fixed — but it says WHO decided, which is the difference
+        // the reader cannot otherwise see.
+        Disposition::Confirmed => {
+            format!(
+                "Confirmed by the reviewer (recommended: {})",
+                bucket_title(bucket)
+            )
+        }
         Disposition::Ignored => {
             if confirmed_by_client {
                 if reason.trim().is_empty() {
@@ -2534,7 +2569,12 @@ pub(crate) fn matrix_bucket(
         }
         Disposition::TechDebtNow => "do_now",
         Disposition::TechDebtLater => "plan",
-        Disposition::Unresolved => {
+        // `Confirmed` shares `Unresolved`'s arm ON PURPOSE. The three dispositions above all
+        // override the computed quadrant because each records a decision about WHEN or
+        // WHETHER to fix; confirming records only that the finding is REAL, which is what the
+        // quadrant already assumed. Giving it its own cell would be the UI inventing a
+        // scheduling decision the auditor never made.
+        Disposition::Confirmed | Disposition::Unresolved => {
             if severity == "critical" {
                 return "do_now";
             }
@@ -3756,7 +3796,10 @@ pub fn build_report_json(
     for f in &report.findings {
         let wire = dispositions.get(&finding_key(f));
         if let Some(w) = wire {
-            if matches!(w.state.as_str(), "Ignored" | "TechDebt" | "FalsePositive") {
+            if matches!(
+                w.state.as_str(),
+                "Confirmed" | "Ignored" | "TechDebt" | "FalsePositive"
+            ) {
                 auditor_touched_any_finding = true;
             }
         }
@@ -4273,9 +4316,15 @@ pub fn build_report_json(
                 _ => low += 1,
             }
             rule_ids_with_findings.insert(f.rule_id.clone());
+            // `Confirmed` is still open: the auditor has established that the finding is real,
+            // which is the opposite of it having been dealt with. Omitting it here would let a
+            // fully-reviewed scan of real criticals report its category as "Clean".
             let still_open = matches!(
                 disposition,
-                Disposition::Unresolved | Disposition::TechDebtNow | Disposition::TechDebtLater
+                Disposition::Unresolved
+                    | Disposition::Confirmed
+                    | Disposition::TechDebtNow
+                    | Disposition::TechDebtLater
             );
             if still_open {
                 match severity {
@@ -4471,9 +4520,16 @@ pub fn build_report_json(
     // Still-open action items (every informational/held row is Unresolved by construction — see
     // `is_informational`/`is_held_for_review` — so subtracting them keeps `open` an ACTION
     // count, not an appendix one).
+    // `Confirmed` counts here for the same reason it counts in `still_open` above: the auditor
+    // established the finding is real and nobody has fixed it. Subtracting
+    // `held_for_review_total` stays valid because every informational/held row is `Unresolved`
+    // by construction (both gates return early on any other disposition), so confirming a row
+    // removes it from that bucket before it is ever counted there.
     let open = code_findings
         .iter()
-        .filter(|(_, d, _, _)| *d == Disposition::Unresolved)
+        .filter(|(_, d, _, _)| {
+            matches!(d, Disposition::Unresolved | Disposition::Confirmed)
+        })
         .count()
         - held_for_review_total;
     // Calibration-review fix: rank by (severity desc, precondition_count asc, confidence) —
@@ -11859,6 +11915,100 @@ mod tests {
         let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.review_state, ReviewState::Reviewed);
         assert!(!json.review_state.is_draft());
+    }
+
+    /// req_pass2_10 (THE DEFECT, stated against the export): a finding the auditor READ AND
+    /// CONFIRMED must be distinguishable, in the exported artifacts, from one he never opened.
+    ///
+    /// RED BEFORE THE FIX, on `1a61a7c`, as two separate failures:
+    ///
+    /// 1. `review_state` came back `Raw`, so the PDF stamped "DRAFT: not yet reviewed" on
+    ///    every page and the narrative spoke in the engine's voice — on a scan the auditor had
+    ///    reviewed end to end. The product's first public promise is "one person reads every
+    ///    finding and signs"; a confirmation that does not reach `review_state` leaves that
+    ///    promise with no data behind it.
+    /// 2. `classify`'s catch-all mapped the unrecognized wire value `"Confirmed"` to
+    ///    `Disposition::Unresolved`, so the confirmed row's own site label read "Open
+    ///    (recommended: ...)" — byte-identical to the row nobody had looked at.
+    ///
+    /// Together those are the "ships inert" shape: a disposition that exists only in the UI.
+    #[test]
+    fn req_pass2_10_a_confirmed_finding_is_distinguishable_from_an_unopened_one_in_the_export() {
+        let confirmed = finding("SEC-1", "a.rs", 1, "critical");
+        let never_opened = finding("SEC-2", "b.rs", 2, "critical");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(finding_key(&confirmed), wire("Confirmed", "", ""));
+        let report = report_with(vec![confirmed.clone(), never_opened.clone()], vec![]);
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
+
+        // (1) The sign-off promise, backed by data.
+        assert_eq!(
+            json.review_state,
+            ReviewState::Reviewed,
+            "confirming a finding IS this session's auditor dispositioning it"
+        );
+        assert!(!json.review_state.is_draft());
+
+        // (2) The two rows do not read the same.
+        let label_for = |rule_id: &str| -> String {
+            json.curated_findings
+                .iter()
+                .chain(json.held_for_review_findings.iter())
+                .flat_map(|g| g.sites.iter())
+                .find(|s| s.path == if rule_id == "SEC-1" { "a.rs" } else { "b.rs" })
+                .unwrap_or_else(|| panic!("{rule_id} must appear in the export"))
+                .disposition
+                .clone()
+        };
+        let confirmed_label = label_for("SEC-1");
+        let unopened_label = label_for("SEC-2");
+        assert_ne!(
+            confirmed_label, unopened_label,
+            "a reviewed-and-confirmed finding must not read identically to one nobody opened"
+        );
+        assert!(
+            confirmed_label.to_lowercase().contains("confirmed"),
+            "the confirmed row says so in words; got {confirmed_label:?}"
+        );
+        assert!(
+            unopened_label.starts_with("Open ("),
+            "and the unopened row still reads as open; got {unopened_label:?}"
+        );
+    }
+
+    /// req_pass2_10: a confirmed finding is DECIDED, but it is not FIXED and it is not
+    /// accepted — so it keeps its severity-derived action bucket exactly as an open row would,
+    /// and it still counts as outstanding work for the client.
+    ///
+    /// This is the half of the semantics that is easy to get wrong in the other direction:
+    /// `Ignored`/`TechDebt*` all move a row out of its computed quadrant because they record a
+    /// decision about WHEN or WHETHER to fix it. `Confirmed` records only that the finding is
+    /// REAL, which is precisely what the quadrant already assumed.
+    #[test]
+    fn req_pass2_10_confirmed_keeps_the_severity_derived_bucket_and_still_counts_as_open() {
+        assert_eq!(
+            matrix_bucket(Disposition::Confirmed, "critical", None),
+            matrix_bucket(Disposition::Unresolved, "critical", None),
+            "confirming does not reschedule the fix"
+        );
+        assert_eq!(
+            matrix_bucket(Disposition::Confirmed, "high", Some("low")),
+            "do_now"
+        );
+        assert_eq!(matrix_bucket(Disposition::Confirmed, "medium", None), "plan");
+
+        let confirmed = finding("SEC-1", "a.rs", 1, "critical");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(finding_key(&confirmed), wire("Confirmed", "", ""));
+        let report = report_with(vec![confirmed.clone()], vec![]);
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
+        assert_eq!(json.executive_summary.do_now, 1);
+        assert_eq!(
+            json.executive_summary.open, 1,
+            "confirmed-and-unfixed is still open work for the client"
+        );
+        assert_eq!(json.executive_summary.excluded_false_positive, 0);
+        assert_eq!(json.executive_summary.held_for_review, 0);
     }
 
     /// The core P5 raw-export contract: the JSON carries the draft flag, the narrative

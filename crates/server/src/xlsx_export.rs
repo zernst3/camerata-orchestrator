@@ -506,10 +506,17 @@ fn cap_snippet_for_workbook(snippet: &str) -> String {
     out
 }
 
+/// `Confirmed` is open here for exactly the reason it is open in the PDF (see
+/// `report_export::Disposition::Confirmed`): the auditor established the finding is real and
+/// nobody has fixed it. The workbook's disposition summary is required to reconcile with the
+/// PDF's own numbers, so the two "still open" predicates must agree variant for variant.
 fn is_still_open(d: Disposition) -> bool {
     matches!(
         d,
-        Disposition::Unresolved | Disposition::TechDebtNow | Disposition::TechDebtLater
+        Disposition::Unresolved
+            | Disposition::Confirmed
+            | Disposition::TechDebtNow
+            | Disposition::TechDebtLater
     )
 }
 
@@ -1936,7 +1943,13 @@ fn write_index_sheet(
             "held" => held += 1,
             _ => {}
         }
-        if row.disposition_kind == Some(Disposition::Unresolved) {
+        // Mirrors `report_export`'s own `open` count, which also sums Unresolved + Confirmed
+        // before subtracting the held/informational rows — this line is the workbook half of
+        // the reconciliation the comment above this block demands.
+        if matches!(
+            row.disposition_kind,
+            Some(Disposition::Unresolved) | Some(Disposition::Confirmed)
+        ) {
             unresolved += 1;
         }
     }
@@ -1969,6 +1982,8 @@ fn write_index_sheet(
     r += 1;
     for line in [
         "Open (recommended: ...) — no triage decision yet this session",
+        "Confirmed by the reviewer (recommended: ...) — the auditor read this finding and \
+         judged it real; still open work, the recommendation is unchanged",
         "Accepted risk / Needs client confirmation — an Ignored disposition (see \
          confirmed_by_client)",
         "Tech debt, resolve now / planned (resolve later) — a TechDebt disposition",
