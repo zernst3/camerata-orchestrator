@@ -126,7 +126,7 @@ impl TriageState {
 
 /// Which tech-debt bucket a finding is in: resolve LATER (file a tracked ticket) or NOW (pull
 /// into the dev engine as the first story). Only meaningful when state == TechDebt.
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum TechDebtBucket {
     Later,
     Now,
@@ -134,7 +134,7 @@ pub enum TechDebtBucket {
 
 /// One finding's triage disposition: its table, the (required) ignore reason, and its
 /// tech-debt bucket. Absence from the dispositions map == Unresolved with defaults.
-#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Disposition {
     pub state: TriageState,
     pub reason: String,
@@ -1283,6 +1283,178 @@ pub fn pane_command(focus: PaneFocus, key: &str, mods: KeyMods) -> Option<PaneCo
 /// ships-inert shape in miniature.
 pub fn pane_keys_armed(focus: PaneFocus) -> bool {
     pane_command(focus, "c", KeyMods::none()).is_some()
+}
+
+/// How long a keyboard disposition stays undoable — **five seconds**, per the owner's Q5
+/// ruling ("plus a five-second undo toast … the toast removes the 1am risk").
+///
+/// The window is what makes a one-keystroke disposition safe to offer at all: the cost of a
+/// mis-press is bounded by five seconds of attention rather than by noticing it later in an
+/// exported report.
+pub const UNDO_WINDOW_MS: u64 = 5_000;
+
+/// An applied disposition that can still be taken back, and everything needed to take it
+/// back exactly.
+///
+/// Holds the PRIOR [`Disposition`] of every row it touched — `None` for a row that had no
+/// entry at all, so undo restores ABSENCE rather than writing an explicit `Unresolved`
+/// record. That distinction is not pedantry: the map is persisted in the auto-saved draft and
+/// read by the report export, so an undone action that leaves a row behind has not fully
+/// undone itself.
+///
+/// Timestamps are plain `u64` milliseconds supplied by the caller rather than read from a
+/// clock here, which is what keeps the window testable without sleeping and keeps this module
+/// free of a time dependency.
+#[derive(Clone, PartialEq, Debug)]
+pub struct UndoEntry {
+    /// What the toast says it will reverse.
+    message: String,
+    /// `(finding_key, prior disposition)` for every touched row. `None` = absent from the map.
+    prior: Vec<(String, Option<Disposition>)>,
+    /// When the action was applied, in the caller's millisecond clock.
+    armed_at_ms: u64,
+    /// Whether this entry has already been used. An undo is single use.
+    spent: bool,
+}
+
+impl UndoEntry {
+    /// What the toast says it will reverse — the disposition and the count, never an unnamed
+    /// "Undo".
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Whether the undo still works at `now_ms`. The window closes at exactly
+    /// `armed_at + `[`UNDO_WINDOW_MS`], and a spent entry is never live.
+    pub fn is_live(&self, now_ms: u64) -> bool {
+        !self.spent && now_ms.saturating_sub(self.armed_at_ms) < UNDO_WINDOW_MS
+    }
+
+    /// Milliseconds left in the window, for the toast's countdown. `0` once it has closed, so
+    /// the toast can dismiss itself the moment the button stops working rather than a frame
+    /// later — a visible "Undo" that silently refuses is the thing the window is for.
+    pub fn remaining_ms(&self, now_ms: u64) -> u64 {
+        if self.spent {
+            return 0;
+        }
+        UNDO_WINDOW_MS.saturating_sub(now_ms.saturating_sub(self.armed_at_ms))
+    }
+
+    /// How many rows this entry would put back.
+    pub fn row_count(&self) -> usize {
+        self.prior.len()
+    }
+}
+
+/// What [`TriageModel::undo`] did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UndoOutcome {
+    /// Reverted this many rows.
+    Reverted(usize),
+    /// The five seconds are up; nothing was written.
+    WindowClosed,
+    /// This entry was already used; nothing was written. Reverting twice could reach back
+    /// over a newer decision.
+    AlreadyUndone,
+}
+
+/// The toast sentence for an applied disposition.
+///
+/// Reads [`TriageState::label`] for the three it cannot phrase as a verb, so a renamed
+/// disposition renames itself here too.
+fn undo_message(state: TriageState, n: usize) -> String {
+    let noun = if n == 1 { "finding" } else { "findings" };
+    match state {
+        TriageState::Confirmed => format!("Confirmed {n} {noun}."),
+        TriageState::Unresolved => format!("Moved {n} {noun} back to Unresolved."),
+        other => format!("Marked {n} {noun} as {}.", other.label()),
+    }
+}
+
+impl TriageModel {
+    /// Apply `state` to `rows`, capturing what it overwrote so the next five seconds can take
+    /// it back (owner's Q5 ruling).
+    ///
+    /// Returns `None` — having written NOTHING — for the two refusals:
+    ///
+    /// * a reason-carrying state ([`TriageState::requires_reason`]) with a blank reason. The
+    ///   same invariant the buttons and [`TriageModel::bulk_false_positive`] enforce, at the
+    ///   same point. The keyboard is where dropping it would be cheapest and least visible,
+    ///   which is exactly why it is checked here rather than at the call site.
+    /// * an empty row set. Nothing moved, so no undo may be offered for it.
+    ///
+    /// Routes every write through the EXISTING per-row paths (`confirm` / `ignore` /
+    /// `mark_false_positive` / `move_to`) rather than touching the map itself, so the
+    /// keyboard provably leaves the state the buttons leave instead of becoming a second,
+    /// divergent write path — the same discipline `bulk_confirm` and `bulk_false_positive`
+    /// are built on.
+    pub fn dispose_with_undo(
+        &mut self,
+        rows: &[FindingView],
+        state: TriageState,
+        reason: &str,
+        now_ms: u64,
+    ) -> Option<UndoEntry> {
+        if rows.is_empty() {
+            return None;
+        }
+        if state.requires_reason() && reason.trim().is_empty() {
+            return None;
+        }
+        // Snapshot BEFORE the write, deduplicated by key so the same row listed twice does
+        // not record its own post-write value as its "prior".
+        let mut prior: Vec<(String, Option<Disposition>)> = Vec::with_capacity(rows.len());
+        for f in rows {
+            let key = finding_key(f);
+            if prior.iter().any(|(k, _)| *k == key) {
+                continue;
+            }
+            let before = self.dispositions.get(&key).cloned();
+            prior.push((key, before));
+        }
+        match state {
+            TriageState::Confirmed => self.confirm(rows),
+            TriageState::Ignored => self.ignore(rows, reason),
+            TriageState::FalsePositive => self.mark_false_positive(rows, reason),
+            other => self.move_to(rows, other),
+        }
+        Some(UndoEntry {
+            message: undo_message(state, prior.len()),
+            prior,
+            armed_at_ms: now_ms,
+            spent: false,
+        })
+    }
+
+    /// Put back everything `entry` overwrote, if it still may be.
+    ///
+    /// Writes nothing outside the window and nothing for an entry already used, and SAYS
+    /// which it was ([`UndoOutcome`]) rather than returning a bare bool — a toast whose button
+    /// quietly does nothing is the failure this whole mechanism exists to avoid, and a
+    /// silently-refusing undo would be a second instance of it.
+    ///
+    /// Restores absence as absence: a row that had no disposition before the action has its
+    /// entry REMOVED, not set to a default-constructed `Unresolved`.
+    pub fn undo(&mut self, entry: &mut UndoEntry, now_ms: u64) -> UndoOutcome {
+        if entry.spent {
+            return UndoOutcome::AlreadyUndone;
+        }
+        if !entry.is_live(now_ms) {
+            return UndoOutcome::WindowClosed;
+        }
+        for (key, before) in &entry.prior {
+            match before {
+                Some(d) => {
+                    self.dispositions.insert(key.clone(), d.clone());
+                }
+                None => {
+                    self.dispositions.remove(key);
+                }
+            }
+        }
+        entry.spent = true;
+        UndoOutcome::Reverted(entry.prior.len())
+    }
 }
 
 #[cfg(test)]
@@ -2970,5 +3142,215 @@ mod tests {
                 s.label()
             );
         }
+    }
+
+    // ── req_pass2_11: THE FIVE-SECOND UNDO (owner's Q5 ruling, design §13) ────────────
+    //
+    // > plus a **five-second undo toast**. … the toast removes the 1am risk.
+    //
+    // An undo that is rendered and does nothing would be the ships-inert shape again, so
+    // every one of these asserts the DISPOSITION MAP, never the toast's presence.
+
+    fn row(path: &str) -> FindingView {
+        finding(serde_json::json!({
+            "repo": "me/api", "path": path, "line": 1, "rule_id": "SQL-INJECTION-1",
+            "severity": "critical", "snippet": "s", "detail": "", "kind": "defect"
+        }))
+    }
+
+    /// req_pass2_11: the window is five seconds, because the ruling says five seconds.
+    #[test]
+    fn req_pass2_11_the_undo_window_is_five_seconds() {
+        assert_eq!(UNDO_WINDOW_MS, 5_000);
+    }
+
+    /// req_pass2_11: WITHIN the window, undo puts the row back exactly as it was.
+    #[test]
+    fn req_pass2_11_undo_within_the_window_reverts_the_disposition() {
+        let f = row("src/a.rs");
+        let mut m = TriageModel::new();
+        let mut entry = m
+            .dispose_with_undo(&[f.clone()], TriageState::Confirmed, "", 1_000)
+            .expect("Confirm needs no reason, so it is never refused");
+        assert_eq!(m.state_of(&f), TriageState::Confirmed, "applied immediately");
+
+        assert_eq!(m.undo(&mut entry, 1_000 + 4_999), UndoOutcome::Reverted(1));
+        assert_eq!(m.state_of(&f), TriageState::Unresolved, "and put back");
+    }
+
+    /// req_pass2_11 — **THE OTHER HALF.** AFTER the window, undo changes nothing and SAYS it
+    /// changed nothing. A button that silently no-ops is worse than no button.
+    #[test]
+    fn req_pass2_11_undo_after_the_window_closes_changes_nothing() {
+        let f = row("src/a.rs");
+        let mut m = TriageModel::new();
+        let mut entry = m
+            .dispose_with_undo(&[f.clone()], TriageState::Confirmed, "", 1_000)
+            .expect("applied");
+
+        assert_eq!(
+            m.undo(&mut entry, 1_000 + UNDO_WINDOW_MS),
+            UndoOutcome::WindowClosed,
+            "five seconds exactly is already closed"
+        );
+        assert_eq!(m.state_of(&f), TriageState::Confirmed, "the decision stands");
+        assert_eq!(m.undo(&mut entry, 1_000 + 60_000), UndoOutcome::WindowClosed);
+        assert_eq!(m.state_of(&f), TriageState::Confirmed);
+    }
+
+    /// req_pass2_11: the live window is readable, so the toast can count down and can
+    /// dismiss itself the moment the undo stops working rather than a frame later.
+    #[test]
+    fn req_pass2_11_the_toast_can_tell_whether_its_own_undo_still_works() {
+        let f = row("src/a.rs");
+        let mut m = TriageModel::new();
+        let entry = m
+            .dispose_with_undo(&[f], TriageState::Confirmed, "", 1_000)
+            .expect("applied");
+        assert!(entry.is_live(1_000));
+        assert!(entry.is_live(5_999));
+        assert!(!entry.is_live(6_000), "the window closes exactly at +5000ms");
+        assert_eq!(entry.remaining_ms(1_000), 5_000);
+        assert_eq!(entry.remaining_ms(3_500), 2_500);
+        assert_eq!(entry.remaining_ms(99_999), 0);
+    }
+
+    /// req_pass2_11: undo restores the row's PRIOR disposition, not merely "Unresolved". A
+    /// row that was Ignored with a recorded reason, re-confirmed by a stray keypress, comes
+    /// back Ignored WITH its reason — the reason is the baseline audit trail and losing it
+    /// quietly is the failure this test exists for.
+    #[test]
+    fn req_pass2_11_undo_restores_the_prior_state_and_its_reason() {
+        let f = row("src/a.rs");
+        let mut m = TriageModel::new();
+        m.ignore(&[f.clone()], "accepted: fixture-only path");
+        m.set_bucket(&[f.clone()], TechDebtBucket::Now);
+
+        let mut entry = m
+            .dispose_with_undo(&[f.clone()], TriageState::Confirmed, "", 10_000)
+            .expect("applied");
+        assert_eq!(m.state_of(&f), TriageState::Confirmed);
+
+        assert_eq!(m.undo(&mut entry, 11_000), UndoOutcome::Reverted(1));
+        let d = m.dispositions.get(&finding_key(&f)).expect("still present");
+        assert_eq!(d.state, TriageState::Ignored);
+        assert_eq!(d.reason, "accepted: fixture-only path", "the audit trail comes back");
+        assert_eq!(d.bucket, TechDebtBucket::Now, "and so does the bucket");
+    }
+
+    /// req_pass2_11: undoing a row that had NO disposition removes the entry entirely rather
+    /// than leaving an explicit `Unresolved` record behind. The draft is persisted, and an
+    /// undone action that leaves a trace has not fully undone anything.
+    #[test]
+    fn req_pass2_11_undo_restores_absence_not_an_explicit_unresolved() {
+        let f = row("src/a.rs");
+        let mut m = TriageModel::new();
+        let mut entry = m
+            .dispose_with_undo(&[f.clone()], TriageState::TechDebt, "", 0)
+            .expect("applied");
+        assert_eq!(m.dispositions.len(), 1);
+        assert_eq!(m.undo(&mut entry, 1), UndoOutcome::Reverted(1));
+        assert!(
+            m.dispositions.is_empty(),
+            "the map must be byte-identical to before the action, not merely equivalent"
+        );
+    }
+
+    /// req_pass2_11: an undo is SINGLE USE. Undoing twice must not re-apply the revert over
+    /// a decision the curator has made since.
+    #[test]
+    fn req_pass2_11_an_undo_is_single_use() {
+        let f = row("src/a.rs");
+        let mut m = TriageModel::new();
+        let mut entry = m
+            .dispose_with_undo(&[f.clone()], TriageState::Confirmed, "", 0)
+            .expect("applied");
+        assert_eq!(m.undo(&mut entry, 100), UndoOutcome::Reverted(1));
+        // The curator then deliberately marks it tech debt.
+        m.move_to(&[f.clone()], TriageState::TechDebt);
+        assert_eq!(m.undo(&mut entry, 200), UndoOutcome::AlreadyUndone);
+        assert_eq!(
+            m.state_of(&f),
+            TriageState::TechDebt,
+            "a second undo must not reach back over a newer decision"
+        );
+    }
+
+    /// req_pass2_11: the keyboard path honours the require-reason invariant. A blank reason
+    /// is REFUSED and nothing is written — no disposition, and no undo entry claiming one.
+    #[test]
+    fn req_pass2_11_dispose_with_undo_refuses_a_reason_carrying_state_with_no_reason() {
+        for state in [TriageState::Ignored, TriageState::FalsePositive] {
+            let f = row("src/a.rs");
+            let mut m = TriageModel::new();
+            assert!(
+                m.dispose_with_undo(&[f.clone()], state, "   ", 0).is_none(),
+                "{} with a blank reason must be refused",
+                state.label()
+            );
+            assert!(m.dispositions.is_empty(), "and must write nothing");
+            assert_eq!(m.state_of(&f), TriageState::Unresolved);
+        }
+    }
+
+    /// req_pass2_11: with a reason, the reason-carrying states go through the SAME write
+    /// paths the buttons use, so the keyboard cannot become a second, divergent one.
+    #[test]
+    fn req_pass2_11_dispose_with_undo_is_the_same_write_the_buttons_make() {
+        let f = row("src/a.rs");
+        for (state, reason) in [
+            (TriageState::Confirmed, ""),
+            (TriageState::TechDebt, ""),
+            (TriageState::Ignored, "accepted risk"),
+            (TriageState::FalsePositive, "the tool mis-parsed the macro"),
+        ] {
+            let mut via_pane = TriageModel::new();
+            via_pane
+                .dispose_with_undo(&[f.clone()], state, reason, 0)
+                .unwrap_or_else(|| panic!("{} must apply", state.label()));
+
+            let mut via_button = TriageModel::new();
+            match state {
+                TriageState::Confirmed => via_button.confirm(&[f.clone()]),
+                TriageState::Ignored => via_button.ignore(&[f.clone()], reason),
+                TriageState::FalsePositive => via_button.mark_false_positive(&[f.clone()], reason),
+                other => via_button.move_to(&[f.clone()], other),
+            }
+            assert!(
+                via_pane.dispositions == via_button.dispositions,
+                "{} via the pane must leave EXACTLY the state the button leaves",
+                state.label()
+            );
+        }
+    }
+
+    /// req_pass2_11: the toast says what it will undo, naming the disposition and the count,
+    /// so "Undo" is never an offer to reverse something unnamed.
+    #[test]
+    fn req_pass2_11_the_undo_entry_names_what_it_would_reverse() {
+        let mut m = TriageModel::new();
+        let one = m
+            .dispose_with_undo(&[row("src/a.rs")], TriageState::Confirmed, "", 0)
+            .expect("applied");
+        assert_eq!(one.message(), "Confirmed 1 finding.");
+        let mut m = TriageModel::new();
+        let many = m
+            .dispose_with_undo(
+                &[row("src/a.rs"), row("src/b.rs"), row("src/c.rs")],
+                TriageState::FalsePositive,
+                "mis-parsed",
+                0,
+            )
+            .expect("applied");
+        assert_eq!(many.message(), "Marked 3 findings as False positive.");
+    }
+
+    /// req_pass2_11: an action over NO rows produces no entry, so the toast never offers to
+    /// undo something that never happened.
+    #[test]
+    fn req_pass2_11_disposing_nothing_arms_no_undo() {
+        let mut m = TriageModel::new();
+        assert!(m.dispose_with_undo(&[], TriageState::Confirmed, "", 0).is_none());
+        assert!(m.dispositions.is_empty());
     }
 }
