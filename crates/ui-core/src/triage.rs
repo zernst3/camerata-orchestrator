@@ -6,16 +6,17 @@
 //! keeps the reactive signals, the chorale table effects, the toasts, and the rsx; every pure
 //! transition + derivation lives here and is unit-tested with no VirtualDom.
 //!
-//! The architect moves each finding between four tables (Unresolved / Ignored / Tech debt /
-//! False positive) until nothing is Unresolved, then buckets the tech-debt findings (resolve
-//! later / now). This is LOCAL triage state — the backend commit (baseline waiver / ticket /
-//! dev-engine import) happens at Process, not on each move. False positive is the odd one out:
-//! it is never committed anywhere — see `TriageState::FalsePositive`'s doc comment.
+//! The architect moves each finding between five tables (Unresolved / Confirmed / Ignored /
+//! Tech debt / False positive) until nothing is Unresolved, then buckets the tech-debt findings
+//! (resolve later / now). This is LOCAL triage state — the backend commit (baseline waiver /
+//! ticket / dev-engine import) happens at Process, not on each move. False positive and
+//! Confirmed are the odd ones out: neither is committed anywhere — see
+//! `TriageState::FalsePositive`'s and `TriageState::Confirmed`'s doc comments.
 
 use std::collections::HashMap;
 
 /// Where a finding sits in onboarding triage. The architect moves each finding between these
-/// FOUR tables (a single-select switches the view) until nothing is Unresolved; then the
+/// FIVE tables (a single-select switches the view) until nothing is Unresolved; then the
 /// ignored and tech-debt buckets are processed. This is LOCAL triage state — the backend
 /// commit (baseline waiver / ticket / dev-engine import) happens at Process, not on each move.
 ///
@@ -26,10 +27,44 @@ use std::collections::HashMap;
 /// via the baseline would be exactly the invisible, reasonless-waiver hole the require-reason
 /// baseline invariant prevents — if the same code trips again next scan, that is correct: the
 /// reviewer re-judges it fresh.
+///
+/// ## Why the variant order is the switcher order
+///
+/// [`TriageState::all`] is the single source of the sub-tab order, so the declaration order
+/// here IS what the curator sees: Unresolved, Confirmed, Ignored, Tech debt, False positive.
+/// Nothing on the wire depends on it (serde writes unit variants by NAME), so reordering is a
+/// presentation change only.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub enum TriageState {
     #[default]
     Unresolved,
+    /// THE AFFIRMATIVE DISPOSITION (design §3/§4, Pass 2 step 3): the curator read this
+    /// finding, judged it REAL, and it ships in the report as a live finding.
+    ///
+    /// ### The defect this closes
+    ///
+    /// Before it existed, every exit from `Unresolved` was a way of NOT shipping a row:
+    /// `Ignored` accepts the risk and baselines it, `TechDebt` defers the fix to a ticket,
+    /// `FalsePositive` excludes it from the report entirely. So the only way to keep a finding
+    /// LIVE was to leave it undecided — which meant `Unresolved` was doing double duty as both
+    /// "not yet looked at" and "confirmed and shipping", and the system could not tell those
+    /// apart. The product's first promise is that one person reads every finding and signs;
+    /// this is the variant that puts data behind it. It is also the MAJORITY outcome of an
+    /// audit, which is why it is the gesture that costs the least (one click, no reason).
+    ///
+    /// ### What it is not
+    ///
+    /// It is not a schedule and it is not an acceptance. The export gives a `Confirmed`
+    /// finding the same severity-derived action bucket an open one gets and still counts it as
+    /// outstanding work — see `camerata_server::report_export::Disposition::Confirmed`.
+    ///
+    /// ### Scope
+    ///
+    /// LOCAL, exactly like `FalsePositive` (owner's Q2 ruling, 2026-10-12): it lives in the
+    /// auto-saved draft, the report export reads it out of the disposition map, and Process
+    /// commits NOTHING for it. A durable per-finding record across engagements is a real
+    /// backend surface and Pass 2 does not invent one as a side effect of a UI build.
+    Confirmed,
     Ignored,
     TechDebt,
     FalsePositive,
@@ -39,10 +74,37 @@ impl TriageState {
     pub fn label(self) -> &'static str {
         match self {
             Self::Unresolved => "Unresolved",
+            Self::Confirmed => "Confirmed",
             Self::Ignored => "Ignored",
             Self::TechDebt => "Tech debt",
             Self::FalsePositive => "False positive",
         }
+    }
+
+    /// The five triage tables in sub-tab order (Unresolved is the landing table and always
+    /// first; Confirmed sits next to it because it is the common exit from it).
+    ///
+    /// Named once so the switcher, the tally and the tests cannot enumerate a different set —
+    /// a sixth disposition added without a tab would be invisible, and a tab whose state the
+    /// tally skips would show a permanent zero.
+    pub fn all() -> [TriageState; 5] {
+        [
+            Self::Unresolved,
+            Self::Confirmed,
+            Self::Ignored,
+            Self::TechDebt,
+            Self::FalsePositive,
+        ]
+    }
+
+    /// Whether the curator has DECIDED this row.
+    ///
+    /// This is the Process gate's question, and the reason `Confirmed` had to exist: the gate
+    /// blocks on rows nobody has decided, and a confirmed finding is decided — it is simply
+    /// decided to be real. Every state except `Unresolved` is a decision, so the gate's
+    /// blocking count is exactly the `Unresolved` tally (see [`TriageCounts::outstanding`]).
+    pub fn is_decided(self) -> bool {
+        !matches!(self, Self::Unresolved)
     }
 }
 
@@ -660,6 +722,47 @@ impl TriageModel {
         }
     }
 
+    /// CONFIRM each finding: "I read this, it is real, it ships in the report."
+    ///
+    /// Takes NO reason, deliberately, and that asymmetry is the point. `Ignored` and
+    /// `FalsePositive` require one because each makes a claim BEYOND the finding — that the
+    /// risk is acceptable, or that the tool was wrong — and the report has to be able to say
+    /// why. Confirming makes no claim beyond the finding; the finding already states its own
+    /// case, with its evidence, its citation and its severity. Demanding a sentence to agree
+    /// with it would tax the majority outcome of every audit for no audit trail gained.
+    ///
+    /// Deliberately a thin wrapper over [`TriageModel::move_to`] rather than a second write
+    /// path, so an existing reason/bucket on the disposition is left exactly as `move_to`
+    /// leaves it (confirming does not erase the history of how the row got here, and nothing
+    /// renders a `Confirmed` row's reason).
+    pub fn confirm(&mut self, findings: &[FindingView]) {
+        self.move_to(findings, TriageState::Confirmed);
+    }
+
+    /// RULE-LEVEL BULK: confirm every row of a deviation group, in one act (design §2/§4).
+    ///
+    /// The deviation case the design singles out: "if the curator believes the convention is
+    /// real, all N sites are confirmed together far more often than not." This is that
+    /// gesture.
+    ///
+    /// Returns `Some(n)` with the number of rows moved, or `None` for the ONE refusal — an
+    /// empty group, where nothing moved so nothing may be claimed to have moved. There is no
+    /// reason check here because [`TriageModel::confirm`] has none; see its doc comment for
+    /// why that asymmetry with [`TriageModel::bulk_false_positive`] is correct rather than an
+    /// oversight.
+    ///
+    /// Like its false-positive sibling it is a thin wrapper over the PER-ROW path given the
+    /// group's rows, not a second write path. That is what makes "one click equals N
+    /// gestures" a property of the code rather than a hope — see
+    /// `req_pass2_10_bulk_confirm_equals_confirming_each_row_individually`.
+    pub fn bulk_confirm(&mut self, group: &DeviationGroup) -> Option<usize> {
+        if group.rows.is_empty() {
+            return None;
+        }
+        self.confirm(&group.rows);
+        Some(group.rows.len())
+    }
+
     /// Ignore each finding: set state = Ignored AND record the (required) reason together, so a
     /// durable ignore never lands without its baseline-recorded reason.
     pub fn ignore(&mut self, findings: &[FindingView], reason: &str) {
@@ -700,9 +803,8 @@ impl TriageModel {
     /// gestures" a property of the code rather than a hope (see
     /// `req_pass2_9_bulk_false_positive_equals_marking_each_row_individually`).
     ///
-    /// Step 3's `Confirm all N` is the same shape against `TriageState::Confirmed`, which does
-    /// not exist yet — so it is not written here, because the four states that DO exist offer
-    /// nothing that honestly means "yes, this is real, it ships".
+    /// Its affirmative sibling is [`TriageModel::bulk_confirm`] (Pass 2 step 3), the same
+    /// shape against `TriageState::Confirmed` and without the reason check.
     pub fn bulk_false_positive(&mut self, group: &DeviationGroup, reason: &str) -> Option<usize> {
         if reason.trim().is_empty() || group.rows.is_empty() {
             return None;
@@ -739,21 +841,92 @@ impl TriageModel {
         out
     }
 
-    /// Tally the four buckets over `findings`: `(Unresolved, Ignored, TechDebt, FalsePositive)`.
-    pub fn counts(&self, findings: &[FindingView]) -> (usize, usize, usize, usize) {
-        let mut unresolved = 0;
-        let mut ignored = 0;
-        let mut tech_debt = 0;
-        let mut false_positive = 0;
+    /// Tally every disposition over `findings` — see [`TriageCounts`].
+    ///
+    /// `findings` must already be the QUEUE row set ([`findings_on_surface`] with
+    /// [`KindSurface::Queue`]). An informational row has no disposition and no table in which
+    /// to acquire one, so counting it here parks it as `Unresolved` forever and the Process
+    /// gate blocks on a row saying the codebase is CORRECT — the live bug step 1 fixed. The
+    /// filter deliberately lives at the call site rather than inside this loop: this function
+    /// is also how a single triage table's own tally is taken, and silently re-filtering its
+    /// input would make those two uses disagree.
+    pub fn counts(&self, findings: &[FindingView]) -> TriageCounts {
+        let mut counts = TriageCounts::default();
         for f in findings {
             match self.state_of(f) {
-                TriageState::Unresolved => unresolved += 1,
-                TriageState::Ignored => ignored += 1,
-                TriageState::TechDebt => tech_debt += 1,
-                TriageState::FalsePositive => false_positive += 1,
+                TriageState::Unresolved => counts.unresolved += 1,
+                TriageState::Confirmed => counts.confirmed += 1,
+                TriageState::Ignored => counts.ignored += 1,
+                TriageState::TechDebt => counts.tech_debt += 1,
+                TriageState::FalsePositive => counts.false_positive += 1,
             }
         }
-        (unresolved, ignored, tech_debt, false_positive)
+        counts
+    }
+}
+
+/// The per-disposition tally over one finding set: the sub-tab counts, and everything the
+/// Process gate decides from.
+///
+/// A named struct rather than the tuple this used to be, because the tuple was already at four
+/// positionally-identical `usize`s and `Confirmed` would have made five. The two readings a
+/// caller actually wants — "is the curator done" and "is there anything to commit" — are
+/// methods here rather than inline arithmetic at the call site, so the gate's rule is stated
+/// once and unit-tested once.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct TriageCounts {
+    pub unresolved: usize,
+    pub confirmed: usize,
+    pub ignored: usize,
+    pub tech_debt: usize,
+    pub false_positive: usize,
+}
+
+impl TriageCounts {
+    /// This tally's count for one disposition — so the sub-tab loop can read
+    /// [`TriageState::all`] and ask for each, instead of a five-arm match that could drift
+    /// from the enum.
+    pub fn of(self, state: TriageState) -> usize {
+        match state {
+            TriageState::Unresolved => self.unresolved,
+            TriageState::Confirmed => self.confirmed,
+            TriageState::Ignored => self.ignored,
+            TriageState::TechDebt => self.tech_debt,
+            TriageState::FalsePositive => self.false_positive,
+        }
+    }
+
+    /// Every row counted.
+    pub fn total(self) -> usize {
+        self.unresolved + self.confirmed + self.ignored + self.tech_debt + self.false_positive
+    }
+
+    /// Rows the curator has NOT decided yet — the ONLY thing the Process gate blocks on.
+    ///
+    /// Reads [`TriageState::is_decided`] over the whole vocabulary rather than returning
+    /// `self.unresolved` directly, so a future disposition is outstanding or not according to
+    /// the enum's own answer and never because this function forgot about it.
+    pub fn outstanding(self) -> usize {
+        TriageState::all()
+            .into_iter()
+            .filter(|s| !s.is_decided())
+            .map(|s| self.of(s))
+            .sum()
+    }
+
+    /// Whether Process has anything to DO.
+    ///
+    /// Only `Ignored` (baseline waivers) and `TechDebt` (tickets) commit anything server-side.
+    /// `Confirmed` and `FalsePositive` are both client-local by design, so a queue made
+    /// entirely of them is fully triaged AND has nothing to process — which is why the gate
+    /// needs this as a separate question from [`TriageCounts::outstanding`].
+    pub fn has_committable_work(self) -> bool {
+        self.ignored > 0 || self.tech_debt > 0
+    }
+
+    /// Whether the Process button may be enabled: nothing outstanding, and something to commit.
+    pub fn can_process(self) -> bool {
+        self.outstanding() == 0 && self.has_committable_work()
     }
 }
 
@@ -931,18 +1104,33 @@ mod tests {
         assert_eq!(vis[0].line, 4);
     }
 
+    // EDITED for Pass 2 step 3 (exception (a): a fifth disposition legitimately touches count
+    // assertions). The tally gained a `confirmed` field and became a named struct; the
+    // one-of-each shape of the assertion is unchanged.
     #[test]
-    fn counts_tallies_the_four_buckets() {
+    fn counts_tallies_every_bucket() {
         let mut m = TriageModel::new();
         let a = f("r", 1, "low", "active");
         let b = f("r", 2, "low", "active");
         let c = f("r", 3, "low", "active");
         let d = f("r", 4, "low", "active");
+        let e = f("r", 5, "low", "active");
         m.ignore(std::slice::from_ref(&b), "noise");
         m.move_to(std::slice::from_ref(&c), TriageState::TechDebt);
         m.mark_false_positive(std::slice::from_ref(&d), "not exploitable — mocked in test scope");
-        let all = vec![a, b, c, d];
-        assert_eq!(m.counts(&all), (1, 1, 1, 1));
+        m.confirm(std::slice::from_ref(&e));
+        let all = vec![a, b, c, d, e];
+        assert_eq!(
+            m.counts(&all),
+            TriageCounts {
+                unresolved: 1,
+                confirmed: 1,
+                ignored: 1,
+                tech_debt: 1,
+                false_positive: 1,
+            }
+        );
+        assert_eq!(m.counts(&all).total(), 5);
     }
 
     // ── FalsePositive disposition (the explicit ask) ──────────────────────────
@@ -1448,9 +1636,12 @@ mod tests {
         let all = vec![convention("C"), no_convention("N"), not_assessed("A")];
         let queue = findings_on_surface(&all, KindSurface::Queue);
         assert!(queue.is_empty());
-        let (unresolved, _, _, _) = m.counts(&queue);
+        // EDITED for Pass 2 step 3 (exception (a)): `counts` returns `TriageCounts` rather
+        // than a 4-tuple. The assertion is the same one, now stated through the gate's own
+        // reading of the tally instead of a destructured position.
         assert_eq!(
-            unresolved, 0,
+            m.counts(&queue).outstanding(),
+            0,
             "a scan whose only rows are informational is fully triaged on arrival"
         );
     }
@@ -1712,5 +1903,332 @@ mod tests {
         };
         assert_eq!(m.bulk_false_positive(&empty, "a real reason"), None);
         assert!(m.dispositions.is_empty());
+    }
+
+    // ── Pass 2 step 3: the `Confirmed` disposition ──────────────────────────
+    //
+    // RED BEFORE THE FIX, on `1a61a7c`: none of this compiled, because neither
+    // `TriageState::Confirmed` nor `TriageModel::confirm` existed. The defect those absences
+    // ARE is stated in `req_pass2_10_confirmed_is_the_only_affirmative_disposition` below.
+    // The export half of the same defect — a `Confirmed` row arriving at the exporter and
+    // being indistinguishable from an unopened one — is red as a genuine assertion failure,
+    // recorded in
+    // `camerata_server::report_export::tests::req_pass2_10_a_confirmed_finding_is_distinguishable_from_an_unopened_one_in_the_export`.
+
+    /// req_pass2_10 (THE DEFECT): `Confirmed` is the ONE disposition that both decides a row
+    /// AND leaves it shipping as a live finding.
+    ///
+    /// Every other exit from `Unresolved` is a way of NOT shipping:
+    ///
+    /// * `Ignored` — real, but accepted as risk. Baselined; out of the action tiers.
+    /// * `TechDebt` — real, but deferred. Leaves as a ticket.
+    /// * `FalsePositive` — not real. Excluded from the report entirely.
+    ///
+    /// So before this variant the only way to keep a finding LIVE was to leave it
+    /// `Unresolved` — i.e. to not decide it — which made `Unresolved` mean both "never opened"
+    /// and "read, confirmed, shipping" at the same time. That is the whole defect, and it is
+    /// why the sign-off promise ("one person reads every finding and signs") had no data
+    /// behind it.
+    #[test]
+    fn req_pass2_10_confirmed_is_the_only_affirmative_disposition() {
+        // The whole vocabulary, and which members are a DECISION.
+        assert_eq!(TriageState::all().len(), 5);
+        assert!(!TriageState::Unresolved.is_decided());
+        for decided in [
+            TriageState::Confirmed,
+            TriageState::Ignored,
+            TriageState::TechDebt,
+            TriageState::FalsePositive,
+        ] {
+            assert!(decided.is_decided(), "{} is a decision", decided.label());
+        }
+        // And `Confirmed` is its own state, never an alias for one of the four that preceded
+        // it — which is exactly what would have happened had this shipped as "just leave it
+        // Unresolved" or "Ignore it, we know what we mean".
+        for other in [
+            TriageState::Unresolved,
+            TriageState::Ignored,
+            TriageState::TechDebt,
+            TriageState::FalsePositive,
+        ] {
+            assert_ne!(TriageState::Confirmed, other);
+        }
+        assert_eq!(TriageState::Confirmed.label(), "Confirmed");
+    }
+
+    /// req_pass2_10: a finding the curator READ AND CONFIRMED is distinguishable from one he
+    /// never opened — the single sentence the whole step exists to make true.
+    #[test]
+    fn req_pass2_10_a_reviewed_and_real_finding_is_distinguishable_from_an_unopened_one() {
+        let never_opened = defect("NEVER-OPENED-1", "critical");
+        let read_and_real = defect("READ-AND-REAL-1", "critical");
+
+        let mut m = TriageModel::new();
+        m.confirm(std::slice::from_ref(&read_and_real));
+
+        assert_eq!(m.state_of(&read_and_real), TriageState::Confirmed);
+        assert_eq!(m.state_of(&never_opened), TriageState::Unresolved);
+        assert_ne!(
+            m.state_of(&read_and_real),
+            m.state_of(&never_opened),
+            "a finding that was read and judged real must not record the same state as one \
+             nobody opened"
+        );
+
+        let counts = m.counts(&[never_opened, read_and_real]);
+        assert_eq!(counts.confirmed, 1);
+        assert_eq!(counts.unresolved, 1);
+    }
+
+    /// req_pass2_10: confirming requires NO reason, and the model's own API says so — there is
+    /// no parameter to pass one through. The contrast with `ignore` / `mark_false_positive`
+    /// is deliberate (see [`TriageModel::confirm`]'s doc comment); this pins it so a later
+    /// "consistency" refactor cannot quietly tax the majority gesture of every audit.
+    #[test]
+    fn req_pass2_10_confirming_needs_no_reason_and_records_none() {
+        let mut m = TriageModel::new();
+        let item = defect("SQL-INJECTION-1", "critical");
+        m.confirm(std::slice::from_ref(&item));
+        let d = m.dispositions.get(&finding_key(&item)).expect("recorded");
+        assert_eq!(d.state, TriageState::Confirmed);
+        assert_eq!(d.reason, "", "no reason was asked for and none was invented");
+    }
+
+    /// req_pass2_10: `Confirmed` gets its own triage table, exactly like the other four.
+    #[test]
+    fn req_pass2_10_visible_filters_confirmed_into_its_own_view() {
+        let mut m = TriageModel::new();
+        let unresolved = defect("A-OPEN-1", "high");
+        let confirmed = defect("Z-REAL-1", "critical");
+        m.confirm(std::slice::from_ref(&confirmed));
+        let all = vec![unresolved.clone(), confirmed.clone()];
+
+        let vis = m.visible(&all);
+        assert_eq!(
+            vis.iter().map(|f| f.rule_id.clone()).collect::<Vec<_>>(),
+            vec!["A-OPEN-1"],
+            "the Unresolved table no longer holds the confirmed row"
+        );
+
+        m.triage_view = TriageState::Confirmed;
+        let vis = m.visible(&all);
+        assert_eq!(
+            vis.iter().map(|f| f.rule_id.clone()).collect::<Vec<_>>(),
+            vec!["Z-REAL-1"]
+        );
+    }
+
+    /// req_pass2_10 (THE PROCESS GATE): a confirmed finding is DECIDED, so it does not block
+    /// Process — and confirming commits nothing, so it does not unblock it either.
+    ///
+    /// Both halves matter. The first is the step's requirement. The second is the trap next to
+    /// it: `Confirmed` is client-local (owner's Q2), so a queue made entirely of confirmed
+    /// rows is fully triaged AND has nothing for Process to commit. Enabling the button there
+    /// would be a button that does nothing, which is the dead-affordance shape this product
+    /// forbids.
+    #[test]
+    fn req_pass2_10_confirmed_rows_do_not_block_the_process_gate_and_do_not_unblock_it() {
+        let a = defect("SQL-INJECTION-1", "critical");
+        let b = defect("NO-RAW-SQL-1", "high");
+        let all = vec![a.clone(), b.clone()];
+
+        // Nothing touched: outstanding, and nothing to commit.
+        let m = TriageModel::new();
+        assert_eq!(m.counts(&all).outstanding(), 2);
+        assert!(!m.counts(&all).can_process());
+
+        // Both confirmed: NOTHING outstanding (the requirement) ...
+        let mut m = TriageModel::new();
+        m.confirm(&all);
+        let counts = m.counts(&all);
+        assert_eq!(
+            counts.outstanding(),
+            0,
+            "a confirmed finding is decided, not outstanding — the gate must not block on it"
+        );
+        // ... but still nothing to Process, because Confirmed commits nothing server-side.
+        assert!(!counts.has_committable_work());
+        assert!(!counts.can_process());
+
+        // One confirmed, one ignored: still nothing outstanding, and now there IS something
+        // to commit, so the gate opens.
+        let mut m = TriageModel::new();
+        m.confirm(std::slice::from_ref(&a));
+        m.ignore(std::slice::from_ref(&b), "defense in depth elsewhere");
+        let counts = m.counts(&all);
+        assert_eq!(counts.outstanding(), 0);
+        assert!(counts.can_process());
+
+        // One left unresolved: blocked again, by that row alone.
+        let mut m = TriageModel::new();
+        m.ignore(std::slice::from_ref(&b), "defense in depth elsewhere");
+        let counts = m.counts(&all);
+        assert_eq!(counts.outstanding(), 1);
+        assert!(!counts.can_process());
+    }
+
+    /// req_pass2_10 (REGRESSION GUARD for step 1's live bug): informational rows still cannot
+    /// block the gate, now read through the gate's own `outstanding()` and with a `Confirmed`
+    /// row in the mix.
+    ///
+    /// Step 1 fixed a shipped bug where a row saying "your codebase does this correctly" sat
+    /// `Unresolved` forever and disabled Process permanently. Adding a fifth disposition
+    /// rewrote the tally, which is exactly the kind of edit that silently reinstates it.
+    #[test]
+    fn req_pass2_10_informational_rows_still_cannot_block_the_gate_after_the_fifth_disposition() {
+        let real = defect("SQL-INJECTION-1", "critical");
+        let all = vec![
+            real.clone(),
+            convention("ALREADY-GOOD-1"),
+            no_convention("SPLIT-1"),
+            not_assessed("UNRUN-1"),
+        ];
+        let queue = findings_on_surface(&all, KindSurface::Queue);
+        assert_eq!(queue.len(), 1, "only the defect is a Queue row");
+
+        let mut m = TriageModel::new();
+        m.confirm(std::slice::from_ref(&real));
+        assert_eq!(
+            m.counts(&queue).outstanding(),
+            0,
+            "every Queue row is decided, so nothing is outstanding"
+        );
+        // And the tally is taken over the QUEUE, never the raw set — the actual mechanism of
+        // the original bug. Over the raw set the three informational rows would still read as
+        // Unresolved, which is why the call site must never pass it.
+        assert_eq!(
+            m.counts(&all).outstanding(),
+            3,
+            "the raw set still contains three undisposable informational rows; the gate must \
+             never be fed this"
+        );
+    }
+
+    /// req_pass2_10 (THE BULK EQUIVALENCE): `Confirm all N` on a deviation group leaves
+    /// EXACTLY the state that confirming its N rows one at a time leaves.
+    ///
+    /// The same claim step 2 proved for `False positive all N`, and for the same reason: a
+    /// one-click gesture that quietly means something other than the N gestures it replaces
+    /// would first show up as a report with a hole in it.
+    #[test]
+    fn req_pass2_10_bulk_confirm_equals_confirming_each_row_individually() {
+        let mut a1 = deviation_labelled("API-VERSIONING-1", 3, Some(47), "URI-versioned");
+        a1.path = "src/routes.rs".into();
+        a1.line = 12;
+        let mut a2 = a1.clone();
+        a2.line = 40;
+        let mut a3 = a1.clone();
+        a3.path = "src/admin.rs".into();
+        let other = defect("SQL-INJECTION-1", "critical");
+        let all = vec![a1, a2, a3, other];
+        let group = deviation_groups(&all).remove(0);
+        assert_eq!(group.row_count(), 3, "three distinct rows, no key collision");
+
+        // One act on the group, through the SHIPPED entry point.
+        let mut bulk = TriageModel::new();
+        assert_eq!(
+            bulk.bulk_confirm(&group),
+            Some(3),
+            "the bulk call reports exactly the rows it moved"
+        );
+
+        // The same thing, one row at a time.
+        let mut by_row = TriageModel::new();
+        for row in &group.rows {
+            by_row.confirm(std::slice::from_ref(row));
+        }
+
+        assert_eq!(
+            bulk.dispositions.len(),
+            by_row.dispositions.len(),
+            "same number of dispositions written"
+        );
+        for (key, d) in &by_row.dispositions {
+            let got = bulk.dispositions.get(key).expect("bulk wrote the same key");
+            assert_eq!(got.state, d.state);
+            assert_eq!(got.reason, d.reason);
+            // `TechDebtBucket` is deliberately not `Debug`, so this is `assert!`.
+            assert!(got.bucket == d.bucket, "bucket differs for {key}");
+        }
+        // And nothing outside the group moved.
+        for f in &all {
+            let expected = if group.rows.iter().any(|r| finding_key(r) == finding_key(f)) {
+                TriageState::Confirmed
+            } else {
+                TriageState::Unresolved
+            };
+            assert_eq!(bulk.state_of(f), expected, "{} moved correctly", f.rule_id);
+        }
+    }
+
+    /// req_pass2_10: `Confirm all N` needs NO reason, where `False positive all N` refuses
+    /// without one. Asserted side by side so the asymmetry is visibly intentional.
+    #[test]
+    fn req_pass2_10_bulk_confirm_needs_no_reason_where_bulk_false_positive_demands_one() {
+        let f = deviation_labelled("API-VERSIONING-1", 2, Some(47), "URI-versioned");
+        let group = deviation_groups(std::slice::from_ref(&f)).remove(0);
+
+        let mut confirming = TriageModel::new();
+        assert_eq!(confirming.bulk_confirm(&group), Some(1));
+        assert_eq!(confirming.state_of(&f), TriageState::Confirmed);
+
+        let mut fp = TriageModel::new();
+        assert_eq!(fp.bulk_false_positive(&group, "   "), None);
+        assert!(fp.dispositions.is_empty());
+    }
+
+    /// req_pass2_10: a bulk confirm over an EMPTY group moves nothing and says so.
+    #[test]
+    fn req_pass2_10_bulk_confirm_on_an_empty_group_is_a_no_op() {
+        let mut m = TriageModel::new();
+        let empty = DeviationGroup {
+            label: "R".to_string(),
+            rule_id: "R".to_string(),
+            headline: DeviationHeadline {
+                deviating_sites: 0,
+                assessed_sites: None,
+                convention_label: "L".to_string(),
+            },
+            rows: Vec::new(),
+        };
+        assert_eq!(m.bulk_confirm(&empty), None);
+        assert!(m.dispositions.is_empty());
+    }
+
+    /// req_pass2_10: `Confirmed` round-trips on the wire as the literal `"Confirmed"` the
+    /// server's `classify` matches on.
+    ///
+    /// This is the seam between the two crates — the UI writes this value into the
+    /// auto-saved draft's disposition map, the export reads it back out of the same map, and
+    /// they cannot share the type. A rename here with no rename there is exactly how a
+    /// disposition ships inert, so the literal is pinned on both sides.
+    #[test]
+    fn req_pass2_10_confirmed_serializes_as_the_wire_value_the_export_matches_on() {
+        let d = Disposition {
+            state: TriageState::Confirmed,
+            reason: String::new(),
+            bucket: TechDebtBucket::Later,
+        };
+        let v = serde_json::to_value(&d).expect("Disposition serializes");
+        assert_eq!(
+            v["state"], "Confirmed",
+            "camerata_server::report_export::classify matches this string literally"
+        );
+        let back: Disposition = serde_json::from_value(v).expect("and deserializes");
+        assert_eq!(back.state, TriageState::Confirmed);
+    }
+
+    /// req_pass2_10: a draft written BEFORE this step still loads. Old drafts contain only the
+    /// four prior states, and `Unresolved` remains the default for anything absent.
+    #[test]
+    fn req_pass2_10_pre_existing_drafts_still_deserialize() {
+        for legacy in ["Unresolved", "Ignored", "TechDebt", "FalsePositive"] {
+            let d: Disposition = serde_json::from_value(serde_json::json!({
+                "state": legacy, "reason": "", "bucket": "Later"
+            }))
+            .unwrap_or_else(|e| panic!("legacy state {legacy} must still load: {e}"));
+            assert_ne!(d.state, TriageState::Confirmed);
+        }
+        assert_eq!(TriageState::default(), TriageState::Unresolved);
     }
 }
