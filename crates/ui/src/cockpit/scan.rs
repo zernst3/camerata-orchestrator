@@ -2490,6 +2490,18 @@ pub(super) fn FindingDetailPane(
                             autofocus: true,
                             placeholder: "why — the export reads this",
                             value: "{prompt_reason}",
+                            // Pre-focused, as design §3 specifies. `autofocus` alone is not
+                            // reliable in a webview for an element appearing on a re-render,
+                            // and getting this wrong is not cosmetic: the pane has already
+                            // disarmed its keys (opening the prompt is the one place it does
+                            // so EAGERLY, because disarming early is the safe direction and
+                            // arming early is not), so a prompt nobody is focused in would
+                            // be a dead surface with dead keys beside it.
+                            onmounted: move |e| {
+                                spawn(async move {
+                                    let _ = e.set_focus(true).await;
+                                });
+                            },
                             onfocusin: move |_| on_focus.call(PaneFocus::ReasonPrompt),
                             oninput: move |e| on_prompt_reason.call(e.value()),
                             onkeydown: move |e: KeyboardEvent| {
@@ -3376,13 +3388,21 @@ pub(super) fn FindingsTable(
                 if let Some(state) = prompt.peek().to_owned() {
                     let reason = prompt_reason.peek().clone();
                     apply_disposition.call((state, reason));
-                    pane_focus.set(PaneFocus::Cursor);
+                    // Only hand focus back if the disposition actually LANDED.
+                    // `dispose_with_undo` refuses a blank reason and leaves the prompt open;
+                    // re-arming the keys over a still-open prompt would put the curator back
+                    // in exactly the state the Q5 clause forbids, one keystroke from a
+                    // Confirm while mid-sentence.
+                    if prompt.peek().is_none() {
+                        focus_detail_pane();
+                    }
                 }
             }),
             on_prompt_cancel: Callback::new(move |()| {
                 prompt.set(None);
                 prompt_reason.set(String::new());
-                pane_focus.set(PaneFocus::Cursor);
+                // Move REAL focus back, and let `focusin` set the state — never assert it.
+                focus_detail_pane();
             }),
             on_undo: Callback::new(move |()| {
                 let Some(mut entry) = undo_entry.peek().clone() else { return };
