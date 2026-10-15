@@ -11122,6 +11122,110 @@ mod render_tests {
         assert!(html.contains(">Severity<"), "Severity header; html=\n{html}");
         assert!(html.contains(">Authority<"), "Authority header; html=\n{html}");
     }
+
+    /// req_pass2_13 (§9.4): NO informational surface renders a severity, and the proof is a
+    /// fixture that WOULD leak one.
+    ///
+    /// §9.4: "Conventions, No convention and Not assessed panels render NO severity anywhere.
+    /// The kinds ship at `info` by construction; a severity badge there is a dead affordance
+    /// implying a ranking decision that does not exist."
+    ///
+    /// The existing `req_pass2_6_conventions_panel_lists_labels_and_renders_no_severity` pins
+    /// one panel with an `info` fixture — which cannot distinguish "the panel ignores
+    /// severity" from "the fixture happened to be boring". These rows are authored
+    /// `critical`/`high`/`medium` precisely so the assertion can only pass if the panels never
+    /// read the field at all. All three panels, plus the rule hub strip that every one of
+    /// their rule ids opens.
+    #[test]
+    fn req_pass2_13_no_informational_surface_renders_a_severity() {
+        fn harness() -> Element {
+            rsx! {
+                ConventionsPanel {
+                    findings: vec![kinded_finding(
+                        "API-VERSIONING-1",
+                        "critical",
+                        serde_json::json!({
+                            "kind": "convention_observed",
+                            "convention_option_id": "versioned",
+                            "convention_label": "URI-versioned endpoints",
+                        }),
+                    )],
+                }
+                NoConventionPanel {
+                    findings: vec![kinded_finding(
+                        "ERROR-HANDLING-1",
+                        "high",
+                        serde_json::json!({
+                            "kind": "no_convention",
+                            "observed_options": [
+                                { "option_id": "result", "label": "Result types", "sites": 9 },
+                            ],
+                        }),
+                    )],
+                }
+                NotAssessedPanel {
+                    findings: vec![kinded_finding(
+                        "ESLINT-1",
+                        "medium",
+                        serde_json::json!({
+                            "kind": "not_assessed",
+                            "reason": "tool_unavailable",
+                            "reason_detail": "eslint is not installed",
+                        }),
+                    )],
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        // Each panel really did render its row, so the absence below is an absence of
+        // severity and not an absence of output.
+        for present in ["API-VERSIONING-1", "ERROR-HANDLING-1", "ESLINT-1"] {
+            assert!(html.contains(present), "{present} must render; html=\n{html}");
+        }
+        for forbidden in [
+            "severity", "Severity", "critical", "Critical", "high", "High", "medium", "Medium",
+            "chorale-badge", "finding-row-critical",
+        ] {
+            assert!(
+                !html.contains(forbidden),
+                "§9.4: no severity on an informational panel (found {forbidden:?}); html=\n{html}"
+            );
+        }
+
+        // And the hub strip those rule ids open — the fourth informational surface, reached
+        // from all three panels — says nothing about severity either.
+        #[component]
+        fn HubHarness(hub: RuleHubView) -> Element {
+            rsx! { RuleHubStrip { hub, on_jump: Callback::new(|_: KindSurface| {}) } }
+        }
+        let rows = vec![kinded_finding(
+            "API-VERSIONING-1",
+            "critical",
+            serde_json::json!({
+                "kind": "convention_observed",
+                "convention_option_id": "versioned",
+                "convention_label": "URI-versioned endpoints",
+            }),
+        )];
+        let hub = rule_hub(&rows, "me/api", "API-VERSIONING-1").expect("the rule is in the scan");
+        let mut vdom =
+            VirtualDom::new_with_props(HubHarness, HubHarnessProps { hub });
+        vdom.rebuild_in_place();
+        let hub_html = dioxus_ssr::render(&vdom);
+        assert!(
+            hub_html.contains("Convention observed"),
+            "the hub rendered the informational rule; html=\n{hub_html}"
+        );
+        for forbidden in ["severity", "Severity", "critical", "Critical"] {
+            assert!(
+                !hub_html.contains(forbidden),
+                "§9.4: no severity on the hub for an informational rule (found {forbidden:?}); \
+                 html=\n{hub_html}"
+            );
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
