@@ -516,6 +516,145 @@ pub(super) use camerata_ui_core::triage::{
     MergedSiteView, PaneCommand, PaneFocus, RowCursor, UndoEntry, UndoOutcome,
 };
 
+// Pass 2, THE GATED CONVENTION COMMIT (design §3, Q3 + Q4 in §12/§13). Every rule about what
+// is adoptable, what is adopted, what was actually OPENED and whether the gate is shut lives
+// in `camerata_ui_core::adopt`, unit-tested with no VirtualDom. This layer owns the pixels,
+// the two HTTP calls and the focus handling; it owns none of the decisions.
+pub(super) use camerata_ui_core::adopt::{
+    adoptable_conventions, adoption_key, commit_gate, merge_adoptions, split_rules,
+    AdoptableConvention, AdoptedRule, AdoptionModel, CommitPlan, ProjectRulesetView, SplitRule,
+};
+
+// ── The convention commit's two HTTP calls (design §3; owner's Q3/Q4) ─────────
+//
+// THERE IS NO NEW SERVER SURFACE HERE, and that is deliberate. Both routes already exist and
+// already do exactly this; the only thing Pass 2 adds is the curator's decision about WHICH
+// rules travel them.
+//
+//   1. `GET  /api/projects/:id/ruleset`     — `export_project_ruleset`
+//   2. `POST /api/projects/:id/ruleset`     — `import_project_ruleset` -> `upsert_base_rules`
+//   3. `POST /api/projects/:id/emit-local`  — `emit_project_local` -> `camerata_server::arm`,
+//      which renders AGENTS.md / CONVENTIONS.md / the gate config into the repo's local
+//      checkout. The cascade is all-false: write the files in place, no branch, no push, no
+//      PR. Adoption is a decision about what the standard IS; shipping it is a separate act
+//      with its own controls on the Rules screen.
+//
+// Step 1 exists because step 2 REPLACES `selections` wholesale (`upsert_base_rules` assigns
+// the three lists). Posting only the adopted rules would delete every other selection the
+// project has. The read-modify-write is therefore not an optimization, it is the contract.
+
+/// Read the project's current base ruleset (`GET /api/projects/:id/ruleset`).
+///
+/// `None` on a transport/parse failure or an `ok: false` body — the caller must not proceed
+/// to the write, because a merge against a default (empty) ruleset would erase the project's
+/// selections.
+pub(super) async fn fetch_project_ruleset(project_id: &str) -> Option<ProjectRulesetView> {
+    let v: serde_json::Value = reqwest::get(format!(
+        "{}/api/projects/{}/ruleset",
+        crate::bff_base(),
+        project_id
+    ))
+    .await
+    .ok()?
+    .json()
+    .await
+    .ok()?;
+    if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    serde_json::from_value(v.get("ruleset")?.clone()).ok()
+}
+
+/// Write the merged base ruleset back (`POST /api/projects/:id/ruleset`).
+///
+/// The body carries no `custom` key, so the server's `merge_custom` sees nothing and every
+/// architect-authored custom rule stays exactly where it is. See [`ProjectRulesetView`].
+pub(super) async fn save_project_ruleset(project_id: &str, ruleset: &ProjectRulesetView) -> bool {
+    let Ok(resp) = reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/ruleset",
+            crate::bff_base(),
+            project_id
+        ))
+        .json(ruleset)
+        .send()
+        .await
+    else {
+        return false;
+    };
+    if !resp.status().is_success() {
+        return false;
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .map(|v| v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false))
+        .unwrap_or(false)
+}
+
+/// COMMIT the curator's adopted rules into one destination repository's `AGENTS.md`.
+///
+/// Read, merge, write, emit — in that order, and it STOPS at the first failure rather than
+/// pressing on. A failed read followed by a write would post a merge built on an empty
+/// ruleset, which is the one failure mode here that destroys data rather than merely not
+/// doing anything.
+///
+/// Returns `(ok, one sentence for the toast)`.
+pub(super) async fn commit_adoptions(
+    project_id: &str,
+    destination_repo: &str,
+    adopted: &[AdoptedRule],
+) -> (bool, String) {
+    if adopted.is_empty() {
+        return (false, "Nothing selected to write.".to_string());
+    }
+    let Some(current) = fetch_project_ruleset(project_id).await else {
+        return (
+            false,
+            "Could not read the project's current ruleset, so nothing was written. \
+             (Writing without it would have erased the project's other rule selections.)"
+                .to_string(),
+        );
+    };
+    let merged = merge_adoptions(&current, destination_repo, adopted);
+    if !save_project_ruleset(project_id, &merged).await {
+        return (
+            false,
+            "Could not save the project's ruleset. Nothing was written to the repository."
+                .to_string(),
+        );
+    }
+    let n = adopted.len();
+    let (ok, emit_msg) = super::rules::emit_project_local(project_id, false, false, false).await;
+    if ok {
+        (
+            true,
+            format!("Wrote {n} into {destination_repo}. {emit_msg}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Saved {n} to the project's ruleset, but writing the governance files failed: \
+                 {emit_msg}"
+            ),
+        )
+    }
+}
+
+/// Which panel raised the commit dialog, where it is writing, and what has been typed.
+///
+/// Session state. The typed destination is deliberately NOT persisted anywhere: a half-typed
+/// confirmation restored from a draft would be a gate the curator did not pass.
+#[derive(Clone, PartialEq, Debug)]
+pub(super) struct CommitDialogState {
+    /// `KindSurface::Conventions` or `KindSurface::NoConvention` — which plan to rebuild.
+    pub surface: KindSurface,
+    /// The destination repository. The string the curator has to type.
+    pub destination: String,
+    /// What has been typed so far.
+    pub typed: String,
+}
+
 /// Durable ignore: record the findings as reasoned baseline suppressions (governed PR).
 /// Returns the PR URL.
 pub(super) async fn ignore_findings(
@@ -5474,64 +5613,196 @@ pub(super) fn KindSurfaceConflictBanner(findings: Vec<FindingView>) -> Element {
     }
 }
 
-/// CONVENTIONS panel — `ConventionObserved` rows: the codebase consistently follows a
-/// convention and there are ZERO violations. A compliment, one row per rule.
+/// CONVENTIONS panel — the conventions this audit DERIVED from the client's own codebase, and
+/// the decision to write them into that codebase's `AGENTS.md`.
 ///
-/// Deliberately a plain list, and deliberately UGLY at this stage. The real decision this panel
-/// needs (Adopt / Skip, with Zach's typed-destination commit gate) is step 2+; building a
-/// checklist with no commit behind it would be a dead affordance. What matters now is that
-/// these rows are OUT of the accusing queue.
+/// ## What is in the list
+///
+/// Not only the `ConventionObserved` rows. Per the owner's §13 reversal, the convention BEHIND
+/// a rule's `Deviation` rows is in here too, labelled "observed with N exceptions" with a jump
+/// into the Queue for those exceptions:
+///
+/// > "I could decide that 'this is the correct convention even though there are inconsistencies
+/// > that exist'. The remediation of those inconsistencies is a separate process."
+///
+/// So this panel takes the WHOLE finding set, not just the rows routed to its own surface, and
+/// derives its list through `adopt::adoptable_conventions`. The exception count is context; no
+/// code here reads it to decide anything.
+///
+/// ## Opt-out, and what that costs
+///
+/// Adopt is pre-checked (Q4) and Skip is the gesture. That makes the common case fast and it
+/// makes one thing dangerous, which the commit dialog is built to say out loud: a convention
+/// nobody opened can land in a client's `AGENTS.md`. This panel therefore records an OPENED
+/// gesture per row — the "Open" button, which reveals the row's detail — and feeds it to
+/// [`CommitPlan::unopened_count`]. Rendering a row is not opening it; nothing else writes that
+/// record.
 ///
 /// NO SEVERITY is rendered, here or on the other two panels (design §9.4): informational kinds
 /// ship at `info` by construction, so a severity badge would imply a ranking decision that does
 /// not exist.
+///
+/// Props-only, like every other Pass-2 component, so SSR can render each state.
 #[component]
 pub(super) fn ConventionsPanel(
+    /// The scan's findings. The WHOLE set, not one surface's rows — see the type doc.
     findings: Vec<FindingView>,
     /// Open the RULE HUB on a listed rule (design §8: "reachable from every surface that
     /// shows a rule id"). Defaulted so the panel's existing render tests keep compiling and
     /// asserting unchanged.
     #[props(default)]
     on_open_hub: Callback<RuleHubRequest>,
+    /// The curator's adopt/skip and openness state. Default = nothing skipped, nothing
+    /// opened, which is the opt-out starting position.
+    #[props(default)]
+    model: AdoptionModel,
+    /// Flip one convention between Adopt and Skip. Carries its [`adoption_key`].
+    #[props(default)]
+    on_toggle: Callback<String>,
+    /// The curator OPENED this convention's detail. The ONE writer of the openness record.
+    #[props(default)]
+    on_open: Callback<String>,
+    /// Raise the commit dialog for one destination repository.
+    #[props(default)]
+    on_commit: Callback<String>,
+    /// Show ONLY the adopted-but-unopened rows — the commit dialog's third exit.
+    #[props(default)]
+    only_unopened: bool,
+    /// Leave the unopened-only view.
+    #[props(default)]
+    on_clear_filter: Callback<()>,
+    /// Whether a commit is in flight (disables the commit bars).
+    #[props(default)]
+    busy: bool,
 ) -> Element {
-    use camerata_api_types::audit::FindingKind;
-    if findings.is_empty() {
+    let all = adoptable_conventions(&findings);
+    if all.is_empty() {
         return rsx! {
             p { class: "kind-panel-empty", "No conventions observed in this scan." }
         };
     }
+    let with_exceptions = all.iter().filter(|c| c.deviating_sites > 0).count();
+    // One group per DESTINATION repo, because one commit writes one `AGENTS.md` and the gate
+    // asks for one repository name. A single-repo scan renders one group.
+    let mut by_repo: std::collections::BTreeMap<String, Vec<AdoptableConvention>> =
+        Default::default();
+    for c in &all {
+        by_repo.entry(c.repo.clone()).or_default().push(c.clone());
+    }
     rsx! {
         div { class: "kind-panel",
             p { class: "kind-panel-sub",
-                "Conventions this codebase already follows consistently, with zero violations. Adopting them into the client's derived decision set is a later step."
+                "Conventions this audit derived from the client's own codebase. Adopting one writes it into that repository's AGENTS.md, where it governs how future AI agents work on the code. Adoption is OPT-OUT: every convention below is selected unless you skip it."
             }
-            ul { class: "kind-panel-list",
-                for f in findings.iter() {
-                    {
-                        let label = match &f.kind {
-                            Some(FindingKind::ConventionObserved(c)) => c.convention_label.clone(),
-                            // Unreachable by routing; rendered rather than panicking so a
-                            // routing regression is visible instead of fatal.
-                            _ => String::new(),
-                        };
-                        rsx! {
-                            li { key: "{f.repo}\u{0}{f.rule_id}", class: "kind-panel-row",
-                                {
-                                    let req = RuleHubRequest {
-                                        repo: f.repo.clone(),
-                                        rule_id: f.rule_id.clone(),
-                                    };
-                                    rsx! {
-                                        button {
-                                            class: "rule-hub-link kind-panel-rule",
-                                            title: "Everything this scan knows about {f.rule_id}.",
-                                            onclick: move |_| on_open_hub.call(req.clone()),
-                                            "{f.rule_id}"
+            if with_exceptions > 0 {
+                p { class: "kind-panel-sub adopt-exceptions-note",
+                    "{with_exceptions} of these are conventions the codebase mostly follows; their exceptions are rows on the Queue tab and are counted there, not here. A convention is adoptable whatever its exception count \u{2014} adopting states the standard going forward; remediating the exceptions is separate work."
+                }
+            }
+            if only_unopened {
+                div { class: "adopt-filter-bar",
+                    span { class: "adopt-filter-label", "Showing only what this commit would write without your having opened it." }
+                    button {
+                        class: "btn-ghost adopt-filter-clear",
+                        onclick: move |_| on_clear_filter.call(()),
+                        "Show all"
+                    }
+                }
+            }
+            for (repo , rows) in by_repo.iter() {
+                {
+                    let plan = CommitPlan::conventions(&all, &model, repo);
+                    let unopened: std::collections::BTreeSet<String> =
+                        plan.unopened_rule_ids().into_iter().collect();
+                    let shown: Vec<AdoptableConvention> = if only_unopened {
+                        rows.iter().filter(|c| unopened.contains(&c.rule_id)).cloned().collect()
+                    } else {
+                        rows.clone()
+                    };
+                    rsx! {
+                        div { key: "{repo}", class: "kind-panel-group adopt-group",
+                            p { class: "kind-panel-group-h", "{repo}" }
+                            ul { class: "kind-panel-list",
+                                for c in shown.iter() {
+                                    {
+                                        let key = c.key();
+                                        let adopted = model.is_adopted(&key);
+                                        let opened = model.was_opened(&key);
+                                        let adoptable = c.is_adoptable();
+                                        let req = RuleHubRequest {
+                                            repo: c.repo.clone(),
+                                            rule_id: c.rule_id.clone(),
+                                        };
+                                        let toggle_key = key.clone();
+                                        let open_key = key.clone();
+                                        rsx! {
+                                            li {
+                                                key: "{key}",
+                                                class: if adopted && adoptable { "kind-panel-row adopt-row adopted" } else { "kind-panel-row adopt-row skipped" },
+                                                span {
+                                                    class: if adoptable && adopted { "adopt-state on" } else { "adopt-state off" },
+                                                    if !adoptable {
+                                                        "Cannot write"
+                                                    } else if adopted {
+                                                        "Adopt"
+                                                    } else {
+                                                        "Skipped"
+                                                    }
+                                                }
+                                                button {
+                                                    class: "rule-hub-link kind-panel-rule",
+                                                    title: "Everything this scan knows about {c.rule_id}.",
+                                                    onclick: move |_| on_open_hub.call(req.clone()),
+                                                    "{c.rule_id}"
+                                                }
+                                                span { class: "kind-panel-label", "{c.label}" }
+                                                span { class: "adopt-status", "{c.status_line()}" }
+                                                if !opened {
+                                                    span { class: "adopt-unopened-flag", title: "You have not opened this one.", "not opened" }
+                                                }
+                                                span { class: "kind-panel-repo", "{c.repo}" }
+                                                button {
+                                                    class: "btn-ghost adopt-open",
+                                                    onclick: move |_| on_open.call(open_key.clone()),
+                                                    if opened { "Opened" } else { "Open" }
+                                                }
+                                                if adoptable {
+                                                    button {
+                                                        class: "btn-ghost adopt-toggle",
+                                                        onclick: move |_| on_toggle.call(toggle_key.clone()),
+                                                        if adopted { "Skip" } else { "Adopt" }
+                                                    }
+                                                }
+                                                if opened {
+                                                    div { class: "adopt-detail",
+                                                        p { class: "adopt-detail-line",
+                                                            "Writes \u{201c}{c.label}\u{201d} into {c.repo}'s AGENTS.md as this project's position on {c.rule_id}."
+                                                        }
+                                                        if let Some(reason) = c.blocked_reason() {
+                                                            p { class: "adopt-detail-blocked", "{reason}" }
+                                                        }
+                                                        if c.deviating_sites > 0 {
+                                                            p { class: "adopt-detail-line",
+                                                                "{c.deviating_sites} site(s) do not follow it today. Those are Queue rows under {c.rule_id}; dispositioning them is separate work and does not gate this adoption."
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
-                                span { class: "kind-panel-label", "{label}" }
-                                span { class: "kind-panel-repo", "{f.repo}" }
+                            }
+                            if shown.is_empty() {
+                                p { class: "kind-panel-empty", "Nothing unopened in {repo}." }
+                            }
+                            AdoptCommitBar {
+                                plan,
+                                busy,
+                                on_commit: {
+                                    let repo = repo.clone();
+                                    Callback::new(move |()| on_commit.call(repo.clone()))
+                                },
                             }
                         }
                     }
@@ -5541,69 +5812,350 @@ pub(super) fn ConventionsPanel(
     }
 }
 
+/// The footer under one destination's decision list: what a commit would write, and the button
+/// that raises the gate.
+///
+/// Separate from the dialog on purpose. This bar states the counts WITHOUT the typed
+/// confirmation, so the curator can read "27 to write, 3 skipped, 25 of them never opened"
+/// before committing to the dialog at all — and can go open some of them instead.
+///
+/// Props-only.
+#[component]
+pub(super) fn AdoptCommitBar(
+    /// What a commit for this destination would do.
+    plan: CommitPlan,
+    /// A commit is in flight.
+    #[props(default)]
+    busy: bool,
+    /// Raise the commit dialog.
+    on_commit: Callback<()>,
+) -> Element {
+    let n = plan.adopted_count();
+    let unopened = plan.unopened_count();
+    rsx! {
+        div { class: "adopt-commit-bar",
+            span { class: "adopt-commit-counts", "{plan.counts_line()}" }
+            if unopened > 0 {
+                span { class: "adopt-commit-unopened", "{unopened} not opened" }
+            }
+            button {
+                class: "btn-primary adopt-commit-btn",
+                disabled: n == 0 || busy,
+                onclick: move |_| on_commit.call(()),
+                if n == 0 {
+                    "Nothing selected to write"
+                } else {
+                    "Write {n} into {plan.destination_repo}\u{2026}"
+                }
+            }
+        }
+    }
+}
+
+/// THE COMMIT DIALOG — the gate (owner's Q4, design §13; the reviewed layout mockups).
+///
+/// > "Yes it should be opt out by default, make sure it is thoroughly gated and not an
+/// > accidental click."
+///
+/// Five things the ruling requires, each one visible in the rsx below:
+///
+/// 1. **The destination repository, named.** Not "the repo", not "this project".
+/// 2. **The adopted count and the skipped count.**
+/// 3. **How many were adopted by default and never opened** — the number that matters, and the
+///    one opt-out makes necessary. [`CommitPlan::unopened_count`] is a count of a recorded
+///    gesture, not a ratio or a guess.
+/// 4. **The repository name TYPED, not a checkbox.** A checkbox is muscle memory at 1am; typing
+///    the destination cannot be done without reading it. The predicate is core's
+///    [`commit_gate`] and the button reads nothing else.
+/// 5. **Three exits.** Cancel, Review the unopened set, Commit. The safer path is offered
+///    rather than only implied — which is the whole reason the third exit exists.
+///
+/// The third exit is hidden when there is nothing unopened to review, per the standing
+/// hide-dead-end-affordances rule: a button that filters to an empty list is the 403-button bug
+/// in miniature.
+///
+/// Props-only. SSR renders every state: untyped, mismatched, armed, empty, busy.
+#[component]
+pub(super) fn ConventionCommitDialog(
+    /// Exactly what the commit will do.
+    plan: CommitPlan,
+    /// What the curator has typed into the destination field so far.
+    typed: String,
+    /// The commit is in flight; every exit is disabled rather than hidden.
+    #[props(default)]
+    busy: bool,
+    /// The destination field changed.
+    on_typed: Callback<String>,
+    /// Exit 1 — close, write nothing.
+    on_cancel: Callback<()>,
+    /// Exit 2 — close, and filter the panel to the rules this commit would write unopened.
+    on_review_unopened: Callback<()>,
+    /// Exit 3 — write. Only ever called when [`commit_gate`] is armed; the handler re-checks.
+    on_commit: Callback<()>,
+) -> Element {
+    let gate = commit_gate(&plan, &typed);
+    let armed = gate.is_armed();
+    let unopened = plan.unopened_count();
+    let destination = plan.destination_repo.clone();
+    rsx! {
+        div { class: "rule-modal-overlay adopt-dialog-overlay",
+            div {
+                class: "rule-modal adopt-dialog",
+                role: "dialog",
+                "aria-modal": "true",
+                onclick: move |e| e.stop_propagation(),
+                div { class: "rule-modal-head",
+                    span { class: "rule-modal-id", "Write to {destination}" }
+                }
+                p { class: "adopt-dialog-headline", "{plan.headline()}" }
+                p { class: "adopt-dialog-dest",
+                    "Destination repository: "
+                    span { class: "adopt-dialog-dest-name", "{destination}" }
+                }
+                p { class: "adopt-dialog-counts", "{plan.counts_line()}" }
+                if let Some(warning) = plan.unopened_warning() {
+                    p { class: "adopt-dialog-warning", "{warning}" }
+                }
+                ul { class: "adopt-dialog-list",
+                    for rule in plan.adopted.iter() {
+                        li { key: "{rule.rule_id}", class: "adopt-dialog-item",
+                            span { class: "adopt-dialog-item-rule", "{rule.rule_id}" }
+                            span { class: "adopt-dialog-item-label", "{rule.label}" }
+                            if !rule.opened {
+                                span { class: "adopt-unopened-flag", "not opened" }
+                            }
+                        }
+                    }
+                }
+                label { class: "adopt-dialog-confirm-label", r#for: "adopt-dialog-confirm",
+                    "Type {destination} to confirm the destination."
+                }
+                input {
+                    id: "adopt-dialog-confirm",
+                    class: "adopt-dialog-confirm-input",
+                    r#type: "text",
+                    autofocus: true,
+                    autocomplete: "off",
+                    placeholder: "{destination}",
+                    value: "{typed}",
+                    disabled: busy,
+                    oninput: move |e| on_typed.call(e.value()),
+                }
+                if let Some(hint) = gate.hint(&destination) {
+                    p { class: "adopt-dialog-hint", "{hint}" }
+                }
+                div { class: "adopt-dialog-exits",
+                    button {
+                        class: "btn-ghost adopt-dialog-cancel",
+                        disabled: busy,
+                        onclick: move |_| on_cancel.call(()),
+                        "Cancel"
+                    }
+                    if unopened > 0 {
+                        button {
+                            class: "btn-ghost adopt-dialog-review",
+                            disabled: busy,
+                            onclick: move |_| on_review_unopened.call(()),
+                            "Review the {unopened} not opened"
+                        }
+                    }
+                    button {
+                        class: if armed { "btn-primary adopt-dialog-commit armed" } else { "btn-primary adopt-dialog-commit shut" },
+                        // The ONLY predicate. `commit_gate` is the same function the hint
+                        // above reads, so a dialog that says "type the name" while offering a
+                        // live button is unreachable.
+                        disabled: !armed || busy,
+                        onclick: move |_| {
+                            if armed {
+                                on_commit.call(());
+                            }
+                        },
+                        if busy { "Writing\u{2026}" } else { "Commit" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One `NoConvention` option pick, as the panel raises it.
+#[derive(Clone, PartialEq, Debug)]
+pub(super) struct RecommendationPick {
+    /// The rule's [`adoption_key`].
+    pub key: String,
+    /// The authored option to recommend, or `None` for "leave as reported".
+    pub option_id: Option<String>,
+}
+
 /// NO CONVENTION panel — `NoConvention` rows: the codebase is inconsistent with no clear
 /// majority. Exactly one row per rule (A5.3), listing the options actually observed with their
 /// site counts where the producer could count them.
 ///
-/// Read-only at this stage. Picking a recommended option is a CLIENT-FACING governance act
-/// (Zach's Q3 ruling) and inherits the typed-destination commit gate, which is a later step.
+/// ## Picking an option is a GOVERNANCE ACT, and the panel says so
+///
+/// The owner's Q3 ruling:
+///
+/// > a `NoConvention` option pick IS client-facing. It feeds the derived decision set, so it is
+/// > a governance act and must say so in the UI. It therefore inherits Q4's gating: the same
+/// > typed-destination confirm, the same honest count of what was not opened.
+///
+/// So a pick here produces the SAME [`AdoptedRule`] an adoption produces, travels the same
+/// [`CommitPlan`] and passes the same [`ConventionCommitDialog`]. The one difference is the
+/// default, and it runs the other way: **"Leave as reported" is pre-selected.** Nothing is
+/// written unless the curator chooses something, because unlike a convention the audit did not
+/// derive an answer here — it found a split, and inventing a default would be the UI picking
+/// the client's standard for them.
+///
+/// NO SEVERITY, here or anywhere informational (design §9.4).
 #[component]
 pub(super) fn NoConventionPanel(
     findings: Vec<FindingView>,
     /// Open the RULE HUB on a listed rule. See [`ConventionsPanel`].
     #[props(default)]
     on_open_hub: Callback<RuleHubRequest>,
+    /// The curator's picks and openness record. Default = everything left as reported.
+    #[props(default)]
+    model: AdoptionModel,
+    /// A pick changed.
+    #[props(default)]
+    on_recommend: Callback<RecommendationPick>,
+    /// The curator OPENED this rule's detail. The ONE writer of the openness record.
+    #[props(default)]
+    on_open: Callback<String>,
+    /// Raise the commit dialog for one destination repository.
+    #[props(default)]
+    on_commit: Callback<String>,
+    /// A commit is in flight.
+    #[props(default)]
+    busy: bool,
 ) -> Element {
-    use camerata_api_types::audit::FindingKind;
-    if findings.is_empty() {
+    let all = split_rules(&findings);
+    if all.is_empty() {
         return rsx! {
             p { class: "kind-panel-empty", "Every assessed rule reached a convention \u{2014} nothing split." }
         };
     }
+    let mut by_repo: std::collections::BTreeMap<String, Vec<SplitRule>> = Default::default();
+    for r in &all {
+        by_repo.entry(r.repo.clone()).or_default().push(r.clone());
+    }
+    // The prose the detail row needs when the producer enumerated nothing. Keyed the same way
+    // the rules are, so a row with no options still shows its own honest explanation.
+    let detail_of: std::collections::BTreeMap<String, String> = findings
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.kind,
+                Some(camerata_api_types::audit::FindingKind::NoConvention(_))
+            )
+        })
+        .map(|f| (adoption_key(&f.repo, &f.rule_id), f.detail.clone()))
+        .collect();
     rsx! {
         div { class: "kind-panel",
             p { class: "kind-panel-sub",
-                "Rules where the codebase is split with no clear majority. Recommending an option going forward is a governance act and is a later step."
+                "Rules where the codebase is split with no clear majority. Recommending an option is a CLIENT-FACING governance act, not a note to yourself: it is written into that repository's AGENTS.md and governs how future AI agents work on the code. The default is to leave the split as reported and write nothing."
             }
-            ul { class: "kind-panel-list",
-                for f in findings.iter() {
-                    {
-                        let options: Vec<String> = match &f.kind {
-                            Some(FindingKind::NoConvention(n)) => n
-                                .observed_options
-                                .iter()
-                                .map(|o| match o.sites {
-                                    Some(n) => format!("{} ({n} sites)", o.label),
-                                    // "observed but not counted" is the honest rendering; a
-                                    // fabricated count here would be exactly the dishonesty
-                                    // the structured taxonomy exists to prevent.
-                                    None => o.label.clone(),
-                                })
-                                .collect(),
-                            _ => Vec::new(),
-                        };
-                        rsx! {
-                            li { key: "{f.repo}\u{0}{f.rule_id}", class: "kind-panel-row",
-                                {
-                                    let req = RuleHubRequest {
-                                        repo: f.repo.clone(),
-                                        rule_id: f.rule_id.clone(),
-                                    };
-                                    rsx! {
-                                        button {
-                                            class: "rule-hub-link kind-panel-rule",
-                                            title: "Everything this scan knows about {f.rule_id}.",
-                                            onclick: move |_| on_open_hub.call(req.clone()),
-                                            "{f.rule_id}"
+            for (repo , rows) in by_repo.iter() {
+                {
+                    let plan = CommitPlan::recommendations(&all, &model, repo);
+                    rsx! {
+                        div { key: "{repo}", class: "kind-panel-group adopt-group",
+                            p { class: "kind-panel-group-h", "{repo}" }
+                            ul { class: "kind-panel-list",
+                                for r in rows.iter() {
+                                    {
+                                        let key = r.key();
+                                        let picked = model.recommendation(&key).map(str::to_string);
+                                        let opened = model.was_opened(&key);
+                                        let req = RuleHubRequest {
+                                            repo: r.repo.clone(),
+                                            rule_id: r.rule_id.clone(),
+                                        };
+                                        let open_key = key.clone();
+                                        let pick_key = key.clone();
+                                        let options = r.options.clone();
+                                        let summary: Vec<String> = r
+                                            .options
+                                            .iter()
+                                            .filter_map(|(id, _, _)| r.option_line(id))
+                                            .collect();
+                                        let detail = detail_of.get(&key).cloned().unwrap_or_default();
+                                        rsx! {
+                                            li {
+                                                key: "{key}",
+                                                class: if picked.is_some() { "kind-panel-row adopt-row adopted" } else { "kind-panel-row adopt-row skipped" },
+                                                span {
+                                                    class: if picked.is_some() { "adopt-state on" } else { "adopt-state off" },
+                                                    if picked.is_some() { "Recommend" } else { "Leave as reported" }
+                                                }
+                                                button {
+                                                    class: "rule-hub-link kind-panel-rule",
+                                                    title: "Everything this scan knows about {r.rule_id}.",
+                                                    onclick: move |_| on_open_hub.call(req.clone()),
+                                                    "{r.rule_id}"
+                                                }
+                                                if summary.is_empty() {
+                                                    span { class: "kind-panel-label", "{detail}" }
+                                                } else {
+                                                    span { class: "kind-panel-label", "{summary.join(\" \u{00b7} \")}" }
+                                                }
+                                                if picked.is_some() && !opened {
+                                                    span { class: "adopt-unopened-flag", title: "You have not opened this one.", "not opened" }
+                                                }
+                                                span { class: "kind-panel-repo", "{r.repo}" }
+                                                button {
+                                                    class: "btn-ghost adopt-open",
+                                                    onclick: move |_| on_open.call(open_key.clone()),
+                                                    if opened { "Opened" } else { "Open" }
+                                                }
+                                                select {
+                                                    class: "adopt-pick",
+                                                    // "Leave as reported" is the first entry AND the
+                                                    // default, so the keyboard-first gesture on an
+                                                    // untouched row changes nothing.
+                                                    value: picked.clone().unwrap_or_default(),
+                                                    onchange: move |e| {
+                                                        let v = e.value();
+                                                        on_recommend
+                                                            .call(RecommendationPick {
+                                                                key: pick_key.clone(),
+                                                                option_id: if v.is_empty() { None } else { Some(v) },
+                                                            });
+                                                    },
+                                                    option { value: "", "Leave as reported" }
+                                                    for (id , label , sites) in options.iter() {
+                                                        option { key: "{id}", value: "{id}",
+                                                            if let Some(n) = sites {
+                                                                "Recommend: {label} ({n} sites)"
+                                                            } else {
+                                                                "Recommend: {label}"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if opened {
+                                                    div { class: "adopt-detail",
+                                                        p { class: "adopt-detail-line",
+                                                            "Nothing is written for this rule unless you recommend an option. A recommendation becomes {r.repo}'s stated position on {r.rule_id} in its AGENTS.md."
+                                                        }
+                                                        if !detail.is_empty() {
+                                                            p { class: "adopt-detail-line", "{detail}" }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
-                                if options.is_empty() {
-                                    span { class: "kind-panel-label", "{f.detail}" }
-                                } else {
-                                    span { class: "kind-panel-label", "{options.join(\" \u{00b7} \")}" }
-                                }
-                                span { class: "kind-panel-repo", "{f.repo}" }
+                            }
+                            AdoptCommitBar {
+                                plan,
+                                busy,
+                                on_commit: {
+                                    let repo = repo.clone();
+                                    Callback::new(move |()| on_commit.call(repo.clone()))
+                                },
                             }
                         }
                     }
@@ -5961,6 +6513,19 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let mut hub_open = use_signal(|| Option::<RuleHubRequest>::None);
     let mut queue_rule_filter = use_signal(|| Option::<String>::None);
     let mut processing = use_signal(|| false);
+    // ── THE GATED CONVENTION COMMIT (design §3; Q3 + Q4) ──────────────────────
+    // The curator's adopt/skip state, his openness record, and his `NoConvention` picks. One
+    // model serves both informational panels because a pick and an adoption write the same
+    // thing by the same path (Q3).
+    //
+    // Session state, like `kind_view` and `hub_open`, and deliberately NOT in the draft. The
+    // openness record in particular must not be restored: "I opened this one" is a claim
+    // about THIS sitting, and a stale one would quietly shrink the number the whole gate
+    // exists to show.
+    let mut adoption = use_signal(AdoptionModel::new);
+    let mut commit_dialog = use_signal(|| Option::<CommitDialogState>::None);
+    let mut unopened_only = use_signal(|| false);
+    let mut committing = use_signal(|| false);
 
     // ── Auto-save / restore the onboarding draft (issue #27) ──────────────────
     // On mount, rehydrate this scan's audit / selection / dispositions / view from the saved
@@ -6135,6 +6700,96 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                     hub_open.set(None);
                 }),
                 on_close: Callback::new(move |()| hub_open.set(None)),
+            }
+        }
+        // THE COMMIT DIALOG (Q4's gate). Hosted at the results-subtree root for the same
+        // reason the hub is: an overlay that is a sibling of a chorale table left a ghost
+        // click-eater in the desktop webview.
+        //
+        // ON FOCUS AND THE PANE'S KEYS. The dialog takes keyboard focus, and the destination
+        // it asks the curator to type contains `c`, `i`, `t` and `f` more often than not. It
+        // cannot arm the detail pane's disposition keys, for two independent reasons, and
+        // both are asserted rather than assumed:
+        //
+        //  * STRUCTURAL — the dialog is raised only from the Conventions and No-convention
+        //    panels, which render in the `else if` branches where `FindingsTable` (and so the
+        //    pane, and so the keydown handler that lives on it) is not mounted at all.
+        //  * BY CONSTRUCTION — `pane_command`'s scope gate is unconditional: anything but
+        //    `PaneFocus::Cursor` returns `None` for every key, and the dialog's input is not
+        //    the pane's cursor. `pane_keys_armed` is DEFINED as that same call, so the
+        //    indicator cannot disagree with the handler.
+        if let Some(dialog) = commit_dialog() {
+            {
+                let plan = match dialog.surface {
+                    KindSurface::NoConvention => CommitPlan::recommendations(
+                        &split_rules(&findings),
+                        &adoption.read(),
+                        &dialog.destination,
+                    ),
+                    _ => CommitPlan::conventions(
+                        &adoptable_conventions(&findings),
+                        &adoption.read(),
+                        &dialog.destination,
+                    ),
+                };
+                let typed = dialog.typed.clone();
+                let commit_plan = plan.clone();
+                let project_id_commit = project_id.clone();
+                rsx! {
+                    ConventionCommitDialog {
+                        plan,
+                        typed: typed.clone(),
+                        busy: committing(),
+                        on_typed: Callback::new(move |v: String| {
+                            if let Some(d) = commit_dialog.write().as_mut() {
+                                d.typed = v;
+                            }
+                        }),
+                        on_cancel: Callback::new(move |()| commit_dialog.set(None)),
+                        // Exit 2 — the safer path, offered rather than implied. It closes the
+                        // dialog and narrows the panel to exactly the rules the commit would
+                        // write unopened. It does NOT mark them opened: that would be the gate
+                        // clearing its own warning.
+                        on_review_unopened: Callback::new(move |()| {
+                            unopened_only.set(true);
+                            commit_dialog.set(None);
+                        }),
+                        on_commit: Callback::new(move |()| {
+                            // THE ENFORCEMENT. The button's `disabled` attribute is a hint to
+                            // the eye; this re-check is what actually holds, and it reads the
+                            // same `commit_gate` the dialog rendered.
+                            let typed = commit_dialog
+                                .peek()
+                                .as_ref()
+                                .map(|d| d.typed.clone())
+                                .unwrap_or_default();
+                            if !commit_gate(&commit_plan, &typed).is_armed() {
+                                return;
+                            }
+                            let project_id = project_id_commit.clone();
+                            let destination = commit_plan.destination_repo.clone();
+                            let adopted = commit_plan.adopted.clone();
+                            committing.set(true);
+                            spawn(async move {
+                                let (ok, msg) =
+                                    commit_adoptions(&project_id, &destination, &adopted).await;
+                                committing.set(false);
+                                if ok {
+                                    commit_dialog.set(None);
+                                }
+                                crate::toast::push_toast(
+                                    toasts,
+                                    if ok {
+                                        crate::toast::ToastKind::Info
+                                    } else {
+                                        crate::toast::ToastKind::Error
+                                    },
+                                    msg,
+                                );
+                            });
+                        }),
+                    }
+                }
             }
         }
         // Finding-detail modal: click any findings row to read the violated rule's full
@@ -7046,14 +7701,52 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         }
                     }
                 } else if kind_view() == KindSurface::Conventions {
+                    // The WHOLE finding set, not this surface's rows: per §13 the convention
+                    // behind a rule's Deviation rows is adoptable too, and those rows live on
+                    // the Queue. `adoptable_conventions` does the routing.
                     ConventionsPanel {
-                        findings: findings_on_surface(&findings, KindSurface::Conventions),
+                        findings: findings.clone(),
                         on_open_hub: Callback::new(move |r: RuleHubRequest| hub_open.set(Some(r))),
+                        model: adoption(),
+                        busy: committing(),
+                        only_unopened: unopened_only(),
+                        on_clear_filter: Callback::new(move |()| unopened_only.set(false)),
+                        on_toggle: Callback::new(move |key: String| {
+                            adoption.write().toggle_adopted(&key);
+                        }),
+                        // THE ONE WRITER of the openness record. Nothing else in this file
+                        // calls `mark_opened`, which is what makes the dialog's "not opened"
+                        // count a record of a gesture rather than an inference.
+                        on_open: Callback::new(move |key: String| {
+                            adoption.write().mark_opened(&key);
+                        }),
+                        on_commit: Callback::new(move |repo: String| {
+                            commit_dialog.set(Some(CommitDialogState {
+                                surface: KindSurface::Conventions,
+                                destination: repo,
+                                typed: String::new(),
+                            }));
+                        }),
                     }
                 } else if kind_view() == KindSurface::NoConvention {
                     NoConventionPanel {
                         findings: findings_on_surface(&findings, KindSurface::NoConvention),
                         on_open_hub: Callback::new(move |r: RuleHubRequest| hub_open.set(Some(r))),
+                        model: adoption(),
+                        busy: committing(),
+                        on_recommend: Callback::new(move |pick: RecommendationPick| {
+                            adoption.write().set_recommendation(&pick.key, pick.option_id);
+                        }),
+                        on_open: Callback::new(move |key: String| {
+                            adoption.write().mark_opened(&key);
+                        }),
+                        on_commit: Callback::new(move |repo: String| {
+                            commit_dialog.set(Some(CommitDialogState {
+                                surface: KindSurface::NoConvention,
+                                destination: repo,
+                                typed: String::new(),
+                            }));
+                        }),
                     }
                 } else {
                     NotAssessedPanel {

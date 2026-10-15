@@ -2638,6 +2638,85 @@ html, body {
   color: var(--ink-soft); margin: 0 0 5px;
 }
 
+/* THE GATED CONVENTION COMMIT (design §3; the owner's Q3 + Q4 rulings). Adoption is opt-out,
+   so the two things that must be legible at a glance are (a) which rows are selected and
+   (b) which selected rows the curator has never opened. The "not opened" flag is therefore
+   loud, and it is the same flag in the panel and in the dialog's list. */
+.adopt-exceptions-note { color: var(--ink-faint); }
+.adopt-group { margin-bottom: 18px; }
+.adopt-row { align-items: center; }
+.adopt-row.skipped { opacity: .62; }
+.adopt-state {
+  font-size: 10.5px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase;
+  border-radius: 5px; padding: 2px 7px; white-space: nowrap;
+}
+.adopt-state.on { color: #14532d; background: #bbf7d0; }
+.adopt-state.off { color: var(--ink-soft); background: var(--paper); border: 1px solid var(--line); }
+.adopt-status { font-size: 11.5px; color: var(--ink-soft); white-space: nowrap; }
+.adopt-unopened-flag {
+  font-size: 10.5px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase;
+  color: #92400e; background: #fde68a; border-radius: 5px; padding: 2px 7px; white-space: nowrap;
+}
+.adopt-open, .adopt-toggle { font-size: 11.5px; padding: 3px 9px; }
+.adopt-pick { font-size: 12px; padding: 3px 6px; max-width: 280px; }
+.adopt-detail {
+  flex: 1 1 100%; margin-top: 6px; padding: 8px 10px;
+  background: var(--paper); border-radius: 7px; border: 1px solid var(--line);
+}
+.adopt-detail-line { margin: 0 0 5px; font-size: 12px; color: var(--ink-soft); line-height: 1.55; }
+.adopt-detail-line:last-child { margin-bottom: 0; }
+.adopt-detail-blocked { margin: 0 0 5px; font-size: 12px; color: #92400e; line-height: 1.55; }
+.adopt-filter-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 10px; padding: 7px 11px; border-radius: 7px;
+  background: rgba(253,230,138,.28); border: 1px solid #fde68a;
+}
+.adopt-filter-label { font-size: 12px; color: var(--ink); }
+.adopt-filter-clear { font-size: 11.5px; padding: 3px 9px; }
+.adopt-commit-bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 8px; padding: 9px 11px; border-radius: 7px;
+  background: var(--paper); border: 1px solid var(--line);
+}
+.adopt-commit-counts { font-size: 12px; color: var(--ink-soft); flex: 1 1 auto; }
+.adopt-commit-unopened {
+  font-size: 11px; font-weight: 700; color: #92400e; background: #fde68a;
+  border-radius: 5px; padding: 2px 8px;
+}
+.adopt-commit-btn { font-size: 12.5px; }
+
+/* The dialog. Narrower than the rule modal and deliberately dense: every line in it is a
+   fact the curator has to read before typing the destination. */
+.adopt-dialog { max-width: 560px; }
+.adopt-dialog-headline { margin: 12px 0 10px; font-size: 14px; font-weight: 700; color: var(--ink); line-height: 1.5; }
+.adopt-dialog-dest { margin: 0 0 6px; font-size: 12.5px; color: var(--ink-soft); }
+.adopt-dialog-dest-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700;
+  color: var(--accent-ink);
+}
+.adopt-dialog-counts { margin: 0 0 10px; font-size: 12px; color: var(--ink-soft); }
+.adopt-dialog-warning {
+  margin: 0 0 12px; padding: 9px 11px; border-radius: 7px; line-height: 1.55;
+  font-size: 12.5px; font-weight: 600; color: #92400e;
+  background: #fde68a; border: 1px solid #f59e0b;
+}
+.adopt-dialog-list {
+  list-style: none; margin: 0 0 14px; padding: 0; max-height: 180px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 1px;
+}
+.adopt-dialog-item { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; font-size: 11.5px; padding: 3px 0; }
+.adopt-dialog-item-rule { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; }
+.adopt-dialog-item-label { color: var(--ink-soft); flex: 1 1 auto; }
+.adopt-dialog-confirm-label { display: block; margin: 0 0 6px; font-size: 12.5px; color: var(--ink); }
+.adopt-dialog-confirm-input {
+  width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+}
+.adopt-dialog-hint { margin: 7px 0 0; font-size: 12px; color: var(--ink-soft); line-height: 1.5; }
+.adopt-dialog-exits { display: flex; justify-content: flex-end; gap: 9px; flex-wrap: wrap; margin-top: 16px; }
+.adopt-dialog-commit.shut { opacity: .5; }
+
 /* One-rule-one-surface invariant violation: a PIPELINE bug, surfaced rather than tolerated. */
 .kind-conflict-banner {
   margin: 10px 0 14px; padding: 11px 14px; border-radius: 9px;
