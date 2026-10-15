@@ -4743,6 +4743,174 @@ pub(super) fn stage_or_clear_override(
     }
 }
 
+/// ONE multi-option rule's ALTERNATIVES CONTROL LINE, flattened into exactly what renders.
+///
+/// Flat, owned, `PartialEq` data rather than the three sources it is joined from
+/// (`ProposedRuleView`, `RuleRecommendationView`, the staged-override map) — the same shape,
+/// and the same reason, as `DetailPaneRow` and `DeviationBulkRow`. Every judgement (which
+/// option the rule is CURRENTLY evaluated against, which badge that earns, whether the
+/// override is staged) is made once in [`alternative_controls_row`] and unit-tested there;
+/// the component chooses words and pixels.
+///
+/// Built as a precondition of design §9.1, which moves this line off the standalone panel and
+/// into the surfaces that describe the rule. A line that can only be produced inside one
+/// component's render body cannot move anywhere.
+#[derive(Clone, PartialEq)]
+pub(super) struct AlternativeControlsRow {
+    pub rule_id: String,
+    pub title: String,
+    /// How many of this scan's findings are attributed to this rule. Zero is a normal and
+    /// important value: a multi-option rule the codebase fully complies with still needs
+    /// reviewing, because the review is of the OPTION, not of the violations.
+    pub finding_count: usize,
+    /// The option the rule is evaluated against RIGHT NOW, resolved in priority order:
+    /// a staged override, else the option the findings were actually produced under, else
+    /// the AI's recommendation, else the rule's declared default.
+    pub evaluated_option_id: String,
+    /// That option's authored label, or `(none)` when the id matches no option on the rule.
+    pub evaluated_label: String,
+    pub badge_class: &'static str,
+    pub badge_text: &'static str,
+    /// An override is staged for this rule and has not been rescanned yet.
+    pub staged: bool,
+    /// The architect has explicitly accepted this rule's current pick in this session.
+    pub accepted: bool,
+    /// The model judged the rule applicable to this repo. `false` renders a warning.
+    pub applicable: bool,
+    /// The `file:line` citation the model grounded its pick in, when it gave one.
+    pub evidence: Option<String>,
+    /// `(option_id, label)` for the Change select, in the rule's own order.
+    pub options: Vec<(String, String)>,
+    /// The model's reasoning, for the Why? modal.
+    pub reasoning: String,
+    /// The model's raw answer was not a real option and the pick shown is a fallback.
+    pub hallucinated: bool,
+}
+
+/// Build one rule's control line out of the scan's three sources. PURE, so the priority order
+/// below is unit-testable rather than buried in a render body.
+///
+/// `evaluated_by_rule` maps rule id -> the option id that rule's findings were produced under
+/// (every finding for one rule shares it); `staged` is the pending override, if any.
+pub(super) fn alternative_controls_row(
+    rule: &ProposedRuleView,
+    rec: &RuleRecommendationView,
+    finding_count: usize,
+    evaluated_in_findings: Option<&str>,
+    staged: Option<&str>,
+    accepted: bool,
+) -> AlternativeControlsRow {
+    // THE PRIORITY ORDER, and why it is this way round. A staged override wins because it is
+    // what the next rescan will use and the curator needs to see what he just picked. Below
+    // that, the option the FINDINGS were produced under beats the AI's recommendation,
+    // because a prior rescan can have already applied an override that the recommendation
+    // field does not know about — showing the recommendation there would describe the scan
+    // the curator is NOT looking at.
+    let evaluated_option_id = staged
+        .map(str::to_string)
+        .or_else(|| evaluated_in_findings.map(str::to_string))
+        .or_else(|| Some(rec.recommended_option_id.clone()).filter(|s| !s.is_empty()))
+        .or_else(|| rule.default_option.clone())
+        .unwrap_or_default();
+    let evaluated_label = rule
+        .options
+        .iter()
+        .find(|o| o.id == evaluated_option_id)
+        .map(|o| o.label.clone())
+        .unwrap_or_else(|| "(none)".to_string());
+    let (badge_class, badge_text) = if staged.is_some() {
+        ("rec-badge rec-badge-pending", "Override, pending rescan")
+    } else if rec.operator_chosen {
+        ("rec-badge rec-badge-yours", "Your choice")
+    } else {
+        ("rec-badge rec-badge-ai", "AI recommended")
+    };
+    AlternativeControlsRow {
+        rule_id: rule.id.clone(),
+        title: rule.title.clone(),
+        finding_count,
+        evaluated_option_id,
+        evaluated_label,
+        badge_class,
+        badge_text,
+        staged: staged.is_some(),
+        accepted,
+        applicable: rec.applicable,
+        evidence: rec.evidence.clone().filter(|e| !e.is_empty()),
+        options: rule
+            .options
+            .iter()
+            .map(|o| (o.id.clone(), o.label.clone()))
+            .collect(),
+        reasoning: rec.recommendation_reasoning.clone(),
+        hallucinated: rec.hallucinated,
+    }
+}
+
+/// THE ALTERNATIVES CONTROL LINE, rendered (design §4's group-header line, §9.1's relocation).
+///
+/// > Evaluated against: URI-versioned endpoints (AI recommended) · Why? · Change
+///
+/// Props-only, so SSR can render it in every badge state — including the two a click would be
+/// needed to reach through the panel (an override staged, and an accepted rule). That is the
+/// same discipline `ProcessGate`, `DeviationBulkBar` and `FindingDetailPane` are built on, and
+/// it is what makes §9.1's relocation checkable rather than hopeful: the line can now be
+/// rendered anywhere a rule id is, and asserted on wherever it lands.
+#[component]
+pub(super) fn RuleAlternativeControls(
+    row: AlternativeControlsRow,
+    /// Open the Why? modal for this rule.
+    on_why: Callback<()>,
+    /// The curator picked an option in the Change select. Invoked with the picked option id;
+    /// the caller decides whether that stages an override or clears one
+    /// (see [`stage_or_clear_override`]).
+    on_pick: Callback<String>,
+) -> Element {
+    let evaluated_id = row.evaluated_option_id.clone();
+    rsx! {
+        div { class: "rec-row", key: "{row.rule_id}",
+            div { class: "rec-row-main",
+                span { class: "rec-row-id", "{row.rule_id}" }
+                span { class: "rec-row-title", "{row.title}" }
+                span { class: "rec-row-count",
+                    if row.finding_count == 0 { "0 findings" } else { "{row.finding_count} finding(s)" }
+                }
+            }
+            div { class: "rec-line",
+                "Evaluated against: "
+                strong { "{row.evaluated_label}" }
+                span { class: "{row.badge_class}", "{row.badge_text}" }
+                if row.accepted {
+                    span { class: "rec-badge rec-badge-accepted", "Accepted" }
+                }
+                if !row.applicable {
+                    span { class: "rec-not-applicable", "Not applicable to this repo" }
+                }
+                button {
+                    class: "btn-edit-sm rec-why",
+                    onclick: move |_| on_why.call(()),
+                    "Why?"
+                }
+            }
+            // Evidence (P7): the file:line citation the model grounded its pick in — "a wrong
+            // pick costs a glance, not a false finding". Absent for legacy reports and
+            // operator-forced picks with no model evidence, so this line only renders when
+            // present.
+            if let Some(ev) = row.evidence.clone() {
+                span { class: "rec-evidence", "Evidence: {ev}" }
+            }
+            select {
+                class: "rec-select",
+                value: "{evaluated_id}",
+                onchange: move |e: Event<FormData>| on_pick.call(e.value()),
+                for (id , label) in row.options.iter() {
+                    option { key: "{id}", value: "{id}", "{label}" }
+                }
+            }
+        }
+    }
+}
+
 /// The "Why?" explanation modal: shows the recommendation's reasoning (or a fallback note if
 /// none was recorded) plus a hallucination notice when the model's raw answer had to be
 /// corrected. Extracted out of `RuleAlternativesPanel` as its own props-only component so it
@@ -4908,79 +5076,32 @@ pub(super) fn RuleAlternativesPanel(
                         let rid_for_select = rid.clone();
                         let rid_for_why = rid.clone();
                         let rec = recommendations.get(&rid).cloned().unwrap_or_default();
-                        let count = finding_counts.get(&rid).copied().unwrap_or(0);
-                        let staged = pending.read().get(&rid).cloned();
-                        let is_pending = staged.is_some();
-                        let evaluated_id = staged
-                            .clone()
-                            .or_else(|| evaluated_by_rule.get(&rid).cloned())
-                            .or_else(|| {
-                                Some(rec.recommended_option_id.clone()).filter(|s| !s.is_empty())
-                            })
-                            .or_else(|| r.default_option.clone())
-                            .unwrap_or_default();
-                        let evaluated_label = r
-                            .options
-                            .iter()
-                            .find(|o| o.id == evaluated_id)
-                            .map(|o| o.label.clone())
-                            .unwrap_or_else(|| "(none)".to_string());
-                        let is_accepted = accepted_ids.read().contains(&rid);
-                        let (badge_cls, badge_text) = if is_pending {
-                            ("rec-badge rec-badge-pending", "Override, pending rescan")
-                        } else if rec.operator_chosen {
-                            ("rec-badge rec-badge-yours", "Your choice")
-                        } else {
-                            ("rec-badge rec-badge-ai", "AI recommended")
-                        };
-                        let select_value = staged.unwrap_or_else(|| evaluated_id.clone());
+                        // ONE derivation, shared with every other surface that will render
+                        // this line (design §9.1). The priority order that resolves
+                        // "evaluated against" used to live inline here; it is now
+                        // `alternative_controls_row`, pure and unit-tested.
+                        let row = alternative_controls_row(
+                            r,
+                            &rec,
+                            finding_counts.get(&rid).copied().unwrap_or(0),
+                            evaluated_by_rule.get(&rid).map(String::as_str),
+                            pending.read().get(&rid).map(String::as_str),
+                            accepted_ids.read().contains(&rid),
+                        );
+                        let evaluated_id = row.evaluated_option_id.clone();
                         rsx! {
-                            div { class: "rec-row", key: "{rid}",
-                                div { class: "rec-row-main",
-                                    span { class: "rec-row-id", "{r.id}" }
-                                    span { class: "rec-row-title", "{r.title}" }
-                                    span { class: "rec-row-count",
-                                        if count == 0 { "0 findings" } else { "{count} finding(s)" }
-                                    }
-                                }
-                                div { class: "rec-line",
-                                    "Evaluated against: "
-                                    strong { "{evaluated_label}" }
-                                    span { class: "{badge_cls}", "{badge_text}" }
-                                    if is_accepted {
-                                        span { class: "rec-badge rec-badge-accepted", "Accepted" }
-                                    }
-                                    if !rec.applicable {
-                                        span { class: "rec-not-applicable", "Not applicable to this repo" }
-                                    }
-                                    button {
-                                        class: "btn-edit-sm",
-                                        onclick: move |_| why_open.set(Some(rid_for_why.clone())),
-                                        "Why?"
-                                    }
-                                }
-                                // Evidence (P7): the file:line citation the model grounded its
-                                // pick in — "a wrong pick costs a glance, not a false finding".
-                                // Absent for legacy reports / operator-forced picks with no
-                                // model evidence, so this line only renders when present.
-                                if let Some(ev) = rec.evidence.as_ref().filter(|e| !e.is_empty()) {
-                                    span { class: "rec-evidence", "Evidence: {ev}" }
-                                }
-                                select {
-                                    class: "rec-select",
-                                    value: "{select_value}",
-                                    onchange: move |e: Event<FormData>| {
-                                        stage_or_clear_override(
-                                            &mut pending.write(),
-                                            &rid_for_select,
-                                            &evaluated_id,
-                                            &e.value(),
-                                        );
-                                    },
-                                    for o in r.options.iter() {
-                                        option { key: "{o.id}", value: "{o.id}", "{o.label}" }
-                                    }
-                                }
+                            RuleAlternativeControls {
+                                key: "{rid}",
+                                row,
+                                on_why: Callback::new(move |()| why_open.set(Some(rid_for_why.clone()))),
+                                on_pick: Callback::new(move |picked: String| {
+                                    stage_or_clear_override(
+                                        &mut pending.write(),
+                                        &rid_for_select,
+                                        &evaluated_id,
+                                        &picked,
+                                    );
+                                }),
                             }
                         }
                     }
@@ -11397,6 +11518,130 @@ mod render_tests {
         }
         assert!(html.contains(">Severity<"), "Severity header; html=\n{html}");
         assert!(html.contains(">Authority<"), "Authority header; html=\n{html}");
+    }
+
+    /// req_pass2_13 (§9.1, precondition): `alternative_controls_row` resolves "Evaluated
+    /// against" in the one priority order the product means, and nothing else re-derives it.
+    ///
+    /// This order used to live inline in `RuleAlternativesPanel`'s render body, where it was
+    /// unreachable by any test. §9.1 moves this line onto other surfaces, and a line whose
+    /// central judgement can only be produced inside one component cannot move — so the
+    /// extraction is a precondition of the removal, and the order is pinned here before
+    /// anything starts depending on it from a second place.
+    #[test]
+    fn req_pass2_13_the_alternatives_line_resolves_one_evaluated_option_in_one_order() {
+        let rule = proposed_rule_with_options(
+            "API-VERSIONING-1",
+            "Version the API",
+            &[("versioned", "URI-versioned endpoints"), ("header", "Header-versioned")],
+        );
+        let rec = recommendation("versioned", "most endpoints already do", false, false);
+
+        // 1. A STAGED OVERRIDE wins everything: it is what the next rescan will use, and the
+        //    curator has to see what he just picked.
+        let row = alternative_controls_row(&rule, &rec, 3, Some("versioned"), Some("header"), false);
+        assert_eq!(row.evaluated_option_id, "header");
+        assert_eq!(row.evaluated_label, "Header-versioned");
+        assert!(row.staged);
+        assert_eq!(row.badge_text, "Override, pending rescan");
+
+        // 2. No override: the option the FINDINGS were produced under beats the
+        //    recommendation. A prior rescan can have applied an override the recommendation
+        //    field knows nothing about, and showing the recommendation then would describe a
+        //    scan the curator is not looking at.
+        let row = alternative_controls_row(&rule, &rec, 3, Some("header"), None, false);
+        assert_eq!(row.evaluated_option_id, "header");
+        assert!(!row.staged);
+
+        // 3. No findings at all (the case the standalone panel exists for): the AI's pick.
+        let row = alternative_controls_row(&rule, &rec, 0, None, None, false);
+        assert_eq!(row.evaluated_option_id, "versioned");
+        assert_eq!(row.badge_text, "AI recommended");
+        assert_eq!(row.finding_count, 0);
+
+        // 4. No findings and no recommendation: the rule's declared default.
+        let mut defaulted = rule.clone();
+        defaulted.default_option = Some("header".to_string());
+        let empty = recommendation("", "", false, false);
+        let row = alternative_controls_row(&defaulted, &empty, 0, None, None, false);
+        assert_eq!(row.evaluated_option_id, "header");
+
+        // 5. Nothing anywhere: the label says so rather than rendering a blank that reads as
+        //    "no opinion".
+        let row = alternative_controls_row(&rule, &empty, 0, None, None, false);
+        assert_eq!(row.evaluated_label, "(none)");
+
+        // 6. The operator's own prior choice is labelled as his, not as the AI's.
+        let chosen = recommendation("versioned", "operator forced", false, true);
+        let row = alternative_controls_row(&rule, &chosen, 1, Some("versioned"), None, false);
+        assert_eq!(row.badge_text, "Your choice");
+
+        // 7. Accepted is ADDITIVE, never a replacement for the provenance badge: "I accepted
+        //    it" and "the AI picked it" are both true and the curator needs both.
+        let row = alternative_controls_row(&rule, &rec, 1, Some("versioned"), None, true);
+        assert!(row.accepted);
+        assert_eq!(row.badge_text, "AI recommended");
+    }
+
+    /// req_pass2_13 (§9.1, precondition): the control line renders every state, including the
+    /// two a click would be needed to reach through the panel.
+    #[test]
+    fn req_pass2_13_the_alternatives_line_renders_every_state_props_only() {
+        #[component]
+        fn Harness(row: AlternativeControlsRow) -> Element {
+            rsx! {
+                RuleAlternativeControls {
+                    row,
+                    on_why: Callback::new(|()| {}),
+                    on_pick: Callback::new(|_: String| {}),
+                }
+            }
+        }
+        let render = |row: AlternativeControlsRow| {
+            let mut vdom = VirtualDom::new_with_props(Harness, HarnessProps { row });
+            vdom.rebuild_in_place();
+            dioxus_ssr::render(&vdom)
+        };
+        let rule = proposed_rule_with_options(
+            "API-VERSIONING-1",
+            "Version the API",
+            &[("versioned", "URI-versioned endpoints"), ("header", "Header-versioned")],
+        );
+
+        // The resting state: the fact, the provenance, the Why? door, the Change select.
+        let rec = recommendation("versioned", "most endpoints already do", false, false);
+        let html = render(alternative_controls_row(&rule, &rec, 3, Some("versioned"), None, false));
+        assert!(html.contains("Evaluated against:"), "html=\n{html}");
+        assert!(html.contains("URI-versioned endpoints"), "the LABEL, not the id; html=\n{html}");
+        assert!(html.contains("AI recommended"), "html=\n{html}");
+        assert!(html.contains("rec-why"), "the Why? door; html=\n{html}");
+        assert!(html.contains("rec-select"), "the Change select; html=\n{html}");
+        assert!(html.contains("3 finding(s)"), "html=\n{html}");
+        assert!(!html.contains("rec-badge-accepted"), "html=\n{html}");
+        assert!(!html.contains("Not applicable"), "html=\n{html}");
+
+        // STAGED — reachable through the panel only by driving a real <select> change, which
+        // a Tier-1 SSR test cannot do. Props-only is what makes it assertable.
+        let html = render(alternative_controls_row(&rule, &rec, 3, Some("versioned"), Some("header"), false));
+        assert!(html.contains("Override, pending rescan"), "html=\n{html}");
+        assert!(html.contains("rec-badge-pending"), "html=\n{html}");
+
+        // ACCEPTED — likewise reachable only after a successful server round trip.
+        let html = render(alternative_controls_row(&rule, &rec, 3, Some("versioned"), None, true));
+        assert!(html.contains("rec-badge-accepted"), "html=\n{html}");
+        assert!(html.contains("AI recommended"), "both, not one; html=\n{html}");
+
+        // Evidence and the not-applicable marker, together.
+        let flagged = recommendation_with_evidence(
+            "versioned",
+            "r",
+            Some("src/routes.rs:12"),
+            false,
+        );
+        let html = render(alternative_controls_row(&rule, &flagged, 0, None, None, false));
+        assert!(html.contains("Evidence: src/routes.rs:12"), "html=\n{html}");
+        assert!(html.contains("Not applicable to this repo"), "html=\n{html}");
+        assert!(html.contains("0 findings"), "a clean multi-option rule still renders; html=\n{html}");
     }
 
     /// A twelve-row deviation group, for the bulk prompt's heading. Twelve so the count in
