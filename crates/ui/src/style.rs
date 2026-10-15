@@ -2507,12 +2507,10 @@ textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-f
 }
 .pg-onboard-badge.done { color: #4ade80; background: rgba(22,163,74,0.18); border-color: rgba(22,163,74,0.35); }
 
-.nr-flag {
-  display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
-  text-transform: uppercase; color: #92400e; background: #fde68a; border-radius: 999px;
-  padding: 1px 8px; white-space: nowrap;
-}
-.nr-reason { font-size: 11.5px; color: var(--ink-soft); }
+/* `.nr-flag` and `.nr-reason` went out with the "Needs review" column's cell renderer
+   (design §9.3) — the chip is now chorale's own badge and the 300px inline reason is gone.
+   `.nr-inline` stays: it bolds the `[needs review: …]` marker inside the detail pane's and
+   the finding modal's explanation body, which is exactly where §9.3 relocates the text. */
 .nr-inline { color: #92400e; }
 
 .arm-note { font-size: 11.5px; color: var(--ink-soft); line-height: 1.5; margin: 8px 0 0; max-width: 90ch; }
@@ -6384,13 +6382,10 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .scan-coverage-note-tool { font-weight: 700; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .scan-coverage-note-msg { color: var(--ink-soft); }
 
-/* ── Part 2: "Test" badge (scan.rs) — reuses the dark amber chip pattern (like the
-   chorale-badge-yellow / .nr-flag family) instead of the undefined .badge/.badge-yellow. ── */
-.test-flag {
-  display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
-  text-transform: uppercase; color: #fbbf24; background: rgba(202,138,4,0.20);
-  border-radius: 999px; padding: 1px 8px; white-space: nowrap;
-}
+/* `.test-flag` was the "Test" chip the removed "Needs review" cell renderer drew for an
+   `in_test` row (design §9.3). The Confidence column keeps that state — `confidence_tag`
+   returns `test` first, before any confidence reading — and renders it as chorale's own
+   yellow badge, so the hand-rolled chip and its rule are gone with the renderer. */
 
 /* ── Part 1.5: research chat context-visibility strip (ChatBubble "what this
    assistant can see" panel) + the small "New chat" affordance — new since the

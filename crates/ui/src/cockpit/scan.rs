@@ -464,6 +464,34 @@ pub(super) use camerata_ui_core::triage::{rule_hub, RuleHubView};
 // the function's docs in core for why that is not a second calibration layer.
 pub(super) use camerata_ui_core::triage::{severity_sort_value, severity_sort_values};
 
+// Design §9.3: the CONFIDENCE column's cell value and its filter vocabulary, from the same
+// closed set, so the two cannot drift. Structured fields only — `confidence_tag` is the
+// replacement for a cell value that OR'd two flags with a regex over the model's English.
+pub(super) use camerata_ui_core::triage::{confidence_tag, confidence_tags};
+
+// ── `split_needs_review` IN THE UI: what §9.3 retires, and the two uses that survive ──
+//
+// §9.3 asks for "the `split_needs_review` prose-parsing path in the UI ... retired entirely
+// ONCE THE STRUCTURED FIELD IS UNIVERSAL". It is not universal: `FindingView::confidence` is
+// `Option<String>`, and a row serialized before the field existed carries the `[needs review:
+// …]` marker and nothing else. So the retirement is partial, and the line it is drawn on is
+// the one the principle is actually about — prose must not DECIDE anything:
+//
+//   RETIRED (this commit): the Queue's hedging column. Its cell value, and therefore its
+//   filter vocabulary and its sort key, were derived in part by regex over `f.detail`. That is
+//   a UI classifying a row on the strength of a sentence, which is what "structured identity,
+//   never prose" forbids. `confidence_tag` reads structured fields only.
+//
+//   KEPT, deliberately: `DetailPaneRow::from_finding` and the finding modal. Both call it to
+//   SPLIT text the producer already wrote into body + marker so the marker can be bolded for a
+//   human reader. Nothing is classified, filtered, counted or sorted by the result, and §9.3's
+//   own next clause — "the reason text lives in the detail pane" — is satisfied by exactly
+//   these two call sites. Deleting them would silently drop a legacy row's only disclosure of
+//   its hedge, which is the capability loss this sweep is supposed to avoid, not cause.
+//
+// When `confidence` becomes universal upstream, the two survivors become deletable and the
+// retirement completes. Until then they are the honest half.
+
 // Pass 2 step 2: the DEVIATION GROUP HEADER. `rule_group_label` is the Queue's group-by value
 // (rule id, plus the structured sentence when the row is a deviation), so chorale renders the
 // sentence as the group header's own label; `deviation_groups` is the same partition lifted out
@@ -1709,38 +1737,51 @@ pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<Colu
         // wants "show me everything matching ARCH-" or a specific id, not a checkbox list.
         .filter(FilterKind::Text)
         .initial_width(250.0),
-        // "Needs review": the calibration pass's applicability flag with its reason. Every
-        // finding technically needs review; THESE are flagged for a specific reason (usually
-        // over-engineering / YAGNI on a small codebase). Surfaced as its own column + reason
-        // so the architect can triage the hedged ones at a glance. Text-filterable so you can
-        // show only the flagged rows. Drawn by a cell renderer (orange chip + reason).
-        // The cell VALUE is just yes/no ("does this need review?") so the filter is a simple
-        // two-option toggle, not a free-text box over every distinct reason. The visible chip +
-        // reason are drawn by the row renderer (which reads f.detail), so the reason still shows.
-        ColumnDef::new(
-            ColumnId("needs_review"),
-            "Needs review",
-            |f: &FindingView| {
-                CellValue::Text(if f.in_test {
-                    "test".to_string()
-                } else if f.needs_review || split_needs_review(&f.detail).1.is_some() {
-                    "yes".to_string()
-                } else {
-                    "no".to_string()
-                })
-            },
-        )
-        .sortable()
-        .filter(FilterKind::MultiSelect {
-            options: vec!["test".to_string(), "yes".to_string(), "no".to_string()],
+        // CONFIDENCE (design §4, §9.3) — REPLACES the 300px "Needs review" column.
+        //
+        // > the structured `confidence` field ("high" / "needs-review") as a narrow chip; the
+        // > verbose inline reason moves to the detail pane. Recovers ~300px.
+        //
+        // The column it replaces computed its cell value as
+        // `in_test || needs_review || split_needs_review(detail).1.is_some()` — two structured
+        // flags OR'd with a REGEX OVER THE MODEL'S OWN ENGLISH — and then drew the matched
+        // sentence inline, at 300px, on every row. `confidence_tag` reads structured fields
+        // only; see its docs in core for why the prose term was redundant as well as
+        // undesirable (the server sets `needs_review` unconditionally two lines above writing
+        // the `[needs review: …]` tag, so the regex was reading a shadow of the field beside
+        // it) and for why `unrated` is deliberately NOT folded into `high`.
+        //
+        // THE REASON TEXT IS NOT LOST, it moves: `DetailPaneRow::needs_review` carries it into
+        // the docked pane for the focused row, and the finding modal bolds it inline. §9.3's
+        // own sentence is "the reason text lives in the detail pane".
+        //
+        // THE COLUMN ID STAYS `needs_review` on purpose. It is an internal key, never rendered
+        // — the header below is what the curator reads, and the order bar resolves its
+        // sentence from that header. Renaming it would buy nothing and would break
+        // `req_pass2_8_every_meaningful_queue_column_header_is_sortable`, which pins this
+        // column as re-cuttable by id; that test asserts a behaviour this change keeps, so
+        // editing it to accommodate a cosmetic rename would be loosening a guard for no gain.
+        //
+        // No custom row-cell renderer any more: the whole point of the removal is that the
+        // cell is a CHIP, and chorale's own `RenderKind::Badge` draws chips. The four variants
+        // are the exact closed set `confidence_tags()` offers as filter options, which is the
+        // same anti-drift discipline the Severity column uses.
+        ColumnDef::new(ColumnId("needs_review"), "Confidence", |f: &FindingView| {
+            CellValue::Text(confidence_tag(f).to_string())
         })
+        .sortable()
+        .filter(FilterKind::MultiSelect { options: confidence_tags() })
         .render_kind(RenderKind::Badge(
             BadgeVariantMap::new()
                 .with("test", BadgeVariant::new("Test", "yellow"))
-                .with("yes", BadgeVariant::new("Needs review", "orange"))
-                .with("no", BadgeVariant::new("", "gray")),
+                .with("needs-review", BadgeVariant::new("Needs review", "orange"))
+                .with("high", BadgeVariant::new("High", "green"))
+                // "Calibration never looked at this row" is a different statement from "it
+                // looked and was confident", and the chip says so rather than leaving a blank
+                // the curator would read as the latter.
+                .with("unrated", BadgeVariant::new("Unrated", "gray")),
         ))
-        .initial_width(300.0),
+        .initial_width(130.0),
         // The ratchet: enforced (active = new/changed) vs suppressed (baseline debt or
         // an inline waiver). Report shows all; the gate blocks only the enforced ones.
         ColumnDef::new(ColumnId("status"), "Enforcement", |f: &FindingView| {
@@ -3173,31 +3214,12 @@ pub(super) fn FindingsTable(
                 rsx! { span { class: "{cls}", title: "{tip}", "{label}" } }
             }) as RowCellRenderer<FindingView>,
         );
-        // "Needs review" flag + reason: an orange chip when the calibration pass hedged this
-        // finding, followed by the specific reason. Blank when not flagged.
-        m.insert(
-            ColumnId("needs_review"),
-            std::sync::Arc::new(
-                move |f: &FindingView, _val: &CellValue| {
-                    if f.in_test {
-                        rsx! { span { class: "test-flag", "Test" } }
-                    } else {
-                        match split_needs_review(&f.detail).1 {
-                            Some(reason) => {
-                                let reason = reason.clone();
-                                rsx! {
-                                    span { class: "nr-flag", "Needs review" }
-                                    if !reason.is_empty() {
-                                        span { class: "nr-reason", " {reason}" }
-                                    }
-                                }
-                            }
-                            None => rsx! {},
-                        }
-                    }
-                },
-            ) as RowCellRenderer<FindingView>,
-        );
+        // REMOVED (design §9.3): the "Needs review" cell renderer — an orange chip followed by
+        // the model's hedging SENTENCE, inline, at 300px, on every row that had one. It was
+        // the only renderer in the Queue that drew prose it had recovered with a regex. The
+        // Confidence column that replaces it is a chorale `RenderKind::Badge` over
+        // `confidence_tag`'s closed set, so there is nothing left to override here; the reason
+        // text reaches the curator in the detail pane, which is where §9.3 puts it.
         // Tech-debt bucket flag: reads the live disposition snapshot for this finding and
         // renders a "Later" / "Now" badge. Present only in the tech-debt view.
         if in_techdebt {
@@ -11121,6 +11143,191 @@ mod render_tests {
         }
         assert!(html.contains(">Severity<"), "Severity header; html=\n{html}");
         assert!(html.contains(">Authority<"), "Authority header; html=\n{html}");
+    }
+
+    /// req_pass2_13 (§9.3): the Queue's hedging column is the STRUCTURED Confidence chip, and
+    /// the 300px prose column it replaces is gone from the table.
+    ///
+    /// Coverage, item by item, against what the old column could say:
+    ///
+    /// | old cell | old source | new cell | new source |
+    /// |---|---|---|---|
+    /// | `test` | `f.in_test` | `test` | `f.in_test` |
+    /// | `yes` | `f.needs_review` OR a regex over `f.detail` | `needs-review` | `f.needs_review` OR `f.confidence` |
+    /// | `no` | neither | `high` / `unrated`, told apart | `f.confidence` |
+    ///
+    /// The one thing the old column rendered that this one does not is the hedging SENTENCE,
+    /// inline on the row. That is the removal, and the next test proves where it went.
+    #[test]
+    fn req_pass2_13_the_queue_hedging_column_is_the_structured_confidence_chip() {
+        let cols = finding_columns(vec!["me/api".to_string()], false);
+        let col = cols
+            .iter()
+            .find(|c| c.id == ColumnId("needs_review"))
+            .expect("the hedging column must still exist, re-headed");
+        assert_eq!(
+            col.header, "Confidence",
+            "§4: Confidence REPLACES \"Needs review\" as the column the curator reads"
+        );
+        let width = col.initial_width.expect("the column sets an initial width");
+        assert!(
+            width <= 160.0,
+            "§9.3 recovers ~300px off the 300px column; got {width}px"
+        );
+
+        // Every state the old column could report, still reported — plus the one it could not.
+        let cases = [
+            (serde_json::json!({"in_test": true}), "test"),
+            (serde_json::json!({"needs_review": true}), "needs-review"),
+            (serde_json::json!({"confidence": "needs-review"}), "needs-review"),
+            (serde_json::json!({"confidence": "high"}), "high"),
+            (serde_json::json!({}), "unrated"),
+        ];
+        for (patch, want) in &cases {
+            let mut row = serde_json::json!({
+                "repo": "me/api", "path": "src/a.rs", "line": 1, "rule_id": "R-1",
+                "severity": "medium", "snippet": "s", "detail": "d"
+            });
+            for (k, v) in patch.as_object().expect("object") {
+                row[k] = v.clone();
+            }
+            let f: FindingView = serde_json::from_value(row).expect("fixture");
+            assert_eq!(
+                (col.accessor)(&f),
+                CellValue::Text((*want).to_string()),
+                "cell value for {patch}"
+            );
+        }
+
+        // THE PROSE TERM IS GONE from the cell value. This row's `detail` carries the legacy
+        // marker and its structured verdict CONTRADICTS it; the old accessor would have read
+        // `yes` off the sentence, over the top of the calibration pass's own answer.
+        let contradicted: FindingView = serde_json::from_value(serde_json::json!({
+            "repo": "me/api", "path": "src/a.rs", "line": 1, "rule_id": "R-1",
+            "severity": "medium", "snippet": "s",
+            "detail": "Debatable. [needs review: premature for a mini app]",
+            "confidence": "high", "needs_review": false
+        }))
+        .expect("fixture");
+        assert_eq!(
+            (col.accessor)(&contradicted),
+            CellValue::Text("high".to_string()),
+            "the cell must read the structured verdict, never the sentence beside it"
+        );
+
+        // Filter vocabulary from the same closed set as the cell (the Severity discipline).
+        let FilterKind::MultiSelect { options } = &col.filter else {
+            panic!("Confidence keeps a multi-select filter, got {:?}", col.filter);
+        };
+        assert_eq!(options, &confidence_tags());
+        for (_, want) in &cases {
+            assert!(
+                options.contains(&(*want).to_string()),
+                "{want} is emitted but not filterable"
+            );
+        }
+
+        // And every emitted value resolves to a chip, so no state renders as a blank cell the
+        // curator would misread as "nothing to say here".
+        let RenderKind::Badge(map) = &col.render_kind else {
+            panic!("Confidence renders as a badge");
+        };
+        for tag in confidence_tags() {
+            let variant = map
+                .resolve(&tag)
+                .unwrap_or_else(|| panic!("{tag} must resolve to a badge variant"));
+            assert!(!variant.label.is_empty(), "{tag}: a chip with no label is a blank cell");
+        }
+        assert_ne!(
+            map.resolve("high").expect("high").label,
+            map.resolve("unrated").expect("unrated").label,
+            "\"calibration was confident\" and \"calibration never looked\" must not render alike"
+        );
+    }
+
+    /// req_pass2_13 (§9.3, the other half): the hedging SENTENCE the removed column drew
+    /// inline is still reaching the curator — in the detail pane, which is where §9.3 sends it
+    /// ("the reason text lives in the detail pane").
+    ///
+    /// This is the test that makes the removal a relocation rather than a capability loss, so
+    /// it asserts in both directions: the reason is absent from the rendered Queue and present
+    /// in the pane describing that same row.
+    #[test]
+    fn req_pass2_13_the_hedging_reason_left_the_row_and_arrived_in_the_pane() {
+        const REASON: &str = "premature for a mini app";
+        let hedged: FindingView = serde_json::from_value(serde_json::json!({
+            "repo": "me/api", "path": "src/a.rs", "line": 7, "rule_id": "AI-LAYERING",
+            "severity": "medium", "snippet": "fn x() {}", "status": "active",
+            "detail": format!("No mappers crate. [needs review: {REASON}]"),
+            "kind": "defect", "needs_review": true, "confidence": "needs-review"
+        }))
+        .expect("fixture");
+
+        // Gone from the Queue: not in any cell value, and not drawn by a renderer either.
+        let cols = finding_columns(vec!["me/api".to_string()], false);
+        for c in &cols {
+            if let CellValue::Text(v) = (c.accessor)(&hedged) {
+                assert!(
+                    !v.contains(REASON),
+                    "{:?}: the hedging sentence must not be a cell value any more; got {v:?}",
+                    c.id
+                );
+            }
+        }
+        fn queue() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(|| Signal::new(None::<FindingView>));
+            let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
+            rsx! {
+                FindingsTable {
+                    findings: vec![
+                        serde_json::from_value(serde_json::json!({
+                            "repo": "me/api", "path": "src/a.rs", "line": 7,
+                            "rule_id": "AI-LAYERING", "severity": "medium", "snippet": "fn x() {}",
+                            "status": "active",
+                            "detail": "No mappers crate. [needs review: premature for a mini app]",
+                            "kind": "defect", "needs_review": true, "confidence": "needs-review"
+                        })).expect("fixture"),
+                    ],
+                    repos: vec!["me/api".to_string()],
+                    descriptions: std::collections::HashMap::new(),
+                    triage_view: TriageState::Unresolved,
+                    dispositions,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(queue);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains(">Confidence<"), "the new header; html=\n{html}");
+        assert!(
+            !html.contains(">Needs review<"),
+            "the old column header is gone; html=\n{html}"
+        );
+        for gone in ["nr-reason", "nr-flag", "test-flag"] {
+            assert!(
+                !html.contains(gone),
+                "the prose cell renderer and its chips are gone (found {gone:?}); html=\n{html}"
+            );
+        }
+
+        // Arrived in the pane. `DetailPaneRow` is the ONE place the pane's props are built, so
+        // asserting on it covers the pane for every row it can ever focus.
+        let pane = DetailPaneRow::from_finding(&hedged, None, None, 0, 1);
+        assert_eq!(
+            pane.needs_review.as_deref(),
+            Some(REASON),
+            "the hedge the Queue stopped drawing must reach the pane"
+        );
+        assert!(
+            !pane.explanation.contains("[needs review"),
+            "and the pane splits it OFF the body rather than leaving the marker inline twice"
+        );
+        assert_eq!(
+            pane.confidence.as_deref(),
+            Some("needs-review"),
+            "the structured value the chip reads is in the pane too, so the two agree"
+        );
     }
 
     /// req_pass2_13 (§9.4): NO informational surface renders a severity, and the proof is a
