@@ -11,7 +11,13 @@
       "Read(**/feedback-classes.md)",
       "Read(**/scorecard.md)",
       "Read(**/grader-raw.json)",
-      "Read(**/grader-stdout.log)"
+      "Read(**/grader-stdout.log)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/tutorly/**)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/lumen/**)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/hearth/**)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/membersclub/**)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/faktura/**)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/supabase-portal-fixture/**)"
     ]
   }
 }
