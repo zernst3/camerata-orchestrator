@@ -2658,6 +2658,7 @@ html, body {
   color: #92400e; background: #fde68a; border-radius: 5px; padding: 2px 7px; white-space: nowrap;
 }
 .adopt-open, .adopt-toggle { font-size: 11.5px; padding: 3px 9px; }
+.adopt-jump { font-size: 11.5px; padding: 3px 9px; margin-top: 2px; }
 .adopt-pick { font-size: 12px; padding: 3px 6px; max-width: 280px; }
 .adopt-detail {
   flex: 1 1 100%; margin-top: 6px; padding: 8px 10px;

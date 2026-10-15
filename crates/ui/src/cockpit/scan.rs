@@ -5665,6 +5665,15 @@ pub(super) fn ConventionsPanel(
     /// Raise the commit dialog for one destination repository.
     #[props(default)]
     on_commit: Callback<String>,
+    /// JUMP INTO THE QUEUE for one rule's exceptions, carrying the rule id (§13: a convention
+    /// with deviations is adoptable "with a jump into the Queue").
+    ///
+    /// Deliberately the SAME gesture the rule hub's own jump performs — a column filter on
+    /// the Queue, design §8's "a filter, not a hyperlink graph" — rather than a second
+    /// navigation concept. It does not mark the convention opened and it does not change its
+    /// adopt state: looking at the exceptions is not a decision about the convention.
+    #[props(default)]
+    on_review_exceptions: Callback<String>,
     /// Show ONLY the adopted-but-unopened rows — the commit dialog's third exit.
     #[props(default)]
     only_unopened: bool,
@@ -5784,6 +5793,17 @@ pub(super) fn ConventionsPanel(
                                                         if c.deviating_sites > 0 {
                                                             p { class: "adopt-detail-line",
                                                                 "{c.deviating_sites} site(s) do not follow it today. Those are Queue rows under {c.rule_id}; dispositioning them is separate work and does not gate this adoption."
+                                                            }
+                                                            {
+                                                                let jump_rule = c.rule_id.clone();
+                                                                let n = c.deviating_sites;
+                                                                rsx! {
+                                                                    button {
+                                                                        class: "btn-ghost adopt-jump",
+                                                                        onclick: move |_| on_review_exceptions.call(jump_rule.clone()),
+                                                                        "Review the {n} exceptions in the Queue"
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -7726,6 +7746,13 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 destination: repo,
                                 typed: String::new(),
                             }));
+                        }),
+                        // §13's "with a jump into the Queue". Byte-for-byte the rule hub's
+                        // own jump (a column filter plus the kind switch), so there is one
+                        // way to land on a rule's rows rather than two that can diverge.
+                        on_review_exceptions: Callback::new(move |rule_id: String| {
+                            queue_rule_filter.set(Some(rule_id));
+                            kind_view.set(KindSurface::Queue);
                         }),
                     }
                 } else if kind_view() == KindSurface::NoConvention {
@@ -14369,6 +14396,25 @@ mod convention_commit_tests {
         assert!(
             html.contains("AGENTS.md"),
             "and names where this is written; html=\n{html}"
+        );
+        assert!(
+            html.contains("adopt-jump") && html.contains("Review the 2 exceptions in the Queue"),
+            "\u{a7}13's \u{201c}with a jump into the Queue\u{201d}; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_14: a CLEAN convention gets no jump. There are no exceptions to review, and
+    /// a button that filtered the Queue to nothing would be the 403-button bug.
+    #[test]
+    fn req_pass2_14_a_clean_convention_has_no_exceptions_jump() {
+        let mut model = AdoptionModel::new();
+        model.mark_opened(&adoption_key("me/api", "R-1"));
+        let html = render_conventions(vec![convention("me/api", "R-1", "a", "A")], model, false);
+        assert!(html.contains("adopt-detail"), "the detail is open; html=\n{html}");
+        assert!(html.contains("observed, no exceptions"), "html=\n{html}");
+        assert!(
+            !html.contains("adopt-jump"),
+            "nothing to jump to; html=\n{html}"
         );
     }
 
