@@ -432,12 +432,16 @@ pub(super) use camerata_ui_core::scan::{det_tool_label, estimate_audit_cost, hum
 
 // The onboarding-triage state machine + its data shapes now live in the framework-agnostic core
 // (RUST-HEADLESS-CORE-1): FindingView, Disposition (+ its Default), TriageState, TechDebtBucket,
-// finding_key/finding_state, and the new pure TriageModel. Re-exported so every existing
+// finding_key, and the pure TriageModel + its TriageCounts tally. Re-exported so every existing
 // scan/cockpit call site (and cockpit's `pub use scan::*`) is unchanged; the Dioxus layer keeps
 // the signals, table effects, toasts, and rsx. (FindingView's `default_finding_status` serde
 // provider lives with it in core::triage — re-exported from core::scan; not needed bare here.)
+//
+// `finding_state` is no longer re-exported: Pass 2 step 3 replaced this file's last caller (the
+// hand-rolled disposition tally in `ScanResults`) with `TriageModel::counts`, and a re-export
+// nothing imports is a warning, not an interface.
 pub(super) use camerata_ui_core::triage::{
-    finding_key, finding_state, Disposition, FindingView, TechDebtBucket, TriageModel, TriageState,
+    finding_key, Disposition, FindingView, TechDebtBucket, TriageCounts, TriageModel, TriageState,
 };
 
 // Pass 2 step 1 (docs/plans/2026-10-11_pass2-curator-ui-design.md): the five-kind taxonomy's
@@ -1956,19 +1960,22 @@ impl DeviationBulkRow {
 /// (`RULE_GROUP_COLUMN`); the BUTTONS cannot, so they sit immediately above the table where
 /// every deviation group is visible at once, including on mount when every group is collapsed.
 ///
-/// ## Why there is no `Confirm all N` here yet
+/// ## Both directions, and why Confirm comes first
 ///
-/// `TriageState` has four variants; `Confirmed` is section 11 step 3. A `Confirm all` button
-/// today could only write one of the four existing dispositions, none of which means "yes,
-/// this is real, it ships in the report" — `Unresolved` is a no-op that lies and `Ignored` is
-/// its opposite. So the bulk PLUMBING landed (the group partition, the row set, and the
-/// equivalence test) and `False positive all N` ships on it, while `Confirm all N` waits for
-/// the disposition it needs. Step 3 adds it here as one more button over the same
-/// `DeviationBulkRow` and the same `TriageModel::move_to(&group.rows, …)` call.
+/// Step 2 shipped the bulk PLUMBING with only `False positive all N` on it, because none of
+/// the four dispositions that existed then honestly meant "yes, this is real, it ships".
+/// Step 3 adds `Confirm all N` over the identical group row set, as the owner's ruling
+/// required. It is rendered FIRST and styled as the primary action because it is the
+/// overwhelmingly more common answer: a deviation group exists precisely because the codebase
+/// itself established the convention, so "the convention is real and these are the exceptions"
+/// is the default reading, and "the tool mis-parsed all N of these" is the exception.
 #[component]
 pub(super) fn DeviationBulkBar(
     /// The deviation groups in the current view, in table order.
     groups: Vec<DeviationBulkRow>,
+    /// Invoked with the index into `groups` when `Confirm all N` is clicked. Takes no reason,
+    /// because confirming needs none (see `TriageModel::confirm`).
+    on_confirm_all: Callback<usize>,
     /// Invoked with the index into `groups` when `False positive all N` is clicked. The call
     /// site owns the reason, the require-reason invariant and the disposition write.
     on_false_positive_all: Callback<usize>,
@@ -1988,12 +1995,74 @@ pub(super) fn DeviationBulkBar(
                     span { class: "deviation-bulk-rule", "{g.rule_id}" }
                     span { class: "deviation-bulk-sentence", "{g.sentence}" }
                     button {
+                        class: "btn-run deviation-bulk-confirm",
+                        title: "Confirm every one of this rule's {g.row_count} row(s) in this table in one act: the convention is real and these are genuine exceptions. Identical to selecting them and confirming each. No reason required.",
+                        onclick: move |_| on_confirm_all.call(i),
+                        "Confirm all {g.row_count}"
+                    }
+                    button {
                         class: "btn-restart deviation-bulk-fp",
                         title: "Mark every one of this rule's {g.row_count} row(s) in this table as a false positive, in one act. Identical to selecting them and marking each. Uses the false-positive reason above; it is required here, same as for a single row.",
                         onclick: move |_| on_false_positive_all.call(i),
                         "False positive all {g.row_count}"
                     }
                 }
+            }
+        }
+    }
+}
+
+/// THE PROCESS GATE: the hint that says what is still outstanding, and the button that commits
+/// the ignored and tech-debt buckets.
+///
+/// Its own props-only component (Pass 2 step 3) for the reason `QueueOrderBar` and
+/// `DeviationBulkBar` are: SSR cannot click, and this gate lives inside `ScanResults`, which
+/// sits behind `use_resource` network resources and is not SSR-testable at all. Step 1's build
+/// note recorded exactly that as a coverage caveat — the gate's live bug (informational rows
+/// blocking it forever) was fixed with only the pure derivation under test. As props-only data
+/// the gate can now be rendered in any tally state, including the one this step introduces: a
+/// Queue where everything is CONFIRMED, nothing is outstanding, and there is still nothing to
+/// commit.
+///
+/// Every judgment it renders comes from [`TriageCounts`], which is unit-tested in core. This
+/// component chooses words, not rules.
+#[component]
+pub(super) fn ProcessGate(
+    /// The live tally over the QUEUE rows (never the raw finding set — see
+    /// `TriageModel::counts`).
+    counts: TriageCounts,
+    /// Whether a Process run is already in flight.
+    processing: bool,
+    /// Invoked when the button is clicked. The caller owns the commit itself.
+    on_process: Callback<()>,
+) -> Element {
+    let outstanding = counts.outstanding();
+    rsx! {
+        div { class: "triage-process",
+            if outstanding > 0 {
+                // The exits are named in full. Before step 3 this sentence offered only
+                // "Ignore or save as Tech debt", which was already incomplete (False positive
+                // also resolves a row) and would now omit the one the curator reaches for
+                // most.
+                p { class: "section-hint",
+                    "Resolve the {outstanding} remaining Unresolved finding(s) \u{2014} Confirm, \
+                     Ignore, save as Tech debt, or mark a false positive \u{2014} before Processing."
+                }
+            } else if !counts.has_committable_work() {
+                // The common end state once Confirm exists: every row decided, and nothing
+                // for the server to do. Saying so beats a disabled button with no
+                // explanation, which is the dead affordance the standing rule is about.
+                p { class: "section-hint",
+                    "Nothing to process: no findings were ignored or saved as tech debt. \
+                     Confirmed and False positive are recorded in this draft and read by the \
+                     report export; neither commits anything to a repository."
+                }
+            }
+            button {
+                class: "btn-run",
+                disabled: processing || !counts.can_process(),
+                onclick: move |_| on_process.call(()),
+                if processing { "Processing\u{2026}" } else { "Process ignored + tech-debt buckets" }
             }
         }
     }
@@ -2101,6 +2170,10 @@ pub(super) fn FindingsTable(
     // One more clone for the Unresolved view's "mark false positive" button + the
     // FalsePositive view's "move back to Unresolved" button.
     let id_map_e = id_map.clone();
+    // And one for the Unresolved view's Confirm button (Pass 2 step 3). Its own clone rather
+    // than sharing `id_map_a`/`id_map_b`: those two are already moved into the Ignore and
+    // Tech-debt closures in this same match arm.
+    let id_map_f = id_map.clone();
     // The (sorted) rows for CSV export.
     let csv_rows = findings.clone();
 
@@ -2110,10 +2183,11 @@ pub(super) fn FindingsTable(
     // the number of rows its button will move. `bulk_groups` keeps the full rows (for the
     // disposition write); `bulk_rows` is the flat props the bar renders.
     //
-    // Unresolved only. The bar's one action is False positive, which requires the reason
-    // textarea that exists only in the Unresolved toolbar, and a deviation already moved to
-    // Ignored or Tech debt has had its rule-level decision made. Rendering a dead bar in the
-    // other three tables would be the 403-button shape the standing rule forbids.
+    // Unresolved only. Both of the bar's actions are decisions ABOUT an undecided group: a
+    // deviation already moved to Confirmed, Ignored or Tech debt has had its rule-level
+    // decision made, and `False positive all N` additionally needs the reason textarea that
+    // exists only in the Unresolved toolbar. Rendering a dead bar in the other four tables
+    // would be the 403-button shape the standing rule forbids.
     let bulk_groups = std::rc::Rc::new(if triage_view == TriageState::Unresolved {
         deviation_groups(&findings)
     } else {
@@ -2256,6 +2330,41 @@ pub(super) fn FindingsTable(
             // table on the next switch. Backend commit happens later, at Process.
             match triage_view {
                 TriageState::Unresolved => rsx! {
+                    // CONFIRM — the affirmative disposition, and the majority outcome of an
+                    // audit (design §3). First in the toolbar and styled as the primary
+                    // action because it is the most common gesture, and the ONLY one with no
+                    // reason input in front of it: confirming makes no claim beyond the
+                    // finding, which already states its own case. See `TriageModel::confirm`.
+                    //
+                    // ## No `C` keystroke yet — DEFERRED to the docked detail pane
+                    //
+                    // The owner's Q5 ruling (design §13, 2026-10-12) ships `C`/`I`/`T`/`F`
+                    // "scoped so the keys only fire while the detail pane holds focus, plus a
+                    // five-second undo toast". The docked detail pane is a later step and does
+                    // not exist; the Queue's detail surface is still the row-click modal. So
+                    // the scoping condition the ruling ATTACHES THE KEYS TO cannot be
+                    // satisfied today, and the only thing buildable now is a document-level
+                    // handler firing on any `c` press anywhere on the page — which at 400 rows
+                    // is precisely the fat-finger risk the scoping clause exists to prevent,
+                    // and would also swallow `c` typed into the reason textareas six inches
+                    // away. The keystroke belongs to the pane step, where its focus owner,
+                    // its row cursor and its undo toast all arrive together. Button only here.
+
+                    button {
+                        class: "btn-run triage-confirm",
+                        title: "I read these findings, they are real, and they ship in the report. No reason required. Local to this draft — the export reads it; Process commits nothing for it.",
+                        onclick: move |_| {
+                            let sel = handle.selected_ids();
+                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_f.get(id).cloned()).collect();
+                            if picked.is_empty() { return; }
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.confirm(&picked);
+                            dispositions.set(model.dispositions);
+                            handle.remove_rows(&sel);
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Confirmed {}.", picked.len()));
+                        },
+                        "Confirm \u{2192}"
+                    }
                     // A small labeled textarea (not a single-line input) — this is a recorded
                     // justification, same as the waiver reason, so it deserves the same room.
                     textarea {
@@ -2327,6 +2436,27 @@ pub(super) fn FindingsTable(
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Marked {} as false positive.", picked.len()));
                         },
                         "Mark false positive \u{2192}"
+                    }
+                },
+                // Confirmed: one way back, and nothing else. Mirrors the FalsePositive table
+                // exactly, for the same reason — the decision was made in the Unresolved
+                // table with the inputs it has; the only thing left to offer here is undoing
+                // it. Offering Ignore/Tech debt without their reason textareas (which live
+                // only in the Unresolved toolbar) would be a button that cannot complete.
+                TriageState::Confirmed => rsx! {
+                    button {
+                        class: "btn-restart",
+                        onclick: move |_| {
+                            let sel = handle.selected_ids();
+                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_f.get(id).cloned()).collect();
+                            if picked.is_empty() { return; }
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.move_to(&picked, TriageState::Unresolved);
+                            dispositions.set(model.dispositions);
+                            handle.remove_rows(&sel);
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} back to Unresolved.", picked.len()));
+                        },
+                        "Move to Unresolved"
                     }
                 },
                 TriageState::Ignored => rsx! {
@@ -2463,6 +2593,23 @@ pub(super) fn FindingsTable(
         // view holds no deviations.
         DeviationBulkBar {
             groups: bulk_rows,
+            on_confirm_all: Callback::new({
+                let bulk_groups = std::rc::Rc::clone(&bulk_groups);
+                let key_to_row_id = key_to_row_id.clone();
+                move |i: usize| {
+                    let Some(group) = bulk_groups.get(i) else { return };
+                    let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                    // Same shape as the false-positive path below and for the same reason:
+                    // core's `bulk_confirm` is a thin wrapper over the per-row `confirm`, so
+                    // one click here is provably identical to N individual gestures rather
+                    // than a second write path. `None` means an empty group — nothing moved.
+                    let Some(moved) = model.bulk_confirm(group) else { return };
+                    dispositions.set(model.dispositions);
+                    let ids: Vec<RowId> = group.rows.iter().filter_map(|f| key_to_row_id.get(&finding_key(f)).copied()).collect();
+                    handle.remove_rows(&ids);
+                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Confirmed all {moved} {} row(s).", group.rule_id));
+                }
+            }),
             on_false_positive_all: Callback::new({
                 let bulk_groups = std::rc::Rc::clone(&bulk_groups);
                 let key_to_row_id = key_to_row_id.clone();
@@ -4282,22 +4429,16 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let n_unspecified = unspecified_kind_count(&findings);
 
     // Live per-table counts (recompute reactively as dispositions change).
-    let (n_unresolved, n_ignored, n_techdebt, n_falsepositive) = {
-        let d = dispositions.read();
-        let mut u = 0usize;
-        let mut i = 0usize;
-        let mut t = 0usize;
-        let mut fp = 0usize;
-        for f in &queue_findings {
-            match finding_state(&d, f) {
-                TriageState::Unresolved => u += 1,
-                TriageState::Ignored => i += 1,
-                TriageState::TechDebt => t += 1,
-                TriageState::FalsePositive => fp += 1,
-            }
-        }
-        (u, i, t, fp)
-    };
+    //
+    // Pass 2 step 3: this was an inline five-way loop that duplicated `TriageModel::counts`.
+    // With a fifth disposition the duplicate became a real drift risk — a state the loop
+    // forgot would show a permanent zero on its tab AND silently stop blocking the Process
+    // gate — so the tally is now taken by core's own function, the one the unit tests cover.
+    let triage_counts: TriageCounts = TriageModel {
+        dispositions: dispositions.read().clone(),
+        triage_view: triage_view(),
+    }
+    .counts(&queue_findings);
 
     rsx! {
         // Row-detail modal: hosted here, at the results-subtree root, so it is NOT a
@@ -5145,11 +5286,14 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 }
 
                 if kind_view() == KindSurface::Queue {
-                    // Single-select over the four triage tables, each with a live count.
+                    // Single-select over the triage tables, each with a live count. The set
+                    // and its order come from `TriageState::all()` and the count from
+                    // `TriageCounts::of`, so a disposition can never exist without a tab or
+                    // sit behind a tab that shows a permanent zero.
                     div { class: "triage-switch",
-                        for st in [TriageState::Unresolved, TriageState::Ignored, TriageState::TechDebt, TriageState::FalsePositive] {
+                        for st in TriageState::all() {
                             {
-                                let count = match st { TriageState::Unresolved => n_unresolved, TriageState::Ignored => n_ignored, TriageState::TechDebt => n_techdebt, TriageState::FalsePositive => n_falsepositive };
+                                let count = triage_counts.of(st);
                                 let active = triage_view() == st;
                                 rsx! {
                                     button {
@@ -5215,22 +5359,21 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 }
 
                 // Process: commit the ignored bucket to the baseline and file the tech-debt
-                // bucket as tickets. Enabled only once nothing remains Unresolved.
-                if kind_view() == KindSurface::Queue && (triage_view() == TriageState::TechDebt || n_unresolved == 0) {
+                // bucket as tickets. Enabled only once nothing remains OUTSTANDING — which,
+                // since Pass 2 step 3, a Confirmed row is not: it is decided, just decided to
+                // be real. The gate's whole rule lives in `TriageCounts` (core, unit-tested);
+                // `ProcessGate` renders it and this closure performs the commit.
+                if kind_view() == KindSurface::Queue && (triage_view() == TriageState::TechDebt || triage_counts.outstanding() == 0) {
                     {
                     // QUEUE rows only. Process commits dispositions (baseline waivers,
                     // tickets); an informational row has no disposition to commit, and
                     // including one could only produce a waiver for a compliment.
                     let findings_for_process = queue_findings.clone();
                     rsx! {
-                    div { class: "triage-process",
-                        if n_unresolved > 0 {
-                            p { class: "section-hint", "Resolve the {n_unresolved} remaining Unresolved finding(s) (Ignore or save as Tech debt) before Processing." }
-                        }
-                        button {
-                            class: "btn-run",
-                            disabled: processing() || n_unresolved > 0 || (n_ignored == 0 && n_techdebt == 0),
-                            onclick: move |_| {
+                    ProcessGate {
+                        counts: triage_counts,
+                        processing: processing(),
+                        on_process: Callback::new(move |()| {
                                 let d = dispositions.read().clone();
                                 // Group ignored findings by (repo, reason) -> baseline waiver;
                                 // group tech-debt by repo -> a tracked ticket.
@@ -5257,6 +5400,16 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                         // separately) exclusion from the findings section + a
                                         // methodology counter. See `TriageState::FalsePositive`'s doc.
                                         TriageState::FalsePositive => {}
+                                        // Confirmed is a Process-time NO-OP too, for a
+                                        // different reason than FalsePositive: the finding is
+                                        // REAL, so there is nothing to waive and nothing to
+                                        // ticket — the client's action item is the finding
+                                        // itself, which the report already carries. Owner's
+                                        // Q2 ruling (2026-10-12): Confirmed stays local to
+                                        // this draft and the export reads it; a durable
+                                        // per-finding record across engagements is a backend
+                                        // surface Pass 2 does not invent.
+                                        TriageState::Confirmed => {}
                                         TriageState::Unresolved => {}
                                     }
                                 }
@@ -5295,9 +5448,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                     }
                                     processing.set(false);
                                 });
-                            },
-                            if processing() { "Processing…" } else { "Process ignored + tech-debt buckets" }
-                        }
+                        }),
                     }
                     }
                     }
@@ -5306,7 +5457,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 // ── PDF audit-report export (brownfield audit hardening, Pass B) ──────
                 // Board-forwardable export of the CURRENT triage state (including any
                 // still-Unresolved findings — a draft mid-engagement report is legitimate;
-                // this is never gated on n_unresolved == 0). Project id + the lifted
+                // this is never gated on the outstanding count). Project id + the lifted
                 // dispositions map come from this component's own state.
                 {
                     let pid_report = project_id.clone();
@@ -5443,7 +5594,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 // first. This is OPTIONAL — it does NOT gate "onboarded". Use "Complete
                 // onboarding" above to finish at any point; the dev layer picks up each CI
                 // story independently.
-                if n_unresolved == 0 {
+                if triage_counts.outstanding() == 0 {
                     div { class: "onboard-final-step",
                         span { class: "onboard-step-eyebrow", "Optional: wire CI rules into CI" }
                         CiRulesPanel {
@@ -9341,6 +9492,9 @@ mod render_tests {
             rsx! {
                 DeviationBulkBar {
                     groups,
+                    // EDITED for Pass 2 step 3 (exception (b)): the bar gained a second,
+                    // required callback prop. Nothing else about this harness changed.
+                    on_confirm_all: Callback::new(move |_: usize| {}),
                     on_false_positive_all: Callback::new(move |_: usize| {}),
                 }
             }
@@ -9385,6 +9539,8 @@ mod render_tests {
             rsx! {
                 DeviationBulkBar {
                     groups: Vec::<DeviationBulkRow>::new(),
+                    // EDITED for Pass 2 step 3 (exception (b)): new required prop.
+                    on_confirm_all: Callback::new(move |_: usize| {}),
                     on_false_positive_all: Callback::new(move |_: usize| {}),
                 }
             }
@@ -9462,7 +9618,11 @@ mod render_tests {
                 }
             }
         }
+        // EDITED for Pass 2 step 3 (exception (a)): `Confirmed` is a fifth table the bar
+        // must also stay out of — a deviation group already confirmed has had its
+        // rule-level decision made.
         for view in [
+            TriageState::Confirmed,
             TriageState::Ignored,
             TriageState::TechDebt,
             TriageState::FalsePositive,
@@ -9483,5 +9643,198 @@ mod render_tests {
                 view.label()
             );
         }
+    }
+
+    // ── Pass 2 step 3: `Confirmed` on the curator surface ───────────────────
+
+    /// req_pass2_10: the rule-level bar offers BOTH directions now, over the same group.
+    ///
+    /// Step 2 shipped it with only `False positive all N` because no disposition honestly
+    /// meant "confirmed". This is the half that was withheld, rendered through the SHIPPED
+    /// component so the button's label and count come from the group's own `row_count`.
+    #[test]
+    fn req_pass2_10_bulk_bar_offers_confirm_all_alongside_false_positive_all() {
+        #[component]
+        fn BarHarness(groups: Vec<DeviationBulkRow>) -> Element {
+            rsx! {
+                DeviationBulkBar {
+                    groups,
+                    on_confirm_all: Callback::new(move |_: usize| {}),
+                    on_false_positive_all: Callback::new(move |_: usize| {}),
+                }
+            }
+        }
+        let groups = vec![
+            DeviationBulkRow {
+                rule_id: "API-VERSIONING-1".into(),
+                sentence: "2 of 47 sites deviate from \"URI-versioned endpoints\"".into(),
+                row_count: 2,
+            },
+            DeviationBulkRow {
+                rule_id: "NAMING-1".into(),
+                sentence: "3 sites deviate from \"snake_case table names\"".into(),
+                row_count: 3,
+            },
+        ];
+        let mut vdom = VirtualDom::new_with_props(BarHarness, BarHarnessProps { groups });
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Confirm all 2"), "html=\n{html}");
+        assert!(html.contains("Confirm all 3"), "html=\n{html}");
+        // Both directions on every group, and the counts agree with the false-positive
+        // button beside them: one group row, one row set, two readings of it.
+        assert!(html.contains("False positive all 2"), "html=\n{html}");
+        assert!(html.contains("False positive all 3"), "html=\n{html}");
+        assert_eq!(
+            html.matches("deviation-bulk-confirm").count(),
+            2,
+            "one Confirm control per group; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_10: a Confirm button exists in the Unresolved toolbar, and it is the only
+    /// action there with no reason input of its own.
+    #[test]
+    fn req_pass2_10_unresolved_toolbar_offers_confirm_with_no_reason_input() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(|| Signal::new(None::<FindingView>));
+            let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
+            rsx! {
+                FindingsTable {
+                    findings: deviation_queue_rows(),
+                    repos: vec!["me/api".to_string()],
+                    descriptions: std::collections::HashMap::new(),
+                    triage_view: TriageState::Unresolved,
+                    dispositions,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("triage-confirm"),
+            "the Unresolved toolbar must offer Confirm; html=\n{html}"
+        );
+        // The two reason textareas belong to Ignore and False positive, not to Confirm.
+        assert_eq!(
+            html.matches("ignore-reason").count(),
+            2,
+            "Confirm adds no third reason input; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_10: the Confirmed table has exactly one way out and no reason inputs.
+    ///
+    /// Mirrors the FalsePositive table. The reason textareas live only in the Unresolved
+    /// toolbar, so offering Ignore or Tech debt here would be a control that cannot complete.
+    #[test]
+    fn req_pass2_10_confirmed_table_offers_only_the_way_back() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(|| Signal::new(None::<FindingView>));
+            let mut dispositions =
+                use_signal(std::collections::HashMap::<String, Disposition>::new);
+            use_hook(move || {
+                let mut model = TriageModel::new();
+                model.confirm(&deviation_queue_rows());
+                dispositions.set(model.dispositions);
+            });
+            rsx! {
+                FindingsTable {
+                    findings: deviation_queue_rows(),
+                    repos: vec!["me/api".to_string()],
+                    descriptions: std::collections::HashMap::new(),
+                    triage_view: TriageState::Confirmed,
+                    dispositions,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("Move to Unresolved"),
+            "the confirmed rows must be reversible; html=\n{html}"
+        );
+        assert!(
+            !html.contains("ignore-reason"),
+            "no reason inputs in a table that cannot use them; html=\n{html}"
+        );
+        assert!(
+            !html.contains("triage-confirm"),
+            "and no Confirm button in the Confirmed table; html=\n{html}"
+        );
+        // The confirmed rows are actually HERE — the table is not merely empty.
+        assert!(
+            group_header_region(&html).contains("2 of 47 sites deviate from"),
+            "the confirmed deviation rows render in this table; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_10 (THE PROCESS GATE, rendered): a Queue of confirmed findings does not
+    /// block Process, and the gate says why the button is still disabled.
+    ///
+    /// Step 1's build note recorded that the gate itself was never render-tested, because it
+    /// lives inside `ScanResults` (behind `use_resource`, not SSR-testable). `ProcessGate` is
+    /// the extraction that closes that: every state below is the real component, rendered.
+    #[test]
+    fn req_pass2_10_process_gate_treats_confirmed_as_resolved() {
+        #[component]
+        fn GateHarness(counts: TriageCounts) -> Element {
+            rsx! {
+                ProcessGate {
+                    counts,
+                    processing: false,
+                    on_process: Callback::new(move |()| {}),
+                }
+            }
+        }
+        let render = |counts: TriageCounts| {
+            let mut vdom = VirtualDom::new_with_props(GateHarness, GateHarnessProps { counts });
+            vdom.rebuild_in_place();
+            dioxus_ssr::render(&vdom)
+        };
+
+        // (1) Two rows nobody has decided: blocked, and the hint NAMES Confirm as an exit.
+        // Before this step it offered only "Ignore or save as Tech debt".
+        let html = render(TriageCounts { unresolved: 2, ..Default::default() });
+        assert!(html.contains("Resolve the 2 remaining"), "html=\n{html}");
+        assert!(
+            html.contains("Confirm"),
+            "the hint must name the exit the curator reaches for most; html=\n{html}"
+        );
+        assert!(html.contains("disabled"), "html=\n{html}");
+
+        // (2) Everything CONFIRMED: nothing outstanding, so the blocking hint is gone. The
+        // button stays disabled because Confirmed commits nothing — and the gate says so
+        // instead of leaving a dead control unexplained.
+        let html = render(TriageCounts { confirmed: 2, ..Default::default() });
+        assert!(
+            !html.contains("remaining Unresolved"),
+            "a confirmed finding is decided, not outstanding; html=\n{html}"
+        );
+        assert!(html.contains("Nothing to process"), "html=\n{html}");
+        assert!(html.contains("disabled"), "html=\n{html}");
+
+        // (3) Confirmed + ignored: nothing outstanding AND something to commit. Enabled.
+        let html = render(TriageCounts { confirmed: 1, ignored: 1, ..Default::default() });
+        assert!(!html.contains("remaining Unresolved"), "html=\n{html}");
+        assert!(!html.contains("Nothing to process"), "html=\n{html}");
+        assert!(
+            !html.contains("disabled"),
+            "nothing outstanding and a baseline waiver to commit; html=\n{html}"
+        );
+
+        // (4) One row still unresolved alongside a confirmed one: blocked by that row alone.
+        let html = render(TriageCounts {
+            unresolved: 1,
+            confirmed: 1,
+            ignored: 1,
+            ..Default::default()
+        });
+        assert!(html.contains("Resolve the 1 remaining"), "html=\n{html}");
+        assert!(html.contains("disabled"), "html=\n{html}");
     }
 }

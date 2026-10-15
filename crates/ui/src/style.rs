@@ -1196,7 +1196,16 @@ html, body {
 }
 .deviation-bulk-rule { font-weight: 700; color: var(--ink); flex: none; }
 .deviation-bulk-sentence { color: var(--ink-soft); flex: 1 1 260px; min-width: 0; }
+/* Both rule-level buttons keep their intrinsic width; Confirm renders first because it is the
+   far more common answer for a deviation group (see `DeviationBulkBar`'s docs). */
+.deviation-bulk-confirm { flex: none; }
 .deviation-bulk-fp { flex: none; }
+
+/* The per-row Confirm button in the Unresolved toolbar. Visually first and primary (it reuses
+   `btn-run`), with a margin that separates it from the two reason-bearing actions beside it:
+   it is the only action in that toolbar that takes no textarea, and grouping it with the ones
+   that do invites a confirm click while an unrelated reason sits half-typed next to it. */
+.triage-confirm { margin-right: 10px; }
 
 /* Rule-alternatives review panel (audit-integrated alternative recommendation,
    docs/design/2026-09-22_audit-integrated-alternatives.md). Lists every multi-option rule the

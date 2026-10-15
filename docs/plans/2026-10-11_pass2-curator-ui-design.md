@@ -1,10 +1,11 @@
 # Pass 2 - Curator UI design for the five-kind finding taxonomy (2026-10-11)
 
 > **STATUS, 2026-10-14: PARTLY BUILT.** This was a design document with no code when it was
-> written. Step 1 of section 11 is now shipped end to end, and so is the manual-sort
-> requirement section 5 mentions in passing. Steps 2 and 3 have zero code. The full
-> built-versus-designed inventory, with file:line, is section 14 at the bottom; read it before
-> treating any paragraph here as a description of the product.
+> written. Steps 1, 2 and 3 of section 11 are now shipped (step 3 minus the keystroke, which is
+> deferred to the detail-pane step for a stated reason), and so is the manual-sort requirement
+> section 5 mentions in passing. The full built-versus-designed inventory, with file:line, is
+> section 14 at the bottom; read it before treating any paragraph here as a description of the
+> product.
 
 Design document, written before any code existed. Builds on:
 
@@ -589,23 +590,51 @@ Test coverage, with a caveat worth recording: `req_pass2_2_informational_rows_ca
 sits behind `use_resource` network resources and is not SSR-testable; the render tests target
 `FindingsTable` and the panels directly.
 
-### NOT BUILT - section 11 step 2
+### BUILT - section 11 step 2
 
-No deviation group-header sentence anywhere: `convention_label` is read in exactly one place
-(`ConventionsPanel`, `scan.rs:3592`), and `deviating_sites` / `assessed_sites` appear only in
-test fixtures and in `deviation_ratio_ppm`. No `Confirm all N` / `FP all N` control exists.
-The table still uses chorale's stock group headers (`group_by` at `scan.rs:2300`); none of
-`render_grouped_row` / `group_header_tr` / `group_header_class` is used, even though the
-2026-10-12 dependency check above confirmed chorale 0.2.3 exposes them. `RuleAlternativesPanel`
-is still a standalone panel above the table (`scan.rs:4979-4987`), so section 9.1's relocation
-has not happened.
+Commits `b35f144`, `d24a00d`. (This section read "NOT BUILT" until 2026-10-14; it was written
+before those commits landed and was not revised with them.)
 
-### NOT BUILT - section 11 step 3
+The deviation sentence is structured values in core (`DeviationHeadline` / `rule_group_label`
+/ `deviation_groups`, `crates/ui-core/src/triage.rs`) and reaches the real group header by
+being the value the table GROUPS BY (`RULE_GROUP_COLUMN`), so chorale renders it. The
+rule-level bulk action is `DeviationBulkBar` above the table, not content inside the group
+header `<tr>`: the 2026-10-12 dependency check recorded `render_grouped_row` /
+`group_header_tr` / `group_header_class` as a content-injection hook and they are not one
+(the first two are private in `chorale-dioxus` 0.2.3, the third is a CSS class string), which
+is recorded at the component. `False positive all N` shipped there; `Confirm all N` was
+deliberately withheld for want of an honest disposition, and step 3 below adds it.
 
-`TriageState` still has exactly four variants (`crates/ui-core/src/triage.rs:30-36`),
-`label()` has four arms (`:39-46`), `TriageModel::counts` returns a 4-tuple (`:533`), and the
-Process gate is still `n_unresolved == 0`. No `Confirmed` disposition, no `C`/`I`/`T`/`F`
-keystrokes, no undo toast. Nothing in the tree references `Confirmed`.
+Still open from section 9: `RuleAlternativesPanel` remains a standalone panel above the table,
+so section 9.1's relocation has not happened.
+
+### BUILT - section 11 step 3 (2026-10-14), except the keystroke
+
+`TriageState` now has FIVE variants, `Confirmed` second (`crates/ui-core/src/triage.rs`),
+and the disposition reaches the export rather than stopping at the UI.
+
+| Design item | Where it landed |
+|---|---|
+| The fifth disposition | `TriageState::Confirmed` + `label()` + `TriageState::all()` (the single source of the sub-tab set and order) + `TriageState::is_decided()`, `crates/ui-core/src/triage.rs` |
+| The per-row transition | `TriageModel::confirm(&[FindingView])` — no reason parameter, deliberately; a thin wrapper over `move_to` |
+| `Confirm all N` (step 2's withheld half) | `TriageModel::bulk_confirm(&DeviationGroup)` (thin wrapper over `confirm`, refuses only an empty group) + the button in `DeviationBulkBar`, `crates/ui/src/cockpit/scan.rs` |
+| The tally | `TriageCounts` struct replaces the 4-tuple; `ScanResults`' duplicate inline loop is gone, so there is now exactly ONE tally and it is the unit-tested one |
+| The Process gate | `TriageCounts::outstanding()` / `has_committable_work()` / `can_process()`, rendered by the new props-only `ProcessGate` component. Confirmed is resolved, so it does not block; it commits nothing, so it does not unblock either, and the gate now SAYS so instead of leaving a disabled button unexplained |
+| The export | `camerata_server::report_export::Disposition::Confirmed` — `ReviewState` flips to `Reviewed`, `matrix_bucket` shares `Unresolved`'s severity-derived arm, the row counts as still open, and `disposition_label` reads "Confirmed by the reviewer (recommended: X)". `xlsx_export`'s two counting sites and its legend follow, because the workbook must reconcile with the PDF |
+
+Local only, per Q2. Nothing is committed at Process and there is no cross-scan record.
+
+**The `C`/`I`/`T`/`F` keystrokes are DEFERRED to the docked-detail-pane step, deliberately.**
+Q5 ships them "scoped so the keys only fire while the detail pane holds focus, plus a
+five-second undo toast". The pane does not exist yet (the Queue's detail surface is still the
+row-click modal), so the scoping condition the ruling attaches the keys to cannot be
+satisfied. The only thing buildable today is a document-level handler firing on any `c`
+anywhere on the page, which at 400 rows is the exact fat-finger risk the scoping clause
+exists to prevent. The keys belong to the pane step, where their focus owner, the row cursor
+and the undo toast all arrive together. The rationale is repeated at the Confirm button in
+`scan.rs` so it is not rediscovered as an oversight.
+
+Still not built from this step's neighbourhood: the undo toast (it arrives with the keys).
 
 ### NOT BUILT - the later layers, as expected
 
