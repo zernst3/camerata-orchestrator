@@ -2601,6 +2601,19 @@ html, body {
   margin: 0; font-size: 12px; line-height: 1.5; color: #7f1d1d;
   background: #fef2f2; border: 1px solid #fecaca; border-radius: 7px; padding: 8px 10px;
 }
+/* The ALTERNATIVES CONTEXT inside the hub (design §9.1): which option the rule was judged
+   against, who chose it, and why. Read-only — it adds no control, which is what keeps §8's
+   "exactly one navigation" invariant true of the hub. */
+.rule-hub-alt {
+  display: flex; flex-direction: column; gap: 6px;
+  border-top: 1px solid var(--line); padding-top: 9px;
+}
+.rule-hub-alt-line {
+  margin: 0; font-size: 12.5px; color: var(--ink); line-height: 1.6;
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+}
+.rule-hub-alt-why { margin: 0; font-size: 12px; color: var(--ink-soft); line-height: 1.55; max-width: 80ch; }
+.rule-hub-alt-where { margin: 0; font-size: 11.5px; color: var(--ink-faint); line-height: 1.5; }
 .rule-hub-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
 .rule-hub-modal { max-width: 620px; }
 

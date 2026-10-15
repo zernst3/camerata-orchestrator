@@ -2399,6 +2399,20 @@ pub(super) fn RuleHubStrip(
     /// "Take me to this rule." Invoked with `hub.jump` — never with a surface the caller
     /// chose, so the button and the derivation cannot disagree about where the rule is.
     on_jump: Callback<KindSurface>,
+    /// THE ALTERNATIVES CONTEXT (design §9.1), for a multi-option rule the audit evaluated.
+    /// `None` for a single-option rule, and for any rule the audit recorded no recommendation
+    /// for — which is the majority, so this must render nothing at all rather than an empty
+    /// "Evaluated against: (none)" line.
+    ///
+    /// Read-only here, and deliberately so. The Change select and the staged-override/rescan
+    /// flow stay on `RuleAlternativesPanel`; see that component's doc comment for why §9.1
+    /// cannot move them. What moves is the FACT and its justification, to the surface every
+    /// rule id already opens.
+    ///
+    /// Defaulted so the strip's existing render tests — which assert, among other things,
+    /// that the hub offers exactly ONE control — keep compiling and asserting unchanged.
+    #[props(default)]
+    alternatives: Option<AlternativeControlsRow>,
 ) -> Element {
     let (kind_class, kind_label, kind_tip) = kind_chip_parts(hub.kind_tag);
     let jump = hub.jump;
@@ -2427,8 +2441,67 @@ pub(super) fn RuleHubStrip(
                 }
                 // The Evaluated-against fact, relocated from `RuleAlternativesPanel`
                 // (design §9.1) to the surface that is reachable from every rule id.
-                if let Some(opt) = hub.evaluated_option_id.clone() {
-                    span { class: "rule-modal-tag rule-hub-evaluated", "evaluated against \u{b7} {opt}" }
+                //
+                // The raw OPTION ID, and only when the richer line below is absent. When the
+                // audit recorded a recommendation for this rule, that line carries the
+                // authored LABEL instead — which is what the curator reads everywhere else,
+                // and the id is an internal key he has no reason to decode. Rendering both
+                // would state one fact twice in two vocabularies.
+                if alternatives.is_none() {
+                    if let Some(opt) = hub.evaluated_option_id.clone() {
+                        span { class: "rule-modal-tag rule-hub-evaluated", "evaluated against \u{b7} {opt}" }
+                    }
+                }
+            }
+            // THE ALTERNATIVES CONTEXT (design §9.1): what option this rule was judged
+            // against, who chose it, the evidence behind the choice, and WHY — the answer the
+            // panel's "Why?" button reveals, rendered directly.
+            //
+            // Directly, rather than behind a Why? button of its own, for two reasons. The hub
+            // is an overlay the curator opened deliberately on ONE rule, so three sentences
+            // about that rule are what he came for, not something to hide behind a second
+            // click; and a modal raised from inside a modal is a worse surface than the text
+            // it would reveal. The panel keeps its button because it lists many rules at once
+            // and inline reasoning for all of them would be a wall.
+            //
+            // It also adds NO control, which is load-bearing: §8's "the hub offers exactly one
+            // navigation and no link graph" is pinned by a test that counts the rendered
+            // buttons, and this line is read-only precisely so that invariant survives it.
+            if let Some(alt) = alternatives.clone() {
+                div { class: "rule-hub-alt",
+                    p { class: "rule-hub-alt-line",
+                        "Evaluated against: "
+                        strong { "{alt.evaluated_label}" }
+                        span { class: "{alt.badge_class}", "{alt.badge_text}" }
+                        if alt.accepted {
+                            span { class: "rec-badge rec-badge-accepted", "Accepted" }
+                        }
+                        if !alt.applicable {
+                            span { class: "rec-not-applicable", "Not applicable to this repo" }
+                        }
+                    }
+                    if let Some(ev) = alt.evidence.clone() {
+                        span { class: "rec-evidence", "Evidence: {ev}" }
+                    }
+                    p { class: "rule-hub-alt-why",
+                        if alt.reasoning.trim().is_empty() {
+                            "No reasoning was recorded for this recommendation."
+                        } else {
+                            "{alt.reasoning}"
+                        }
+                    }
+                    if alt.hallucinated {
+                        span { class: "rec-hallucinated-note",
+                            "The model did not return a valid choice for this rule; this is the selected or default option shown instead."
+                        }
+                    }
+                    // Where the DECISION lives, named rather than implied. §9.1 wanted the
+                    // Change select here too; it could not come (see `RuleAlternativesPanel`),
+                    // and a curator reading "Override, pending rescan" with no way to act on
+                    // it needs to be told where the control is rather than left to hunt.
+                    p { class: "rule-hub-alt-where",
+                        "Change this, or rescan a staged override, in \u{201c}Rule alternatives\u{201d} above the Queue."
+                    }
                 }
             }
             // COUNTS ONLY, and the sentence says why. Offering a link here would be inventing
@@ -2482,6 +2555,9 @@ pub(super) fn RuleHubModal(
     hub: RuleHubView,
     on_jump: Callback<KindSurface>,
     on_close: Callback<()>,
+    /// See [`RuleHubStrip`]'s `alternatives`. Passed straight through.
+    #[props(default)]
+    alternatives: Option<AlternativeControlsRow>,
 ) -> Element {
     rsx! {
         div { class: "rule-modal-overlay", onclick: move |_| on_close.call(()),
@@ -2494,7 +2570,7 @@ pub(super) fn RuleHubModal(
                         "\u{2715}"
                     }
                 }
-                RuleHubStrip { hub, on_jump }
+                RuleHubStrip { hub, on_jump, alternatives }
             }
         }
     }
@@ -4989,6 +5065,43 @@ pub(super) fn RescanStickyBar(
 ///
 /// Rendered (and re-keyed) alongside the findings table in `ScanResults`, so a fresh audit
 /// remounts it with clean staged-override state.
+///
+/// # Design §9.1: WHY THIS PANEL IS STILL HERE
+///
+/// §9.1 is the removals sweep's first item and asks for this panel to go, with its
+/// Evaluated-against line, Why?, Change select and staged-override/rescan flow moving "into
+/// the rule group headers and the rule hub modal". Both destinations were checked against the
+/// built product rather than against the design's description of it, and between them they do
+/// not cover what this panel does. The halves:
+///
+/// * **MOVED (done).** The Evaluated-against line and the Why? answer now also render inside
+///   [`RuleHubStrip`], built by the SAME `alternative_controls_row` this panel uses, so the
+///   two cannot disagree. A curator reading any rule id in the Queue reaches that context in
+///   one click, which is §9.1's actual complaint — "duplicating per-rule context away from the
+///   rows it describes" — addressed.
+///
+/// * **CANNOT MOVE: the group headers take no content.** Established at build time and
+///   recorded in the design's own §13 retraction: `render_grouped_row` / `group_header_tr` are
+///   private in `chorale-dioxus` 0.2.3 and `group_header_class` is a CSS class string. The
+///   deviation SENTENCE reaches the header only because it IS the grouped-on cell value; a
+///   `<select>` and a button cannot be a cell value. (chorale is not to be modified.)
+///
+/// * **CANNOT MOVE: the hub cannot reach a rule with no findings.**
+///   `camerata_ui_core::triage::rule_hub` returns `None` when a rule has no rows in the repo,
+///   deliberately — its own doc says "there is no '0 findings' hub, an empty strip is a dead
+///   affordance". But this panel exists precisely to list "every multi-option rule the audit
+///   evaluated (every key of `recommendations`), INCLUDING RULES WITH ZERO VIOLATIONS, so the
+///   architect can review — and, if they disagree, override — any of them". A clean rule is
+///   the one whose option choice is least visible and most in need of a second look. Deleting
+///   the panel would make those rules unreachable: no Queue row, no panel row, no hub.
+///
+/// So the Change select, the staged-override map and the rescan/accept flow stay here, where
+/// every rule in scope can be reached. The hub names this panel as their home rather than
+/// leaving the curator to hunt for it.
+///
+/// Removing this panel is possible, but it needs a surface that enumerates the rules the scan
+/// found nothing for — which is a new thing to build, not a relocation, and §9.1 does not
+/// describe one.
 #[component]
 pub(super) fn RuleAlternativesPanel(
     project_id: String,
@@ -5960,6 +6073,43 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
         .as_ref()
         .and_then(|r| rule_hub(&findings, &r.repo, &r.rule_id));
 
+    // THE ALTERNATIVES CONTEXT for the open hub (design §9.1): the Evaluated-against line and
+    // the Why? answer, at the surface every rule id already opens. `None` unless the rule is
+    // multi-option AND the audit recorded a recommendation for it, which is the common case —
+    // the hub must say nothing rather than render an empty line.
+    //
+    // Built from exactly the three sources `RuleAlternativesPanel` joins, through the SAME
+    // pure `alternative_controls_row`, so the hub and the panel cannot disagree about which
+    // option a rule is evaluated against. `staged` is `None` here because the staged-override
+    // map is the panel's own state: the hub reports what the scan did, and the panel is where
+    // a change is made. See the panel's doc comment.
+    let open_hub_alternatives: Option<AlternativeControlsRow> = hub_open.read().as_ref().and_then(|req| {
+        let rec = audited
+            .as_ref()
+            .and_then(|a| a.recommendations.get(&req.rule_id))
+            .cloned()?;
+        let rule = report
+            .proposed_rules
+            .iter()
+            .find(|r| r.id == req.rule_id && r.options.len() >= 2)?;
+        let scoped: Vec<&FindingView> = findings
+            .iter()
+            .filter(|f| f.repo == req.repo && f.rule_id == req.rule_id)
+            .collect();
+        let evaluated = scoped
+            .iter()
+            .find_map(|f| f.evaluated_option_id.clone())
+            .filter(|o| !o.is_empty());
+        Some(alternative_controls_row(
+            rule,
+            &rec,
+            scoped.len(),
+            evaluated.as_deref(),
+            None,
+            false,
+        ))
+    });
+
     rsx! {
         // Row-detail modal: hosted here, at the results-subtree root, so it is NOT a
         // sibling of the chorale table (see RuleDetailModal for why).
@@ -5970,6 +6120,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
         if let Some(hub) = open_hub {
             RuleHubModal {
                 hub,
+                alternatives: open_hub_alternatives,
                 // ONE jump, and it is the derivation's own `hub.jump`. Into the Queue it is a
                 // COLUMN FILTER — design §8's "a filter, not a hyperlink graph" — so the
                 // curator lands in a normal, visibly filtered table with the controls to clear
@@ -11518,6 +11669,179 @@ mod render_tests {
         }
         assert!(html.contains(">Severity<"), "Severity header; html=\n{html}");
         assert!(html.contains(">Authority<"), "Authority header; html=\n{html}");
+    }
+
+    /// req_pass2_13 (§9.1, the half that MOVED): the hub carries the Evaluated-against line
+    /// and the Why? answer, and carries them as the authored LABEL rather than the raw option
+    /// id it used to show.
+    ///
+    /// It also adds NO control while doing so — asserted here as well as in the §8 tests,
+    /// because this is the change that could have broken "the hub builds exactly one
+    /// navigation and no link graph" without any of those tests noticing: they render the
+    /// strip with `alternatives` defaulted to `None`, so they cannot see this path.
+    #[test]
+    fn req_pass2_13_the_hub_carries_the_evaluated_against_line_and_the_why_answer() {
+        #[component]
+        fn Harness(hub: RuleHubView, alternatives: Option<AlternativeControlsRow>) -> Element {
+            rsx! {
+                RuleHubStrip {
+                    hub,
+                    on_jump: Callback::new(|_: KindSurface| {}),
+                    alternatives,
+                }
+            }
+        }
+        let render = |hub: RuleHubView, alternatives: Option<AlternativeControlsRow>| {
+            let mut vdom = VirtualDom::new_with_props(
+                Harness,
+                HarnessProps { hub, alternatives },
+            );
+            vdom.rebuild_in_place();
+            dioxus_ssr::render(&vdom)
+        };
+
+        let mut row = kinded_finding(
+            "API-VERSIONING-1",
+            "medium",
+            serde_json::json!({
+                "kind": "deviation", "deviating_sites": 2, "assessed_sites": 47,
+                "convention_option_id": "versioned", "convention_label": "URI-versioned endpoints"
+            }),
+        );
+        row.evaluated_option_id = Some("versioned".to_string());
+        let hub = rule_hub(std::slice::from_ref(&row), "me/api", "API-VERSIONING-1")
+            .expect("the rule is in the scan");
+
+        // WITHOUT the alternatives context (a rule the audit recorded no recommendation for):
+        // unchanged behaviour, the raw option id tag.
+        let bare = render(hub.clone(), None);
+        assert!(
+            bare.contains("evaluated against"),
+            "the pre-existing tag survives for a rule with no recommendation; html=\n{bare}"
+        );
+        assert!(bare.contains("versioned"), "html=\n{bare}");
+
+        // WITH it: the LABEL, the provenance, the evidence, and the reasoning the panel's
+        // Why? button hides behind a click.
+        let rule = proposed_rule_with_options(
+            "API-VERSIONING-1",
+            "Version the API",
+            &[("versioned", "URI-versioned endpoints"), ("header", "Header-versioned")],
+        );
+        let rec = recommendation_with_evidence(
+            "versioned",
+            "Thirty-one of forty-seven endpoints already carry a /v1 prefix.",
+            Some("src/routes.rs:12"),
+            true,
+        );
+        let alt = alternative_controls_row(&rule, &rec, 2, Some("versioned"), None, false);
+        let html = render(hub.clone(), Some(alt));
+        assert!(html.contains("Evaluated against:"), "html=\n{html}");
+        assert!(
+            html.contains("URI-versioned endpoints"),
+            "the authored LABEL, which is what the curator reads elsewhere; html=\n{html}"
+        );
+        assert!(html.contains("AI recommended"), "the provenance badge; html=\n{html}");
+        assert!(html.contains("Evidence: src/routes.rs:12"), "html=\n{html}");
+        assert!(
+            html.contains("Thirty-one of forty-seven endpoints"),
+            "the Why? ANSWER, rendered rather than hidden behind a modal inside a modal; \
+             html=\n{html}"
+        );
+        assert!(
+            !html.contains("rule-hub-evaluated"),
+            "and NOT the raw option-id tag as well — one fact, one vocabulary; html=\n{html}"
+        );
+        // Where the control actually is, named. The hub cannot carry the Change select (see
+        // `RuleAlternativesPanel`), so it must not leave the curator hunting for it.
+        assert!(html.contains("Rule alternatives"), "html=\n{html}");
+
+        // THE §8 INVARIANT SURVIVES THE ADDITION: still exactly one control, the jump.
+        assert_eq!(
+            html.matches("<button").count(),
+            1,
+            "the alternatives context is READ-ONLY; §8's one-navigation rule holds; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_13 (§9.1, the half that could NOT move): `RuleAlternativesPanel` still lists
+    /// a multi-option rule the scan found NOTHING for, and the hub still cannot.
+    ///
+    /// This is the coverage proof that blocks the removal, asserted rather than asserted-in-
+    /// prose. A clean multi-option rule has no Queue row and no panel row anywhere else; if
+    /// the panel went, its option choice would be unreachable and unchangeable. `rule_hub`
+    /// returning `None` for it is deliberate (its own doc: "there is no '0 findings' hub"),
+    /// so this is a property of the replacement, not a gap to be patched.
+    #[test]
+    fn req_pass2_13_the_hub_cannot_reach_a_clean_multi_option_rule_so_the_panel_stays() {
+        // A scan whose findings touch ONE rule, while the audit recommended on TWO.
+        let found = kinded_finding("API-VERSIONING-1", "medium", serde_json::json!({"kind": "defect"}));
+        let findings = vec![found];
+
+        assert!(
+            rule_hub(&findings, "me/api", "ERROR-HANDLING-1").is_none(),
+            "the hub describes what a scan FOUND; a clean rule has nothing for it to describe"
+        );
+
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(|| {
+                Signal::new(std::collections::HashMap::<String, String>::new())
+            });
+            let audit = use_signal(|| Option::<ScanReportView>::None);
+            let mut recs = std::collections::HashMap::new();
+            recs.insert(
+                "API-VERSIONING-1".to_string(),
+                recommendation("versioned", "most endpoints already do", false, false),
+            );
+            recs.insert(
+                "ERROR-HANDLING-1".to_string(),
+                recommendation("result", "no call sites panic today", false, false),
+            );
+            rsx! {
+                RuleAlternativesPanel {
+                    project_id: "p".to_string(),
+                    proposed_rules: vec![
+                        proposed_rule_with_options(
+                            "API-VERSIONING-1",
+                            "Version the API",
+                            &[("versioned", "URI-versioned endpoints"), ("header", "Header-versioned")],
+                        ),
+                        proposed_rule_with_options(
+                            "ERROR-HANDLING-1",
+                            "Handle errors consistently",
+                            &[("result", "Result types"), ("panic", "Panics")],
+                        ),
+                    ],
+                    findings: vec![kinded_finding(
+                        "API-VERSIONING-1",
+                        "medium",
+                        serde_json::json!({"kind": "defect"}),
+                    )],
+                    repos: vec!["me/api".to_string()],
+                    recommendations: recs,
+                    audit,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("ERROR-HANDLING-1"),
+            "the CLEAN rule must still be listed and overridable — it is the one whose option \
+             choice is least visible; html=\n{html}"
+        );
+        assert!(html.contains("0 findings"), "and labelled honestly; html=\n{html}");
+        assert!(
+            html.contains("Result types"),
+            "with its Change select populated; html=\n{html}"
+        );
+        assert!(
+            html.contains("API-VERSIONING-1"),
+            "the rule WITH findings is listed too, because this is still where the Change \
+             select lives for every rule; html=\n{html}"
+        );
     }
 
     /// req_pass2_13 (§9.1, precondition): `alternative_controls_row` resolves "Evaluated
