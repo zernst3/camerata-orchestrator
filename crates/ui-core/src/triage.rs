@@ -3170,7 +3170,7 @@ mod tests {
         let f = row("src/a.rs");
         let mut m = TriageModel::new();
         let mut entry = m
-            .dispose_with_undo(&[f.clone()], TriageState::Confirmed, "", 1_000)
+            .dispose_with_undo(std::slice::from_ref(&f), TriageState::Confirmed, "", 1_000)
             .expect("Confirm needs no reason, so it is never refused");
         assert_eq!(m.state_of(&f), TriageState::Confirmed, "applied immediately");
 
@@ -3185,7 +3185,7 @@ mod tests {
         let f = row("src/a.rs");
         let mut m = TriageModel::new();
         let mut entry = m
-            .dispose_with_undo(&[f.clone()], TriageState::Confirmed, "", 1_000)
+            .dispose_with_undo(std::slice::from_ref(&f), TriageState::Confirmed, "", 1_000)
             .expect("applied");
 
         assert_eq!(
@@ -3223,11 +3223,11 @@ mod tests {
     fn req_pass2_11_undo_restores_the_prior_state_and_its_reason() {
         let f = row("src/a.rs");
         let mut m = TriageModel::new();
-        m.ignore(&[f.clone()], "accepted: fixture-only path");
-        m.set_bucket(&[f.clone()], TechDebtBucket::Now);
+        m.ignore(std::slice::from_ref(&f), "accepted: fixture-only path");
+        m.set_bucket(std::slice::from_ref(&f), TechDebtBucket::Now);
 
         let mut entry = m
-            .dispose_with_undo(&[f.clone()], TriageState::Confirmed, "", 10_000)
+            .dispose_with_undo(std::slice::from_ref(&f), TriageState::Confirmed, "", 10_000)
             .expect("applied");
         assert_eq!(m.state_of(&f), TriageState::Confirmed);
 
@@ -3246,7 +3246,7 @@ mod tests {
         let f = row("src/a.rs");
         let mut m = TriageModel::new();
         let mut entry = m
-            .dispose_with_undo(&[f.clone()], TriageState::TechDebt, "", 0)
+            .dispose_with_undo(std::slice::from_ref(&f), TriageState::TechDebt, "", 0)
             .expect("applied");
         assert_eq!(m.dispositions.len(), 1);
         assert_eq!(m.undo(&mut entry, 1), UndoOutcome::Reverted(1));
@@ -3263,11 +3263,11 @@ mod tests {
         let f = row("src/a.rs");
         let mut m = TriageModel::new();
         let mut entry = m
-            .dispose_with_undo(&[f.clone()], TriageState::Confirmed, "", 0)
+            .dispose_with_undo(std::slice::from_ref(&f), TriageState::Confirmed, "", 0)
             .expect("applied");
         assert_eq!(m.undo(&mut entry, 100), UndoOutcome::Reverted(1));
         // The curator then deliberately marks it tech debt.
-        m.move_to(&[f.clone()], TriageState::TechDebt);
+        m.move_to(std::slice::from_ref(&f), TriageState::TechDebt);
         assert_eq!(m.undo(&mut entry, 200), UndoOutcome::AlreadyUndone);
         assert_eq!(
             m.state_of(&f),
@@ -3284,7 +3284,7 @@ mod tests {
             let f = row("src/a.rs");
             let mut m = TriageModel::new();
             assert!(
-                m.dispose_with_undo(&[f.clone()], state, "   ", 0).is_none(),
+                m.dispose_with_undo(std::slice::from_ref(&f), state, "   ", 0).is_none(),
                 "{} with a blank reason must be refused",
                 state.label()
             );
@@ -3306,15 +3306,15 @@ mod tests {
         ] {
             let mut via_pane = TriageModel::new();
             via_pane
-                .dispose_with_undo(&[f.clone()], state, reason, 0)
+                .dispose_with_undo(std::slice::from_ref(&f), state, reason, 0)
                 .unwrap_or_else(|| panic!("{} must apply", state.label()));
 
             let mut via_button = TriageModel::new();
             match state {
-                TriageState::Confirmed => via_button.confirm(&[f.clone()]),
-                TriageState::Ignored => via_button.ignore(&[f.clone()], reason),
-                TriageState::FalsePositive => via_button.mark_false_positive(&[f.clone()], reason),
-                other => via_button.move_to(&[f.clone()], other),
+                TriageState::Confirmed => via_button.confirm(std::slice::from_ref(&f)),
+                TriageState::Ignored => via_button.ignore(std::slice::from_ref(&f), reason),
+                TriageState::FalsePositive => via_button.mark_false_positive(std::slice::from_ref(&f), reason),
+                other => via_button.move_to(std::slice::from_ref(&f), other),
             }
             assert!(
                 via_pane.dispositions == via_button.dispositions,

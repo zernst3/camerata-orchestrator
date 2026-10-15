@@ -1201,6 +1201,104 @@ html, body {
 .deviation-bulk-confirm { flex: none; }
 .deviation-bulk-fp { flex: none; }
 
+/* ── THE DOCKED DETAIL PANE (Pass 2 step 4, design §2; the owner's Q5 ruling §13) ──────────
+   The Queue table and its pane, side by side. The pane is a flex sibling of the table rather
+   than content inside it: chorale 0.2.3's `detail_renderer` is an expandable INLINE row
+   detail (`<tr><td colspan=N>` beneath its parent row), and an inline panel would push every
+   row below it down the page, so cursor-down-read-decide would reflow the table under the
+   cursor on every move. See `FindingDetailPane`'s doc comment.
+
+   The pane is sticky so it stays beside the cursor through a long scroll, and it has its own
+   scroll context so a merged row's site list cannot push the disposition controls off screen
+   — the controls are the whole point of the surface. Below 1100px the split stacks, because
+   two 420px columns in a 900px window is two unusable columns. */
+.queue-split { display: flex; align-items: flex-start; gap: 12px; }
+.queue-split-table { flex: 1 1 auto; min-width: 0; }
+.finding-pane {
+  flex: 0 0 380px; align-self: flex-start; position: sticky; top: 8px;
+  max-height: calc(100vh - 120px); overflow-y: auto;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--surface); font-size: 12px; line-height: 1.5;
+}
+/* The focus ring is load-bearing, not decoration: "the detail pane holds focus" is the
+   condition the disposition keys are scoped to, so the curator has to be able to SEE it. */
+.finding-pane:focus,
+.finding-pane:focus-within { outline: 2px solid #4a90e2; outline-offset: 1px; }
+@media (max-width: 1100px) {
+  .queue-split { flex-direction: column; }
+  .finding-pane { flex: 1 1 auto; width: 100%; position: static; max-height: none; }
+}
+.pane-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+.pane-rule { font-weight: 700; color: var(--ink); }
+.pane-pos { margin-left: auto; color: var(--ink-faint); font-size: 11px; }
+.pane-full-detail { flex: none; }
+.pane-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+/* A deviation's structured claim, in the pane for the same reason it is on the group header:
+   it is the thing the disposition agrees or disagrees with. */
+.pane-claim {
+  margin: 0 0 8px; padding: 6px 8px; border-left: 3px solid #4a90e2;
+  background: var(--surface-alt, transparent); color: var(--ink); font-weight: 600;
+}
+.pane-snippet {
+  margin: 0 0 8px; padding: 6px 8px; overflow-x: auto;
+  border: 1px solid var(--line); border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  white-space: pre-wrap; word-break: break-word;
+}
+/* Absorbed sites (design §6) — the full-disclosure surface C5 lacked. A consequence site is
+   visually subordinated rather than hidden: it IS a place the defect reaches, it just has no
+   independently-fixable code of its own. */
+.pane-sites { list-style: none; margin: 0 0 8px; padding: 0; }
+.pane-site {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+  padding: 3px 0; border-bottom: 1px solid var(--line);
+}
+.pane-site:last-child { border-bottom: none; }
+.pane-site-primary .pane-site-loc { font-weight: 700; }
+.pane-site-consequence { padding-left: 12px; opacity: 0.82; }
+.pane-site-sub {
+  flex: none; text-transform: uppercase; letter-spacing: 0.06em;
+  font-size: 9px; font-weight: 700; color: var(--ink-faint);
+}
+.pane-site-loc { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.pane-site-rule { color: var(--ink-faint); font-size: 11px; }
+.pane-site-snippet { flex: 1 1 100%; color: var(--ink-soft); font-size: 11px; }
+.pane-fix-head { display: flex; align-items: baseline; gap: 8px; }
+.pane-effort { flex: none; }
+/* The five-second undo (Q5). Docked in the pane rather than in the app-wide toast stack: that
+   stack's cards are informational and run their own timer, while this one carries an action
+   whose window is the model's, and it has to sit where the curator's eyes already are. */
+.pane-undo {
+  display: flex; align-items: center; gap: 8px;
+  margin: 8px 0; padding: 6px 8px; border-radius: 3px;
+  border: 1px solid #4a90e2; background: rgba(74, 144, 226, 0.12);
+}
+.pane-undo-msg { flex: 1 1 auto; min-width: 0; }
+.pane-undo-btn { flex: none; }
+.pane-undo-left { flex: none; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+.pane-reason-prompt {
+  display: flex; flex-direction: column; gap: 4px;
+  margin: 8px 0; padding: 8px; border-radius: 3px;
+  border: 1px solid var(--line); border-left: 3px solid #d4a017;
+}
+.pane-reason-input { width: 100%; }
+.pane-prompt-actions { display: flex; gap: 6px; }
+.pane-actions {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line);
+}
+/* The armed/off indicator. Its text comes from `pane_keys_armed`, which is DEFINED as "would
+   C produce a command" — so a pane that looks armed while the handler refuses is not
+   reachable. The two states are deliberately different colours: a curator about to press C
+   should be able to tell at a glance whether it will land. */
+.pane-keys {
+  flex: 1 1 100%; font-size: 10px; letter-spacing: 0.03em;
+}
+.pane-keys.armed { color: #2e7d32; font-weight: 700; }
+.pane-keys.off { color: var(--ink-faint); }
+.pane-dispose { flex: none; }
+.pane-empty { color: var(--ink-faint); margin: 0; }
+
 /* The per-row Confirm button in the Unresolved toolbar. Visually first and primary (it reuses
    `btn-run`), with a margin that separates it from the two reason-bearing actions beside it:
    it is the only action in that toolbar that takes no textarea, and grouping it with the ones

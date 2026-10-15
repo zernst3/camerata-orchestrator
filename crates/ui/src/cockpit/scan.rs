@@ -467,6 +467,16 @@ pub(super) use camerata_ui_core::triage::{
     deviation_groups, rule_group_label, DeviationGroup,
 };
 
+// Pass 2 step 4 (THE DOCKED DETAIL PANE, design §2 + the owner's Q5 ruling in §13). All pure
+// and all in core: the row cursor that arrow keys drive, the SCOPED key handler (the whole of
+// Q5's "only fire while the detail pane holds focus" clause lives in `pane_command`), and the
+// five-second undo. This layer owns the focus signal, the keydown wiring and the rsx; it owns
+// none of the rules.
+pub(super) use camerata_ui_core::triage::{
+    deviation_headline, pane_command, pane_keys_armed, site_count, state_hotkey, KeyMods,
+    MergedSiteView, PaneCommand, PaneFocus, RowCursor, UndoEntry, UndoOutcome,
+};
+
 /// Durable ignore: record the findings as reasoned baseline suppressions (governed PR).
 /// Returns the PR URL.
 pub(super) async fn ignore_findings(
@@ -2068,6 +2078,480 @@ pub(super) fn ProcessGate(
     }
 }
 
+/// The Kind chip's `(class, label, tooltip)` for a wire kind tag.
+///
+/// One function, two renderers: the Queue's Kind column cell and the docked detail pane's
+/// header both call it, so the badge a curator sees in the row and the badge he sees in the
+/// pane describing that same row can never say different things. The three states are not
+/// three colours of one thing — `unspecified` is an ALARM about the pipeline and gets a red
+/// OUTLINE and its own label, which is why this is hand-rolled rather than a chorale
+/// `RenderKind::Badge`.
+pub(super) fn kind_chip_parts(tag: &str) -> (&'static str, &'static str, &'static str) {
+    match tag {
+        "defect" => ("kind-chip kind-defect", "Defect", "An objective fault."),
+        "deviation" => (
+            "kind-chip kind-deviation",
+            "Deviation",
+            "A consistency violation against the convention this codebase itself \
+             predominantly follows. Same severity words as a defect, a different claim.",
+        ),
+        _ => (
+            "kind-chip kind-unspecified",
+            "Unspecified",
+            "PIPELINE BUG: this row reached the UI with no kind, which means an unmapped \
+             emission path. It is NOT a defect — it is a gap to fix upstream.",
+        ),
+    }
+}
+
+/// The DOM id of the docked detail pane's focusable region.
+///
+/// Named once because three things depend on it agreeing: the `aside`'s own `id`, the
+/// `focus_detail_pane` helper, and the CSS focus ring that makes "the pane holds focus"
+/// visible. The Q5 scoping is stated in terms of that condition, so the curator has to be
+/// able to both see it and reach it.
+pub(super) const DETAIL_PANE_ID: &str = "camerata-finding-pane";
+
+/// Move real keyboard focus into the detail pane.
+///
+/// Deliberately a DOM focus call rather than a signal write: `PaneFocus` is maintained by the
+/// pane's own `focusin`/`focusout`, so it always reflects where focus actually is. Writing the
+/// signal directly would let the pane report its keys armed while the keydown handler — which
+/// lives on the pane element — received nothing.
+fn focus_detail_pane() {
+    dioxus::document::eval(&format!(
+        "var el=document.getElementById('{DETAIL_PANE_ID}');if(el)el.focus();"
+    ));
+}
+
+/// One ABSORBED evidence site as the detail pane lists it (design §6).
+#[derive(Clone, PartialEq)]
+pub(super) struct PaneSiteRow {
+    /// `path:line`, or `repo path:line` when the absorbed site lives in a different repo
+    /// from the primary (a cross-file merge can span two repos in one scan).
+    pub location: String,
+    /// The rule id this site was originally flagged under, before being absorbed.
+    pub rule_id: String,
+    /// The line this site cited.
+    pub snippet: String,
+    /// A pure CONSEQUENCE of the primary's root cause rather than another place needing the
+    /// same fix. Rendered subordinated, under "also affects".
+    pub consequence: bool,
+}
+
+/// THE FOCUSED FINDING, flattened into exactly what the pane renders.
+///
+/// Flat, owned, `PartialEq` data rather than the `FindingView` itself — the same shape (and
+/// the same reason) as `DeviationBulkRow`: the pane is then a props-only component that
+/// renders, and is therefore testable, without a chorale table, a disposition map, a network
+/// resource or a VirtualDom-minted handle. SSR cannot press a key; what it CAN do is read
+/// what the pane says about the row it is describing and about whether the keys are armed,
+/// and those are the two things a keystroke test would otherwise have to take on trust.
+#[derive(Clone, PartialEq)]
+pub(super) struct DetailPaneRow {
+    pub rule_id: String,
+    /// From [`kind_chip_parts`] — the same chip the Queue's Kind column renders.
+    pub kind_class: String,
+    pub kind_label: String,
+    pub kind_tip: String,
+    /// A deviation's structured claim (`DeviationHeadline::sentence`), verbatim — the same
+    /// words its group header carries. `None` for every other kind.
+    pub claim: Option<String>,
+    /// The CALIBRATED severity, authored word, read straight off `FindingView::severity`.
+    /// Never the rank-prefixed Severity CELL value, which exists only so chorale's
+    /// lexicographic column sort orders the ladder correctly.
+    pub severity: String,
+    pub status: String,
+    pub repo: String,
+    /// `path:line` of the primary site.
+    pub location: String,
+    /// Every absorbed site (design §6). Empty for an un-merged row.
+    pub sites: Vec<PaneSiteRow>,
+    /// `1 + sites.len()`, from `camerata_ui_core::triage::site_count`.
+    pub site_count: usize,
+    pub snippet: String,
+    /// THE CITED STANDARD: the rule's own authored directive, as the rules corpus states it.
+    pub standard: Option<String>,
+    /// The finding's explanation, with the calibration `[needs review: …]` flag split off.
+    pub explanation: String,
+    pub needs_review: Option<String>,
+    /// Structured calibration confidence (`high` / `needs-review`).
+    pub confidence: Option<String>,
+    /// Structured remediation-effort estimate (`low` / `medium` / `high`).
+    pub effort: Option<String>,
+    /// The recommended fix, fetched by the call site from the SAME server function the
+    /// report's "Fix:" line uses — never re-derived here.
+    pub fix: Option<String>,
+    /// Other rule ids violated at this same location.
+    pub also_matches: Vec<String>,
+    /// 1-based position of this row in the table, and the table's row count: "3 of 212".
+    pub position: usize,
+    pub total: usize,
+}
+
+impl DetailPaneRow {
+    /// Flatten the focused finding into the pane's props. The ONLY place a `DetailPaneRow` is
+    /// built, so every field goes through one derivation: the kind chip is
+    /// [`kind_chip_parts`]'s, the claim is `DeviationHeadline::sentence`'s, the site count is
+    /// core's `site_count`, and the severity is the authored word rather than the sort value.
+    ///
+    /// `index` is 0-based (the cursor's); `position` is the 1-based number shown.
+    pub(super) fn from_finding(
+        f: &FindingView,
+        directive: Option<&str>,
+        fix: Option<String>,
+        index: usize,
+        total: usize,
+    ) -> Self {
+        let (kind_class, kind_label, kind_tip) = kind_chip_parts(kind_tag(f));
+        let (body, needs_review) = split_needs_review(&f.detail);
+        Self {
+            rule_id: f.rule_id.clone(),
+            kind_class: kind_class.to_string(),
+            kind_label: kind_label.to_string(),
+            kind_tip: kind_tip.to_string(),
+            claim: deviation_headline(f).map(|h| h.sentence()),
+            severity: f.severity.clone(),
+            status: f.status.clone(),
+            repo: f.repo.clone(),
+            location: format!("{}:{}", f.path, f.line),
+            sites: f.also_locations.iter().map(|s| pane_site(f, s)).collect(),
+            site_count: site_count(f),
+            snippet: f.snippet.clone(),
+            standard: directive.map(str::to_string).filter(|d| !d.trim().is_empty()),
+            explanation: body,
+            needs_review,
+            confidence: f.confidence.clone(),
+            effort: f.effort.clone(),
+            fix: fix.filter(|s| !s.trim().is_empty()),
+            also_matches: f.also_matches.clone(),
+            position: index + 1,
+            total,
+        }
+    }
+}
+
+/// One absorbed site, with its repo named only when it differs from the primary's — a
+/// same-repo merge does not need the owner/repo prefix on every line, and a cross-repo one
+/// would be actively misleading without it.
+fn pane_site(primary: &FindingView, s: &MergedSiteView) -> PaneSiteRow {
+    let location = if s.repo.is_empty() || s.repo == primary.repo {
+        format!("{}:{}", s.path, s.line)
+    } else {
+        format!("{} {}:{}", s.repo, s.path, s.line)
+    };
+    PaneSiteRow {
+        location,
+        rule_id: s.rule_id.clone(),
+        snippet: s.snippet.clone(),
+        consequence: s.consequence,
+    }
+}
+
+/// The live five-second undo, as the pane renders it.
+#[derive(Clone, PartialEq)]
+pub(super) struct UndoBanner {
+    /// What it will reverse — `UndoEntry::message`.
+    pub message: String,
+    /// Whole seconds left in the window, for the countdown.
+    pub seconds_left: u64,
+}
+
+/// THE DOCKED DETAIL PANE (design §2; the owner's Q5 ruling, design §13).
+///
+/// > At 400+ rows the modal's open/decide/close cycle is the single biggest per-decision time
+/// > cost in the current UI. A docked pane plus arrow-key row focus turns review into
+/// > cursor-down, read, one keystroke.
+///
+/// ## chorale does not have this, and the design document says it does
+///
+/// Design §13's 2026-10-12 dependency check recorded `detail_renderer` /
+/// `set_detail_column_enabled` / `detail_column_enabled` as "the docked pane" in chorale
+/// 0.2.3. Reading the installed source, they are not: `detail_renderer` is an EXPANDABLE
+/// INLINE ROW DETAIL, rendered by `detail_panel_tr` (chorale-dioxus 0.2.3
+/// `components.rs:1998`) as `<tr class="chorale-detail-panel"><td colspan=N>…</td></tr>`
+/// immediately beneath its parent row, with a chevron column to expand it. That is a
+/// different thing, and it would defeat the gesture this pane exists for: an inline panel
+/// pushes every row below it down the page, so cursor-down-read-decide would reflow the table
+/// under the cursor on every single move. This is the same class of error step 2 found in the
+/// same dependency check's group-header entry. Per the standing ruling not to context-switch
+/// into chorale, the pane is built here.
+///
+/// What chorale DOES provide, and what the call site uses, is `visible_grouped_view` — the
+/// post-filter, post-sort, post-COLLAPSE row order. The cursor walks that, which is why focus
+/// survives a re-sort and a collapse by construction rather than by special-casing.
+///
+/// ## Props-only, deliberately
+///
+/// Every judgment is made in `camerata_ui_core::triage` and arrives here as data: whether the
+/// keys are armed ([`pane_keys_armed`]), which disposition a key means ([`pane_command`]),
+/// what the undo will reverse. This component chooses words and pixels, nothing else — the
+/// same discipline `ProcessGate` and `DeviationBulkBar` are built on, and the reason SSR can
+/// verify the scoping at all.
+#[component]
+pub(super) fn FindingDetailPane(
+    /// The focused row, or `None` when nothing is focused (an empty triage table, or every
+    /// group collapsed).
+    row: Option<DetailPaneRow>,
+    /// Where keyboard focus is. THE scoping input — see [`pane_command`].
+    focus: PaneFocus,
+    /// The disposition whose reason is being collected, when the on-demand prompt is open.
+    prompt: Option<TriageState>,
+    /// The reason typed so far.
+    prompt_reason: String,
+    /// The live undo, when one is armed.
+    undo: Option<UndoBanner>,
+    /// Every keydown on the pane, as `(key, modifiers)`. The call site runs it through
+    /// [`pane_command`]; this component never decides what a key means.
+    on_key: Callback<(String, KeyMods)>,
+    /// Focus moved into or out of the pane's cursor / its reason prompt.
+    on_focus: Callback<PaneFocus>,
+    on_prompt_reason: Callback<String>,
+    on_prompt_commit: Callback<()>,
+    on_prompt_cancel: Callback<()>,
+    on_undo: Callback<()>,
+    /// A disposition chosen with the MOUSE. The keys are an accelerator, not the only door.
+    on_dispose: Callback<TriageState>,
+    /// Open the finding-detail MODAL on this row. The pane replaces the modal as the Queue's
+    /// row-click surface (design §9.6), but not as the deep dive: the modal carries the
+    /// on-demand enclosing-code-block fetch, which is far too expensive to re-run on every
+    /// cursor-down and so stays one deliberate click away.
+    on_open_detail: Callback<()>,
+) -> Element {
+    let armed = pane_keys_armed(focus);
+    rsx! {
+        aside {
+            class: "finding-pane",
+            id: "{DETAIL_PANE_ID}",
+            // The pane is a focusable REGION: tabbing into it arms the keys, tabbing out
+            // disarms them. That is the Q5 scoping made operable rather than merely checked —
+            // there is a visible, reachable thing that "the detail pane holds focus" means.
+            tabindex: "0",
+            onfocusin: move |_| on_focus.call(PaneFocus::Cursor),
+            onfocusout: move |_| on_focus.call(PaneFocus::Elsewhere),
+            onkeydown: move |e: KeyboardEvent| {
+                let m = e.modifiers();
+                let mods = KeyMods {
+                    ctrl: m.contains(Modifiers::CONTROL),
+                    alt: m.contains(Modifiers::ALT),
+                    meta: m.contains(Modifiers::META),
+                    shift: m.contains(Modifiers::SHIFT),
+                };
+                let key = e.key().to_string();
+                // Swallow only the presses the pane actually claims, so Tab still tabs and
+                // Cmd-C still copies the snippet the curator is reading. The claim test is
+                // `pane_command` itself — the same call the handler makes — so a key can
+                // never be eaten by a pane that then does nothing with it.
+                if pane_command(focus, &key, mods).is_some() {
+                    e.prevent_default();
+                    e.stop_propagation();
+                }
+                on_key.call((key, mods));
+            },
+
+            if let Some(r) = row.clone() {
+                div { class: "pane-head",
+                    span { class: "pane-rule", "{r.rule_id}" }
+                    span { class: "{r.kind_class}", title: "{r.kind_tip}", "{r.kind_label}" }
+                    span { class: "pane-pos", "{r.position} of {r.total}" }
+                    button {
+                        class: "btn-edit-sm pane-full-detail",
+                        title: "Open the full finding modal: the enclosing code block around this line, fetched on demand.",
+                        onclick: move |_| on_open_detail.call(()),
+                        "Full detail"
+                    }
+                }
+                div { class: "pane-meta",
+                    // The AUTHORED severity. Not the Severity column's cell value, which
+                    // carries a calibrated rank prefix purely so chorale's lexicographic
+                    // column sort orders the ladder; the badge, the row highlight, the CSV
+                    // and the report all read the clean word, and so does this.
+                    span { class: "rule-modal-tag", "severity \u{b7} {r.severity}" }
+                    span { class: "rule-modal-tag", "{r.location}" }
+                    if !r.repo.is_empty() {
+                        span { class: "rule-modal-tag", "{r.repo}" }
+                    }
+                    span { class: "rule-modal-tag", "{r.status}" }
+                    if let Some(c) = r.confidence.clone() {
+                        span { class: "rule-modal-tag", "confidence \u{b7} {c}" }
+                    }
+                }
+                // A deviation's structured claim, verbatim from the same builder the group
+                // header uses. Nothing here is parsed out of prose.
+                if let Some(claim) = r.claim.clone() {
+                    p { class: "pane-claim", "{claim}" }
+                }
+                if let Some(d) = r.standard.clone() {
+                    p { class: "rule-modal-label", "Cited standard" }
+                    p { class: "rule-modal-detail", "{d}" }
+                }
+                p { class: "rule-modal-label", "Evidence" }
+                pre { class: "pane-snippet", "{r.snippet}" }
+                if !r.explanation.trim().is_empty() {
+                    p { class: "rule-modal-detail",
+                        "{r.explanation}"
+                        if let Some(nr) = r.needs_review.clone() {
+                            " "
+                            b { class: "nr-inline",
+                                if nr.is_empty() { "[needs review]" } else { "[needs review: {nr}]" }
+                            }
+                        }
+                    }
+                }
+                // ABSORBED SITES (design §6) — the full-disclosure surface. Rendered only
+                // when there is more than one site: "Sites (1)" on an un-merged row would be
+                // a section that exists to say nothing.
+                if !r.sites.is_empty() {
+                    p { class: "rule-modal-label", "Sites ({r.site_count})" }
+                    ul { class: "pane-sites",
+                        li { class: "pane-site pane-site-primary",
+                            span { class: "pane-site-loc", "{r.location}" }
+                            span { class: "pane-site-rule", "{r.rule_id}" }
+                        }
+                        for (i, s) in r.sites.iter().enumerate() {
+                            li {
+                                key: "{s.location}-{i}",
+                                class: if s.consequence { "pane-site pane-site-consequence" } else { "pane-site" },
+                                if s.consequence {
+                                    span { class: "pane-site-sub", "also affects" }
+                                }
+                                span { class: "pane-site-loc", "{s.location}" }
+                                span { class: "pane-site-rule", "{s.rule_id}" }
+                                if !s.snippet.is_empty() {
+                                    span { class: "pane-site-snippet", "{s.snippet}" }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !r.also_matches.is_empty() {
+                    p { class: "rule-modal-label", "Also violates here" }
+                    div { class: "pane-meta",
+                        for rid in r.also_matches.iter() {
+                            span { key: "{rid}", class: "rule-modal-tag", "{rid}" }
+                        }
+                    }
+                }
+                // THE FIX, with its structured effort estimate beside it. The text is the
+                // SAME server function's output the report's "Fix:" line renders — fetched
+                // by the call site, never re-derived here.
+                if r.fix.is_some() || r.effort.is_some() {
+                    div { class: "pane-fix-head",
+                        p { class: "rule-modal-label", "Recommended fix" }
+                        if let Some(e) = r.effort.clone() {
+                            span {
+                                class: "rule-modal-tag pane-effort",
+                                title: "The calibration pass's remediation-effort estimate for this finding.",
+                                "effort \u{b7} {e}"
+                            }
+                        }
+                    }
+                    if let Some(fix) = r.fix.clone() {
+                        p { class: "rule-modal-detail", "{fix}" }
+                    }
+                }
+            } else {
+                p { class: "pane-empty",
+                    "No finding focused. Click a row, or press Tab into this panel and use the \
+                     arrow keys."
+                }
+            }
+
+            // THE UNDO (Q5's five-second toast). Docked in the pane rather than in the
+            // app-wide toast stack because that stack's cards are purely informational and
+            // auto-dismiss on their own timer; this one carries an action whose window must
+            // be the model's, and it must sit where the curator's eyes already are.
+            if let Some(u) = undo.clone() {
+                div { class: "pane-undo",
+                    span { class: "pane-undo-msg", "{u.message}" }
+                    button {
+                        class: "btn-edit-sm pane-undo-btn",
+                        onclick: move |_| on_undo.call(()),
+                        "Undo"
+                    }
+                    span { class: "pane-undo-left", "{u.seconds_left}s" }
+                }
+            }
+
+            if row.is_some() {
+                // THE ON-DEMAND REASON PROMPT (design §3). Replaces the two permanently
+                // visible textareas for the keyboard path: it appears when `I` or `F` is
+                // pressed, pre-focused, Enter commits, Esc cancels — and while it holds
+                // focus the disposition keys are OFF, which is the composition the Q5
+                // scoping clause asks for rather than a second mechanism bolted beside it.
+                if let Some(state) = prompt {
+                    div { class: "pane-reason-prompt",
+                        label { class: "rule-modal-label",
+                            "Reason for \u{201c}{state.label()}\u{201d} (required)"
+                        }
+                        textarea {
+                            class: "addressee-input pane-reason-input",
+                            rows: "2",
+                            autofocus: true,
+                            placeholder: "why — the export reads this",
+                            value: "{prompt_reason}",
+                            onfocusin: move |_| on_focus.call(PaneFocus::ReasonPrompt),
+                            oninput: move |e| on_prompt_reason.call(e.value()),
+                            onkeydown: move |e: KeyboardEvent| {
+                                // Belt AND braces. The pure gate above already refuses every
+                                // key while `focus == ReasonPrompt`; stopping propagation
+                                // here means the pane's handler never even sees a keystroke
+                                // aimed at this textarea, so a focus-tracking bug cannot
+                                // turn the first `c` of "cannot reproduce" into a Confirm.
+                                e.stop_propagation();
+                                match e.key() {
+                                    Key::Escape => { on_prompt_cancel.call(()); }
+                                    Key::Enter if !e.modifiers().contains(Modifiers::SHIFT) => {
+                                        e.prevent_default();
+                                        on_prompt_commit.call(());
+                                    }
+                                    _ => {}
+                                }
+                            },
+                        }
+                        div { class: "pane-prompt-actions",
+                            button {
+                                class: "btn-run",
+                                onclick: move |_| on_prompt_commit.call(()),
+                                "Commit \u{2192}"
+                            }
+                            button {
+                                class: "btn-edit-sm",
+                                onclick: move |_| on_prompt_cancel.call(()),
+                                "Cancel"
+                            }
+                        }
+                    }
+                }
+                div { class: "pane-actions",
+                    span {
+                        class: if armed { "pane-keys armed" } else { "pane-keys off" },
+                        // The indicator is `pane_keys_armed`, which is DEFINED as "would C
+                        // produce a command". A pane that said "armed" while the handler
+                        // refused would be the ships-inert shape in miniature.
+                        if armed {
+                            "Keys: C confirm \u{b7} I ignore \u{b7} T tech debt \u{b7} F false positive \u{b7} \u{2191}\u{2193} move"
+                        } else if prompt.is_some() {
+                            "Keys are off while you type a reason. Enter commits, Esc cancels."
+                        } else {
+                            "Keys are off. Click this panel (or Tab into it) to arm C / I / T / F."
+                        }
+                    }
+                    for state in TriageState::all().into_iter().filter(|s| s.is_decided()) {
+                        button {
+                            key: "{state.label()}",
+                            class: "btn-edit-sm pane-dispose",
+                            title: "Press {state_hotkey(state).unwrap_or(\"\").to_uppercase()} while this panel has focus.",
+                            onclick: move |_| on_dispose.call(state),
+                            "{state.label()}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The findings table with TRIAGE: sort by repo/severity/type, filter, select rows
 /// and Ignore / Resolve / Accept-as-tech-debt (open a ticket) them. Virtualized by
 /// chorale, so a large audit doesn't choke the UI.
@@ -2203,6 +2687,188 @@ pub(super) fn FindingsTable(
         .map(|(rid, f)| (finding_key(f), *rid))
         .collect();
 
+    // ── THE DOCKED DETAIL PANE (design §2; the owner's Q5 ruling, §13) ──────────────────
+    //
+    // Everything below is wiring: the pure cursor, scoped key handler and undo all live in
+    // `camerata_ui_core::triage` and are unit-tested there, and `FindingDetailPane` is
+    // props-only and render-tested. This block owns only the signals and the effects.
+
+    // THE ON-SCREEN ROW ORDER, as chorale itself has it. `visible_grouped_view` is
+    // post-filter, post-sort AND post-collapse, so a manual column re-cut, a column filter
+    // and a group collapse all reach the cursor as a change to this one list — which is what
+    // makes "focus survives a re-sort" and "focus survives a collapse" one rule rather than
+    // two features. A memo rather than an inline read, for the same reason `active_sort` is
+    // one: subscribing this whole subtree to `TableState` would re-render the table on every
+    // scroll and selection write.
+    let visible_keys = use_memo({
+        let id_map = id_map.clone();
+        move || {
+            let state = sort_signal.read();
+            chorale_core::visible_grouped_view(&state)
+                .into_iter()
+                .filter_map(|r| match r {
+                    chorale_core::GroupedRow::Data(rid, _) => {
+                        id_map.get(&rid).map(finding_key)
+                    }
+                    // Group headers are not rows the cursor can land on; `GroupedRow` is
+                    // `#[non_exhaustive]`, so anything chorale adds later is skipped rather
+                    // than silently treated as a focusable row.
+                    _ => None,
+                })
+                .collect::<Vec<String>>()
+        }
+    });
+    // The cursor itself. Stored unresolved and resolved against the CURRENT frame's row list
+    // on every render, which is why `RowCursor`'s methods are pure and non-mutating: the
+    // resolution is a read, not a write, so it cannot loop.
+    let mut cursor = use_signal(RowCursor::new);
+    let mut pane_focus = use_signal(|| PaneFocus::Elsewhere);
+    let mut prompt = use_signal(|| Option::<TriageState>::None);
+    let mut prompt_reason = use_signal(String::new);
+    // The live undo, plus what it would take to put the row back ON SCREEN (the disposition
+    // revert is the model's job; chorale's row set is this layer's).
+    let mut undo_entry = use_signal(|| Option::<UndoEntry>::None);
+    let mut undo_restore = use_signal(|| Option::<(usize, RowId, FindingView)>::None);
+    // A MONOTONIC clock, not a wall clock: the five-second window is measured against time
+    // elapsed since this table mounted, so a system-clock change (NTP step, timezone, the
+    // laptop waking) can neither extend the window nor close it early.
+    let epoch = use_hook(std::time::Instant::now);
+    let mut now_ms = use_signal(|| 0u64);
+
+    let resolved = cursor.read().resolve(&visible_keys());
+    let focused_finding: Option<FindingView> = resolved
+        .key()
+        .and_then(|k| key_to_row_id.get(k))
+        .and_then(|rid| id_map.get(rid).cloned());
+    // A second handle on the focused row for the "Full detail" callback: `focused_finding`
+    // is move-captured by `apply_disposition` below.
+    let focused_for_modal = focused_finding.clone();
+    // THE FOCUSED RULE, as a MEMO. It has to be one: `use_resource` re-runs when a signal
+    // read inside its closure changes, and a plain captured `Option<String>` is not one — a
+    // resource built over the captured value would fetch the first focused rule's fix once
+    // and then never again, so every subsequent row would show that first rule's fix. A memo
+    // also only notifies when its VALUE changes, so cursoring within one rule's group does
+    // not refetch.
+    let focused_rule = use_memo({
+        let id_map = id_map.clone();
+        let key_to_row_id = key_to_row_id.clone();
+        move || {
+            cursor
+                .read()
+                .resolve(&visible_keys())
+                .key()
+                .and_then(|k| key_to_row_id.get(k))
+                .and_then(|rid| id_map.get(rid))
+                .map(|f| f.rule_id.clone())
+        }
+    });
+    // The recommended fix for the focused rule, from the SAME server function the report's
+    // "Fix:" line and the xlsx's "Recommended Fix" column call — never a second derivation
+    // here.
+    let fix_res = use_resource(move || {
+        let rid = focused_rule();
+        async move {
+            match rid {
+                Some(rid) => fetch_finding_fix(&rid).await.map(|v| v.fix),
+                None => None,
+            }
+        }
+    });
+    let focused_fix: Option<String> = fix_res.read().clone().flatten();
+    let pane_row = focused_finding.as_ref().map(|f| {
+        DetailPaneRow::from_finding(
+            f,
+            descriptions.get(&f.rule_id).map(String::as_str),
+            focused_fix.clone(),
+            resolved.index(),
+            visible_keys().len(),
+        )
+    });
+    let undo_banner = undo_entry.read().as_ref().and_then(|e| {
+        let t = now_ms();
+        e.is_live(t).then(|| UndoBanner {
+            message: e.message().to_string(),
+            // Ceiling, so a window with 1ms left still reads "1s" rather than "0s" — a
+            // countdown that shows zero while the button still works is a small lie, and
+            // this one is about how long the curator has to act.
+            seconds_left: e.remaining_ms(t).div_ceil(1_000),
+        })
+    });
+
+    // APPLY one disposition to the focused row, arm the undo, and advance the cursor.
+    //
+    // A single closure for every entry point — the four keys, the four pane buttons, and the
+    // reason prompt's Commit — so there is exactly one path from "the curator decided" to
+    // "the map changed", and it is the one that captures the undo. `dispose_with_undo` owns
+    // the require-reason refusal and routes the write through the same per-row functions the
+    // toolbar buttons call.
+    // A `Callback` rather than a plain closure because three call sites share it (the keys,
+    // the pane buttons, and the reason prompt's Commit) and `Callback` is `Copy`.
+    let key_to_row_id_pane = key_to_row_id.clone();
+    let focused_for_apply = focused_finding.clone();
+    let apply_disposition = Callback::new(move |(state, reason): (TriageState, String)| {
+        let Some(f) = focused_for_apply.clone() else {
+            return;
+        };
+        let now = epoch.elapsed().as_millis() as u64;
+        now_ms.set(now);
+        let mut model = TriageModel {
+            dispositions: dispositions.peek().clone(),
+            triage_view,
+        };
+        let Some(entry) = model.dispose_with_undo(std::slice::from_ref(&f), state, &reason, now) else {
+            crate::toast::push_toast(
+                toasts,
+                crate::toast::ToastKind::Warning,
+                format!(
+                    "A reason is required to move a finding to {}. It is recorded in the draft \
+                     and read by the report export.",
+                    state.label()
+                ),
+            );
+            return;
+        };
+        dispositions.set(model.dispositions);
+        prompt.set(None);
+        prompt_reason.set(String::new());
+        // Drop the row from THIS triage table, which is what advances the cursor: the key
+        // leaves `visible_keys`, so the next `resolve` clamps to whatever took its index.
+        // That is the burn-down gesture — decide, and the next row is already focused.
+        // Remember where it was so Undo can put it back on screen, not merely in the map.
+        if let Some(rid) = key_to_row_id_pane.get(&finding_key(&f)).copied() {
+            let raw_index = sort_signal
+                .peek()
+                .rows
+                .iter()
+                .position(|(r, _)| *r == rid)
+                .unwrap_or(0);
+            undo_restore.set(Some((raw_index, rid, f.clone())));
+            handle.remove_rows(&[rid]);
+        } else {
+            undo_restore.set(None);
+        }
+        let armed = entry.clone();
+        undo_entry.set(Some(entry));
+        // Tick the countdown while this undo is armed, and clear it when the window shuts.
+        // The loop exits the moment a NEWER undo replaces this one, so two dispositions
+        // inside five seconds cannot have the older ticker close the newer window.
+        spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let t = epoch.elapsed().as_millis() as u64;
+                now_ms.set(t);
+                if undo_entry.peek().as_ref() != Some(&armed) {
+                    break;
+                }
+                if !armed.is_live(t) {
+                    undo_entry.set(None);
+                    undo_restore.set(None);
+                    break;
+                }
+            }
+        });
+    });
+
     // SECURITY findings (the deterministic floor — the only tier ranked "critical") get a
     // red full-row highlight so they're unmistakable beyond the badge text. This now uses
     // chorale 0.2.3's `row_class` hook on the Table (below), not a per-cell stripe renderer.
@@ -2241,27 +2907,7 @@ pub(super) fn FindingsTable(
         m.insert(
             ColumnId("kind"),
             std::sync::Arc::new(move |f: &FindingView, _val: &CellValue| {
-                let (cls, label, tip) = match kind_tag(f) {
-                    "defect" => (
-                        "kind-chip kind-defect",
-                        "Defect",
-                        "An objective fault.",
-                    ),
-                    "deviation" => (
-                        "kind-chip kind-deviation",
-                        "Deviation",
-                        "A consistency violation against the convention this codebase itself \
-                         predominantly follows. Same severity words as a defect, a different \
-                         claim.",
-                    ),
-                    _ => (
-                        "kind-chip kind-unspecified",
-                        "Unspecified",
-                        "PIPELINE BUG: this row reached the UI with no kind, which means an \
-                         unmapped emission path. It is NOT a defect — it is a gap to fix \
-                         upstream.",
-                    ),
-                };
+                let (cls, label, tip) = kind_chip_parts(kind_tag(f));
                 rsx! { span { class: "{cls}", title: "{tip}", "{label}" } }
             }) as RowCellRenderer<FindingView>,
         );
@@ -2633,6 +3279,13 @@ pub(super) fn FindingsTable(
                 }
             }),
         }
+        // THE SPLIT: the Queue table and its docked detail pane, side by side. The pane is a
+        // SIBLING of the table rather than content inside it — chorale 0.2.3's
+        // `detail_renderer` is an expandable inline row-detail `<tr>` beneath its parent row,
+        // not a docked panel, so an inline detail would reflow the table under the cursor on
+        // every cursor-down. See `FindingDetailPane`'s doc comment.
+        div { class: "queue-split",
+        div { class: "queue-split-table",
         CamerataTable {
             handle,
             sort_enabled: true,
@@ -2657,11 +3310,138 @@ pub(super) fn FindingsTable(
             row_class: RowClass::new(|f: &FindingView| {
                 (f.severity == "critical").then(|| "finding-row-critical".to_string())
             }),
+            // A row click FOCUSES the pane on that row; it no longer pops the modal
+            // (design §9.6 — "the row-click modal for Queue rows, replaced by the docked
+            // detail pane"). Mouse and keyboard drive the SAME `RowCursor`, so there is one
+            // notion of "the focused row" rather than two that can disagree. The modal is
+            // still one click away, from the pane's own "Full detail" button, and it still
+            // earns that: it carries the on-demand enclosing-code-block fetch, which is far
+            // too expensive to re-run on every cursor-down.
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(f) = id_map_click.get(&rid) {
-                    detail_finding.set(Some(f.clone()));
+                    cursor.set(RowCursor::focused_on(finding_key(f)));
+                    // Move REAL keyboard focus into the pane, and let the pane's own
+                    // `focusin` set `PaneFocus::Cursor` from that. Setting the signal here
+                    // instead would be a lie the curator could act on: the keydown handler
+                    // lives on the pane element, so with DOM focus still in the table a `C`
+                    // would reach nothing while the pane reported its keys armed. The one
+                    // state the indicator reads must come from the one thing that is true.
+                    focus_detail_pane();
                 }
             }),
+        }
+        }
+        FindingDetailPane {
+            row: pane_row,
+            focus: pane_focus(),
+            prompt: prompt(),
+            prompt_reason: prompt_reason(),
+            undo: undo_banner,
+            // THE SCOPED KEY HANDLER. Every press goes through core's `pane_command`, which
+            // refuses everything unless `focus == PaneFocus::Cursor` — so the reason
+            // textarea inches away cannot have its `c` read as a Confirm.
+            on_key: Callback::new(move |(key, mods): (String, KeyMods)| {
+                let here = *pane_focus.peek();
+                match pane_command(here, &key, mods) {
+                    Some(PaneCommand::MoveFocus(dir)) => {
+                        let next = cursor.peek().moved(&visible_keys(), dir);
+                        cursor.set(next);
+                    }
+                    Some(PaneCommand::Dispose(state)) => {
+                        apply_disposition.call((state, String::new()));
+                    }
+                    Some(PaneCommand::PromptFor(state)) => {
+                        // `I` and `F` OPEN the reason prompt; they never dispose. The
+                        // export reads those reasons, and a keystroke is not a licence to
+                        // drop them. Opening it also moves focus into the prompt, which
+                        // disarms the keys for exactly as long as the curator is typing.
+                        prompt.set(Some(state));
+                        prompt_reason.set(String::new());
+                        pane_focus.set(PaneFocus::ReasonPrompt);
+                    }
+                    None => {}
+                }
+            }),
+            on_focus: Callback::new(move |f: PaneFocus| {
+                // A blur out of the pane while the reason prompt is open must not disarm
+                // the prompt's own focus state — the textarea is INSIDE the pane, so
+                // focusing it fires the region's `focusout` first.
+                if f == PaneFocus::Elsewhere && prompt.peek().is_some() {
+                    return;
+                }
+                pane_focus.set(f);
+            }),
+            on_prompt_reason: Callback::new(move |r: String| prompt_reason.set(r)),
+            on_prompt_commit: Callback::new(move |()| {
+                if let Some(state) = prompt.peek().to_owned() {
+                    let reason = prompt_reason.peek().clone();
+                    apply_disposition.call((state, reason));
+                    pane_focus.set(PaneFocus::Cursor);
+                }
+            }),
+            on_prompt_cancel: Callback::new(move |()| {
+                prompt.set(None);
+                prompt_reason.set(String::new());
+                pane_focus.set(PaneFocus::Cursor);
+            }),
+            on_undo: Callback::new(move |()| {
+                let Some(mut entry) = undo_entry.peek().clone() else { return };
+                let now = epoch.elapsed().as_millis() as u64;
+                let mut model = TriageModel {
+                    dispositions: dispositions.peek().clone(),
+                    triage_view,
+                };
+                match model.undo(&mut entry, now) {
+                    UndoOutcome::Reverted(n) => {
+                        dispositions.set(model.dispositions);
+                        // Put the row back ON SCREEN too. Reverting only the map would
+                        // leave the toast truthfully claiming a revert while the row stayed
+                        // gone from the table, which is the half-done undo this is for.
+                        if let Some((at, rid, f)) = undo_restore.peek().clone() {
+                            handle.insert_row(at, rid, f);
+                            cursor.set(RowCursor::focused_on(finding_key(
+                                &undo_restore.peek().as_ref().expect("just read").2,
+                            )));
+                        }
+                        crate::toast::push_toast(
+                            toasts,
+                            crate::toast::ToastKind::Info,
+                            format!("Undone \u{2014} {n} finding(s) put back."),
+                        );
+                    }
+                    // Both refusals are REPORTED. A visible Undo that silently does nothing
+                    // is the exact failure the window exists to prevent.
+                    UndoOutcome::WindowClosed => crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Warning,
+                        "That undo expired (the window is five seconds). Move the finding back from its triage table.",
+                    ),
+                    UndoOutcome::AlreadyUndone => crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Warning,
+                        "That action was already undone.",
+                    ),
+                }
+                undo_entry.set(None);
+                undo_restore.set(None);
+            }),
+            on_dispose: Callback::new(move |state: TriageState| {
+                // The pane's own buttons. A reason-carrying state opens the prompt first,
+                // exactly as its key does — one path, two triggers.
+                if state.requires_reason() {
+                    prompt.set(Some(state));
+                    prompt_reason.set(String::new());
+                    pane_focus.set(PaneFocus::ReasonPrompt);
+                } else {
+                    apply_disposition.call((state, String::new()));
+                }
+            }),
+            on_open_detail: Callback::new(move |()| {
+                if let Some(f) = focused_for_modal.clone() {
+                    detail_finding.set(Some(f));
+                }
+            }),
+        }
         }
     }
 }
@@ -9836,5 +10616,304 @@ mod render_tests {
         });
         assert!(html.contains("Resolve the 1 remaining"), "html=\n{html}");
         assert!(html.contains("disabled"), "html=\n{html}");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// req_pass2_11 — THE DOCKED DETAIL PANE, rendered (design §2; Q5 ruling §13)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// SSR cannot press a key, so the pane is a props-only component whose rendered output
+// MANIFESTS the two things a keypress test could otherwise only assert about a helper: which
+// row it is describing, and whether the keys are armed. The armed indicator is driven by
+// `pane_keys_armed`, which is DEFINED as `pane_command(focus, "c", …).is_some()` — so a pane
+// that renders "armed" while the handler would refuse is not reachable.
+#[cfg(test)]
+mod pane_render_tests {
+    use super::*;
+
+    fn sample() -> FindingView {
+        serde_json::from_value(serde_json::json!({
+            "repo": "me/api", "path": "src/handlers.rs", "line": 88,
+            "rule_id": "SQL-INJECTION-1", "severity": "critical",
+            "snippet": "db.query(format!(\"select … {}\", id))",
+            "detail": "String-interpolated SQL reaches the driver unparameterised.",
+            "status": "active", "confidence": "high", "effort": "medium",
+            "kind": "defect",
+            "also_locations": [
+                { "repo": "me/api", "path": "src/export.rs", "line": 31,
+                  "rule_id": "SQL-INJECTION-1", "snippet": "db.query(format!(..))",
+                  "consequence": false },
+                { "repo": "me/api", "path": "src/report.rs", "line": 4,
+                  "rule_id": "DATA-EXFIL-1", "snippet": "every customer row is readable",
+                  "consequence": true }
+            ]
+        }))
+        .expect("valid FindingView fixture")
+    }
+
+    fn deviation() -> FindingView {
+        serde_json::from_value(serde_json::json!({
+            "repo": "me/api", "path": "src/routes.rs", "line": 12,
+            "rule_id": "API-VERSIONING-1", "severity": "medium", "snippet": "get(\"/users\")",
+            "detail": "", "kind": "deviation", "deviating_sites": 2, "assessed_sites": 47,
+            "convention_option_id": "versioned", "convention_label": "URI-versioned endpoints"
+        }))
+        .expect("valid FindingView fixture")
+    }
+
+    fn render(
+        row: Option<DetailPaneRow>,
+        focus: PaneFocus,
+        prompt: Option<TriageState>,
+        undo: Option<UndoBanner>,
+    ) -> String {
+        #[component]
+        fn Harness(
+            row: Option<DetailPaneRow>,
+            focus: PaneFocus,
+            prompt: Option<TriageState>,
+            undo: Option<UndoBanner>,
+        ) -> Element {
+            rsx! {
+                FindingDetailPane {
+                    row,
+                    focus,
+                    prompt,
+                    prompt_reason: String::new(),
+                    undo,
+                    on_key: Callback::new(|_: (String, KeyMods)| {}),
+                    on_focus: Callback::new(|_: PaneFocus| {}),
+                    on_prompt_reason: Callback::new(|_: String| {}),
+                    on_prompt_commit: Callback::new(|()| {}),
+                    on_prompt_cancel: Callback::new(|()| {}),
+                    on_undo: Callback::new(|()| {}),
+                    on_dispose: Callback::new(|_: TriageState| {}),
+                    on_open_detail: Callback::new(|()| {}),
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new_with_props(
+            Harness,
+            HarnessProps {
+                row,
+                focus,
+                prompt,
+                undo,
+            },
+        );
+        vdom.rebuild_in_place();
+        dioxus_ssr::render(&vdom)
+    }
+
+    /// req_pass2_11: the pane shows the focused row's whole case — rule id, kind badge,
+    /// severity, location, snippet, cited standard, and the fix with its effort estimate.
+    /// This is the content that made the modal's open/decide/close cycle necessary; the
+    /// point of the pane is that none of it costs a click.
+    #[test]
+    fn req_pass2_11_the_pane_shows_the_focused_rows_whole_case() {
+        let row = DetailPaneRow::from_finding(
+            &sample(),
+            Some("Never interpolate into SQL; bind parameters."),
+            Some("Replace the format! with a bound parameter.".to_string()),
+            0,
+            12,
+        );
+        let html = render(Some(row), PaneFocus::Cursor, None, None);
+        assert!(html.contains("finding-pane"), "pane container; html=\n{html}");
+        assert!(html.contains("SQL-INJECTION-1"), "rule id; html=\n{html}");
+        assert!(html.contains("Defect"), "kind badge; html=\n{html}");
+        assert!(html.contains("critical"), "severity; html=\n{html}");
+        assert!(html.contains("src/handlers.rs:88"), "location; html=\n{html}");
+        assert!(html.contains("Never interpolate into SQL"), "cited standard; html=\n{html}");
+        assert!(html.contains("Replace the format!"), "fix; html=\n{html}");
+        assert!(html.contains("medium"), "effort estimate; html=\n{html}");
+        assert!(html.contains("1 of 12"), "position in the queue; html=\n{html}");
+    }
+
+    /// req_pass2_11 (design §6): a merged row's ABSORBED sites are listed, with consequence
+    /// sites subordinated under "also affects" — the full-disclosure surface C5 lacked.
+    #[test]
+    fn req_pass2_11_the_pane_lists_every_absorbed_site() {
+        let row = DetailPaneRow::from_finding(&sample(), None, None, 0, 1);
+        let html = render(Some(row), PaneFocus::Cursor, None, None);
+        assert!(html.contains("Sites (3)"), "1 primary + 2 absorbed; html=\n{html}");
+        assert!(html.contains("src/export.rs:31"), "peer site; html=\n{html}");
+        assert!(html.contains("src/report.rs:4"), "consequence site; html=\n{html}");
+        assert!(html.contains("also affects"), "the consequence sub-label; html=\n{html}");
+        assert!(html.contains("DATA-EXFIL-1"), "the absorbed site's own rule id; html=\n{html}");
+    }
+
+    /// req_pass2_11: a single-site row says nothing about sites at all, rather than
+    /// rendering an empty section or a lonely "Sites (1)".
+    #[test]
+    fn req_pass2_11_an_unmerged_row_renders_no_sites_section() {
+        let row = DetailPaneRow::from_finding(&deviation(), None, None, 0, 1);
+        let html = render(Some(row), PaneFocus::Cursor, None, None);
+        assert!(!html.contains("Sites ("), "no sites section for one site; html=\n{html}");
+    }
+
+    /// req_pass2_11: a deviation's structured claim renders in the pane verbatim from
+    /// `DeviationHeadline::sentence` — the same words the group header carries.
+    #[test]
+    fn req_pass2_11_the_pane_states_a_deviations_claim() {
+        let row = DetailPaneRow::from_finding(&deviation(), None, None, 0, 1);
+        let html = render(Some(row), PaneFocus::Cursor, None, None);
+        assert!(html.contains("Deviation"), "kind badge; html=\n{html}");
+        assert!(
+            html.contains("2 of 47 sites deviate from &#34;URI-versioned endpoints&#34;"),
+            "the structured sentence; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_11 — **THE SCOPING, RENDERED.** The pane tells the curator whether the keys
+    /// are live, and it is the HANDLER'S OWN GATE that decides what it says. While the reason
+    /// prompt holds focus the pane says the keys are off; while the cursor holds focus it
+    /// names all four.
+    #[test]
+    fn req_pass2_11_the_pane_says_whether_the_keys_are_armed() {
+        let row = || Some(DetailPaneRow::from_finding(&sample(), None, None, 0, 1));
+
+        let armed = render(row(), PaneFocus::Cursor, None, None);
+        assert!(armed.contains("pane-keys armed"), "armed class; html=\n{armed}");
+        for label in ["C confirm", "I ignore", "T tech debt", "F false positive"] {
+            assert!(armed.contains(label), "{label} must be named; html=\n{armed}");
+        }
+
+        // Typing a reason: the keys are OFF, and the pane says so in those words.
+        let typing = render(
+            row(),
+            PaneFocus::ReasonPrompt,
+            Some(TriageState::Ignored),
+            None,
+        );
+        assert!(typing.contains("pane-keys off"), "off class; html=\n{typing}");
+        assert!(
+            typing.contains("Keys are off while you type"),
+            "and says why; html=\n{typing}"
+        );
+        assert!(!typing.contains("pane-keys armed"), "html=\n{typing}");
+
+        // Focus elsewhere on the page: also off, with the way back.
+        let away = render(row(), PaneFocus::Elsewhere, None, None);
+        assert!(away.contains("pane-keys off"), "html=\n{away}");
+        assert!(!away.contains("pane-keys armed"), "html=\n{away}");
+    }
+
+    /// req_pass2_11: the `I`/`F` prompt renders with the disposition it is collecting a
+    /// reason FOR named in it, so a pre-focused textarea is never ambiguous about which of
+    /// the two it will commit.
+    #[test]
+    fn req_pass2_11_the_reason_prompt_names_the_disposition_it_will_commit() {
+        let row = || Some(DetailPaneRow::from_finding(&sample(), None, None, 0, 1));
+        let ignoring = render(
+            row(),
+            PaneFocus::ReasonPrompt,
+            Some(TriageState::Ignored),
+            None,
+        );
+        assert!(ignoring.contains("pane-reason-prompt"), "html=\n{ignoring}");
+        assert!(ignoring.contains("Ignored"), "names the disposition; html=\n{ignoring}");
+        assert!(ignoring.contains("required"), "states the invariant; html=\n{ignoring}");
+
+        let fp = render(
+            row(),
+            PaneFocus::ReasonPrompt,
+            Some(TriageState::FalsePositive),
+            None,
+        );
+        assert!(fp.contains("False positive"), "html=\n{fp}");
+
+        // No prompt open: no textarea in the pane at all (design §9.2 — an unused textarea
+        // is noise 95% of the time).
+        let idle = render(row(), PaneFocus::Cursor, None, None);
+        assert!(!idle.contains("pane-reason-prompt"), "html=\n{idle}");
+    }
+
+    /// req_pass2_11: the undo toast renders what it will reverse and how long is left, and
+    /// disappears when there is nothing to undo.
+    #[test]
+    fn req_pass2_11_the_undo_toast_names_its_action_and_its_window() {
+        let row = || Some(DetailPaneRow::from_finding(&sample(), None, None, 0, 1));
+        let with_undo = render(
+            row(),
+            PaneFocus::Cursor,
+            None,
+            Some(UndoBanner {
+                message: "Confirmed 1 finding.".to_string(),
+                seconds_left: 4,
+            }),
+        );
+        assert!(with_undo.contains("pane-undo"), "html=\n{with_undo}");
+        assert!(with_undo.contains("Confirmed 1 finding."), "html=\n{with_undo}");
+        assert!(with_undo.contains("Undo"), "html=\n{with_undo}");
+        assert!(with_undo.contains("4s"), "the countdown; html=\n{with_undo}");
+
+        let without = render(row(), PaneFocus::Cursor, None, None);
+        assert!(!without.contains("pane-undo"), "html=\n{without}");
+    }
+
+    /// req_pass2_11: with no row focused — an empty triage table, or every group collapsed —
+    /// the pane says so instead of rendering a shell of empty labels, and offers no
+    /// disposition buttons, because there is nothing to dispose.
+    #[test]
+    fn req_pass2_11_an_unfocused_pane_offers_nothing_to_act_on() {
+        let html = render(None, PaneFocus::Elsewhere, None, None);
+        assert!(html.contains("finding-pane"), "the pane still occupies its dock; html=\n{html}");
+        assert!(html.contains("pane-empty"), "html=\n{html}");
+        assert!(!html.contains("pane-dispose"), "no dead buttons; html=\n{html}");
+        assert!(!html.contains("pane-keys armed"), "and no armed keys; html=\n{html}");
+    }
+
+    /// req_pass2_11: the pane IS a focusable region, with the id `focus_detail_pane` targets.
+    ///
+    /// This is the physical half of the Q5 scoping. "The keys fire while the detail pane
+    /// holds focus" is only a real condition if there is something that can hold focus, that
+    /// a Tab reaches, and that a row click can be routed to — and if the id the row-click
+    /// handler focuses is the id the pane actually renders. A drift between those two would
+    /// leave the pane permanently unfocusable by mouse, and therefore the keys permanently
+    /// dead, with the indicator none the wiser.
+    #[test]
+    fn req_pass2_11_the_pane_is_the_focusable_region_the_scoping_names() {
+        let row = DetailPaneRow::from_finding(&sample(), None, None, 0, 1);
+        let html = render(Some(row), PaneFocus::Cursor, None, None);
+        assert!(html.contains("tabindex=\"0\""), "Tab must reach it; html=\n{html}");
+        assert!(
+            html.contains(&format!("id=\"{DETAIL_PANE_ID}\"")),
+            "the id `focus_detail_pane` focuses; html=\n{html}"
+        );
+    }
+
+    /// req_pass2_11 (design §9.6): the pane replaces the row-click modal, but keeps it one
+    /// deliberate click away — the modal carries the on-demand enclosing-code-block fetch,
+    /// which is far too expensive to re-run on every cursor-down.
+    #[test]
+    fn req_pass2_11_the_pane_keeps_the_modal_one_click_away() {
+        let row = DetailPaneRow::from_finding(&sample(), None, None, 0, 1);
+        let html = render(Some(row), PaneFocus::Cursor, None, None);
+        assert!(html.contains("pane-full-detail"), "html=\n{html}");
+        assert!(html.contains("Full detail"), "html=\n{html}");
+        // And not on an empty pane, where there is no row to open.
+        let empty = render(None, PaneFocus::Elsewhere, None, None);
+        assert!(!empty.contains("pane-full-detail"), "html=\n{empty}");
+    }
+
+    /// req_pass2_11: the pane carries the same four dispositions as buttons, so the gesture
+    /// is available to the mouse too and the keys are an accelerator rather than the only
+    /// way in. Their labels name their key.
+    #[test]
+    fn req_pass2_11_the_pane_offers_the_four_dispositions_as_buttons_too() {
+        let row = DetailPaneRow::from_finding(&sample(), None, None, 0, 1);
+        let html = render(Some(row), PaneFocus::Cursor, None, None);
+        let n = html.matches("pane-dispose").count();
+        assert_eq!(n, 4, "one button per disposition; html=\n{html}");
+        for s in [
+            TriageState::Confirmed,
+            TriageState::Ignored,
+            TriageState::TechDebt,
+            TriageState::FalsePositive,
+        ] {
+            assert!(html.contains(s.label()), "{} button; html=\n{html}", s.label());
+        }
     }
 }
