@@ -1146,15 +1146,10 @@ html, body {
 .rule-gate-warning-icon { color: #b8860b; font-size: 14px; line-height: 1.3; flex-shrink: 0; }
 .rule-gate-warning strong { color: var(--ink); font-weight: 600; }
 
-/* Key above the findings table: what the stripe means. */
-.findings-key { display: flex; flex-wrap: wrap; gap: 16px; margin: 4px 0 10px; }
-.findings-key-item {
-  display: inline-flex; align-items: center; gap: 7px;
-  font-size: 12px; color: var(--ink-soft);
-}
-.findings-key-swatch { width: 14px; height: 14px; border-radius: 3px; flex: none; }
-.findings-key-swatch.crit { background: #d4332b; }
-.findings-key-swatch.arch { background: var(--surface); border: 1px solid var(--line); }
+/* The `.findings-key` legend was REMOVED with its markup (design §9.5); its rules are gone
+   with it so the stylesheet cannot keep a dead selector alive for a future reintroduction. The
+   red full-row critical highlight it purported to explain is `.finding-row-critical`, which
+   stays. */
 
 /* Order bar above the findings table (Pass 2 step 2): which order the Queue is showing, and
    one click back to the curated default. Sits flush against the sticky header it describes so

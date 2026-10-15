@@ -1579,6 +1579,22 @@ pub(super) fn DeterministicProgress(progress: DetProgressView) -> Element {
 /// hiding it does not disturb the grouping.
 pub(super) const RULE_GROUP_COLUMN: ColumnId = ColumnId("rule_group");
 
+/// THE RED FULL-ROW HIGHLIGHT, as a named predicate (design §9.5 — "the red full-row critical
+/// highlight stays").
+///
+/// It reads `severity` and nothing else. The legend §9.5 removed glossed this highlight as
+/// "Security findings (deterministic, stop-the-line)", which it never was: a critical
+/// AI-ADVISORY finding is highlighted and is neither deterministic nor security, and a
+/// deterministic floor hit below `critical` is both and is NOT highlighted. The per-row
+/// Severity and Authority badges now carry those two facts separately and correctly.
+///
+/// Reads the CALIBRATED `FindingView::severity`, never the Severity column's cell value — that
+/// one carries a rank prefix (`1 critical`) purely so chorale's lexicographic column sort
+/// orders the ladder, and comparing against it here would silently stop matching.
+pub(super) fn finding_row_class(f: &FindingView) -> Option<String> {
+    (f.severity == "critical").then(|| "finding-row-critical".to_string())
+}
+
 pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<FindingView>> {
     // chorale 0.2.3's palette has a native orange, so each severity gets a distinct color
     // straight from RenderKind::Badge — no custom cell renderer needed (Critical = red,
@@ -3205,17 +3221,20 @@ pub(super) fn FindingsTable(
     };
 
     rsx! {
-        // Key: what the red row highlight means. Security (deterministic, Critical) vs the rest.
-        div { class: "findings-key",
-            span { class: "findings-key-item",
-                span { class: "findings-key-swatch crit" }
-                "Security findings (deterministic, stop-the-line)"
-            }
-            span { class: "findings-key-item",
-                span { class: "findings-key-swatch arch" }
-                "Architectural findings (everything else)"
-            }
-        }
+        // REMOVED, design §9.5: the two-swatch findings key ("Security findings
+        // (deterministic, stop-the-line)" / "Architectural findings (everything else)").
+        //
+        // It was superseded by the Kind + Severity + Authority columns, which say more, per
+        // row, in less space — and it was also WRONG about the thing it claimed to explain.
+        // The red full-row highlight is `row_class`, below: `f.severity == "critical"`, with
+        // no reference to security, to determinism or to the floor rule set. A critical
+        // AI-ADVISORY finding is highlighted and is not a "security finding (deterministic)";
+        // a non-critical floor hit is a deterministic security finding and is not highlighted.
+        // The per-row replacements state both facts without the mismatch: the Severity badge
+        // reads "Critical" on exactly the highlighted rows, and the Authority badge reads
+        // "Rule · enforced" on exactly the deterministic-floor ones.
+        //
+        // The red full-row critical highlight itself STAYS (§9.5 says so explicitly).
         div { class: "findings-toolbar",
             // View-specific triage actions. A move writes the new disposition for each
             // selected finding and drops it from this table; it reappears under its target
@@ -3565,11 +3584,12 @@ pub(super) fn FindingsTable(
             // findings table groups by rule -> file), so a long audit collapses at once.
             group_expand_toggle: true,
             row_cell_renderers: row_renderers,
-            // Critical (security-floor) rows get a red full-row highlight via the 0.2.3
-            // conditional row-styling hook — replaces the old per-cell stripe renderer.
-            row_class: RowClass::new(|f: &FindingView| {
-                (f.severity == "critical").then(|| "finding-row-critical".to_string())
-            }),
+            // Critical rows get a red full-row highlight via the 0.2.3 conditional
+            // row-styling hook. §9.5 removed the legend above the table and kept THIS, so the
+            // predicate is a named pure function rather than an inline closure: "the
+            // highlight stays" is then an assertion a test can make, instead of a claim about
+            // a closure no test can reach.
+            row_class: RowClass::new(finding_row_class),
             // A row click FOCUSES the pane on that row; it no longer pops the modal
             // (design §9.6 — "the row-click modal for Queue rows, replaced by the docked
             // detail pane"). Mouse and keyboard drive the SAME `RowCursor`, so there is one
@@ -11019,6 +11039,88 @@ mod render_tests {
         });
         assert!(html.contains("Resolve the 1 remaining"), "html=\n{html}");
         assert!(html.contains("disabled"), "html=\n{html}");
+    }
+    // ── req_pass2_13: THE REMOVALS SWEEP (design §9) ─────────────────────────
+    //
+    // "Removal is the design work." Each test below pins BOTH halves of one removal: the
+    // affordance is gone, AND the replacement reaches the information it carried. A removal
+    // whose replacement falls short is a capability loss dressed as cleanup.
+
+    /// req_pass2_13 (§9.5): the two-swatch findings-key legend is GONE from the Queue, and the
+    /// red full-row critical highlight it claimed to explain is still there.
+    ///
+    /// The legend is not replaced by silence. It made two claims and the per-row columns make
+    /// both, more precisely:
+    ///
+    /// * "red = Security findings (deterministic, stop-the-line)" → the SEVERITY badge, which
+    ///   reads `Critical` on exactly the rows `finding_row_class` highlights. The legend's own
+    ///   wording was wrong about this: the highlight has never consulted the floor rule set.
+    /// * "Architectural findings (everything else)" → the AUTHORITY badge, which distinguishes
+    ///   `Rule · enforced` (deterministic floor) from `AI · advisory` and `Preview`, per row,
+    ///   rather than lumping three tiers into one "everything else".
+    #[test]
+    fn req_pass2_13_the_findings_key_legend_is_gone_and_the_critical_highlight_stays() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(|| Signal::new(None::<FindingView>));
+            let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
+            rsx! {
+                FindingsTable {
+                    findings: vec![
+                        kinded_finding("SQL-INJECTION-1", "critical", serde_json::json!({ "kind": "defect" })),
+                        kinded_finding("AI-LAYERING", "medium", serde_json::json!({ "kind": "defect" })),
+                    ],
+                    repos: vec!["me/api".to_string()],
+                    descriptions: std::collections::HashMap::new(),
+                    triage_view: TriageState::Unresolved,
+                    dispositions,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        for gone in [
+            "findings-key",
+            "Security findings (deterministic, stop-the-line)",
+            "Architectural findings (everything else)",
+        ] {
+            assert!(!html.contains(gone), "§9.5 removes {gone:?}; html=\n{html}");
+        }
+        // The highlight STAYS, and on exactly the severity the legend's swatch was red for.
+        let crit = kinded_finding("SQL-INJECTION-1", "critical", serde_json::json!({}));
+        let not_crit = kinded_finding("AI-LAYERING", "high", serde_json::json!({}));
+        assert_eq!(
+            finding_row_class(&crit),
+            Some("finding-row-critical".to_string()),
+            "§9.5: the red full-row critical highlight stays"
+        );
+        assert_eq!(finding_row_class(&not_crit), None);
+
+        // And the replacement columns are present and carry the two facts the legend glossed.
+        let cols = finding_columns(vec!["me/api".to_string()], false);
+        let sev = cols.iter().find(|c| c.id == ColumnId("severity")).expect("Severity column");
+        assert_eq!(
+            (sev.accessor)(&crit),
+            CellValue::Text(severity_sort_value("critical")),
+            "the Severity column marks exactly the highlighted rows"
+        );
+        let auth = cols.iter().find(|c| c.id == ColumnId("authority")).expect("Authority column");
+        let RenderKind::Badge(map) = &auth.render_kind else {
+            panic!("Authority renders as a badge");
+        };
+        for (value, label) in [
+            ("enforced", "Rule \u{b7} enforced"),
+            ("advisory", "AI \u{b7} advisory"),
+        ] {
+            assert_eq!(
+                map.resolve(value).expect("authority variant").label,
+                label,
+                "the Authority column, not a legend, is what separates deterministic from advisory"
+            );
+        }
+        assert!(html.contains(">Severity<"), "Severity header; html=\n{html}");
+        assert!(html.contains(">Authority<"), "Authority header; html=\n{html}");
     }
 }
 
