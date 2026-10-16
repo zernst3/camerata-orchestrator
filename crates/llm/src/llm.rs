@@ -132,7 +132,7 @@ pub use camerata_api_types::project::ProjectBackend;
 /// rejects ANY argument containing a NUL ("nul byte found in provided data"), which
 /// fails the spawn for EVERY CLI completion whose assembled prompt or system prompt
 /// happens to contain a stray `\0` (e.g. anywhere in the chat's big system prompt).
-/// Because `complete_cli` / `harden_completion` are the shared path for all bare-LLM
+/// Because `complete_cli_streaming` / `harden_completion` are the shared path for all bare-LLM
 /// CLI calls (chat, audit, calibration, story-authoring, decompose, escalation,
 /// clarification, L3), one stray NUL would break that call app-wide. Stripping is
 /// safe: a NUL carries no meaning in prompt text.
@@ -279,6 +279,14 @@ fn cli_overall_timeout() -> std::time::Duration {
 // reported as "(no output)", which was also simply FALSE whenever real content had been
 // streaming the whole time.
 //
+// A LATER fix completed it: `complete_cli` — the SECOND, non-streaming CLI implementation that
+// `Llm::complete` dispatched to — still used one flat `cli_overall_timeout()` window from
+// spawn to exit, so the AI/semantic audit pass (a `complete` caller) kept dying exactly this
+// way. It could not be heartbeated in place: it waited on `.output()`, which blocks until
+// process exit and therefore offers no incremental signal to distinguish "working" from
+// "wedged". It was deleted and `complete` now routes through the streaming reader with a
+// discarding delta callback, so there is ONE timeout implementation for the CLI backend.
+//
 // Fix: two independently-tracked deadlines, extracted into a small pure/testable type so the
 // timing logic is exercisable without spawning a real subprocess (see the tests below).
 // - `idle`: resets ONLY on real model-content progress. Tight (120s default) — this is what
@@ -359,29 +367,201 @@ fn map_spawn_error(e: std::io::Error) -> anyhow::Error {
     }
 }
 
-/// Run an already-spawned child to completion (collecting stdout/stderr, mirroring
-/// `Command::output`) under a hard overall timeout. On timeout: kill the child by pid
-/// (do not leak it — [`kill_pid`] is a belt-and-suspenders explicit kill; `kill_on_drop`
-/// on the originating `Command` is the backstop) and return the actionable timeout
-/// message. This is the non-streaming CLI timeout wrapper ([`Llm::complete_cli`]);
-/// standalone from any `claude`-specific setup so it's exercisable in a unit test
-/// against ANY child process, not just a live `claude` CLI.
-async fn wait_with_timeout(
-    child: tokio::process::Child,
-    timeout: std::time::Duration,
-) -> anyhow::Result<std::process::Output> {
-    let pid = child.id();
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(res) => res.map_err(|e| anyhow::anyhow!("failed to run `claude` CLI: {e}")),
-        Err(_) => {
-            kill_pid(pid);
-            anyhow::bail!(
-                "Claude CLI timed out after {}s (no output). The `claude` process may be \
-                 stuck waiting for authentication or input.",
-                timeout.as_secs()
-            );
+/// Read an already-spawned `claude --output-format stream-json` child to completion under
+/// the heartbeat-based DUAL timeout (see [`check_heartbeat`]), forwarding each text delta to
+/// `on_delta` and assembling the final [`LlmResponse`].
+///
+/// This is the SINGLE CLI completion reader. It used to be the body of
+/// [`Llm::complete_cli_streaming`], with a second, separate non-streaming implementation
+/// (`complete_cli`, reached from [`Llm::complete`]) waiting on `.output()` under one FLAT
+/// deadline. W6 fixed the flat-deadline bug here and could not fix it there — `.output()`
+/// blocks until process exit, so there is no incremental signal to heartbeat on at all — and
+/// the unfixed half is what silently darkened an entire 120-rule semantic audit tier: every
+/// rule recorded "timed out after 300s (no output)" while the CLI was healthy and the call
+/// was simply long. Extracting the loop and routing BOTH entry points through it means one
+/// timeout implementation, so that bug class cannot recur on half of it.
+///
+/// Standalone from any `claude`-specific spawn setup so it is exercisable in a unit test
+/// against ANY child process that writes stream-json lines, not just a live `claude` CLI.
+async fn read_cli_stream(
+    mut child: tokio::process::Child,
+    model: &str,
+    idle: std::time::Duration,
+    overall_timeout: std::time::Duration,
+    on_delta: &mut (dyn FnMut(&str) + Send),
+) -> anyhow::Result<LlmResponse> {
+    use tokio::io::AsyncBufReadExt;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("claude CLI produced no stdout pipe"))?;
+    // CRITICAL: drain stderr CONCURRENTLY. `--verbose` makes `claude` write a lot to
+    // stderr; if we only read stdout, stderr's OS pipe buffer (~64KB) fills, the
+    // subprocess BLOCKS on its next stderr write, stops producing stdout, and this
+    // read loop hangs forever (observed: an 8-minute hang after a few tokens). A
+    // spawned reader keeps stderr flowing so stdout never stalls.
+    let stderr_task = child.stderr.take().map(|stderr| {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut s = String::new();
+            let _ = tokio::io::BufReader::new(stderr)
+                .read_to_string(&mut s)
+                .await;
+            s
+        })
+    });
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+
+    let mut overall_deadline = tokio::time::Instant::now() + overall_timeout;
+    let mut full = String::new();
+    let mut cost = None;
+    let mut usage_in = None;
+    let mut usage_out = None;
+    let mut usage_cache_read = 0u64;
+    let mut usage_cache_creation = 0u64;
+    // An in-band failure reported by the final `result` event, paired with whether it is
+    // UNCONDITIONALLY fatal. See the `result` arm and the post-loop check below.
+    let mut result_failure: Option<(anyhow::Error, bool)> = None;
+    let mut deadline = tokio::time::Instant::now() + idle;
+    loop {
+        let now = tokio::time::Instant::now();
+        if let Some(kind) = check_heartbeat(now, deadline, overall_deadline) {
+            if kind == HeartbeatTimeout::Silent {
+                kill_pid(child.id());
+            }
+            return Err(heartbeat_timeout_error(kind, idle, overall_timeout));
+        }
+        let remaining = std::cmp::min(deadline, overall_deadline) - now;
+        match tokio::time::timeout(remaining, lines.next_line()).await {
+            Err(_) => {
+                // Re-check which specific deadline actually elapsed (the race above only
+                // tells us SOME timeout fired) so the message matches the real cause.
+                let now = tokio::time::Instant::now();
+                let kind = check_heartbeat(now, deadline, overall_deadline)
+                    .unwrap_or(HeartbeatTimeout::Stalled);
+                if kind == HeartbeatTimeout::Silent {
+                    kill_pid(child.id());
+                }
+                return Err(heartbeat_timeout_error(kind, idle, overall_timeout));
+            }
+            Ok(Ok(None)) => break, // EOF — the process finished
+            Ok(Err(e)) => anyhow::bail!("reading claude stdout: {e}"),
+            Ok(Ok(Some(line))) => {
+                // W6: ANY line at all — even one that fails to parse below, or a plain
+                // status/keepalive event — is proof the process is alive and writing, so
+                // it resets the SILENT backstop unconditionally. Only real model progress
+                // (below) resets the tighter stall window.
+                overall_deadline = tokio::time::Instant::now() + overall_timeout;
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                // Real model progress extends the deadline; status/keepalive lines do not.
+                let mut progressed = false;
+                match v["type"].as_str() {
+                    Some("stream_event") => {
+                        let ev = &v["event"];
+                        // Any of these mean the model is actively responding.
+                        if matches!(
+                            ev["type"].as_str(),
+                            Some(
+                                "message_start"
+                                    | "content_block_start"
+                                    | "content_block_delta"
+                                    | "content_block_stop"
+                                    | "message_delta"
+                            )
+                        ) {
+                            progressed = true;
+                        }
+                        if ev["type"] == "content_block_delta"
+                            && ev["delta"]["type"] == "text_delta"
+                        {
+                            if let Some(t) = ev["delta"]["text"].as_str() {
+                                full.push_str(t);
+                                on_delta(t);
+                            }
+                        }
+                    }
+                    Some("assistant") => progressed = true,
+                    Some("result") => {
+                        progressed = true;
+                        // Apply the SAME in-band failure policy the non-streaming CLI
+                        // path enforced via `cli_result_text` before it was collapsed into
+                        // this one. The CLI can exit 0 and still report failure through
+                        // `is_error:true` (execution error, max-turns abort) or omit
+                        // `result` entirely; accepting either as a successful empty
+                        // completion is what turns a backend failure into a silent
+                        // low-quality result — the precise class of bug this whole change
+                        // exists to close.
+                        match cli_result_text(&v) {
+                            Ok(r) => {
+                                // A later, healthy `result` event supersedes an earlier
+                                // failed one (the stream is not contractually limited to a
+                                // single `result`), so clear any recorded failure.
+                                result_failure = None;
+                                if !r.is_empty() {
+                                    full = r.to_string();
+                                }
+                            }
+                            Err(e) => {
+                                // `is_error:true` is an EXPLICIT failure signal from the
+                                // CLI, so it is fatal no matter what was streamed. A merely
+                                // ABSENT `result` field is weaker evidence: when real
+                                // content already streamed, that content IS the answer, so
+                                // defer to the SALVAGE rule below rather than discard it.
+                                let fatal = v["is_error"].as_bool() == Some(true);
+                                result_failure = Some((e, fatal));
+                            }
+                        }
+                        cost = v["total_cost_usd"].as_f64();
+                        let (i, o, cr, cc) = usage_tokens(&v["usage"]);
+                        usage_in = i.or(usage_in);
+                        usage_out = o.or(usage_out);
+                        // Accumulate cache token breakdowns (they may appear in multiple
+                        // stream events; take the max to avoid double-counting).
+                        usage_cache_read = usage_cache_read.max(cr);
+                        usage_cache_creation = usage_cache_creation.max(cc);
+                    }
+                    _ => {}
+                }
+                if progressed {
+                    deadline = tokio::time::Instant::now() + idle;
+                }
+            }
         }
     }
+    let status = child.wait().await?;
+    let stderr_text = match stderr_task {
+        Some(t) => t.await.unwrap_or_default(),
+        None => String::new(),
+    };
+    if let Some((e, fatal)) = result_failure {
+        if fatal || full.trim().is_empty() {
+            return Err(e);
+        }
+    }
+    // SALVAGE: if the process exited non-zero (e.g. SIGKILL from a timeout, or an
+    // external kill) but it already streamed a usable response, RETURN that text rather
+    // than discarding it. The model's work is in `full`; throwing it away on a late
+    // interruption is what made a fully-streamed audit collapse to "0/3 findings".
+    // Only fail when there's genuinely nothing to salvage.
+    if !status.success() && full.trim().is_empty() {
+        anyhow::bail!(
+            "claude CLI (stream) exited {status}: {}",
+            stderr_text.trim()
+        );
+    }
+    Ok(LlmResponse {
+        text: full,
+        model: model.to_string(),
+        backend: "cli".to_string(),
+        cost_usd: cost,
+        input_tokens: usage_in,
+        output_tokens: usage_out,
+        cache_read_input_tokens: usage_cache_read,
+        cache_creation_input_tokens: usage_cache_creation,
+        or_cache_discount: None,
+    })
 }
 
 /// The minimal completion seam the audit depends on.
@@ -1069,7 +1249,21 @@ impl Llm {
         // + clears the rate-limit flag; failure runs the provider-agnostic rate-limit detector.
         let result = match self.vendor {
             Vendor::Anthropic => match self.backend {
-                Backend::Cli => self.complete_cli(&req, &model).await,
+                // ONE CLI implementation. This arm used to call a separate
+                // non-streaming `complete_cli` that waited on `.output()` under a single
+                // FLAT `cli_overall_timeout()` window — so W6's heartbeat fix (which
+                // replaced exactly that flat deadline) covered only the streaming callers,
+                // and `complete` callers kept being killed mid-work and mislabeled
+                // "(no output)". That silently darkened an entire 120-rule semantic audit
+                // tier on a real scan whose CLI was healthy the whole time. There is no way
+                // to heartbeat a `.output()` call — it blocks until process exit, so there
+                // is no incremental signal to observe — so the non-streaming path is gone
+                // and non-streaming callers come through the streaming reader with a
+                // DISCARDING delta callback. Same request, same response shape, same
+                // in-band failure policy (`cli_result_text`); one timeout implementation.
+                Backend::Cli => {
+                    self.complete_cli_streaming(&req, &model, &mut |_| {}).await
+                }
                 Backend::Api => self.complete_api(&req, &model).await,
             },
             Vendor::OpenAi | Vendor::Google => anyhow::bail!(
@@ -1086,68 +1280,29 @@ impl Llm {
         result
     }
 
-    /// CLI path: a PURE text completion, not an agentic loop. The audit hands the model
-    /// the whole code digest in the prompt, so it must NOT load MCP servers (the GitHub
-    /// MCP), spawn sub-agents (Task/Explore), or touch the filesystem — that was wasteful,
-    /// slow, and muddied the output. `--strict-mcp-config` with no `--mcp-config` loads no
-    /// MCP servers; `--disallowedTools` forbids every built-in so the model can only
-    /// reason over the prompt and answer.
-    async fn complete_cli(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
-        let mut cmd = tokio::process::Command::new("claude");
-        // kill_on_drop: if the caller's future is dropped (e.g. a timeout fires), the
-        // spawned `claude` subprocess is killed rather than orphaned and left running.
-        // stdin(null): `claude -p` blocks on inherited piped stdin until EOF (see the
-        // streaming path for the full explanation). `.output()` already nulls stdin, but
-        // set it explicitly so the behavior doesn't depend on that detail.
-        cmd.kill_on_drop(true)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .arg("-p")
-            .arg(nul_safe(&req.prompt))
-            .arg("--model")
-            .arg(model)
-            .arg("--output-format")
-            .arg("json");
-        harden_completion(&mut cmd, req);
-        let child = cmd.spawn().map_err(map_spawn_error)?;
-        // Track the PID for the shutdown hook; the guard untracks on every exit path.
-        let _pid_guard = child.id().map(ClaudePidGuard::new);
-        let out = wait_with_timeout(child, cli_overall_timeout()).await?;
-        if !out.status.success() {
-            anyhow::bail!(
-                "claude CLI exited {}: {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        let v: serde_json::Value = serde_json::from_slice(&out.stdout)
-            .map_err(|e| anyhow::anyhow!("parse claude CLI JSON: {e}"))?;
-        let result_text = cli_result_text(&v)?;
-        let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&v["usage"]);
-        Ok(LlmResponse {
-            text: result_text.to_string(),
-            model: model.to_string(),
-            backend: "cli".to_string(),
-            cost_usd: v["total_cost_usd"].as_f64(),
-            input_tokens,
-            output_tokens,
-            cache_read_input_tokens: cache_read,
-            cache_creation_input_tokens: cache_creation,
-            or_cache_discount: None,
-        })
-    }
-
-    /// CLI streaming path: `--output-format stream-json --include-partial-messages`. Reads
-    /// stdout line-by-line, calls `on_delta` with each `content_block_delta` text chunk
-    /// (so the UI shows the model writing), and captures the final `result` event.
+    /// THE CLI completion path — a PURE text completion, not an agentic loop. The audit
+    /// hands the model the whole code digest in the prompt, so it must NOT load MCP servers
+    /// (the GitHub MCP), spawn sub-agents (Task/Explore), or touch the filesystem — that was
+    /// wasteful, slow, and muddied the output. `--strict-mcp-config` with no `--mcp-config`
+    /// loads no MCP servers; [`harden_completion`] forbids every built-in so the model can
+    /// only reason over the prompt and answer.
+    ///
+    /// `--output-format stream-json --include-partial-messages`: reads stdout line-by-line
+    /// under the heartbeat dual timeout ([`read_cli_stream`]), calls `on_delta` with each
+    /// `content_block_delta` text chunk (so the UI shows the model writing), and captures
+    /// the final `result` event.
+    ///
+    /// This is now the ONLY CLI implementation. [`Llm::complete`] used to run a separate
+    /// non-streaming `complete_cli` under a FLAT overall deadline, which is why W6's
+    /// heartbeat fix covered only half the callers and the semantic audit pass (a `complete`
+    /// caller) kept being killed mid-work. Non-streaming callers now come through here with
+    /// a discarding `on_delta`.
     async fn complete_cli_streaming(
         &self,
         req: &LlmRequest,
         model: &str,
         on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> anyhow::Result<LlmResponse> {
-        use tokio::io::AsyncBufReadExt;
         let mut cmd = tokio::process::Command::new("claude");
         // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
         // leaving a stalled `claude` running in the background.
@@ -1170,29 +1325,9 @@ impl Llm {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         harden_completion(&mut cmd, req);
-        let mut child = cmd.spawn().map_err(map_spawn_error)?;
+        let child = cmd.spawn().map_err(map_spawn_error)?;
         // Track the PID for the shutdown hook; the guard untracks on every exit path.
         let _pid_guard = child.id().map(ClaudePidGuard::new);
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("claude CLI produced no stdout pipe"))?;
-        // CRITICAL: drain stderr CONCURRENTLY. `--verbose` makes `claude` write a lot to
-        // stderr; if we only read stdout, stderr's OS pipe buffer (~64KB) fills, the
-        // subprocess BLOCKS on its next stderr write, stops producing stdout, and this
-        // read loop hangs forever (observed: an 8-minute hang after a few tokens). A
-        // spawned reader keeps stderr flowing so stdout never stalls.
-        let stderr_task = child.stderr.take().map(|stderr| {
-            tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
-                let mut s = String::new();
-                let _ = tokio::io::BufReader::new(stderr)
-                    .read_to_string(&mut s)
-                    .await;
-                s
-            })
-        });
-        let mut lines = tokio::io::BufReader::new(stdout).lines();
 
         // PROGRESS/STALL timeout, not a total-time cap: the wall-clock allowed since the
         // last sign of the model actually RESPONDING. It resets only on real progress
@@ -1204,131 +1339,12 @@ impl Llm {
         let idle = env_secs("CAMERATA_LLM_IDLE_SECS", 120);
         // W6: the "genuinely silent" backstop, independent of the idle/progress detector
         // above — see the `check_heartbeat`/`HeartbeatTimeout` doc comments for the full
-        // rationale. `CAMERATA_CLI_TIMEOUT_SECS` overrides the 300s default — the same knob
-        // and default as the non-streaming path in `complete_cli`. Unlike before, this
-        // deadline is RESET on any streamed line (below), not just once at call start, so a
+        // rationale. `CAMERATA_CLI_TIMEOUT_SECS` overrides the 300s default. Unlike before,
+        // this deadline is RESET on any streamed line, not just once at call start, so a
         // long-but-live call is never killed merely for running past this window.
         let overall_timeout = cli_overall_timeout();
-        let mut overall_deadline = tokio::time::Instant::now() + overall_timeout;
 
-        let mut full = String::new();
-        let mut cost = None;
-        let mut usage_in = None;
-        let mut usage_out = None;
-        let mut usage_cache_read = 0u64;
-        let mut usage_cache_creation = 0u64;
-        let mut deadline = tokio::time::Instant::now() + idle;
-        loop {
-            let now = tokio::time::Instant::now();
-            if let Some(kind) = check_heartbeat(now, deadline, overall_deadline) {
-                if kind == HeartbeatTimeout::Silent {
-                    kill_pid(child.id());
-                }
-                return Err(heartbeat_timeout_error(kind, idle, overall_timeout));
-            }
-            let remaining = std::cmp::min(deadline, overall_deadline) - now;
-            match tokio::time::timeout(remaining, lines.next_line()).await {
-                Err(_) => {
-                    // Re-check which specific deadline actually elapsed (the race above only
-                    // tells us SOME timeout fired) so the message matches the real cause.
-                    let now = tokio::time::Instant::now();
-                    let kind = check_heartbeat(now, deadline, overall_deadline)
-                        .unwrap_or(HeartbeatTimeout::Stalled);
-                    if kind == HeartbeatTimeout::Silent {
-                        kill_pid(child.id());
-                    }
-                    return Err(heartbeat_timeout_error(kind, idle, overall_timeout));
-                }
-                Ok(Ok(None)) => break, // EOF — the process finished
-                Ok(Err(e)) => anyhow::bail!("reading claude stdout: {e}"),
-                Ok(Ok(Some(line))) => {
-                    // W6: ANY line at all — even one that fails to parse below, or a plain
-                    // status/keepalive event — is proof the process is alive and writing, so
-                    // it resets the SILENT backstop unconditionally. Only real model progress
-                    // (below) resets the tighter stall window.
-                    overall_deadline = tokio::time::Instant::now() + overall_timeout;
-                    let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                        continue;
-                    };
-                    // Real model progress extends the deadline; status/keepalive lines do not.
-                    let mut progressed = false;
-                    match v["type"].as_str() {
-                        Some("stream_event") => {
-                            let ev = &v["event"];
-                            // Any of these mean the model is actively responding.
-                            if matches!(
-                                ev["type"].as_str(),
-                                Some(
-                                    "message_start"
-                                        | "content_block_start"
-                                        | "content_block_delta"
-                                        | "content_block_stop"
-                                        | "message_delta"
-                                )
-                            ) {
-                                progressed = true;
-                            }
-                            if ev["type"] == "content_block_delta"
-                                && ev["delta"]["type"] == "text_delta"
-                            {
-                                if let Some(t) = ev["delta"]["text"].as_str() {
-                                    full.push_str(t);
-                                    on_delta(t);
-                                }
-                            }
-                        }
-                        Some("assistant") => progressed = true,
-                        Some("result") => {
-                            progressed = true;
-                            if let Some(r) = v["result"].as_str() {
-                                if !r.is_empty() {
-                                    full = r.to_string();
-                                }
-                            }
-                            cost = v["total_cost_usd"].as_f64();
-                            let (i, o, cr, cc) = usage_tokens(&v["usage"]);
-                            usage_in = i.or(usage_in);
-                            usage_out = o.or(usage_out);
-                            // Accumulate cache token breakdowns (they may appear in multiple
-                            // stream events; take the max to avoid double-counting).
-                            usage_cache_read = usage_cache_read.max(cr);
-                            usage_cache_creation = usage_cache_creation.max(cc);
-                        }
-                        _ => {}
-                    }
-                    if progressed {
-                        deadline = tokio::time::Instant::now() + idle;
-                    }
-                }
-            }
-        }
-        let status = child.wait().await?;
-        let stderr_text = match stderr_task {
-            Some(t) => t.await.unwrap_or_default(),
-            None => String::new(),
-        };
-        // SALVAGE: if the process exited non-zero (e.g. SIGKILL from a timeout, or an
-        // external kill) but it already streamed a usable response, RETURN that text rather
-        // than discarding it. The model's work is in `full`; throwing it away on a late
-        // interruption is what made a fully-streamed audit collapse to "0/3 findings".
-        // Only fail when there's genuinely nothing to salvage.
-        if !status.success() && full.trim().is_empty() {
-            anyhow::bail!(
-                "claude CLI (stream) exited {status}: {}",
-                stderr_text.trim()
-            );
-        }
-        Ok(LlmResponse {
-            text: full,
-            model: model.to_string(),
-            backend: "cli".to_string(),
-            cost_usd: cost,
-            input_tokens: usage_in,
-            output_tokens: usage_out,
-            cache_read_input_tokens: usage_cache_read,
-            cache_creation_input_tokens: usage_cache_creation,
-            or_cache_discount: None,
-        })
+        read_cli_stream(child, model, idle, overall_timeout, on_delta).await
     }
 
     /// API path: POST the Anthropic Messages API with the key.
@@ -3293,29 +3309,101 @@ malformed line, not json
         std::env::remove_var(var);
     }
 
+    // ── `read_cli_stream` — THE single CLI reader, driven by a scripted process ──────
+    //
+    // The two `wait_with_timeout_*` tests that used to sit here were DELETED with the
+    // function they covered: `wait_with_timeout` was the non-streaming `.output()` timeout
+    // wrapper behind `complete_cli`, and both are gone now that there is one CLI path. Their
+    // coverage is not lost — it is re-asserted, more faithfully, below and by the two
+    // end-to-end `complete_cli_backend_*` tests: a wedged child still dies in bounded time
+    // with the same actionable message, and is still actually killed rather than leaked.
+    //
+    // These drive `read_cli_stream` against a SCRIPTED `/bin/sh` process rather than a live
+    // `claude`, so they are fast and deterministic.
+
+    /// Spawn `/bin/sh -c <script>` wired up exactly like the real `claude` child
+    /// (stdin null, stdout/stderr piped, kill_on_drop) so `read_cli_stream` sees the same
+    /// shape it sees in production.
+    fn spawn_scripted_cli(script: &str) -> tokio::process::Child {
+        tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn the scripted stand-in for `claude`")
+    }
+
+    /// HALF 1, at the reader level — content keeps arriving, so the overall window keeps
+    /// being refreshed and the call is never killed for simply running long. The deltas must
+    /// also reach `on_delta`, and the final `result` event must win over the accumulated
+    /// delta text.
     #[tokio::test]
-    async fn wait_with_timeout_kills_child_and_returns_actionable_error() {
-        // A deliberately slow child (well beyond the timeout below) stands in for a
-        // hung `claude` — auth prompt, stuck stream, whatever the trigger. The wrapper
-        // must fail fast with the actionable message AND actually kill the process
-        // rather than leaking it.
-        let mut cmd = tokio::process::Command::new("sleep");
-        cmd.arg("30").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        let child = cmd.spawn().expect("spawn `sleep` for the test");
+    async fn read_cli_stream_live_call_outlives_the_overall_window_and_streams_deltas() {
+        // 10 content deltas 100ms apart (~1s) under a 600ms overall window. The per-gap
+        // headroom (100ms vs 600ms) is deliberately 6x so a loaded CI box cannot stretch one
+        // gap past the window and make this flaky, while the TOTAL still clears the window.
+        let child = spawn_scripted_cli(
+            r#"i=0
+while [ $i -lt 10 ]; do
+  printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}}'
+  sleep 0.1
+  i=$((i+1))
+done
+printf '%s\n' '{"type":"result","is_error":false,"result":"FINAL","usage":{"input_tokens":5,"output_tokens":2,"cache_read_input_tokens":3}}'
+"#,
+        );
+        let mut seen = String::new();
+        let started = std::time::Instant::now();
+        let resp = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_secs(30), // idle: never trips, content is flowing
+            std::time::Duration::from_millis(600), // overall: deliberately tiny
+            &mut |d| seen.push_str(d),
+        )
+        .await
+        .expect("a continuously-streaming call must never trip the overall window");
+        let elapsed = started.elapsed();
+
+        assert_eq!(seen, "xxxxxxxxxx", "every delta must reach on_delta");
+        assert_eq!(resp.text, "FINAL", "the result event wins over delta text");
+        assert_eq!(resp.input_tokens, Some(8), "5 base + 3 cache_read");
+        assert_eq!(resp.cache_read_input_tokens, 3);
+        assert!(
+            elapsed > std::time::Duration::from_millis(600),
+            "the test must actually outlast the overall window, took {elapsed:?}"
+        );
+    }
+
+    /// HALF 2, at the reader level — a totally silent child must be declared Silent, killed
+    /// (not leaked), and reported with the actionable message. This is the coverage the
+    /// deleted `wait_with_timeout_kills_child_and_returns_actionable_error` provided.
+    #[tokio::test]
+    async fn read_cli_stream_wedged_child_is_killed_and_reported_as_silent() {
+        let child = spawn_scripted_cli("exec sleep 30");
         let pid = child.id().expect("child has a pid");
 
-        let result = wait_with_timeout(child, std::time::Duration::from_millis(150)).await;
+        let err = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_secs(30), // idle wide, so SILENT is what fires
+            std::time::Duration::from_millis(200),
+            &mut |_| {},
+        )
+        .await
+        .expect_err("a silent child must time out");
 
-        let err = result.expect_err("expected a timeout error");
         let msg = err.to_string();
-        assert!(msg.contains("timed out after 0s"), "message: {msg}");
+        assert!(msg.contains("timed out after 0s (no output)"), "message: {msg}");
         assert!(
             msg.contains("stuck waiting for authentication or input"),
             "message: {msg}"
         );
 
-        // Give the SIGKILL a brief moment to land, then confirm the process is gone —
-        // "do not leak it" is the whole point of this fix.
+        // Confirm the process is actually gone — "do not leak it" is half the point.
         let mut still_alive = true;
         for _ in 0..20 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -3332,15 +3420,97 @@ malformed line, not json
         assert!(!still_alive, "child pid {pid} was not killed after the timeout");
     }
 
+    /// A child that emits only NON-progress keepalive lines keeps the silence backstop
+    /// refreshed but must still trip the tighter idle/stall window — the outer window being
+    /// alive must never paper over a real generation stall.
     #[tokio::test]
-    async fn wait_with_timeout_returns_output_on_normal_completion() {
-        let mut cmd = tokio::process::Command::new("true");
-        cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-        let child = cmd.spawn().expect("spawn `true` for the test");
-        let out = wait_with_timeout(child, std::time::Duration::from_secs(10))
-            .await
-            .expect("should complete well within the timeout");
-        assert!(out.status.success());
+    async fn read_cli_stream_keepalive_only_child_still_trips_the_idle_stall() {
+        let child = spawn_scripted_cli(
+            r#"i=0
+while [ $i -lt 30 ]; do
+  printf '%s\n' '{"type":"system","subtype":"keepalive"}'
+  sleep 0.05
+  i=$((i+1))
+done
+"#,
+        );
+        let err = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_millis(200), // idle: never reset, no real progress
+            std::time::Duration::from_secs(30),    // overall: kept alive by the keepalives
+            &mut |_| {},
+        )
+        .await
+        .expect_err("keepalives must not mask a generation stall");
+        let msg = err.to_string();
+        assert!(msg.contains("no model output for 0s"), "message: {msg}");
+        assert!(msg.contains("CAMERATA_LLM_IDLE_SECS"), "message: {msg}");
+    }
+
+    /// The in-band failure policy `complete_cli` enforced via `cli_result_text` must survive
+    /// the collapse: a CLI that exits 0 but reports `is_error:true` is a FAILURE, never a
+    /// successful completion — otherwise a backend error reads as a clean empty answer,
+    /// which is the silent-darkness class of bug this whole change exists to close.
+    #[tokio::test]
+    async fn read_cli_stream_rejects_an_in_band_is_error_result_even_on_exit_zero() {
+        let child = spawn_scripted_cli(
+            r#"printf '%s\n' '{"type":"result","is_error":true,"subtype":"error_max_turns","result":"partial"}'
+exit 0
+"#,
+        );
+        let err = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .expect_err("is_error=true must never read as a successful completion");
+        let msg = err.to_string();
+        assert!(msg.contains("is_error=true"), "message: {msg}");
+        assert!(msg.contains("error_max_turns"), "message: {msg}");
+    }
+
+    /// The SALVAGE contract must survive the collapse too: a child killed mid-response after
+    /// streaming usable content returns that content rather than discarding the round.
+    /// `verify_findings`' `SalvagingFixCompleter` fake in `ai_audit.rs` models exactly this.
+    #[tokio::test]
+    async fn read_cli_stream_salvages_streamed_content_when_the_child_dies_non_zero() {
+        let child = spawn_scripted_cli(
+            r#"printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"half an answer"}}}'
+exit 1
+"#,
+        );
+        let resp = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .expect("a non-zero exit with usable streamed content must be salvaged");
+        assert_eq!(resp.text, "half an answer");
+    }
+
+    /// ...but a non-zero exit with NOTHING streamed is still a hard failure.
+    #[tokio::test]
+    async fn read_cli_stream_fails_when_a_non_zero_exit_left_nothing_to_salvage() {
+        let child = spawn_scripted_cli("echo 'boom' >&2; exit 3");
+        let err = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .expect_err("nothing to salvage -> surface the failure");
+        let msg = err.to_string();
+        assert!(msg.contains("claude CLI (stream) exited"), "message: {msg}");
+        assert!(msg.contains("boom"), "message: {msg}");
     }
 
     // ── W6: heartbeat-based dual timeout (`check_heartbeat`) ────────────────────────────
@@ -3456,6 +3626,185 @@ malformed line, not json
         assert!(
             stalled.contains("CAMERATA_LLM_IDLE_SECS"),
             "message: {stalled}"
+        );
+    }
+
+    // ── `Llm::complete()`'s CLI arm must use the heartbeat timeout, not a flat cap ──────
+    //
+    // END-TO-END regression guards for the half of the bug W6 left unfixed. W6 replaced the
+    // flat overall deadline in `complete_cli_streaming`, but `Llm::complete()`'s
+    // `Backend::Cli` arm ran a SEPARATE non-streaming implementation that still used one
+    // flat `cli_overall_timeout()` window from spawn to exit. The AI/semantic audit pass
+    // calls `complete`, not `complete_streaming`, so it kept getting killed mid-work and
+    // mislabeled "(no output)": a real scan recorded 120 rules, every one of them carrying
+    // that message, while the `claude` CLI was demonstrably healthy and authenticated.
+    //
+    // These drive the REAL dispatch (`Llm::complete`) against a FAKE `claude` on PATH, so
+    // they are fast, deterministic, and need no live CLI or network. Both halves are
+    // asserted: a long-but-LIVE call must now survive past the overall window, and a
+    // genuinely WEDGED (silent) process must still be killed within a bounded time.
+
+    /// A scratch dir holding an executable named `claude`, removed on drop. Prepending this
+    /// dir to `PATH` makes `tokio::process::Command::new("claude")` resolve to the fake.
+    struct FakeClaude {
+        dir: std::path::PathBuf,
+    }
+
+    impl FakeClaude {
+        /// Write `script` (a `/bin/sh` program, shebang included) as an executable `claude`.
+        fn new(tag: &str, script: &str) -> Self {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir()
+                .join(format!("camerata-llm-fake-claude-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create fake-claude dir");
+            let bin = dir.join("claude");
+            let mut f = std::fs::File::create(&bin).expect("create fake claude");
+            f.write_all(script.as_bytes()).expect("write fake claude");
+            drop(f);
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake claude");
+            Self { dir }
+        }
+    }
+
+    impl Drop for FakeClaude {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Serializes the two PATH/env-mutating end-to-end tests against each other (process-
+    /// global state). Only these tests touch `PATH` / `CAMERATA_CLI_TIMEOUT_SECS`. An ASYNC
+    /// mutex because the guard is deliberately held across the `complete()` await — the env
+    /// must stay patched for the whole call — which a `std::sync::Mutex` must never be.
+    static FAKE_CLI_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Prepend `dir` to `PATH` and pin `CAMERATA_CLI_TIMEOUT_SECS`; restore both on drop.
+    struct FakeCliEnv {
+        prior_path: Option<String>,
+        prior_timeout: Option<String>,
+    }
+
+    impl FakeCliEnv {
+        fn new(dir: &std::path::Path, overall_secs: u64) -> Self {
+            let prior_path = std::env::var("PATH").ok();
+            let prior_timeout = std::env::var("CAMERATA_CLI_TIMEOUT_SECS").ok();
+            let joined = match &prior_path {
+                Some(p) => format!("{}:{p}", dir.display()),
+                None => dir.display().to_string(),
+            };
+            std::env::set_var("PATH", joined);
+            std::env::set_var("CAMERATA_CLI_TIMEOUT_SECS", overall_secs.to_string());
+            Self { prior_path, prior_timeout }
+        }
+    }
+
+    impl Drop for FakeCliEnv {
+        fn drop(&mut self) {
+            match &self.prior_path {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+            match &self.prior_timeout {
+                Some(v) => std::env::set_var("CAMERATA_CLI_TIMEOUT_SECS", v),
+                None => std::env::remove_var("CAMERATA_CLI_TIMEOUT_SECS"),
+            }
+        }
+    }
+
+    /// An `Llm` pinned to Anthropic + the CLI backend, independent of any ambient env.
+    fn cli_llm() -> Llm {
+        Llm {
+            vendor: Vendor::Anthropic,
+            backend: Backend::Cli,
+            default_model: "claude-haiku-4-5".to_string(),
+            api_key: None,
+            ledger: None,
+        }
+    }
+
+    /// HALF 1 — a long-but-LIVE call must survive past the overall window.
+    ///
+    /// The fake streams a real content delta every 150ms for ~2.1s while the overall window
+    /// is pinned to 1s (so each gap has ~6x headroom against a loaded box, but the TOTAL
+    /// comfortably clears the window). Before this fix `complete()` ran `complete_cli`, which waited on
+    /// `.output()` under ONE flat 1s deadline and therefore killed this demonstrably-alive
+    /// process and reported "timed out after 1s (no output)" — the exact false message the
+    /// 120-rule scan recorded. After the fix, every streamed line refreshes the silence
+    /// backstop, so the call completes and returns its text.
+    #[tokio::test]
+    async fn complete_cli_backend_survives_a_live_call_that_outlasts_the_overall_window() {
+        let _g = FAKE_CLI_ENV_LOCK.lock().await;
+        let fake = FakeClaude::new(
+            "live",
+            r#"#!/bin/sh
+i=0
+while [ $i -lt 14 ]; do
+  printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"tok "}}}'
+  sleep 0.15
+  i=$((i+1))
+done
+printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cost_usd":0.25,"usage":{"input_tokens":11,"output_tokens":7}}'
+"#,
+        );
+        let _env = FakeCliEnv::new(&fake.dir, 1);
+
+        let started = std::time::Instant::now();
+        let resp = cli_llm()
+            .complete(LlmRequest::new("a legitimately long audit pass"))
+            .await;
+        let elapsed = started.elapsed();
+
+        let resp = resp.expect(
+            "a call that keeps streaming content must NOT be killed for outlasting the \
+             overall window",
+        );
+        assert_eq!(resp.text, "LIVE-DONE");
+        assert_eq!(resp.backend, "cli");
+        assert!(
+            elapsed > std::time::Duration::from_secs(1),
+            "the test must actually outlast the 1s overall window, took {elapsed:?}"
+        );
+        // Usage/cost accounting must survive the change too — the ledger chokepoint and the
+        // cockpit meter read these off every completion.
+        assert_eq!(resp.cost_usd, Some(0.25));
+        assert_eq!(resp.input_tokens, Some(11));
+        assert_eq!(resp.output_tokens, Some(7));
+    }
+
+    /// HALF 2 — a genuinely WEDGED (totally silent) call must still die in bounded time.
+    ///
+    /// This is the safety net the owner explicitly refused to trade away: the fix must not
+    /// amount to "remove/raise the timeout". The fake produces nothing at all and would run
+    /// for 30s; with the overall window at 1s the call must fail fast with the actionable
+    /// "(no output)" message, and the subprocess must actually be killed, not leaked.
+    #[tokio::test]
+    async fn complete_cli_backend_still_kills_a_genuinely_wedged_process() {
+        let _g = FAKE_CLI_ENV_LOCK.lock().await;
+        let fake = FakeClaude::new(
+            "wedged",
+            "#!/bin/sh\nexec sleep 30\n",
+        );
+        let _env = FakeCliEnv::new(&fake.dir, 1);
+
+        let started = std::time::Instant::now();
+        let err = cli_llm()
+            .complete(LlmRequest::new("this one wedges"))
+            .await
+            .expect_err("a silent process must still time out");
+        let elapsed = started.elapsed();
+
+        let msg = err.to_string();
+        assert!(msg.contains("timed out after 1s (no output)"), "message: {msg}");
+        assert!(
+            msg.contains("stuck waiting for authentication or input"),
+            "message: {msg}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "the wedged call must die in BOUNDED time, took {elapsed:?}"
         );
     }
 }
