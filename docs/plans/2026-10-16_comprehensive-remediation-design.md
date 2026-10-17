@@ -240,3 +240,80 @@ review's warning from earlier in this effort applies directly: *"adding detectio
 the mid-layer eats existing recall is how the last two cycles were spent."* Hearth lost five
 working detector classes between two runs. I would not add nine rules until the gate in W19
 exists to catch the next five.
+
+---
+
+## 6. Zach's rulings (2026-10-16)
+
+**Q1 PDF exemption: LIFTED.** "Yes, please correct the pdf." Superseded by a full redesign -
+see `docs/plans/2026-10-16_pdf-redesign-report.md`, commissioned the same day against his
+investor-side report research (six additions, three deliberate omissions, no score, no
+go/no-go verdict, no bus-factor analysis).
+
+**Q2 The nine rules: in scope, timing flexible.** "When is not important, as long as it is part
+of the total package." W29 stays after Wave 2 as recommended, but it ships.
+
+**Q3 Regression baseline: delegated, with a constraint.** "Most importantly is that we restore
+this regression while also not introducing new ones, that is paramount." Taking the 2026-10-09
+export as a floor ONLY for the classes it actually detected, since that engine had a dark
+semantic tier and a broken eslint path and is therefore not a valid ceiling. The gate asserts
+no class regresses from whichever prior export last detected it.
+
+**Q6 Budget: deferred.** "We can worry about this later. Let's get all the changes and fixes in
+before we grade again." So a single graded sweep after all three waves, not one per wave.
+
+### [x] Q4 ANSWERED, and Zach's answer is better than the proposal
+
+The question was how "intentionally public" could be derived from code. It splits:
+
+- **Platform-owned objects ARE deterministic.** Supabase creates `storage.objects` and similar
+  with RLS already enabled; the engine can know the platform's own schema namespace. The hearth
+  case was the RLS-policy-without-RLS rule firing CRITICAL on exactly such a table, with its own
+  headline reading "informational only" and its own fix saying "no new migration is needed".
+- **"Intentionally public" is NOT derivable** and must not be guessed. Nothing in the code
+  separates a deliberately public catalog-photo bucket from an accidentally public
+  user-document bucket, and inferring it from names is the prose-matching this effort removed.
+
+I proposed a client-declared allowlist. **Zach proposed better:**
+
+> "maybe another flag to add to the finding, instead of just plain text. A flag that says 'this
+> could be intentional'. And then, for those in particular, I can mark as 'violation' in the case
+> that the agent's guess was wrong. OR I can flag it as 'genuinely up to the client to decide if
+> intentional' and that latter one would put it in a bucket that would then make it to the
+> product as 'for your visibility, this was found and could likely be intentional, that is your
+> call'."
+
+Why it is better: an allowlist requires the client to pre-declare something they will never
+think to declare, whereas this puts the judgement with the curator at review time, where it
+actually lives, and converts an awkward silence into a deliverable section.
+
+It also fixes the defect at its source. The engine currently writes "very likely intentional"
+into **detail prose**, which no renderer and no severity pass can read, so three such rows
+shipped at HIGH held. A structured flag is readable by the severity ceiling, the ranker and the
+renderer - the same prose-to-structure correction applied everywhere else in this effort.
+
+**Three orthogonal axes, not one overloaded one:** `FindingKind` says what kind of statement a
+row is; `could_be_intentional` is the engine's read on whether the author meant it; the
+disposition is what the curator decided.
+
+**Severity consequence:** a flagged row is capped at INFO/LOW until the curator marks it a
+violation, at which point it takes its authored severity. That single rule removes the
+"HIGH held, detail says very likely intentional" contradiction the grader raised on three repos.
+
+**New client-facing outcome.** Today a finding is an accusation or it is absent. This adds a
+third: "we found this, it may well be deliberate, your call." That is honest in a way neither
+of the other two is, and it belongs in the PDF redesign as its own section.
+
+#### [ ] Open sub-questions
+- **Untriaged rows.** Does an unresolved `could_be_intentional` ship as "your call", or hold the
+  sign-off like an open finding? Recommendation: ship it. The client-visible outcome is honest
+  either way, and holding sign-off would punish the curator for the engine's uncertainty.
+- **Persistence.** Should a curator ruling survive into the next scan, or is the client re-asked
+  every time? Durable per-finding state across engagements is the backend surface deliberately
+  deferred when `Confirmed` was kept local (Pass 2 Q2). This is now the SECOND feature to want
+  it, which starts to make the case for building it properly.
+
+#### Workstream placement
+New **W31 - the `could_be_intentional` flag**: schema field, severity cap, curator disposition,
+and its own client-facing section. Depends on W22 (kind integrity) since it shares the finding
+model, and feeds the PDF redesign. Sits in Wave 2.
