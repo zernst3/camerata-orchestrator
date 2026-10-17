@@ -549,7 +549,25 @@ against regenerated sample data immediately.
   computed server-side so the template never does arithmetic.
 - Stable R-nn ids assigned at export, written to the PDF data and to a new R-id
   column on the workbook findings sheets, so PDF prose and workbook rows
-  cross-reference by the same name. (Open question 1 covers re-export stability.)
+  cross-reference by the same name. Re-export stability is settled by §9.2:
+  **ids are retired, never reused, and the survivors never renumber**, so a
+  re-exported report may read R-01, R-02, R-03, R-05. This has two build
+  consequences beyond the id column:
+  - The id assignment must be **persisted at first export and read back on
+    re-export**, not recomputed from the surviving rows. A counter derived from
+    the current row set renumbers by construction, which is precisely the
+    behaviour §9.2 forbids. This is the part that is easy to get silently wrong:
+    a recomputed id looks correct in every single-export test and only diverges
+    on the second export, so it needs a test that **exports, kills a
+    middle-ranked finding, re-exports, and asserts the survivors kept their
+    original ids** — the gap is the assertion, not an artifact of it.
+  - The withdrawal line is a **required, data-driven** element, not prose the
+    operator remembers to add: when and only when the re-export has at least one
+    retired id, the template prints `Findings R-04 and R-11 were withdrawn
+    following your technical review.` immediately after the risk register, with
+    the retired ids listed in ascending order. Rendering it needs the retired set
+    on the wire, so the persisted id record has to carry withdrawn ids and not
+    merely the surviving assignments.
 - The intake-questions block on `ReportOptions` (three questions, per-question
   answer in the closed YES / NO / NOT ASSESSED FROM CODE vocabulary, answering
   R-ids, hours), with defaults synthesised server-side from the harvest-fear rule
@@ -617,20 +635,61 @@ more, in the artifact built for rows.
 
 ## 9. Open questions
 
-Only what is genuinely open. Everything else above is committed, and all seven of the
-first design's questions are settled and encoded here.
+**None.** All seven of the first design's questions and the one question this design
+raised are settled. The two rulings Zach gave on 2026-10-17 are recorded below as
+committed requirements.
 
-1. **R-id stability across re-exports.** The PDF's prose and the workbook's rows
-   cross-reference by R-nn ids assigned at export (Phase B). Context: after the
-   client fact-checks the observations, a disputed fact can kill a finding, and the
-   report is then re-exported before signature. If R-07 dies, should the re-export
-   renumber so ids are contiguous (R-01 through R-09, cleaner, but "R-07" in any
-   earlier correspondence now points at a different finding), or keep gaps (R-07
-   simply absent, slightly odd-looking, but an id never changes meaning once
-   uttered)? Recommendation: keep gaps; an identifier that can silently change
-   referent between the fact-check email and the signed report undermines the exact
-   trust procedure it serves. Needs his confirmation because the gaps are
-   client-visible.
+### 9.1 SETTLED (2026-10-17) — the engineer is not a reader of the PDF
+
+Section 2's demotion of the risk register from seven pages of per-finding blocks to
+3-4 pages of per-area narrative is **confirmed**. Zach:
+
+> "I am fine with this, the report is a summary that can be used by non technical
+> people, the workbook is for the granular items."
+
+This is now the governing reader model for the whole document, not just the register,
+and it settles future disputes about what belongs in the PDF: **the PDF's reader is
+non-technical.** An engineer who needs per-finding evidence, fix text, citations or
+site lists is a workbook reader. Any future proposal to restore row-shaped detail to
+the PDF has to argue against this line first.
+
+### 9.2 SETTLED (2026-10-17) — R-ids keep gaps, and the gaps are named
+
+R-nn ids are assigned at export. When the client's fact-check kills a finding and the
+report is re-exported before signature, the dead id's number is **retired, not reused,
+and the remaining ids do not renumber.** A report may therefore read R-01, R-02, R-03,
+R-05.
+
+Rationale: the client sees the ids twice, once in the fact-check draft and once in the
+signed report. Renumbering would make the signed report's R-04 a *different finding*
+than the R-04 the client just approved removing, silently invalidating their reply
+email, their margin notes and any ticket opened off the draft. The id still resolves;
+it resolves to the wrong thing, with no error anywhere. A silent referent change is
+the one failure this document cannot absorb, because trustworthiness is the entire
+product.
+
+**The gap must be named, not left to be noticed.** Immediately after the risk
+register, when and only when at least one finding was withdrawn, the report prints a
+line of the form:
+
+> Findings R-04 and R-11 were withdrawn following your technical review.
+
+This is a requirement, not a nicety, and it is what makes the ruling strictly better
+than either branch considered. It converts the one real cost of gaps (a client counts
+to eight, sees seven, and wonders what was hidden) into affirmative evidence that the
+fact-check procedure ran and changed the output. That the engagement is not raw
+scanner output with an invoice attached is close to the center of what is being sold,
+and contiguous renumbering would erase the only visible proof of it.
+
+Rejected alternative, recorded so it is not re-litigated: assigning ids *after* the
+fact-check, which yields contiguous ids and no gaps ever. It fails because the
+fact-check draft then has no stable handle for the client to reference, which moves
+the same problem one document earlier and makes the draft harder to discuss.
+
+**Out of scope, flagged for a future thread:** whether R-ids should be stable *across
+engagements*, so a re-scan can say "R-07 from the March report is still open." That
+needs a durable finding identity rather than a per-report counter, and is a different
+and harder problem than this one.
 
 ---
 

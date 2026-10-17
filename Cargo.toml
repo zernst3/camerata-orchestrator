@@ -91,3 +91,38 @@ sha2 = "0.10"
 # `main()` installs a global subscriber.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ---------------------------------------------------------------------------
+# Build profiles — disk footprint
+# ---------------------------------------------------------------------------
+# Context: on 2026-10-17 this workspace's `target/` reached 222 GiB across
+# 836,209 files and filled the machine's data volume. It was not a leak. Cargo
+# has no garbage collector: artifacts are content-hashed, so every change to a
+# shared crate mints a NEW hashed artifact for everything downstream and the old
+# one is never reclaimed. `target/` is an append-only log of every build ever
+# run, and only `cargo clean` (all-or-nothing) removes anything.
+#
+# This workspace multiplies that: 26 crates, 80 test targets, 839 locked deps,
+# and agent-driven runs that re-run the full suite many times per session. Each
+# run mints a fresh generation of every test binary plus its dependency closure.
+#
+# `debug = "line-tables-only"` is the lever. Cargo's dev/test default is full
+# debuginfo, which on macOS also defaults to `split-debuginfo = "unpacked"` —
+# per-codegen-unit `.o` files next to each artifact, which is where the
+# three-quarters-of-a-million file count came from. Debuginfo, not code, was the
+# bulk of those 222 GiB.
+#
+# The trade, taken deliberately: panics and backtraces KEEP file and line
+# numbers, which is what we actually read. What is given up is variable
+# inspection under a debugger (lldb). We do not step through this workspace in a
+# debugger; `RUST_BACKTRACE=1` plus `tracing` is the debugging surface here.
+#
+# This bounds how large a single generation is. It does NOT reclaim old
+# generations — that is `cargo sweep --time 7`, run on a schedule, which is the
+# GC cargo lacks (it deletes artifacts untouched for N days rather than all of
+# them, so there is no full cold rebuild afterward).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
