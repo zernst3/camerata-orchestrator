@@ -560,3 +560,62 @@ above.
    X; confidential; not for distribution without consent"). The wording has light legal
    weight and should match the engagement agreement, so the sentence is his to write;
    the template just needs the final string.
+
+---
+
+## 11. Zach's answers (2026-10-16)
+
+**Q1 Rate: operator-entered at export; hours-only when absent.** "Allow me to enter the rate,
+otherwise just print the hours."
+
+**Q2 Held rows: REFUSE the signed export.** "Force me to triage, that's the whole point of the
+agency." A signed PDF cannot be produced while any held row exists.
+
+**Q3 "Not assessed from code" ships as the printed answer.** "If the client wants me to review
+their infrastructure... I would gladly review separately. Since it isn't something that can be
+easily scanned it really isn't part of the Camerata scope." So the report answers honestly and
+the follow-on is a separate engagement, not silent manual work folded into this one.
+
+**Q5 Licence check: PARKED.** Zach did not recognise it as a requirement, though it was item 6
+of his own investor-side research. Treat as lower priority than everything else here; the scope
+page prints the not-performed line in the interim.
+
+**Q7 Cover line: drafted, awaiting his word.** Proposed: "Prepared for [Client] by Cantus Works.
+Confidential. Not for distribution outside [Client] and its professional advisors without
+written consent." The advisors clause is load-bearing: it is what lets a founder hand the report
+to an investor or lawyer without breaching it, which is the reason the page exists at all.
+
+### [x] THE GOVERNING PRINCIPLE, and it outranks several choices in this document
+
+> "The PDF is a written document, it is NOT for listing out every single row item, like every
+> finding or every rule, etc. THAT belongs in the Excel. The PDF is more informational."
+
+**This applies to the whole redesign, not only the conventions page.** The 25-page structure in
+section 3 must be re-checked against it before any build: any page that is a table of rows is
+probably an Excel sheet with a paragraph in the PDF pointing at it. The division is
+PROSE AND JUDGMENT in the PDF, ROWS AND EVIDENCE in the workbook.
+
+**Q4 Conventions page, resolved by that principle: a paragraph, not a list.** Do not print the
+conventions. Print the count, name the two or three that matter, and point at the workbook.
+Sketch:
+
+> Your codebase follows 12 conventions consistently across API design, data access and error
+> handling. Three are worth naming: every endpoint carries a version segment; every repository
+> returns domain types rather than database rows; every error response carries a stable
+> machine-readable code. The complete list, with the sites evidencing each one, is in the
+> workbook.
+
+Note Zach floated a third framing, "what the inspection ran against", which is the RULES APPLIED
+rather than the conventions found. That is the scope page's job (section 3, pages 6-7), not this
+page's, and keeping them separate avoids one page answering two questions.
+
+**Q6 Fact-check artifact: xlsx only, one sentence in the PDF.** Same principle. The facts list is
+inherently row-level (file, line, what is there), so it is a workbook sheet. The PDF carries the
+claim and nothing else: "The 47 observations in this report were confirmed as factually accurate
+by [Client] on [date]." The trust move survives in a form a reader absorbs; the evidence is one
+click away.
+
+### Consequence for the build
+Section 3's page plan is now provisional. Before W27 starts, every page must be classified as
+PROSE (stays in the PDF) or ROWS (moves to the workbook with a PDF paragraph pointing at it).
+Expect the page count to fall.
