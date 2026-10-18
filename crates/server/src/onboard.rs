@@ -58,7 +58,10 @@ pub(crate) use camerata_gateway::{
 // from root's perspective (the root orchestration functions call files::* directly via
 // the submodule). The re-export is needed so `use super::*` in the test module reaches them.
 #[allow(unused_imports)]
-pub(crate) use files::{extra_exclude_dirs, has_code_ext, is_admissible_text, is_noise_path, HARD_CAP_FILES};
+pub(crate) use files::{
+    extra_exclude_dirs, has_code_ext, is_admissible_text, is_engine_artifact, is_noise_path,
+    ENGINE_ARTIFACT_PREFIX, HARD_CAP_FILES,
+};
 pub(crate) use propose::domains_for_stack;
 pub(crate) use report::merge_deep_reports;
 
@@ -2930,6 +2933,118 @@ mod tests {
         let extra = vec!["fixtures".to_string()];
         assert!(is_noise_path("test/fixtures/big.ts", &extra));
         assert!(!is_noise_path("test/fixtures/big.ts", none));
+    }
+
+    /// W20 — the engine's own output is never audit input.
+    ///
+    /// On 2026-10-16 two runs of the SAME engine over the SAME hearth commit produced digests
+    /// of 103,307 and 277,543 chars, at 88 files both times with `files_excluded = 0`. The
+    /// +174,236 was `.camerata-scan-cache.json`, written to the scanned repo's own root by
+    /// `camerata_cli::inspect_cmd::manifest_cache_path` and then collected as a dotfile. The
+    /// run shipped a CRITICAL located at `.camerata-scan-cache.json:1778` at queue position #1
+    /// — the engine re-detecting a snippet quoted inside its own cache.
+    #[test]
+    fn engine_written_artifacts_are_never_scanned() {
+        let none: &[String] = &[];
+
+        // The exact file and finding location from the 2026-10-16 export.
+        assert!(is_noise_path(".camerata-scan-cache.json", none));
+        assert!(is_noise_path(".camerata-scan-ledger.json", none));
+
+        // Three of the five are DIRECTORIES. Excluding the directory entry while admitting
+        // everything inside it would be the larger problem for a cargo target or a venv.
+        assert!(is_noise_path(".camerata-shared-target/debug/build/x.rs", none));
+        assert!(is_noise_path(".camerata-venv/lib/python3.12/site-packages/x.py", none));
+        assert!(is_noise_path(".camerata-worktrees/agent-3/src/main.rs", none));
+
+        // Not only at the repo root — a nested checkout writes these too.
+        assert!(is_noise_path("vendor/sub/.camerata-scan-cache.json", none));
+
+        // The fix must not overreach. The dotfile admission in `is_admissible_text` exists
+        // because committed-credential incidents concentrate in exactly that file class, and
+        // W20 must not undo it: these are dotfiles, they are NOT engine artifacts, and they
+        // must still reach the secrets floor.
+        assert!(!is_noise_path(".env.production", none));
+        assert!(!is_noise_path(".npmrc", none));
+        assert!(!is_noise_path(".netrc", none));
+        assert!(!is_noise_path(".github/workflows/ci.yml", none));
+        // A client file that merely MENTIONS the vendor name is not ours.
+        assert!(!is_noise_path("docs/camerata-setup.md", none));
+        assert!(!is_noise_path("src/camerata_client.rs", none));
+    }
+
+    /// The durable half of W20: the exclusion is keyed on a reserved PREFIX, and this test
+    /// derives the artifact list from the source tree rather than restating it.
+    ///
+    /// Two entries in `NOISE_FILES` would have closed the 2026-10-16 instance and left the
+    /// mechanism intact — the next artifact would be admitted identically and found again only
+    /// by an external grader reading a shipped client report. So the assertion that matters is
+    /// not "these five are excluded" but "every `.camerata-*` literal anywhere in the
+    /// workspace is excluded", which a newly-introduced artifact joins automatically.
+    #[test]
+    fn every_engine_artifact_literal_in_the_workspace_is_excluded() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root is two levels above crates/server")
+            .join("crates");
+        // Fail CLOSED: a test that silently finds no sources is a test that always passes.
+        assert!(
+            root.is_dir(),
+            "cannot locate crates/ at {} — this test must never pass by finding nothing",
+            root.display()
+        );
+
+        let mut found: std::collections::BTreeSet<String> = Default::default();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if path.is_dir() {
+                    // Never descend into build output; it contains copies of our own sources.
+                    if name != "target" && !name.starts_with('.') {
+                        stack.push(path);
+                    }
+                } else if name.ends_with(".rs") {
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    // Pull every `".camerata-…"` string literal out of the source.
+                    for (idx, _) in text.match_indices(ENGINE_ARTIFACT_PREFIX) {
+                        let tail = &text[idx..];
+                        let Some(end) = tail.find('"') else { continue };
+                        let literal = &tail[..end];
+                        if !literal.is_empty()
+                            && literal
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))
+                        {
+                            found.insert(literal.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            found.len() >= 2,
+            "expected to discover the engine's own artifact literals in the source; found {found:?}"
+        );
+        for literal in &found {
+            assert!(
+                is_noise_path(literal, &[]),
+                "`{literal}` is written by the engine but is NOT excluded from scanning. \
+                 Every artifact Camerata writes into a scanned tree must start with \
+                 `{ENGINE_ARTIFACT_PREFIX}` so `is_engine_artifact` catches it; if this one \
+                 legitimately cannot, it needs its own exclusion AND a note on why the prefix \
+                 convention did not hold."
+            );
+            assert!(is_engine_artifact(literal), "`{literal}` must match the prefix rule");
+        }
     }
 
     #[test]

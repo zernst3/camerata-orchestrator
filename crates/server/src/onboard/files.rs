@@ -196,10 +196,65 @@ pub(crate) fn is_admissible_text(path: &str) -> bool {
     }
 }
 
-/// True when a path should be pruned BEFORE scanning: it lives under a build/dep/cache
-/// directory, or is a lockfile / minified bundle / source map. `extra_dirs` holds any
-/// project-specific dir names from `CAMERATA_SCAN_EXCLUDE_DIRS`.
+/// The reserved filename prefix for every artifact Camerata itself writes into, or beside, a
+/// scanned repository: the incremental scan cache, the scan ledger, the shared cargo target,
+/// the provisioned virtualenv and the agent worktrees.
+///
+/// Declared as a PREFIX rather than an enumerated basename list on purpose. See
+/// [`is_engine_artifact`] for why the enumerated form is the shape of the bug it fixes.
+pub(crate) const ENGINE_ARTIFACT_PREFIX: &str = ".camerata-";
+
+/// True when `path` names something CAMERATA ITSELF wrote into the scanned tree, at any depth.
+///
+/// # The defect this exists to prevent
+///
+/// On 2026-10-16 a hearth scan's audit digest went from 103,307 to 277,543 characters between
+/// two runs of the SAME engine over the SAME commit, at 88 files both times and with
+/// `files_excluded = 0`. The entire +174,236 was `.camerata-scan-cache.json`, which
+/// `camerata_cli::inspect_cmd::manifest_cache_path` writes to the scanned repo's own root. So
+/// roughly 63% of what the model was asked to audit was the engine's own prior findings, and
+/// the run emitted a CRITICAL located at `.camerata-scan-cache.json:1778` — the engine
+/// re-detecting a snippet quoted inside its own cache and ranking it at queue position #1.
+///
+/// # Why this predicate, and not two more entries in [`NOISE_FILES`]
+///
+/// Nothing was wrong with either half of the collision that produced it:
+///
+/// - [`is_admissible_text`] admits ANY dotfile, deliberately, because `.env.production`,
+///   `.npmrc`, `.netrc` and `.pgpass` are exactly where real committed-credential incidents
+///   concentrate, and the extension-splitting scheme used to drop that whole class.
+/// - The cache is reasonably a dotfile at the repo root.
+///
+/// The gap was that neither clause of [`is_noise_path`] could see it: not a lockfile basename,
+/// not a generated suffix, no directory segment to match. Adding `.camerata-scan-cache.json`
+/// and `.camerata-scan-ledger.json` to `NOISE_FILES` would close THIS instance and leave the
+/// mechanism intact — the next engine-written artifact would be admitted exactly the same way,
+/// and would again be found only by an external grader reading a shipped client report. A
+/// prefix rule makes the namespace closed by construction, so a new artifact is excluded on
+/// the day it is introduced rather than on the day someone remembers this function exists.
+///
+/// # Why segment-wise rather than basename-only
+///
+/// Three of the five are DIRECTORIES (`.camerata-shared-target`, `.camerata-venv`,
+/// `.camerata-worktrees`). Matching only the basename would exclude the directory entry and
+/// admit every file inside it, which for a shared cargo target or a provisioned virtualenv is
+/// the larger problem by orders of magnitude.
+pub(crate) fn is_engine_artifact(path: &str) -> bool {
+    path.split('/')
+        .any(|seg| seg.starts_with(ENGINE_ARTIFACT_PREFIX))
+}
+
+/// True when a path should be pruned BEFORE scanning: it is an artifact Camerata itself wrote
+/// ([`is_engine_artifact`]), it lives under a build/dep/cache directory, or it is a lockfile /
+/// minified bundle / source map. `extra_dirs` holds any project-specific dir names from
+/// `CAMERATA_SCAN_EXCLUDE_DIRS`.
 pub(crate) fn is_noise_path(path: &str, extra_dirs: &[String]) -> bool {
+    // Checked FIRST: the engine's own output is never audit input, regardless of what it is
+    // named or where it sits. Cheapest check, and the one whose absence shipped a CRITICAL
+    // finding about Camerata's own cache file to a client report.
+    if is_engine_artifact(path) {
+        return true;
+    }
     let mut segments = path.split('/');
     let basename = path.rsplit('/').next().unwrap_or(path);
     if NOISE_FILES.contains(&basename) {
