@@ -45,7 +45,14 @@ Measuring the semantic tier by LOCATION instead, of 10 baseline semantic finding
 So semantic recall lost ONE finding, not nine. It happens to be a critical IDOR, so it still
 matters, but the tier is not broken and must not be treated as broken.
 
-## 3. The real regression: 12 deterministic rules
+## 3. CORRECTED — the table below is WRONG. See §3A.
+
+**Retracted same day.** The table in this section was built by diffing two exports, which is
+one run against one run. A third export existed and I had not looked at it. Reading it reduces
+the real regression from 12 rules to 6 and changes what W19 is. The original table is kept
+below strikethrough-style for the record; §3A supersedes it.
+
+## 3. The real regression: 12 deterministic rules  *(SUPERSEDED — see §3A)*
 
 Stable ids, genuinely silent at `50d03a7`:
 
@@ -63,6 +70,120 @@ Stable ids, genuinely silent at `50d03a7`:
 | `ARCH-OBSERVABILITY-SILENT-FAILURE-1` | low | 13 | discarded query errors |
 | `JAVASCRIPT-TESTING-NO-DISABLED-TESTS-1` | low | 2 | no ESLint config for jest rules |
 | `ARCH-MONOLITH-FIRST-1` | low | 1 | structural observation |
+
+## 3A. CORRECTED inventory — 6 reproducible misses, not 12
+
+### The third run
+
+`_runs/sweep5-2026-10-16/hearth.zip` was produced by the SAME engine `50d03a7` as the current
+export, on the SAME fixture commit `a2b3859`, **3h28m earlier**. Every commit after `50d03a7`
+is docs-only. So it is a true engine-fixed, fixture-fixed replicate, and §3's two-run diff was
+measuring a single sample as though it were a trend.
+
+Re-measuring all 12 across three runs, and counting a rule as present if it appears directly
+OR is absorbed into a merge carrier (`also_matches` / `also_locations`):
+
+| rule | base `96ed204` | mid `50d03a7` | curr `50d03a7` | verdict |
+|---|---|---|---|---|
+| `ARCH-EXACT-DECIMALS-1` | 1 | 0 | 0 | **reproducible miss** |
+| `ARCH-TOKEN-REFRESH-ROTATION-1` | 1 | 0 | 0 | **reproducible miss** |
+| `JAVASCRIPT-PUBLIC-ENV-PREFIX-SECRET-1` | 1 | 0 | 0 | **reproducible miss** |
+| `ARCH-NO-SECRETS-IN-URL-1` | 3 | 0 | 0 | **reproducible miss** |
+| `JAVASCRIPT-TESTING-NO-DISABLED-TESTS-1` | 2 | 0 | 0 | **reproducible miss** |
+| `ARCH-MONOLITH-FIRST-1` | 1 | 0 | 0 | **reproducible miss** |
+| `SUPABASE-AUTH-ANON-SIGNIN-1` | 3 | 1 | 0 | run variance |
+| `SUPABASE-AUTH-EDGE-JWT-1` | 2 | 1+2 | 0 | run variance |
+| `SUPABASE-AUTH-REDIRECT-ALLOWLIST-1` | 1 | 1 | 0 | run variance |
+| `SUPABASE-AUTH-PASSWORD-POLICY-1` | 1 | 0+1 | 0 | run variance |
+| `SEC-NO-SECRET-FILE-1` | 1 | 1+1 | 0+2 | not lost, absorbed |
+| `ARCH-OBSERVABILITY-SILENT-FAILURE-1` | 13 | 0 | 0+1 | absorbed, but see note |
+
+**6 reproducible misses. 4 run variance. 2 absorbed.**
+
+Three of the six are HIGH and are the ones that matter: money stored as float, a 30-day token
+lifetime, and a Stripe secret under a client-exposing prefix.
+
+Note on `ARCH-OBSERVABILITY-SILENT-FAILURE-1`: "absorbed" describes its PRESENCE, not its
+coverage. It fell from 13 rows to a single absorbed location. Whether 12 sites merged into one
+carrier or 12 sites vanished is not answerable from the export alone and needs the stage
+ledger. Do not record it as healthy on the strength of the word "absorbed".
+
+### The config-block iterator does not exist
+
+Section 2A of the remediation design says *"a config-block iterator that previously skipped the
+first block now reports nothing on any block."* There is no such iterator. The only code that
+reads `supabase/config.toml` is `parse_exposed_schemas`
+(`crates/checks/src/supabase/config.rs:22`), a single keyed lookup with no loop and no index
+arithmetic. The sentence is grader prose describing an LLM enumerating repeated TOML tables
+with varying recall across runs. It was never a loop, and no revert can fix it.
+
+### The dominant finding: the engine ate its own output
+
+Digest size across the three runs, from each export's own `provenance`:
+
+| run | files scanned | files excluded | code_chars |
+|---|---|---|---|
+| base `96ed204` | 87 | 0 | 98,522 |
+| mid `50d03a7` | 88 | 0 | 103,307 |
+| curr `50d03a7` | 88 | **0** | **277,543** |
+
+**+174,236 chars in ZERO additional files.** The growth is `.camerata-scan-cache.json`, which
+the engine writes into the scanned repo root (`crates/cli/src/inspect_cmd.rs:189`) and then
+collects because the walker runs `hidden(false)` and the file is in no noise list
+(`files_excluded = 0` proves nothing filtered it). It is 212,195 bytes on disk now. It grew
+between runs because the mid run wrote a 105-finding cache where the earlier smoke run had
+written a 19-finding one.
+
+So roughly **63% of the single audit digest in the final run was the engine's own prior JSON.**
+Proof it was inside the model's window rather than merely on disk: the curr export emits
+`SEC-NO-DISABLED-TLS-1`, CRITICAL, located at `.camerata-scan-cache.json:1778`. Verified: mid
+has 0 findings located in the cache, curr has 1.
+
+Cross-repo control, which is what elevates this above coincidence: lumen and tutorly are
+byte-identical between the two engines (54 files / 51,423 chars and 45 files / 43,524 chars in
+both), carry no cache row, and lost one class each. Hearth is the only repo scanned twice on
+Oct 16, therefore the only one carrying a fat cache, and the only one with a large regression
+cluster.
+
+Causation cannot be proven the way a code path can. But it is the only measurable input
+difference, it tracks the damage across repos, and it is independently a defect already
+scheduled as W20.
+
+### What this does to W19 and W20
+
+1. **W20 moves ahead of W19.** It is a one-line noise-list fix that removes 63% of the digest
+   noise and a bogus CRITICAL at queue position #1. Measuring a regression while the engine is
+   eating its own output measures the contamination, not the engine. W19 cannot be measured
+   honestly until W20 lands.
+2. **W19 shrinks to 6 rules** and stops being "restore the regressed classes". Three of the six
+   are HIGH and worth real work; three are LOW.
+3. **A naive revert of the `kind`/`violates` work would be actively harmful.** It would put the
+   four defect-kind auth rules back into the alternatives pass, where
+   `apply_alternative_decision`'s `!option.violates` branch rewrites the project's effective
+   directive to the rule's own degenerate option — the defect `2f23ab3` fixed. The mid run
+   proves that machinery is working: every auth row there carries `kind: defect`.
+4. **`SUPABASE-AUTH-PASSWORD-POLICY-1`** is the one auth rule that misses in both `50d03a7`
+   runs and deserves its own investigation rather than a family story that does not hold for
+   the other three.
+
+### The gate design in §6 is no longer sufficient
+
+§6.3 and §6.4 survive. **§6.5 does not.** A gate that fails when a class fired at >= medium on
+a prior export and is zero now would fire on **4 of these 12 right now**, for rules that are
+provably alive on the same engine. Two runs of one engine on one fixture differ by whole rule
+families.
+
+That is the real headline: **this is a reliability problem wearing a regression costume.** The
+revision needed:
+
+- **Deterministic / ExternalTool / Architectural tiers** — ids are stable AND behaviour is
+  reproducible. Single-baseline floor is sound here. This is where the 6 real misses live.
+- **Semantic tier** — neither id-stable (§2) nor run-stable (§3A). A single-baseline floor is
+  invalid. Either exclude it from the failing gate and report it advisory-only, or require
+  N-run agreement (best-of or median over k runs) before calling anything a regression.
+
+Deciding between advisory-only and N-run needs a cost conversation: N-run multiplies sweep cost
+by N. Advisory-only is free and catches less. Open for Zach.
 
 ## 4. The second failure mode: inversion, not silence
 
