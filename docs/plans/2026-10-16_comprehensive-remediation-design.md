@@ -169,6 +169,85 @@ pass; one is judgment with a deterministic edge.
 *Depends on: the eslint provisioning fix (below) for the hooks rule. **Additive coverage, not a
 fix for anything the sweep measured** - see section 5, question 2.*
 
+#### W29 amendments from the source document (reconciled 2026-10-18)
+
+The authoritative spec is `~/Documents/Repos/_workspace/brownfield-audits/CORPUS_WORK_ORDER_CONSISTENCY_RULES.md`.
+Re-read against it, the nine rules above are correct and the D/H/J split is accurate (5
+deterministic, 3 clone-detector hybrid, 1 judgment with a deterministic edge). Four things in
+that document were NOT carried into this plan.
+
+**1. The evidence base, which is the justification.** A desk audit matched fifteen real refactor
+commits from an open-source Next.js + Supabase product against all 417 directives at strict
+standard: **0 covered, 3 weakly partial, 12 uncovered.** The corpus is strong on security,
+layering, process and per-language style and has no rule for dead code, single-source logic,
+shared constants, scattered state or naming consistency. That is the argument that this is a
+SCOPE gap rather than a detection bug, and it is why W29 survives the "do not add detection
+while recall leaks" objection in Q7.
+
+**2. Every rule ships with a positive test AND a safe-twin test.** The source calls this "the
+standing rule" and documents a specific safe twin per rule (a public package's exported API for
+dead code; repeated boilerplate without a decision for single-source; protocol literals and i18n
+strings for shared constants; independent booleans for state shape; domain homonyms for naming;
+already-composed variants for shared primitives; a single `index.ts` barrel for import paths).
+Nine rules therefore means eighteen tests minimum. Not previously recorded here, and it roughly
+doubles W29's real size.
+
+**3. §83 wires these rules into the convention machinery, which is currently broken.** Each
+consistency rule must also emit the convention it inferred ("this repo formats money through one
+helper in 9 of 11 places") into the conventions-adopted output, because that sentence is the
+client-facing value.
+
+**This creates a SECOND hard ordering constraint on W29, and it is the important finding of
+this reconciliation.** W22/W23 and the `conventions_observed_findings` defect diagnosed on
+2026-10-18 (see `2026-10-18_w19-regression-evidence.md` §4 and the W19 diagnosis) must land
+FIRST. Today that synthesizer emits "the codebase consistently follows X, zero violations were
+observed" off a recommendation whose `applicable` flag fuses *follows* with *needs*, producing
+rows that contradict themselves in the same paragraph. Feeding nine new rules into it would
+multiply a known false-claim generator by nine.
+
+Note the shape §83 actually asks for is the RIGHT one and is already modelled: "9 of 11" is a
+`Deviation` with a real denominator, not a `ConventionObserved` with an aspirational claim. So
+§83 is a validation of the five-kind taxonomy, not a new requirement on it - provided the
+synthesizer is fixed before the rules arrive.
+
+**4. Within-W29 ordering, from the source's own §86-91:**
+  1. `ARCH-DEAD-CODE-1`, `ARCH-SHARED-CONSTANT-1`, `ARCH-ONE-IMPORT-PATH-1` - deterministic,
+     small, highest signal per token
+  2. `UI-REACT-HOOKS-LINT-1` - tool wiring; provisioning fixed first
+  3. `ARCH-SINGLE-SOURCE-LOGIC-1` - the differentiator; builds the clone-detector pass that 5
+     and 6 then reuse
+  4. `ARCH-NAMING-ONE-CONCEPT-1`, `UI-SHARED-PRIMITIVE-1`, `UI-STATE-SHAPE-1`
+  5. `STYLE-NEEDLESS-COMPLEXITY-1` last
+
+Cost note worth keeping: the clone detector and the import graph are one deterministic pass each
+per repo and cost no tokens. They REDUCE advisory-tier spend by handing it candidates instead of
+files, so three of these rules make the semantic tier cheaper rather than dearer.
+
+**Amendment to the eslint residual in W30.** The source names the actual failure as a bad
+`@eslint/config-helpers` range and prescribes **pinning versions in the tool manifest**. W30
+currently records only "retry without `--prefer-offline` on ETARGET". Both are wanted and they
+are not the same fix: pinning prevents the resolution failure, the retry recovers from a stale
+cache. Pinning is primary.
+
+### W32 - Rule metadata for report credibility (NEW, from the source's 2026-10-18 addendum)
+
+Data-only, no detection change, and **not part of W29** - it serves report credibility rather
+than consistency coverage, so it is sequenced with the deliverable instead.
+
+- **(a) `cwe` / `asvs` references on security rules**, so a finding can print a recognised code
+  number. Verified absent: **zero** of the 417 rule files carry either field today. This pairs
+  directly with W27 - a CWE number next to a finding is exactly the externally-recognised anchor
+  the investor-side report research asks for, and it costs the PDF one short parenthetical.
+- **(b) `superseded_since = <year>` plus a `current_recommendation` source** on pattern-level
+  architecture rules, so a finding can say "the ecosystem moved off this in 2021; current
+  guidance: <link>". Also verified absent.
+
+Both should be sourced from the existing `[[sources]]` blocks where possible rather than
+hand-authored. Protected area: the corpus, so it needs Zach's explicit go before any rule file
+is touched.
+
+*Depends on: nothing mechanically. Sequence with W27 in Wave 3 so the PDF can render both.*
+
 ### W30 - Carried residuals
 - `--prefer-offline` turns a stale npm cache into a permanent provisioning failure. Retry
   without it on ETARGET. **Blocks W29's hooks rule.**
