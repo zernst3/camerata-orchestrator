@@ -304,16 +304,56 @@ violation, at which point it takes its authored severity. That single rule remov
 third: "we found this, it may well be deliberate, your call." That is honest in a way neither
 of the other two is, and it belongs in the PDF redesign as its own section.
 
-#### [ ] Open sub-questions
-- **Untriaged rows.** Does an unresolved `could_be_intentional` ship as "your call", or hold the
-  sign-off like an open finding? Recommendation: ship it. The client-visible outcome is honest
-  either way, and holding sign-off would punish the curator for the engine's uncertainty.
-- **Persistence.** Should a curator ruling survive into the next scan, or is the client re-asked
-  every time? Durable per-finding state across engagements is the backend surface deliberately
-  deferred when `Confirmed` was kept local (Pass 2 Q2). This is now the SECOND feature to want
-  it, which starts to make the case for building it properly.
+#### [x] Sub-questions ANSWERED (2026-10-16)
+
+- **Untriaged rows: SHIP AS "YOUR CALL".** "Untriaged it would ship as 'your call'." So an
+  unresolved `could_be_intentional` row does NOT hold sign-off; it renders in the
+  for-your-visibility section exactly as a curator-confirmed one does. Build consequence: the
+  renderer keys off the *flag*, not off the presence of a curator ruling, so the untriaged
+  state needs no separate template branch. Note this is the one deliberate exception to "force
+  me to triage" (settled Q2 of the PDF design, where an unestimated row refuses to render):
+  there, the missing input is the agency's own work product; here, the uncertainty is the
+  engine's, and the curator should not be blocked by it.
+
+- **Persistence: DEFERRED pending real-world use.** "This is good, but perhaps should wait
+  until real world use to determine how something like this would work... I have no idea what
+  things would fall into what bucket yet." So curator rulings do NOT survive into the next scan
+  for now, and durable per-finding state across engagements stays unbuilt. The reasoning is
+  that the bucket distribution is unknown, and designing persistence around a guess about what
+  lands in it would bake in the wrong shape. Recorded explicitly because this is now the
+  SECOND feature to want durable per-finding state (the first was `Confirmed`, kept local at
+  Pass 2 Q2). A THIRD should be read as the signal to build it properly rather than defer
+  again.
 
 #### Workstream placement
 New **W31 - the `could_be_intentional` flag**: schema field, severity cap, curator disposition,
 and its own client-facing section. Depends on W22 (kind integrity) since it shares the finding
 model, and feeds the PDF redesign. Sits in Wave 2.
+
+### [x] Q5 RESOLVED by the PDF redesign — conventions appear, as prose
+
+Settled downstream rather than answered directly, and recorded here so section 5 is not read
+as still open. `docs/plans/2026-10-16_pdf-design-final.md` (section 2, row 19) rules that
+engineering conventions in force appear in the client PDF as **a paragraph, not a list**:
+state the count, name two or three, point at the workbook's Conventions sheet. The table W27
+originally proposed is itself a row listing and was cut under the governing principle that
+rows belong in the workbook.
+
+So the answer is neither of the two branches the question offered. Conventions are not absent
+from the PDF, and they are not a table in it. W27's scope narrows accordingly: the work is
+making conventions render as prose in their own right, and the defect being fixed stands
+unchanged, since what all five graders objected to was conventions rendering **as findings
+with fixes**, which a paragraph cannot do.
+
+### [x] Q7 RESOLVED by the Wave ordering — the pushback was accepted
+
+My pushback was that nine new rules must not land before W19's regression gate exists, because
+hearth lost five working detector classes between two runs and "adding detection capacity while
+the mid-layer eats existing recall is how the last two cycles were spent."
+
+The sequencing already satisfies this: W19 and its gate are the first item of Wave 1, W29 lands
+after Wave 2. Combined with the Q2 ruling ("when is not important, as long as it is part of the
+total package"), nothing further is needed. Recorded so the constraint is not lost if the
+sequence is ever compressed: **W29 may be reordered freely with respect to everything except
+W19, which must precede it.** That dependency is the whole point of the pushback and is the one
+ordering constraint in this plan that is not about shared code paths.
