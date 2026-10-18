@@ -101,6 +101,92 @@ is still large enough that a single run cannot settle anything, and the 4-of-4 c
 should be read as "promising" rather than "settled" — which would itself be the decisive
 argument for N-run agreement in the regression gate rather than advisory-only.
 
+---
+
+# RESULT (run 2026-10-18 15:39 to 16:51, engine `1e3280a`, exit 0)
+
+## Validity checks: 4 of 4 PASS
+
+| check | expected | actual | |
+|---|---|---|---|
+| `code_chars` | ~100,000 | **98,522** | PASS |
+| `files_scanned` | 87 | **87** | PASS |
+| `audit_model` | recorded | **`claude-sonnet-5`** | PASS |
+| findings inside the cache | 0 | **0** | PASS |
+
+`code_chars` came back at **98,522, which is the baseline's figure to the character**, at the
+baseline's exact file count. The input is now identical in volume to what `96ed204` saw, so
+this is as clean a control as the fixture can provide. The bogus `SEC-NO-DISABLED-TLS-1`
+CRITICAL that sat at queue position #1 is gone. **W20 is confirmed in production, not just in
+a unit test.**
+
+## Primary outcome: 4 of 4 returned. Variance control: 4 of 4 present.
+
+| rule | baseline | contaminated | controlled |
+|---|---|---|---|
+| `ARCH-EXACT-DECIMALS-1` | 1 | 0 | **5** |
+| `ARCH-TOKEN-REFRESH-ROTATION-1` | 1 | 0 | **1** |
+| `JAVASCRIPT-PUBLIC-ENV-PREFIX-SECRET-1` | 1 | 0 | **1** |
+| `ARCH-NO-SECRETS-IN-URL-1` | 3 | 0 | **2** |
+
+All four variance controls returned as well (`ANON-SIGNIN` 2, `EDGE-JWT` 3,
+`REDIRECT-ALLOWLIST` 1, `PASSWORD-POLICY` 1), which is the pre-registered condition for a
+CLEAN reading rather than a lucky draw.
+
+## Every one of the twelve now emits
+
+| | rules emitting | findings emitted |
+|---|---|---|
+| contaminated | 83 | 189 |
+| controlled | **106** | **348** |
+
++23 rules and +159 findings from removing one file. `ARCH-OBSERVABILITY-SILENT-FAILURE-1` went
+13 → 1 → **12**. `SUPABASE-AUTH-EDGE-JWT-1` found **3** sites where the baseline found 2, which
+is all three `verify_jwt = false` blocks — the "config-block iterator that skipped the first
+block" was the baseline being WORSE, not the current engine being broken.
+
+## Verdict, per the pre-registered table: the 4-of-4 cell
+
+**There was never a detection regression. W19's restoration scope is ZERO.**
+
+The engine at HEAD out-detects the `96ed204` baseline on this fixture once it stops auditing
+its own output. The entire "hearth lost five working detector classes" finding — which set the
+priority of the whole remediation and made W19 the first item of Wave 1 — was the engine
+reading a 212KB cache file it had written into the repo on a previous run.
+
+W19 reduces to the regression gate alone, and the gate's design changes too: the thing it most
+needed to catch was an INPUT defect, which no output-diffing floor would have identified as
+such. It would have reported twelve rule regressions and sent someone to read twelve rules.
+
+## Scope of the damage: hearth only
+
+| repo | files | code_chars | cache-located findings |
+|---|---|---|---|
+| hearth | 88 | 277,543 | **1** |
+| faktura | 38 | 25,753 | 0 |
+| lumen | 54 | 51,423 | 0 |
+| tutorly | 45 | 43,524 | 0 |
+
+Hearth was the only repo scanned twice on 2026-10-16 and therefore the only one carrying a fat
+cache. So:
+
+- **Hearth's 30-of-46 grade is INVALID.** It graded a run in which 63% of the audit prompt was
+  the engine's own JSON. It cannot be cited as evidence about the engine, and the remediation
+  design's section 1 reading built on it ("hearth's misses are overwhelmingly regressions")
+  falls with it.
+- **The other four repos' grades stand**, and so does everything the graders found that was
+  observed across all five: the kind/honesty defects in 2B and the presentation defects in 2C.
+  Those are NOT contamination artefacts and Waves 2 and 3 are unaffected.
+
+## Honest limits
+
+- **Recall, not correctness.** 348 emitted findings is not 348 good findings. Whether the
+  restored rows are right is a separate question this run does not answer.
+- **One repo, one run.** The variance controls make a fluke unlikely but not impossible.
+- **H3 (prompt dilution, 130 → 147 rules) was never controlled** and is now moot for this
+  question, since the rules returned with it still in place. It is not disproven, just not
+  needed as an explanation.
+
 ## 8. What this run does NOT test
 
 - Whether the restored findings are CORRECT. Recall only.
