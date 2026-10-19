@@ -32,7 +32,7 @@ violates = true
 label = "No cache layer"
 directive = "hot reads run directly against the database with no cache layer; every read request pays the full database round trip"
 remediation = """
-Remove the cache layer in front of this read path and confirm it executes directly against the database on every request. Do this deliberately only where the added database load is acceptable; otherwise add a TTL cache with write-side invalidation instead. Verify by confirming no cache lookup precedes the database query for this read path.
+Put a cache in front of this read path with BOTH controls: a TTL so entries expire on a fixed schedule, and explicit cache-key invalidation on every write path that changes the data behind it. Running the read uncached is a deliberate choice only where the database load is measured and acceptable; otherwise the read re-queries on every request and the cost grows with traffic. Verify by confirming a cached entry is served without a database query, that a write invalidates it immediately, and that an entry still expires on its own if an invalidation is ever missed.
 """
 why = "No cache layer makes every request pay the full database round trip; it works fine at low volume but accumulates latency cost as the system grows, and there is no graceful migration once hot reads become a bottleneck."
 
@@ -42,7 +42,7 @@ violates = true
 label = "TTL only, no invalidation"
 directive = "hot reads sit behind a TTL cache with no write-side invalidation; the TTL is the only mechanism that controls staleness"
 remediation = """
-Add a TTL to the cache in front of this read path so entries expire on a fixed schedule, and do not add write-side invalidation for this path; staleness is bounded by the TTL alone. Set the TTL short enough that the acceptable staleness window matches the data's real-world change rate. Verify by confirming a cached entry expires and refetches after the configured TTL with no invalidation call anywhere in the write path.
+Add explicit cache-key invalidation to every write path that changes the data behind this read path, keeping the existing TTL as the backstop. With the TTL alone, a write is invisible to readers until the entry happens to expire, so the staleness window is the TTL rather than zero no matter how fresh the data needs to be. Verify by writing new data and confirming the very next read reflects it, rather than waiting out the TTL.
 """
 why = "A TTL-only cache produces longer stale-read windows, and a request that just made a change cannot reflect it until the TTL expires, which surfaces as 'why did my update not stick' UX bugs."
 
@@ -52,6 +52,6 @@ violates = true
 label = "Invalidation only, no TTL"
 directive = "hot reads sit behind a cache with explicit write-side invalidation but no TTL; the cache trusts the invalidation paths to cover every change"
 remediation = """
-Add explicit cache-key invalidation to every write path that changes the data behind this read path, and do not set a TTL on the cache entries; correctness relies entirely on every write path being covered. Audit all write paths that touch this data to confirm none is missing its invalidation call. Verify by writing new data and confirming the next read reflects it immediately, with cache entries otherwise persisting indefinitely.
+Set a TTL on this cache's entries as a backstop alongside the existing write-path invalidation. Without one, correctness depends on every current and future write path remembering to invalidate: the first one that forgets serves a stale entry indefinitely, with no expiry to recover it and nothing to signal the omission. Verify by confirming an entry expires on its own after the TTL even when no invalidation call runs.
 """
 why = "Invalidation-only caching is unsafe when something changes outside the invalidation paths (backfill scripts, manual DB edits, third-party data ingest), because the cache then carries indefinitely stale data with no backstop."
