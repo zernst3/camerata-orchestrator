@@ -157,6 +157,38 @@ pub struct RuleRecommendation {
     /// honesty only.
     #[serde(default)]
     pub assessed_sites: Option<usize>,
+    /// W21/W22 — whether the codebase ACTUALLY FOLLOWS the recommended option today, as
+    /// distinct from the rule's concern merely applying to it.
+    ///
+    /// # Why this exists as its own field
+    ///
+    /// [`Self::applicable`] fuses two different states. Its own contract, and the prompt's
+    /// (`"already follows this rule's concern OR concretely needs it"`), make
+    /// `applicable: true` mean *either*. That is correct for deciding whether to evaluate a
+    /// rule, and useless for deciding whether a convention is in force — yet
+    /// [`conventions_observed_findings`] read `applicable: true` plus a non-`violates` option
+    /// plus no surviving row and concluded "the codebase consistently follows X, zero
+    /// violations were observed".
+    ///
+    /// On the 2026-10-18 hearth export that produced rows which contradicted themselves in a
+    /// single paragraph. `ARCH-EXPLICIT-TX-1` shipped: *"The codebase consistently follows
+    /// 'Services own the transaction lifecycle…' — zero violations were observed this scan.
+    /// \[…\] The codebase has no transaction management yet \[…\] No existing pattern uses
+    /// ambient or per-call transactions, so this is the right aspirational target."* Six of
+    /// its 26 convention rows carried that tell by keyword; the graders found 13 of 26 by
+    /// reading them.
+    ///
+    /// The model was not wrong. The prompt tells it to say plainly when a rule applies but
+    /// nothing follows it yet, and it did — in `recommendation_reasoning`, as prose, which no
+    /// severity pass or renderer can read. This field captures the distinction the model is
+    /// ALREADY making instead of discarding it, which is the same prose-to-structure
+    /// correction applied everywhere else in this effort.
+    ///
+    /// `None` means the model did not say. Consumers must treat absence as NOT followed: a
+    /// convention claim is an assertion about the client's codebase that we print over our own
+    /// name, so the burden of evidence sits on claiming it, never on refuting it.
+    #[serde(default)]
+    pub currently_followed: Option<bool>,
 }
 
 /// Serde default for [`RuleRecommendation::applicable`] — see that field's doc comment.
@@ -179,6 +211,7 @@ impl Default for RuleRecommendation {
             no_convention: false,
             observed_options: Vec::new(),
             assessed_sites: None,
+            currently_followed: None,
             applicable: true,
         }
     }
@@ -2264,6 +2297,16 @@ applicable (see above) or, if it applies but nothing in the repo yet follows it,
 ("no existing pattern; recommending X as the best-practice fit for this stack") rather than
 inventing an "adopted" claim.
 
+ALSO report that same distinction as a BOOLEAN, `"currently_followed"`, for every applicable
+rule. Set it `true` ONLY when the codebase ALREADY follows your recommended option today and
+you cited the file:line proving it. Set it `false` when the rule applies but the codebase does
+not follow the option yet and you are recommending it as the best-practice target. This is NOT
+the same question as `"applicable"`: a rule can apply precisely BECAUSE the codebase is missing
+the thing it governs, and that is `"applicable": true` with `"currently_followed": false`. We
+print "this codebase consistently follows X" to the client only for the `true` case, so a wrong
+`true` here puts a false statement about their own code in front of them over our name. If you
+are unsure, use `false`.
+
 Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 {
   "recommendations": [
@@ -2274,6 +2317,7 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
       "evidence": "path/to/file.ext:42 — one short phrase on what's there",
       "recommendation_reasoning": "1-3 sentences grounded in the codebase evidence you saw",
       "sites_total": 47,
+      "currently_followed": true,
       "no_convention": false,
       "observed_options": [{"option_id": "EXACT option id", "sites": 2}]
     }
@@ -2359,6 +2403,7 @@ fn fallback_recommendations(alternatives: &[RuleAlternatives], reason: &str) -> 
                 no_convention: false,
                 observed_options: Vec::new(),
                 assessed_sites: None,
+                currently_followed: None,
             })
         })
         .collect()
@@ -2500,6 +2545,14 @@ pub fn parse_alternative_recommendations(
                 // non-positive count is `None`, never a fabricated number.
                 let assessed_sites =
                     r["sites_total"].as_u64().filter(|n| *n > 0).map(|n| n as usize);
+                // W21/W22: does the codebase ACTUALLY follow the recommended option today, as
+                // opposed to the rule's concern merely applying? `applicable` cannot answer
+                // that — its own contract is "already follows it OR concretely needs it" —
+                // and reading it as if it could is what shipped "the codebase consistently
+                // follows X" over a repo the same row then described as having "no existing
+                // pattern". Absent stays `None` and consumers must treat that as NOT
+                // followed; see `RuleRecommendation::currently_followed`.
+                let currently_followed = r.get("currently_followed").and_then(|v| v.as_bool());
                 // Pass-1 W3 (A5.3): the no-convention outcome. STRUCTURALLY gated: honored
                 // only for a pure `Decision`-kind rule (see `RuleAlternatives::kind`) AND only
                 // when the claim is backed by a validated observed-usage breakdown or a real
@@ -2532,6 +2585,7 @@ pub fn parse_alternative_recommendations(
                         no_convention: true,
                         observed_options,
                         assessed_sites,
+                        currently_followed,
                     });
                     continue;
                 }
@@ -2568,6 +2622,7 @@ pub fn parse_alternative_recommendations(
                         no_convention: false,
                         observed_options: Vec::new(),
                         assessed_sites: None,
+                        currently_followed,
                     }
                 } else if !raw_id.is_empty() && real_ids.contains(raw_id.as_str()) {
                     RuleRecommendation {
@@ -2581,6 +2636,7 @@ pub fn parse_alternative_recommendations(
                         no_convention: false,
                         observed_options: Vec::new(),
                         assessed_sites,
+                        currently_followed,
                     }
                 } else if raw_id.is_empty() {
                     RuleRecommendation {
@@ -2596,6 +2652,7 @@ pub fn parse_alternative_recommendations(
                         no_convention: false,
                         observed_options: Vec::new(),
                         assessed_sites,
+                        currently_followed,
                     }
                 } else {
                     RuleRecommendation {
@@ -2613,6 +2670,7 @@ pub fn parse_alternative_recommendations(
                         no_convention: false,
                         observed_options: Vec::new(),
                         assessed_sites,
+                        currently_followed,
                     }
                 };
                 // Pass-1 W3 (A5.3): the model volunteered "no convention" where the outcome
@@ -2648,6 +2706,7 @@ pub fn parse_alternative_recommendations(
                 no_convention: false,
                 observed_options: Vec::new(),
                 assessed_sites: None,
+                currently_followed: None,
             },
         };
         out.push(rec);
@@ -6441,6 +6500,26 @@ pub(crate) fn conventions_observed_findings(
         if !rec.applicable || rec.no_convention {
             continue;
         }
+        // W21/W22 — the row asserts "the codebase consistently follows X". Only the model's
+        // OWN affirmative answer to that exact question licenses it.
+        //
+        // `rec.applicable` was doing this job and cannot: its contract is "already follows
+        // this rule's concern OR concretely needs it", so it is `true` for a codebase that
+        // conspicuously LACKS the thing the rule governs. That is how hearth shipped "The
+        // codebase consistently follows 'Services own the transaction lifecycle...' - zero
+        // violations were observed" about a repo the same paragraph described as having "no
+        // transaction management yet" and "no existing pattern".
+        //
+        // `None` is refused along with `Some(false)`, deliberately. Every other optional
+        // model field here fails OPEN so a rule is never silently dropped over a missing
+        // key, and this one is the exception because the two directions are not symmetrical:
+        // a missed convention row costs the client a paragraph they would have found mildly
+        // interesting, while a wrongly-emitted one puts a false statement about their own
+        // codebase in front of them over our name. The burden of evidence belongs on the
+        // claim, not on its refutation.
+        if rec.currently_followed != Some(true) {
+            continue;
+        }
         let Some(alt) = alternatives
             .iter()
             .find(|a| a.rule_id.eq_ignore_ascii_case(&rec.rule_id))
@@ -6747,6 +6826,7 @@ pub async fn audit_repo(
                 no_convention: false,
                 observed_options: Vec::new(),
                 assessed_sites: None,
+                currently_followed: None,
             });
             if let Some(opt) = a.options.iter().find(|o| o.id == final_id) {
                 if let Some(f) = apply_alternative_decision(
@@ -13298,6 +13378,13 @@ mod tests {
             evidence: Some("src/a.rs:1 — the A pattern".to_string()),
             applicable: true,
             assessed_sites,
+            // The fixture's own reasoning says "the repo does it the A way nearly everywhere",
+            // i.e. the convention IS followed — so the model would report this. Set
+            // explicitly rather than inherited from `Default` (which is `None`, meaning "the
+            // model did not say") because W21/W22 makes that distinction load-bearing: see
+            // `convention_observed_requires_the_model_to_affirm_the_convention_is_followed`
+            // for the negative cases.
+            currently_followed: Some(true),
             ..Default::default()
         }
     }
@@ -13535,6 +13622,61 @@ mod tests {
     /// rules produced no row of any kind (the A5.5 ship-the-convention-set requirement had
     /// no carrier).
     #[test]
+    /// W21/W22 — "the codebase consistently follows X" requires the model to have said the
+    /// codebase follows X. `applicable: true` does not mean that and never did.
+    ///
+    /// The shipped defect, from the 2026-10-18 hearth export: `ARCH-EXPLICIT-TX-1` rendered
+    /// *"The codebase consistently follows 'Services own the transaction lifecycle…' — zero
+    /// violations were observed this scan"* over a repo whose same paragraph read *"The
+    /// codebase has no transaction management yet […] No existing pattern uses ambient or
+    /// per-call transactions, so this is the right aspirational target."* Six of 26 convention
+    /// rows carried that contradiction by keyword search; the graders found 13 of 26 by
+    /// reading them.
+    ///
+    /// Nothing was wrong with the model's answer. The prompt defines `applicable: true` as
+    /// "already follows this rule's concern OR concretely needs it", and instructs the model
+    /// to say plainly when a rule applies but nothing follows it yet — which it did, in prose,
+    /// where no renderer or severity pass could read it.
+    #[test]
+    fn convention_observed_requires_the_model_to_affirm_the_convention_is_followed() {
+        let alts = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+
+        // The affirmative case still emits — the feature is a deliberate product surface and
+        // must survive this fix.
+        let followed = vec![deviation_rec("MULTI-RULE-1", "opt-a", Some(12))];
+        assert_eq!(
+            conventions_observed_findings("me/api", &[], &followed, &alts).len(),
+            1,
+            "an affirmed convention must still be reported"
+        );
+
+        // The hearth shape: the rule applies precisely BECAUSE the codebase lacks the thing it
+        // governs. Applicable, evidenced, non-violates option, zero trace — every condition
+        // the old code checked — and still not a convention.
+        let mut aspirational = deviation_rec("MULTI-RULE-1", "opt-a", Some(12));
+        aspirational.currently_followed = Some(false);
+        aspirational.recommendation_reasoning =
+            "no existing pattern; recommending opt-a as the best-practice fit for this stack"
+                .to_string();
+        assert!(
+            conventions_observed_findings("me/api", &[], &vec![aspirational], &alts)
+                .is_empty(),
+            "an aspirational target is not a convention the codebase follows"
+        );
+
+        // Absent fails CLOSED, unlike every other optional model field here. The asymmetry is
+        // the point: a missed convention row costs the client a mildly interesting paragraph,
+        // a wrong one puts a false statement about their own code in front of them over our
+        // name.
+        let mut unsaid = deviation_rec("MULTI-RULE-1", "opt-a", Some(12));
+        unsaid.currently_followed = None;
+        assert!(
+            conventions_observed_findings("me/api", &[], &vec![unsaid], &alts).is_empty(),
+            "a model that did not answer the question has not affirmed the convention"
+        );
+    }
+
+    #[test]
     fn req_a5_5_convention_observed_emitted_only_when_zero_trace() {
         use camerata_api_types::audit::FindingKind;
         let recs = vec![deviation_rec("MULTI-RULE-1", "opt-a", Some(12))];
@@ -13666,6 +13808,7 @@ mod tests {
         let canned = r#"{
             "recommendations": [
                 {"rule_id": "MULTI-RULE-1", "applicable": true,
+                 "currently_followed": true,
                  "recommended_option_id": "opt-a", "sites_total": 12,
                  "evidence": "src/lib.rs:1 — the A pattern",
                  "recommendation_reasoning": "A everywhere, consistently"}
