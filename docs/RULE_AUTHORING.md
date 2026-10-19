@@ -28,6 +28,11 @@ only *does* something through one of these channels:
 1. **Grounding** (free, automatic): every SELECTED rule's text flows into the agent's prompt. This is
    how prose rules have effect. You get it for free by adding the TOML.
 2. **Emission** (free, automatic): structured rules emit into `CONVENTIONS.md` / `AGENTS.md`.
+   **These files go into the CLIENT's repository and are the product** — a codebase whose
+   conventions are written down so the client's own future development, much of it
+   agent-driven, stays consistent with what they already have. So the text you author here is
+   read by their engineers and their agents, not only by ours. Write it accordingly; see
+   "Reaching the client is the POINT, not the risk".
 3. **A mechanical gate/check** (NOT free): a rule is only mechanically blocked if a detector for it is
    wired into an enforcement layer (the layer-1 gateway, or a layer-2 check). Adding an "architectural"
    rule to the corpus does NOT create that detector.
@@ -167,6 +172,46 @@ in server-execution-context files; ambiguous paths get needs_review""* - an inst
 scanner, including Camerata's internal `needs_review` vocabulary, presented to a client as a
 description of their own engineering practice. Roughly 28 of 35 such labels sat in
 `crates/rules/principles/supabase/`; `sql/` carries 3 more files in the same voice.
+
+### Reaching the client is the POINT, not the risk
+
+Read the paragraph above and it is easy to draw exactly the wrong conclusion: that
+client-facing text is a hazard and the safe move is to keep corpus prose away from the client.
+That reading is wrong, and this section exists to forbid it before it takes hold.
+
+**Emitting derived conventions into the client's repository IS the product.** The client is
+buying a codebase whose conventions are written down and enforceable, so that their own future
+development — much of it agent-driven — stays consistent with what they already have. A
+directive the client never receives would be a defect, not a safeguard. There is nothing to
+contain here.
+
+**The defect is only ever VOICE.** Never reach, never audience, never volume. A field is wrong
+when its text is addressed to the wrong reader, and the repair is always to re-voice it, never
+to withhold it.
+
+This distinction is easy to lose and was in fact lost once during this work: the
+`directive`-reaches-`CONVENTIONS.md` behaviour was initially written up as a "leak", with a
+proposal to stop emitting it. That proposal would have removed the deliverable to protect it.
+The correction, and its full reasoning, is recorded at `directive`'s own entry below.
+
+### The corollary that does the real work: one voice, not one voice per audience
+
+A field with several audiences does NOT get several voices. It gets the one voice that serves
+all of them, and if no such voice exists the field is being asked to do two jobs and the rule
+is mis-shaped.
+
+`directive` is the worked case. It is simultaneously the scanning model's rule list
+(`ai_audit.rs:2247` renders `- [RULE-ID] directive`, introduced at `ai_audit.rs:389` as "the
+rules the project has ADOPTED"), the client's agents' governance text, and the client's
+engineers' reading. A scanner recipe fails ALL THREE — including the model, which is told to
+behave like a regex engine instead of being told what the code must do. So "tool voice is fine
+in the prompt" is false, and the W15 investigation proved it independently: a directive
+rewritten to such text makes the conformance pass ask the wrong question and correctly find
+nothing.
+
+The practical test, applicable to every multi-audience field: **write the value, then read it
+as each audience in turn.** If it only works for one of them, it is wrong for the field — not
+wrong for the other readers.
 
 Five audiences, in decreasing order of how expensive a wrong word is:
 
@@ -377,7 +422,13 @@ the A5.7 ruling.
 
 ---
 
-## Model- and operator-facing fields: the remaining standards
+## The MULTI-AUDIENCE fields: the remaining standards
+
+Renamed 2026-10-19. This section was headed "Model- and operator-facing fields", which was
+wrong in a way that mattered: `directive` and `qualifies` both reach the CLIENT's repository,
+and filing them under a model/operator heading is exactly the misreading that let the detector
+voice survive in `directive` for the whole `supabase/` pack. Every field below has more than
+one reader. See "one voice, not one voice per audience" above.
 
 - **`directive` has THREE audiences and ONE correct voice.** It is the scanning model's rule
   list, the client's agents', and the client's engineers'.
