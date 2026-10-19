@@ -282,7 +282,37 @@ are load-bearing and are quoted here from the source so the test is checkable, n
 
 ### `label`: the sentence tests
 
-Every label is a noun phrase naming a STATE THE CLIENT'S CODE IS IN. Three tests, in order:
+Every label names a STATE THE CLIENT'S CODE IS IN, in words a reader can CHECK against the
+repository.
+
+**Correction, 2026-10-19.** This opened "Every label is a noun phrase naming a state…", and
+the grammar requirement was wrong. Two audit partitions mis-sorted roughly 195 labels against
+it before it was caught, and this guide's own Right column contradicted it (it blesses
+`"organize packages by domain/business-capability, not by generic layer"`, an imperative).
+
+Grammar is free. 105 of 1,124 corpus labels open with an imperative verb and nearly all are
+fine — *"Use integer minor-units"* and *"Validate every request at the boundary; downstream
+code trusts only validated input"* are both perfectly checkable. Meanwhile the labels that
+genuinely fail are mostly STATIVE:
+
+| grammar | label | verdict |
+|---|---|---|
+| imperative | "Use integer minor-units" | fine — open the repo and look |
+| stative | "The reviewer agent for any change is distinct from the author agent" | fine — checkable |
+| stative | "Conflicting robustness is a real tradeoff, not a clear winner" | **fails** — a proposition about decision theory |
+| stative | "One-way-door routing — blast radius gates autonomy" | **fails** — a slogan naming the rule |
+| stative | "Auto-calls ledger + periodic judgment review" | **fails** — a noun pile naming the rule |
+| — | "tiered" | **fails** — a bare option id |
+
+So the operative question is **VERIFIABILITY, not grammar: can a reader confirm or refute this
+sentence by reading the client's repository?** A slogan cannot be refuted, which is what makes
+it useless as a convention — and it is also what the engine's frame demands, since the frame
+asserts the claim to the client as fact.
+
+The failures are a far smaller set than the grammar rule implied: roughly 15 corpus-wide,
+concentrated in `agentic/`, where labels drifted into naming the rule rather than the state.
+
+Four tests, in order:
 
 - **LABEL-1 (the frame test, primary).** A non-`violates` option's label must complete
   **"The codebase consistently follows ___"** and remain a true, client-voiced statement
@@ -297,6 +327,14 @@ Every label is a noun phrase naming a STATE THE CLIENT'S CODE IS IN. Three tests
   alternatives pass's "which option does this repo follow?" question has no groundable
   answer, and whichever the model picks ships as the client's "convention". That is the
   rule-shape defect, not a wording defect - see the next section.
+- **LABEL-4 (the verifiability test).** The label must be a claim a reader could CONFIRM OR
+  REFUTE by reading the repository. A slogan, a proposition, or the rule's own name fails:
+  nobody can check "Conflicting robustness is a real tradeoff" against code, so asserting it
+  as the client's convention says nothing. Recast as the state the rule actually wants -
+  "Competing robustness properties are escalated to a human, not chosen autonomously".
+  **This replaces the retracted noun-phrase requirement. It is a test of content, not form:
+  an imperative that is checkable passes; a well-formed noun phrase that is unfalsifiable
+  fails.**
 
 Advisory lexical screen (a reviewer aid, not a gate): a label containing `needs_review`,
 `finding`, `severity`, `opt-in`, `pre-checked`, `report`, `scan`, or verb-form `flag` is
