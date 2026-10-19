@@ -1,0 +1,181 @@
+# Master sequence — everything pending before the next graded sweep
+
+**This is the resume document.** Written 2026-10-19 at the owner's request: *"I just want to be
+sure all the necessary work that is pending is KNOWN about. We will just work through
+everything in sequence until we are ready to start the cycle again."*
+
+Nothing is in progress. Nothing below has been started unless marked DONE.
+
+Source documents, none superseded:
+- `2026-10-16_comprehensive-remediation-design.md` — W19-W32 definitions, the three waves
+- `2026-10-18_w19-regression-evidence.md` — the retraction and the controlled re-run result
+- `2026-10-18_w19-controlled-rerun-preregistration.md` — the experiment and its verdict
+- `2026-10-19_corpus-audit-work-order.md` — all 417 rules audited, ~220 edits enumerated
+- `2026-10-16_pdf-design-final.md` — the ~16-page PDF rebuild
+- `docs/RULE_AUTHORING.md` — the prescriptive standard (rewritten this session)
+
+---
+
+## 0. What is already DONE
+
+| item | commit | note |
+|---|---|---|
+| W20 scan scope, both halves | `bced2d3`, `dcb9f9d` | engine neither reads nor writes bookkeeping in the client's repo; confirmed in a live run |
+| W19 restoration | — | **scope is ZERO.** The controlled re-run returned 4/4 target rules and 4/4 variance controls. There was never a detection regression; it was the engine auditing its own 212KB cache |
+| W21 path sources | `f03575f` | 32 absolute auditor paths + 10 prose-as-path rows, fixed at source |
+| Convention synthesiser (part of W22) | `46984f9` | `currently_followed` — a convention row now needs the model to affirm the convention is followed |
+| `ARCH-HOT-READ-CACHE-1` Fix lines (a W26 instance) | `d0ea2ea` | three defect Fix lines told the client to implement the fault |
+| The authoring standard | `fcbab7c` → `c97780c` | audience taxonomy, voice standards, LABEL-1..4, field interactions, three self-corrections |
+| Disk: profile + weekly `cargo-sweep` | `c65cdd8` | 222 GiB incident |
+
+**Five code/corpus fixes, sixteen docs commits.** That ratio is accurate and worth knowing: a
+large part of this stretch was establishing what correct means before changing anything.
+
+---
+
+## 1. Decisions already made — do not re-litigate
+
+| # | decision | date |
+|---|---|---|
+| D1 | Semantic-tier regression checking is **advisory-only** (Option A), not N-run | 10-18 |
+| D2 | The gate watches **INPUT invariants** as the failing layer; output diffs are secondary | 10-18 |
+| D3 | R-ids are **retired, never reused**; survivors never renumber; gaps named by a withdrawal line | 10-17 |
+| D4 | The PDF's reader is **non-technical**; the workbook is the engineer's artifact | 10-17 |
+| D5 | Untriaged `could_be_intentional` rows **ship as "your call"**; persistence deferred | 10-16 |
+| D6 | W32 rule metadata (`cwe`/`asvs`, `superseded_since`) **approved** | 10-18 |
+| D7 | Strip the `Rejected:` token **at render**, not by corpus migration | 10-19 |
+| D8 | Labels judged on **verifiability, not grammar** (LABEL-4) | 10-19 |
+| D9 | **Fix the truncated option ids** — no client scan has run, so no selections to migrate | 10-19 |
+| D10 | **Fix the mis-declared layering rules** (corpus Group 2) | 10-19 |
+| D11 | **A5.7 hold LIFTED** for the rostered rules (corpus Group 3) | 10-19 |
+| D12 | One graded sweep **after all waves**, not per wave | 10-16 |
+
+---
+
+## 2. THE SEQUENCE
+
+Ordering principle, unchanged from the original design: **restore what broke before adding
+anything, and fix what the client sees before what only we see.** The corpus work is slotted
+in rather than parked, per the owner, but it is slotted where its dependencies allow.
+
+### PHASE 1 — finish Wave 1 (two gates)
+
+1. **W19 gate.** Input invariants as the failing layer: no engine-authored bytes in the
+   digest, file count sane, `audit_model` recorded. Semantic-tier output diffs advisory (D1).
+   *Note: the defect this gate most needed to catch was an INPUT defect. An output-diffing
+   floor would have reported twelve rule regressions and sent someone to read twelve rules —
+   which is exactly what happened to me, twice.*
+2. **W21 artifact gate.** No absolute path and no prose-shaped path reaches an export. Needs a
+   seam: `integrity_gate::evaluate` is pure over a `ScanLedger` and has no row set to inspect.
+3. **Model pinning becomes standard** for any measured run. Precondition for the sweep, not a
+   nicety — the whole before/after comparison this week was confounded by an unrecorded model.
+
+### PHASE 2 — Wave 2, the mid-layer (where the all-five-repo defects live)
+
+4. **W22 kind integrity**, including **corpus Group 2** (7 layering rules declared `decision`,
+   so their fat-controller option cannot be flagged; a repo that genuinely puts logic in
+   controllers is told it "consistently follows" that). Two sibling rules already have the
+   correct shape as a template. **This is kind integrity, not wording — it belongs here.**
+5. **Corpus Group 3** — the 4 A5.7-rostered rules (hold lifted, D11). Roster edits follow the
+   worked precedent already in `w14_corpus_schema_gates.rs`. Here because they are also kind
+   changes.
+6. **W23 `not_assessed` honesty.** A rule contradicted by another row in the same export
+   becomes `not_assessed`, never Clean and never "What's healthy". Depends on W22.
+7. **W24 merge and ranking.** Same-root-cause merge; severity anchors; top-3 selects three
+   distinct root causes. Depends on W22.
+8. **W28 field agreement** at the export boundary (the 38 baseline-suppressed-but-Open rows).
+9. **W31 `could_be_intentional`** flag, severity cap, curator disposition, its own
+   client-facing section (D5).
+
+### PHASE 3 — Wave 3, the deliverable
+
+10. **W25 client-facing text hygiene — rendered artifacts.** Pipeline vocabulary, retry
+    narration, CI-state text, calibration notes, placeholder tokens.
+11. **Corpus wording batches (11 of them, ~167 fields).** The upstream half of W25. Fully
+    enumerated in the work order with proposed replacement text. Delegable in parallel.
+    - supabase directives (35) · supabase labels (~26) · 31 upside-first `violates` `why`s ·
+      `integration/` (3) · `process/` (4) · `universal/` gate-mechanics sentences ·
+      5 api-layer payment directives · ~15 slogan labels · 6 graded source titles ·
+      13 hard-newline directives · ~54 template `[decision].question`s
+    - **Fix the guide's orientation snippet FIRST** or the template questions regrow.
+    - **Caveat:** severity-transcription comments quote directive prose these rewrites delete.
+12. **Corpus Group 1** — 17 inert `violates` options describing Camerata's detector design.
+    Verified runtime-inert; safe anywhere, parked here to batch with the wording.
+13. **Corpus Group 4** — truncated option ids. 1,101 ids, **18 hardcoded in Rust**, zero
+    persisted selections. **Fix the generator in the same pass** or the next rule reproduces it.
+14. **W26 fix and estimate quality.** Predicate-aware templates, contradiction gate, magnitude
+    sanity, no high-or-above row without a fix and citation.
+15. **W27 PDF rebuild** per `2026-10-16_pdf-design-final.md`. Last, because restructuring a
+    renderer over wrong data bakes the wrong shape in. Carries:
+    - R-id persistence at first export + read-back (D3). **A recomputed counter renumbers by
+      construction and only diverges on the SECOND export** — the test must export, kill a
+      middle finding, re-export, assert.
+    - The withdrawal line, data-driven, with the retired set on the wire.
+    - `sample-report/data.json` predates the `kind` field and needs regenerating.
+16. **W32 rule metadata** (D6) — `cwe`/`asvs` on security rules, `superseded_since` +
+    `current_recommendation` on pattern-level architecture rules. Sequenced with W27 so the
+    PDF can render both.
+
+### PHASE 4 — W29, coverage expansion
+
+17. **The nine consistency rules + clone detector + 18 safe-twin tests.** TWO hard
+    dependencies, both now satisfiable: W19's gate must exist first, and the convention
+    synthesiser must be fixed (done, `46984f9`) because source §83 wires all nine straight
+    into it.
+    - Order within: dead-code / shared-constant / one-import-path → hooks lint (needs the
+      eslint fix) → single-source-logic (builds the clone detector) → naming / shared-primitive
+      / state-shape → needless-complexity.
+
+### PHASE 5 — residuals, then measure
+
+18. **W30 residuals.** PIN eslint versions in the tool manifest (primary) + ETARGET retry;
+    §9.1 zero-finding rule surface so `RuleAlternativesPanel` can go; Conventions tab count;
+    `is_code_auditable_rule` gating on `inspectable` rather than a name prefix; D6/D7 severity
+    **ceiling** tables still using raw `contains` (the same shape as the fixed D5 floor bug,
+    where `urls` matched `rls`); R1 `cargo fmt`; R2.
+19. **Engine/doc items surfaced by the corpus audit:**
+    - strip `Rejected:` at render (D7)
+    - `report_export.rs:2042-2050` — `resolve_fix` doc comment still carries the repudiated
+      "internal, agent-facing instructions" framing
+    - `RULES_REFERENCE.md` §5.3 — same stale sentence; an author reading only §5.3 reproduces
+      the original defect
+    - `onboard.rs:1366-1373` and `:1425-1427` — two comments claim governance/process families
+      are dropped from the code audit; they are not
+    - three field-interaction rules to ADD to the guide: `enforcement` × multi-option (the most
+      consequential and entirely absent), `remediation` × `violates`, `inspectable` scope
+      (working tree vs VCS metadata)
+    - `supabase-key-service-role-client-1` has no severity bound but says "critical" twice
+    - 3 inert `deviation_ceiling` fields on `defect`-kind rules
+    - `proc-pr-concurrency-1` is `grounded` with one non-http source → resolves zero citations
+    - `javascript-angular-subscription-cleanup-1` flags a state its own conforming option permits
+    - `testing-one-assertion-per-test-1 / strict-one-physical-assert` — `violates` on an
+      over-application, not a fault
+    - `proc-permission-config-1` — `inspectable = false` with `kind = "defect"` and two
+      `violates` options is dead machinery; one of the two declarations is wrong
+20. **ONE graded sweep, all five repos** (D12). **Hearth MUST be re-graded** — its 30/46 is
+    invalid, it measured a run whose prompt was 63% engine JSON. All five answer keys exist.
+    Expect roughly $63 and most of a day.
+
+---
+
+## 3. Explicitly NOT doing
+
+- `ARCH-OBSERVABILITY-CORRELATION-ID-1` stays `decision` — prior ruling, recorded in the roster.
+- `SEC-NO-RAW-SQL-CONCAT-1 / escape-then-concatenate` stays — the roster's own documented
+  "genuine finding the 244-rule audit missed".
+- Option-id renames were previously recommended AGAINST by two auditors; **D9 overrides that**
+  on the grounds that no client scan has run. If that ever stops being true, the recommendation
+  stands again.
+- Durable per-finding state across engagements — deferred twice now (`Confirmed`, then
+  `could_be_intentional`). **A third request is the signal to build it properly.**
+
+## 4. Open questions — none blocking
+
+Every question raised this session has been answered. The two that remain are observations
+rather than blockers:
+
+- Whether `[decision].question` boilerplate (~160 corpus-wide) is acceptable or is sized debt.
+  Operator-only, so low stakes; the work order proposes replacements.
+- Whether the corpus should adopt `testing/` as the explicit worked example to edit toward. It
+  is the healthiest pack by a clear margin (6 of 7 clean, hand-authored ids, real decision
+  questions, no truncation).
