@@ -25,8 +25,13 @@
 //! the `(repo, PathBuf)` "sources" the server functions expect, picking the CURATION-DEFAULT
 //! rule selection a fresh onboarding pre-checks (`ProposedRule::is_auto_recommended`, with no
 //! human override — see [`curated_rule_selection`]), a tiny on-disk incremental-scan cache
-//! (there is no project/database to key one to headlessly — see [`manifest_cache_path`]), and
+//! (there is no project/database to key one to headlessly, so it is keyed by repo path in a
+//! per-user state directory — see [`manifest_cache_path`] and [`camerata_state_dir`]), and
 //! printing the run's real token usage + cost at the end.
+//!
+//! Neither the cache nor the integrity ledger is written into the scanned repository. They
+//! were until 2026-10-18, and the engine then collected its own cache as source on the next
+//! scan — see [`camerata_state_dir`] for the full account.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -94,6 +99,14 @@ pub struct InspectOutcome {
     /// reconciliation pass. Printed by [`format_outcome_report`]; tests assert on this field
     /// directly rather than parsing stdout, matching this module's existing convention.
     pub ledger_summary: String,
+    /// Where this run's pipeline-integrity ledger was written, for passing to
+    /// `camerata integrity-gate --ledger`.
+    ///
+    /// Reported because it is no longer guessable. It used to be
+    /// `<repo>/.camerata-scan-ledger.json`, which an operator could type from memory; it now
+    /// lives in a per-user state directory under a hashed key (see [`ledger_path`]). A path
+    /// nobody can derive and nothing prints is a gate nobody runs.
+    pub ledger_path: PathBuf,
 }
 
 /// Validate the arguments BEFORE touching the filesystem for real work or resolving a
@@ -186,7 +199,108 @@ fn resolve_default_directive(r: &ProposedRule) -> String {
 /// (callers should `.gitignore` it), and read only as input to `audit_repos`'s own
 /// `incremental_prior` parameter — never consulted by anything else.
 fn manifest_cache_path(repo: &Path) -> PathBuf {
-    repo.join(".camerata-scan-cache.json")
+    camerata_state_dir().join(format!("{}.cache.json", repo_state_key(repo)))
+}
+
+/// The per-user directory where Camerata keeps its own bookkeeping for headless runs.
+///
+/// # Why these files are no longer written into the scanned repository
+///
+/// They were, until 2026-10-18, on the stated reasoning that they mirrored
+/// `.eslintcache`/`.turbo`-style tool caches: disposable, and "callers should `.gitignore`
+/// it". That reasoning holds for ESLint and does not hold here, for a reason specific to what
+/// Camerata is: **ESLint's cache sits in a repository whose own developers chose ESLint and
+/// gitignored its cache. Camerata runs on a CLIENT's repository.** The client never opted in,
+/// has never heard of the tool, and will not have gitignored anything. So the "callers should
+/// gitignore it" precondition fails by construction on every single engagement, and what the
+/// client actually sees after an audit is two unexplained vendor-named files in their
+/// `git status` — which at best looks careless and at worst gets committed to their history.
+///
+/// That is the cosmetic half. The expensive half already happened: because the cache sat
+/// inside the scanned tree, the next scan COLLECTED IT AS SOURCE. On hearth that put 174,236
+/// characters of Camerata's own prior findings into the audit prompt, displacing real code
+/// until it was ~35% of what the model read, and the engine then re-detected a snippet quoted
+/// inside its own cache and shipped it to the client as a CRITICAL at queue position #1.
+/// `files::is_engine_artifact` stops the engine READING them; this stops it WRITING them
+/// there in the first place, which is the half that removes the cause rather than the symptom.
+///
+/// Resolution follows the platform convention, with a temp-dir fallback so a missing `HOME`
+/// degrades to a working (if non-persistent) cache rather than failing the inspection.
+fn camerata_state_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches"));
+    #[cfg(not(target_os = "macos"))]
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")));
+
+    base.unwrap_or_else(std::env::temp_dir).join("camerata")
+}
+
+/// A stable, filesystem-safe key identifying one scanned repository.
+///
+/// Shaped `<readable-name>-<hash>` (e.g. `hearth-3f2a9c14`) rather than a bare hash so the
+/// cache directory stays human-debuggable: an operator wondering which cache belongs to which
+/// repo can read it off the filename instead of re-deriving a digest.
+///
+/// The hash is FNV-1a over the absolute path, hand-rolled on purpose. `DefaultHasher` is
+/// explicitly NOT stable across Rust releases, so using it would silently invalidate every
+/// cache on a toolchain upgrade — a slow, confusing, once-a-year performance regression with
+/// no error message. A cache key needs determinism, not cryptographic strength.
+fn repo_state_key(repo: &Path) -> String {
+    let abs = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in abs.to_string_lossy().as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    let name: String = abs
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "repo".to_string())
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .take(40)
+        .collect();
+    format!("{name}-{:08x}", hash as u32)
+}
+
+/// Remove a pre-2026-10-18 bookkeeping file from the scanned repository, if one is there.
+///
+/// Only removes a file that PARSES as the thing we claim it is. The `.camerata-` prefix is
+/// ours by convention, but a convention is not proof, and deleting an unreadable file from a
+/// client's repository on the strength of its name is not a trade worth making. Anything that
+/// does not parse is left alone and reported, so an operator sees it rather than losing it.
+fn clean_legacy_repo_file<T: serde::de::DeserializeOwned>(repo: &Path, basename: &str) {
+    let legacy = repo.join(basename);
+    if !legacy.exists() {
+        return;
+    }
+    let parses = std::fs::read(&legacy)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<T>(&b).ok())
+        .is_some();
+    if !parses {
+        eprintln!(
+            "camerata inspect: {} exists in the scanned repo but is not a readable Camerata \
+             {basename}; leaving it alone rather than deleting a file we cannot identify.",
+            legacy.display()
+        );
+        return;
+    }
+    match std::fs::remove_file(&legacy) {
+        Ok(()) => eprintln!(
+            "camerata inspect: removed {} — Camerata's bookkeeping now lives in {} and is no \
+             longer written into the scanned repository.",
+            legacy.display(),
+            camerata_state_dir().display()
+        ),
+        Err(e) => eprintln!(
+            "camerata inspect: could not remove the legacy {} ({e}); it is harmless (the scan \
+             excludes it) but can be deleted by hand.",
+            legacy.display()
+        ),
+    }
 }
 
 /// Best-effort load: any error (missing file, corrupt JSON, a schema from a future/older
@@ -203,6 +317,9 @@ fn save_manifest(repo: &Path, manifest: &ScanManifest) {
     let Ok(bytes) = serde_json::to_vec_pretty(manifest) else {
         return;
     };
+    // Best-effort: a failure here surfaces as the write error below, which is already
+    // non-fatal (the next run does a full scan instead).
+    let _ = std::fs::create_dir_all(camerata_state_dir());
     if let Err(e) = std::fs::write(manifest_cache_path(repo), bytes) {
         eprintln!(
             "camerata inspect: could not persist the incremental-scan cache at {}: {e} (the \
@@ -225,7 +342,7 @@ fn save_manifest(repo: &Path, manifest: &ScanManifest) {
 /// reading the digest at the moment it scrolled past. `camerata integrity-gate` reads this
 /// file. A ledger is a few kB of JSON; the scan that produced it is dollars and hours.
 pub fn ledger_path(repo: &Path) -> PathBuf {
-    repo.join(".camerata-scan-ledger.json")
+    camerata_state_dir().join(format!("{}.ledger.json", repo_state_key(repo)))
 }
 
 /// Best-effort save of the completed scan's ledger. A persistence failure never fails the
@@ -236,6 +353,16 @@ fn save_ledger(repo: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
     let Ok(bytes) = serde_json::to_vec_pretty(ledger) else {
         return;
     };
+    // Unlike the scan cache, a missing ledger makes `camerata integrity-gate` exit 2 rather
+    // than 0, so the directory must exist before the write is attempted.
+    if let Err(e) = std::fs::create_dir_all(camerata_state_dir()) {
+        eprintln!(
+            "camerata inspect: could not create {} ({e}); the pipeline-integrity ledger will \
+             not be persisted and `camerata integrity-gate` will report itself unavailable.",
+            camerata_state_dir().display()
+        );
+        return;
+    }
     if let Err(e) = std::fs::write(ledger_path(repo), bytes) {
         eprintln!(
             "camerata inspect: could not persist the pipeline-integrity ledger at {}: {e} \
@@ -388,6 +515,16 @@ pub async fn run_inspect_with_key_presence(
         .filter(|m| !m.trim().is_empty());
     let ledger = Arc::new(UsageLedger::new());
 
+    // Sweep up bookkeeping files left in the scanned repo by a pre-2026-10-18 binary. Done
+    // before the scan so this run's file collection never sees them, independently of
+    // `files::is_engine_artifact` — belt and braces on the defect that put 174,236 characters
+    // of Camerata's own output into an audit prompt.
+    clean_legacy_repo_file::<ScanManifest>(&args.repo, ".camerata-scan-cache.json");
+    clean_legacy_repo_file::<camerata_server::scan_ledger::ScanLedger>(
+        &args.repo,
+        ".camerata-scan-ledger.json",
+    );
+
     let incremental_prior = if args.full {
         None
     } else {
@@ -502,6 +639,7 @@ pub async fn run_inspect_with_key_presence(
         actual_usage: report.actual_usage.clone(),
         findings_count: report.findings.len(),
         ledger_summary,
+        ledger_path: ledger_path(&args.repo),
     })
 }
 
@@ -695,10 +833,12 @@ pub fn format_outcome_report(outcome: &InspectOutcome) -> String {
         ProjectBackend::Api => "api",
     };
     format!(
-        "camerata inspect: wrote {} ({} bytes) — backend: {backend_label}, findings: {}\n{}\n\n{}",
+        "camerata inspect: wrote {} ({} bytes) — backend: {backend_label}, findings: {}\n\
+         integrity ledger: {}\n{}\n\n{}",
         outcome.export_path.display(),
         outcome.export_zip_bytes,
         outcome.findings_count,
+        outcome.ledger_path.display(),
         format_usage_report(outcome.actual_usage.as_ref(), outcome.batch),
         outcome.ledger_summary,
     )
@@ -913,6 +1053,65 @@ mod tests {
         assert!(text.contains("none recorded"), "{text}");
     }
 
+    /// W20 (second half) — Camerata's bookkeeping never lands in the client's repository.
+    ///
+    /// The first half stopped the engine READING its own cache back as source, which is what
+    /// put 174,236 characters of prior output into a hearth audit prompt. This is the half
+    /// that stops it being written there at all, so a client running an audit does not find
+    /// two unexplained vendor-named files in their `git status` afterwards.
+    #[test]
+    fn bookkeeping_is_never_written_into_the_scanned_repo() {
+        let repo = PathBuf::from("/Users/someone/clients/acme-platform");
+        for path in [manifest_cache_path(&repo), ledger_path(&repo)] {
+            assert!(
+                !path.starts_with(&repo),
+                "{} is inside the scanned repo; that is the defect this test exists for",
+                path.display()
+            );
+            assert!(
+                path.starts_with(camerata_state_dir()),
+                "{} should live under the per-user state dir",
+                path.display()
+            );
+        }
+        // The two must not collide, or the ledger overwrites the cache.
+        assert_ne!(manifest_cache_path(&repo), ledger_path(&repo));
+    }
+
+    /// The key must be stable across runs (or every scan is a cold scan) and distinct per
+    /// repo (or two clients share one cache, which would be a confidentiality problem as
+    /// well as a correctness one).
+    #[test]
+    fn repo_state_key_is_stable_distinct_and_filesystem_safe() {
+        let a = PathBuf::from("/Users/someone/clients/acme-platform");
+        let b = PathBuf::from("/Users/someone/clients/other-client");
+
+        assert_eq!(repo_state_key(&a), repo_state_key(&a), "must be stable");
+        assert_ne!(
+            repo_state_key(&a),
+            repo_state_key(&b),
+            "two repos must never share a cache key"
+        );
+
+        // Same basename, different parents, must still differ — the hash covers the full
+        // absolute path precisely so two clients' `web` directories do not collide.
+        assert_ne!(
+            repo_state_key(Path::new("/clients/one/web")),
+            repo_state_key(Path::new("/clients/two/web")),
+        );
+
+        let key = repo_state_key(&a);
+        assert!(
+            key.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "key `{key}` must be filesystem-safe"
+        );
+        assert!(
+            key.contains("acme-platform"),
+            "key `{key}` should stay human-readable so an operator can tell which cache is which"
+        );
+    }
+
     #[test]
     fn format_outcome_report_names_the_export_path_and_backend() {
         let outcome = InspectOutcome {
@@ -923,6 +1122,7 @@ mod tests {
             actual_usage: Some(synthetic_usage()),
             findings_count: 3,
             ledger_summary: "== PIPELINE STAGES ==\n  (no stages recorded this scan)".to_string(),
+            ledger_path: PathBuf::from("/tmp/state/out-deadbeef.ledger.json"),
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("/tmp/out.zip"), "{text}");
