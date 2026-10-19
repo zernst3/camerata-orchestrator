@@ -3504,8 +3504,23 @@ pub(crate) fn evidence_negates_requirement(evidence: &str) -> bool {
 /// path/line parts, anchoring the [`evidence_negates_requirement`] advisory finding at a real
 /// location whenever the model's citation parses. Splits ONLY on an em dash or " - " (never a
 /// bare hyphen) so a hyphenated path (`src/my-service/orders.rs:142`) is never mistaken for a
-/// "path — note" separator. Falls back to `(evidence, 0)` — never panics, never drops the
-/// evidence text — when the citation doesn't parse into a real `path:line` shape.
+/// "path — note" separator.
+///
+/// # On the unparseable case (W21, 2026-10-19)
+///
+/// Returns `("", 0)` — an EMPTY path, not the evidence text.
+///
+/// It used to return `(evidence, 0)`, reasoned as "never drops the evidence text". The intent
+/// was right and the mechanism was wrong: `path` is a client-facing FILE LOCATION rendered in
+/// the PDF and the workbook, and the fallback put model prose into it. The measured result on
+/// hearth was ten rows whose `path` was a sentence up to 180 characters long, e.g.
+/// `"app/api/bookings/route.ts:15-39 — booking insert, payment insert, and slot update execute
+/// as three separate awaits with no transaction boundary"`, shipped as a file path.
+///
+/// Nothing is actually lost. All three callers already put the evidence text in `snippet`
+/// (and `report_export`'s gate quotes it in `detail` as well), so the text survives in the
+/// fields built to hold prose. What changes is that a row which cannot be anchored now says
+/// so by carrying no location, which is what `located: false` exists to express.
 pub(crate) fn parse_evidence_citation(evidence: &str) -> (String, usize) {
     let trimmed = evidence.trim();
     let head = trimmed
@@ -3521,7 +3536,7 @@ pub(crate) fn parse_evidence_citation(evidence: &str) -> (String, usize) {
             }
         }
     }
-    (trimmed.to_string(), 0)
+    (String::new(), 0)
 }
 
 /// Defect 4's injection point: for every rule the ledger would otherwise credit as healthy
@@ -3708,6 +3723,11 @@ fn apply_zero_finding_evidence_check(report: &mut crate::onboard::ScanReport) {
             continue;
         }
         let (path, line) = parse_evidence_citation(evidence);
+        // W21: an unparseable citation yields an empty path, so this row is only `located`
+        // when the model's evidence actually named a file. The evidence text itself is still
+        // carried in `snippet` and quoted in `detail` below, so nothing is lost by refusing
+        // to call a sentence a location.
+        let located = !path.is_empty();
         synthetic.push(Finding {
             repo: report.repos.first().cloned().unwrap_or_default(),
             path,
@@ -3723,7 +3743,7 @@ fn apply_zero_finding_evidence_check(report: &mut crate::onboard::ScanReport) {
             ),
             needs_review: true,
             confidence: Some("needs-review".to_string()),
-            located: true,
+            located,
             // A5.6: the gate's claim is that the rule's own requirement is negated — an
             // objective-fault claim (held for review), never a consistency observation.
             kind: Some(camerata_api_types::audit::FindingKind::Defect),
@@ -8824,12 +8844,37 @@ mod tests {
         );
     }
 
+    /// W21 — an unparseable citation yields NO path, rather than a sentence masquerading as
+    /// one. This test previously asserted the opposite (`path == the whole evidence text`),
+    /// on the reasoning that the fallback should "never drop the evidence text". The text is
+    /// still never dropped: every caller puts it in `snippet`, and the negated-requirement
+    /// gate also quotes it in `detail`. What changed is that it no longer arrives in `path`,
+    /// a client-facing file location, where it shipped ten rows on hearth with sentences up
+    /// to 180 characters long rendered as file paths in the PDF and the workbook.
     #[test]
-    fn parse_evidence_citation_falls_back_to_the_whole_text_when_unparseable() {
+    fn parse_evidence_citation_yields_no_path_when_unparseable() {
         let (path, line) =
             parse_evidence_citation("this evidence has no file:line citation at all");
         assert_eq!(line, 0);
-        assert_eq!(path, "this evidence has no file:line citation at all");
+        assert_eq!(path, "", "prose must never be returned as a file path");
+    }
+
+    /// The real shape that leaked, taken verbatim from the 2026-10-18 hearth export: a
+    /// citation whose line part is a RANGE (`15-39`), not a single number, followed by a
+    /// prose note. `rsplit_once(':')` leaves `"15-39"`, which does not parse as a `usize`, so
+    /// this falls to the unparseable branch — which is why the whole sentence used to become
+    /// the path.
+    #[test]
+    fn parse_evidence_citation_rejects_a_line_range_rather_than_pathifying_the_note() {
+        let (path, line) = parse_evidence_citation(
+            "app/api/bookings/route.ts:15-39 — booking insert, payment insert, and slot \
+             update execute as three separate awaits with no transaction boundary",
+        );
+        assert_eq!(line, 0);
+        assert_eq!(
+            path, "",
+            "a line RANGE is not a parseable citation, and the note must not become the path"
+        );
     }
 
     #[test]

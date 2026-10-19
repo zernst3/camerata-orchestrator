@@ -6296,7 +6296,12 @@ fn apply_alternative_decision(
     let (path, line, located) = match evidence {
         Some(ev) if !ev.trim().is_empty() => {
             let (p, l) = crate::report_export::parse_evidence_citation(ev);
-            (p, l, true)
+            // W21: `located` tracks whether this row has a real FILE LOCATION, so it
+            // follows the parsed path rather than the mere presence of evidence. An
+            // unparseable citation yields an empty path, and a row with no path is not
+            // located no matter how much prose came with it.
+            let anchored = !p.is_empty();
+            (p, l, anchored)
         }
         _ => (String::new(), 0, false),
     };

@@ -961,6 +961,44 @@ fn preview_finding(
 ///    components (bundled JS/CSS, server bundles), dropped.
 /// 7. Everything else within the repo: kept.
 ///
+/// Rewrite an external tool's reported path to be REPO-RELATIVE, with forward slashes.
+///
+/// # The defect this exists to fix (W21)
+///
+/// External linters are invoked with absolute paths and report absolute paths back. Nothing
+/// rewrote them, so every ESLint-preview row shipped the auditor's own filesystem layout to
+/// the client. Measured on the 2026-10-18 hearth export: **32 of 237 rows** carried a path
+/// like `/Users/<auditor>/Documents/Repos/Camerata tests/hearth/app/admin/page.tsx`, in the
+/// PDF and the workbook both. Every one of them was `Preview: eslint`; no other tier leaked.
+///
+/// Two things are wrong with that beyond untidiness. It tells the client the auditor's
+/// username, directory habits and where else their work lives, none of which is theirs to
+/// know. And it makes the path useless to them: they cannot open it, search for it, or paste
+/// it into their own tooling, because the prefix describes a machine they have no access to.
+///
+/// [`is_in_repo_scope`] already computed exactly this relative path in order to make its
+/// keep/drop decision and then threw it away. This returns it instead.
+///
+/// A path that is already relative, or that is a synthetic placeholder like `"(repo)"`, or
+/// that lies outside `repo_root` (which [`is_in_repo_scope`] drops anyway) is returned
+/// unchanged — this function narrows paths, it never invents one.
+pub fn repo_relative_path(repo_root: &Path, finding_path: &str) -> String {
+    if finding_path.starts_with('(') {
+        return finding_path.to_string();
+    }
+    let p = Path::new(finding_path);
+    if !p.is_absolute() {
+        return finding_path.replace('\\', "/");
+    }
+    match p.strip_prefix(repo_root) {
+        Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+        // Outside the repo: left alone deliberately. `is_in_repo_scope` is the component that
+        // decides such a row has no business in the results; silently reshaping it here would
+        // hide that decision from whoever reads the filter.
+        Err(_) => finding_path.replace('\\', "/"),
+    }
+}
+
 /// Pure and side-effect-free; all filtering decisions are deterministic.
 pub fn is_in_repo_scope(repo_root: &Path, finding_path: &str) -> bool {
     // Rule 1: synthetic placeholders — always keep.
@@ -1559,6 +1597,13 @@ async fn run_one_tool<'r>(
     // tool arms inherit it automatically.
     .map(|(mut findings, gaps)| {
         findings.retain(|f| is_in_repo_scope(dir, &f.path));
+        // W21: normalise in the SAME uniform pass, for the reason the comment above gives for
+        // filtering here — a new tool arm inherits it automatically instead of each parser
+        // having to remember. Order matters: filter first, so `is_in_repo_scope` still sees
+        // the absolute path it needs to judge whether the file is even inside the repo.
+        for f in &mut findings {
+            f.path = repo_relative_path(dir, &f.path);
+        }
         (findings, gaps)
     })
 }
@@ -2703,6 +2748,65 @@ mod tests {
             !is_in_repo_scope(&root, "target/debug/build/pkg/out/v2_generated.rs"),
             "relative target/ path must be excluded"
         );
+    }
+
+    /// W21 — an external tool's absolute path becomes repo-relative before it can reach an
+    /// artifact.
+    ///
+    /// The 2026-10-18 hearth export shipped 32 of 237 rows carrying the auditor's own
+    /// filesystem layout, all of them `Preview: eslint`. That discloses the auditor's
+    /// username and directory habits to the client, and it makes the path useless to them:
+    /// they cannot open or search a path rooted on a machine they have no access to.
+    #[test]
+    fn external_tool_absolute_paths_become_repo_relative() {
+        let root = repo("/Users/auditor/Documents/Repos/clients/acme");
+
+        // The exact shape that leaked, modulo the name.
+        assert_eq!(
+            repo_relative_path(&root, "/Users/auditor/Documents/Repos/clients/acme/app/admin/page.tsx"),
+            "app/admin/page.tsx"
+        );
+        // A path that is already relative is untouched.
+        assert_eq!(repo_relative_path(&root, "app/api/checkout/route.ts"), "app/api/checkout/route.ts");
+        // Synthetic placeholders our own parsers inject must survive verbatim, since
+        // `is_in_repo_scope` deliberately keeps them.
+        assert_eq!(repo_relative_path(&root, "(repo)"), "(repo)");
+        assert_eq!(repo_relative_path(&root, "(scan preview)"), "(scan preview)");
+        // Nested deeply, and a repo whose own path contains a space (the real fixture did).
+        let spaced = repo("/Users/auditor/Camerata tests/hearth");
+        assert_eq!(
+            repo_relative_path(&spaced, "/Users/auditor/Camerata tests/hearth/app/listings/[id]/page.tsx"),
+            "app/listings/[id]/page.tsx"
+        );
+        // Outside the repo: left alone on purpose. `is_in_repo_scope` is what drops these,
+        // and quietly reshaping one here would hide that decision.
+        assert_eq!(
+            repo_relative_path(&root, "/rustc/abcdef/library/core/src/macros/mod.rs"),
+            "/rustc/abcdef/library/core/src/macros/mod.rs"
+        );
+    }
+
+    /// The normalisation must never produce a path that still names the auditor's machine.
+    /// Asserted as its own property rather than folded into the case above, because this is
+    /// the client-facing consequence and it should fail loudly and by name.
+    #[test]
+    fn no_normalised_path_retains_the_auditor_prefix() {
+        let root = repo("/Users/auditor/Documents/Repos/clients/acme");
+        for raw in [
+            "/Users/auditor/Documents/Repos/clients/acme/app/admin/page.tsx",
+            "/Users/auditor/Documents/Repos/clients/acme/supabase/migrations/0001_init.sql",
+            "/Users/auditor/Documents/Repos/clients/acme/components/Btn.tsx",
+        ] {
+            let out = repo_relative_path(&root, raw);
+            assert!(
+                !out.contains("/Users/") && !out.contains("auditor"),
+                "`{out}` still discloses the auditor's filesystem"
+            );
+            assert!(
+                !out.starts_with('/'),
+                "`{out}` must be relative, not absolute"
+            );
+        }
     }
 
     /// User source files in `src/` are always kept.
