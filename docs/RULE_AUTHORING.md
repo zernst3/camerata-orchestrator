@@ -379,9 +379,34 @@ the A5.7 ruling.
 
 ## Model- and operator-facing fields: the remaining standards
 
-- **`directive` has TWO audiences, and the second is the client's own repo.** It is the
+- **`directive` has THREE audiences and ONE correct voice.** It is the scanning model's rule
+  list, the client's agents', and the client's engineers'.
+
+  **Correction, 2026-10-19.** An earlier draft of this section said the directive is "the
   detection/enforcement recipe in the scan and alternatives prompts - tool voice is correct
-  THERE - but the selected option's directive is also emitted verbatim under
+  THERE". That is wrong, and it is the same misreading that let the detector voice in at all.
+  Tool voice is not correct for the model either. The scan prompt introduces this list as
+  *"the rules the project has ADOPTED"* (`ai_audit.rs:389`) and renders each entry as
+  `- [RULE-ID] directive` (`ai_audit.rs:2247`), so a directive reading "Regex-scan for
+  `getSession(` ... Emit a high-severity finding" instructs a language model to impersonate a
+  regex engine instead of telling it what the code must do. The W15 investigation found that
+  independently: when `apply_alternative_decision` rewrites a project's effective directive to
+  such text, the conformance pass is asked the wrong question and correctly finds nothing.
+
+  So there is no audience for whom the scanner recipe is the right text, and emitting the
+  directive to the client is not a leak to be plugged - it is the PRODUCT. Deriving a
+  repository's conventions and shipping them as governance the client's own agents will follow
+  is the point of the whole pipeline. The defect is only ever the voice. One well-written
+  directive serves all three readers:
+
+  > Server-side identity is established via `getClaims()` or `getUser()`; never trust
+  > `getSession()` in a server execution path. `getSession()` does not revalidate the token,
+  > so a forged cookie can impersonate any user.
+
+  The model can check code against that, the client's agent can follow it, and their engineer
+  can read it. Nothing is lost by dropping the scanner phrasing and the scan improves.
+
+  The selected option's directive is emitted verbatim under
   `### {id} - {title}` into the client's `CONVENTIONS.md`/`AGENTS.md` as a convention the
   project follows. Write it as the behavioral commitment an engineer or agent working in
   that repo can follow ("Establish server-side identity via getClaims() or getUser(); never
