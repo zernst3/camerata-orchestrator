@@ -10,6 +10,14 @@
 > This document is the *workflow* guide and deliberately does not restate the schema, so there
 > is exactly one place to change when a field is added. The snippets below are orientation,
 > not a specification; where they disagree with `docs/RULES_REFERENCE.md`, that file is right.
+>
+> **Scope change, 2026-10-19.** This guide now ALSO owns the per-field AUTHORING STANDARD:
+> who reads each value, what voice it must be written in, and what makes a value wrong. The
+> reference stays descriptive (what the engine does); this document is prescriptive (what you
+> write). The split was forced by a shipped defect: the reference correctly recorded that
+> option `label` is client-facing, this guide specified it as `label = "Human label"`, and
+> ~28 labels went to paying clients in the DETECTOR's voice (see "Who reads what you write"
+> below). A fact recorded in the reference is not a standard until it is stated here as one.
 
 ## The one idea to internalize
 
@@ -96,10 +104,13 @@ default  = "the-default-option-id"
 why      = "rationale for the adopted default"
 
 [[option]]
-id        = "stable-option-id"   # ALSO forever — referenced by selections + code
-label     = "Human label"
-directive = "the concrete behavior this option codifies"
-why       = "rationale"
+id        = "stable-option-id"   # ALSO forever — referenced by selections + code; client-visible data
+label     = "A state the client's code is in"  # CLIENT-FACING VERBATIM — see "The client-facing
+                                 # writing standard" below. "Human label" was this guide's entire
+                                 # spec for the field until 2026-10-19, and it shipped ~28
+                                 # detector-voice labels to clients. Never again.
+directive = "the concrete behavior this option codifies"  # model prompt + emitted CONVENTIONS.md
+why       = "rationale"          # client-facing when violates = true (defect detail)
 # Optional, the escalation hook (see below):
 escalation = { condition = "…", severity = "hard-pause" | "soft-flag" }
 
@@ -138,6 +149,302 @@ Notes:
   the trap that caused this: the field defaults to `draft`, so four rules with shipped deterministic
   detectors never armed anywhere. Set it explicitly. See `docs/TECHNICAL.md` section 5a, "The
   verification ladder", for the full table of which statuses arm and which ground.
+
+---
+
+## Who reads what you write: audience before wording
+
+**A field's audience is a property of the engine, not a stylistic choice.** Every value you
+author lands somewhere specific - a paid client artifact, a model prompt, the client's own
+repo files, the operator's UI, or nowhere - and the engine composes client-facing sentences
+AROUND your text verbatim. Authoring in the wrong voice is therefore not a tone problem; it is
+a factual error in a deliverable.
+
+**The defect that proved it (2026-10-19).** The entire `supabase/` rulepack authored option
+labels in the tool's voice. `conventions_observed_findings` (`ai_audit.rs`) then rendered, in
+client artifacts, sentences like: *"The codebase consistently follows "Flag getSession() calls
+in server-execution-context files; ambiguous paths get needs_review""* - an instruction to a
+scanner, including Camerata's internal `needs_review` vocabulary, presented to a client as a
+description of their own engineering practice. Roughly 28 of 35 such labels sat in
+`crates/rules/principles/supabase/`; `sql/` carries 3 more files in the same voice.
+
+Five audiences, in decreasing order of how expensive a wrong word is:
+
+1. **CLIENT-ARTIFACT** - verbatim text in a paid deliverable (PDF, xlsx, `findings.json`).
+2. **CLIENT-REPO** - verbatim text emitted into the client repository's `AGENTS.md` /
+   `CONVENTIONS.md` (`arm.rs::render_rule`: `### {id} - {title}` then the directive). Read by
+   the client's own developers and agents as "conventions this project follows".
+3. **MODEL** - prompt text (scan directive list, alternatives block, escalation grounding).
+4. **OPERATOR** - the onboarding/cockpit UI (proposal rows, rule-detail modal).
+5. **ENGINE / NOBODY** - consumed as data (ids, flags, bounds) or parsed and read by nothing.
+
+### The audience table
+
+Audience column derived from `docs/RULES_REFERENCE.md`'s per-field consumption and its
+"What reaches which artifact" table (section 8); cited section in the last column. "Absent"
+states the engine's actual behavior on an omitted/blank value (blank strings are scrubbed to
+absent at load for `remediation`/`finding_headline`/`finding_detail`/`effort` and the three
+severity bounds - REF section 2).
+
+| Field | Audience | Absent / blank | REF |
+|---|---|---|---|
+| `id` | CLIENT-ARTIFACT (cited in every artifact) + ENGINE (primary key; prefixes change behavior) | hard load error; file skipped | 3.1 |
+| `title` | CLIENT-ARTIFACT + CLIENT-REPO (emit header; directive of last resort) | parse failure (required) | 3.2 |
+| `enforcement` | ENGINE + OPERATOR (placement string) | required; unknown value drops the whole FILE on the lenient path | 3.3 |
+| `domain` (in-file) | NOBODY (folder-derived domain wins; mismatch only warns) | folder decides regardless | 3.4 |
+| `extra_domains` | ENGINE (proposal match only) | empty; folder domain alone matches | 3.5 |
+| `kind` | ENGINE (never reaches any client artifact) | build gate `rules_missing_kind` | 3.6 |
+| `inspectable` | ENGINE (scan-set narrowing only) | build gate; runtime fallback `true` | 3.6a |
+| `default` | ENGINE (gate on `[decision].default`) | `false`: architect must choose | 3.7 |
+| `qualifies` (-> `summary`) | OPERATOR + CLIENT-REPO/MODEL as FALLBACK directive when no option resolves | summary falls back to `[decision].why`, then `title` | 3.14 |
+| `verification` | ENGINE (arming) + OPERATOR (badge string; never PDF/xlsx) | defaults `draft` = disarmed everywhere = build gate | 3.8 |
+| `[[sources]]` `url`/`title` | CLIENT-ARTIFACT (citations VERBATIM) ; `linter` ENGINE (tool routing) | citation degrades; an uncited AI-tier row routes held/informational | 3.9 |
+| `[[sources]].relevance` | NOBODY (author/reviewer provenance; must never be concatenated into a deliverable) | - | 3.9 |
+| `[verified]` | NOBODY (human provenance for the staleness pass) | none | 3.10 |
+| `opt_in_only` | ENGINE (strips recommended + auto-recommended) | `false` | 3.11 |
+| `layer3_only` | ENGINE (preview-pass exclusion) | `false` | 3.12 |
+| `[[stack_exception]]` | ENGINE (finding suppression; `note` is internal-only) | none; unknown `framework` silently never fires | 3.13 |
+| `max_severity` | ENGINE (export clamp) | no ceiling | 3.15 |
+| `min_severity` | ENGINE (export raise; accusing + located rows only) | no floor | 3.16 |
+| `deviation_ceiling` | ENGINE (Deviation rows only) | pipeline default `"medium"` | 3.17 |
+| `[decision].question` | OPERATOR only | nothing shown | 4.1 |
+| `[decision].why` | OPERATOR + summary fallback #2 (can become the emitted directive) | - | 4.2 |
+| `[decision].default` | ENGINE | dangling id: loads fine, resolves nothing, remediation gate SKIPS the rule (gotcha 11) | 4.3 |
+| `layer`, `[[emits]]` | NOBODY (declared, parsed, discarded). Never add `tag` (deleted; build failure) | - | 3.18/3.19 |
+| option `id` | ENGINE (identity) + CLIENT-ARTIFACT as data (the flattened kind payloads: `convention_option_id`, `observed_options[].option_id` in `findings.json`/xlsx; `evaluated_option_id` itself stays engine-side) | required | 5.1, 6 |
+| option `label` | CLIENT-ARTIFACT VERBATIM (kind payloads, "consistently follows" sentence, snippet fallback) + MODEL | required | 5.2 |
+| option `directive` | MODEL (scan + alternatives prompts) + CLIENT-REPO (emitted convention text). NEVER the report artifacts | empty string; summary/title fall in | 5.3 |
+| option `why` | MODEL + OPERATOR + CLIENT-ARTIFACT when a `violates` option is decided (interpolated into the defect detail) | empty string | 5.4 |
+| option `remediation` | CLIENT-ARTIFACT (the Fix line, all three artifacts) | no Fix; since C5-8 an open action row with no fix on a recognized rule is DEMOTED to `held` | 5.5 |
+| `finding_headline`/`finding_detail` | CLIENT-ARTIFACT (floor-finding rewrite) | pair-or-nothing: a half-authored pair renders NONE of it | 5.6 |
+| option `effort` | CLIENT-ARTIFACT (hours label) + ENGINE (`do_now` routing reads exactly `"low"`) | "not yet estimated"; never demotes the row | 5.7 |
+| option `escalation` | MODEL (agent grounding, `## ESCALATION CONDITIONS`) + OPERATOR (review) | no escalation; absent `severity` = `hard-pause` | 5.8 |
+| option `violates` | ENGINE (alternatives chokepoint; guaranteed high-severity Defect when decided) | `false` | 5.9 |
+
+---
+
+## The client-facing writing standard
+
+The engine does not quote your text in isolation; it builds sentences around it. Two frames
+are load-bearing and are quoted here from the source so the test is checkable, not vibes
+(line numbers drift; anchor on the function names):
+
+- `conventions_observed_findings` (`ai_audit.rs`): *"The codebase consistently follows
+  "{label}" for {rule_id} - zero violations were observed this scan. ..."*
+- `apply_alternative_decision` (`ai_audit.rs`): *"This codebase was judged to follow
+  "{label}" for {rule_id} - {why}. This option is the absence/degenerate form of the rule's
+  own requirement ..."*
+
+### `label`: the sentence tests
+
+Every label is a noun phrase naming a STATE THE CLIENT'S CODE IS IN. Three tests, in order:
+
+- **LABEL-1 (the frame test, primary).** A non-`violates` option's label must complete
+  **"The codebase consistently follows ___"** and remain a true, client-voiced statement
+  about their code. This is not a heuristic - it is the literal sentence the engine ships.
+- **LABEL-2 (the violates frame).** A `violates` option's label must complete
+  **"This codebase was judged to follow ___"** - it names the bad state itself, never the
+  act of flagging it. "User input reaches the sink unescaped" passes; "Flag unescaped input
+  as critical" fails.
+- **LABEL-3 (the decidability test).** A scan must be able to DECIDE the option by looking
+  at the repository alone. If two labels differ only in what Camerata would do (scope,
+  severity, report placement), nothing in the client's code distinguishes them, the
+  alternatives pass's "which option does this repo follow?" question has no groundable
+  answer, and whichever the model picks ships as the client's "convention". That is the
+  rule-shape defect, not a wording defect - see the next section.
+
+Advisory lexical screen (a reviewer aid, not a gate): a label containing `needs_review`,
+`finding`, `severity`, `opt-in`, `pre-checked`, `report`, `scan`, or verb-form `flag` is
+almost certainly in the tool's voice. It IS only advisory: `ci-cd/proc-feature-flags-1.toml`'s
+label `"Flag defaults to on"` is a correct client-code state (noun "flag"), which is exactly
+why the sentence tests gate and the word list does not.
+
+Right/wrong, from the shipped corpus:
+
+| Right (passes LABEL-1/2) | Wrong (tool voice) |
+|---|---|
+| `"A single shared repository error type"` (`rust/rust-domain-6-shared-repository-error.toml`) | `"Flag getSession() calls in server-execution-context files; ambiguous paths get needs_review"` (`supabase/auth/supabase-auth-getsession-server-1.toml`) |
+| `"Parameterized queries / a query builder - external values are always bound, never concatenated"` (`universal/`) | `"Flag true-predicate policies targeting anon/public; high for writes, medium+needs_review for reads"` (`supabase/rls/supabase-rls-permissive-true-1.toml`) |
+| `"organize packages by domain/business-capability, not by generic layer"` (`go/`) | `"Recommend the scalar-subselect wrap for auth.*() calls in policies, opt-in only"` (`supabase/rls/supabase-rls-initplan-1.toml`) |
+
+On a `decision`-kind rule, the labels should additionally read as PARALLEL ANSWERS to
+`[decision].question` - the question asks what the client's code does; each label is one
+possible answer.
+
+Scope note: the two frames render only for rules that enter the alternatives pass (multi-
+option, non-CI-tier, non-`ORCH-/SPIRIT-/PROC-`, non-`defect`-kind). Labels on every other
+rule still reach the proposal UI and prompts, so the tests apply to ALL labels; the frames
+are just where a violation becomes a client-visible false statement.
+
+### `why`: two voices on one field
+
+- On a NON-violates option, `why` is read by the model and the operator only: state why this
+  alternative is legitimate ("A legitimate choice when...", "The natural fit because...").
+- On a `violates` option, `why` is CLIENT-ARTIFACT: `apply_alternative_decision` interpolates
+  it verbatim into the defect finding's detail, directly after the label. It must open with
+  the literal token `Rejected:` (build gate, section 10.4 of the reference) and the sentence
+  AFTER the token must be client-readable fault prose: the concrete failure mode, in terms of
+  their system's behavior, no Camerata vocabulary. Known wart: the `Rejected:` token itself
+  currently ships inside that client sentence; write the clause so it survives that framing.
+
+### `remediation`: the Fix line
+
+2 to 4 imperative, client-facing sentences: what to change, WHERE (use `<path>`/`<file>` and
+`captures`-driven `<token>` placeholders - lowercase ASCII/digits/hyphens only, anything else
+renders verbatim), and how to VERIFY the fix is closed. It is the only source of the Fix line;
+`directive` is never a fallback (fail-safe is omitting the block, not leaking the recipe).
+Wrongness test: a remediation addressed to Camerata ("re-run the scan", "mark as reviewed")
+instead of to the client's engineer is wrong; so is one with no verification step. Remember
+the absence cost: on a recognized rule, an open action row with no fix from any source demotes
+to `held` - an unauthored remediation can silently empty the action queue.
+
+### `finding_headline` / `finding_detail`: the floor rewrite
+
+Client-facing replacement for a deterministic floor finding's internal enforcement prose.
+Author BOTH or neither (a half pair renders nothing). `finding_detail` convention: one
+plain-language sentence a non-technical founder understands first, then 1-2 sentences of
+what/where/impact. Same placeholder machinery as `remediation`.
+
+### `title`, `[[sources]].title`, and the ids
+
+- `title` reaches every artifact AND is the directive of last resort (no resolvable option,
+  no summary): one sentence stating the required state of the code, client voice, imperative
+  enough to survive being read as a directive in `CONVENTIONS.md`.
+- `[[sources]].title` is cited VERBATIM in the client citation block: it must be the real,
+  checkable title of the external source, optionally with a clause on what it establishes -
+  never an internal note (that is `relevance`, which reaches nobody).
+- Rule `id` and option `id` both appear in client artifacts (ids in citations/columns; option
+  ids as data fields in `findings.json`). Option ids are lowercase-kebab noun phrases naming
+  the code state (`"one-shared-repository-error"`), subject to LABEL-3 like the label they
+  identify - `"flag-getsession-in-server-paths"` is tool voice in id form. Both are FOREVER;
+  wrongness includes any rename, and any rule-id prefix chosen without checking the
+  identity-driven behaviors (`SEC-`/`ARCH-` floor injection, `ARCH-OBSERVABILITY-` severity
+  cap + informational routing, `ORCH-/SPIRIT-/PROC-` alternatives exclusion - REF 3.1).
+
+---
+
+## Options describe the client's code, never Camerata
+
+**The invariant, first-class: every `[[option]]` must describe a state the CLIENT'S side
+could be in - their code, or for process/agentic rules their adopted working practice. No
+option may describe something CAMERATA does: a detector scope, a report placement, a severity
+policy. If no option survives that test, the rule is not a `decision`; it is a defect rule
+with a detector-tuning knob wearing a decision's clothes.**
+
+(The "working practice" half matters: an escalation option like "Escalate before X" describes
+the project's own adopted process - the client's side - and is legitimate. "Flag X at high
+severity" describes Camerata's report and never is.)
+
+Why this is structural and not stylistic, three ways:
+
+1. **The alternatives pass asks "which option does this repo follow?"** An option like
+   `"Flag every getSession() call ... without path scoping"` is not an answer a repository
+   can give: no file in the client's tree distinguishes it from the scoped variant. The
+   model's "decision" between them is ungroundable noise (LABEL-3).
+2. **Whatever is decided ships as the client's convention.** The decided option's label and
+   id land verbatim in `ConventionObserved`/`Deviation` payloads and the "consistently
+   follows" sentence. A Camerata-policy option therefore gets reported as the CLIENT's
+   engineering practice - the exact shipped defect.
+3. **Every Camerata-behavior statement already has a dedicated field.** Detector scope and
+   FP carve-outs -> `qualifies` (and the detection recipe -> `directive`); report placement
+   -> `opt_in_only`; severity policy -> `min_severity`/`max_severity`/`deviation_ceiling`;
+   "run it or not" -> `inspectable`/`layer3_only`. An option is never the place.
+
+The two shipped counterexamples, both `kind = "decision"`, both already pinned on the W14
+advisory roster (`DECISION_KIND_RULES_WITH_REJECTED_PROSE`,
+`crates/rules/tests/w14_corpus_schema_gates.rs`), whose own comments name this sub-shape
+("the options describe DETECTOR SCOPE ... not the scanned repo's own behaviour"):
+
+- `SUPABASE-AUTH-GETSESSION-SERVER-1`: options "flag it narrowly" vs "flag it broadly".
+  Neither is a state of the client's code; there is no decision for a client to make. The
+  honest shape is `kind = "defect"`, one correct option ("Server code establishes identity
+  via getClaims()/getUser()"), one `violates = true` option ("Server code trusts
+  getSession() for identity"), with the path-scoping/needs_review policy in `qualifies`.
+- `SUPABASE-RLS-INITPLAN-1`: options "recommend the wrap, opt-in only" vs "report it as a
+  standard finding". Both describe Camerata's report. The code states are "policies wrap
+  auth.*() in a scalar subselect" vs "policies call auth.*() bare"; opt-in placement is
+  already carried by the rule's own `opt_in_only = true`.
+
+**Corollary for `kind`:** strip the Camerata-voice options and look at what remains. Two or
+more genuine code states of equal weight -> `decision`. One correct state plus justified
+exceptions -> `default_with_exceptions`. Only one acceptable state -> `defect`. Equal states
+plus a named fault under all of them -> `decision_with_floor`.
+
+**Do not drive-by fix the two pinned rules.** They sit on the owner's A5.7 reclassification
+hold, the roster test fails on silent shrinkage, and re-shaping them changes option ids that
+projects may have persisted. Author no NEW rule in this shape; route the existing two through
+the A5.7 ruling.
+
+---
+
+## Model- and operator-facing fields: the remaining standards
+
+- **`directive` has TWO audiences, and the second is the client's own repo.** It is the
+  detection/enforcement recipe in the scan and alternatives prompts - tool voice is correct
+  THERE - but the selected option's directive is also emitted verbatim under
+  `### {id} - {title}` into the client's `CONVENTIONS.md`/`AGENTS.md` as a convention the
+  project follows. Write it as the behavioral commitment an engineer or agent working in
+  that repo can follow ("Establish server-side identity via getClaims() or getUser(); never
+  trust getSession() in a server execution path"), with WHERE-to-look specifics as needed.
+  Scanner mechanics that mean nothing to the client's agent - severity assignments,
+  `needs_review` routing, canned finding sentences - belong in `qualifies` or the severity
+  bounds, not here. (Several `supabase/` directives currently embed full finding templates;
+  that is the same voice defect one field over, and the corpus audit covers it.)
+- **`qualifies` must survive two readings:** the operator's "when does this rule apply"
+  summary, and - when no option ever resolves - the emitted/diffed fallback DIRECTIVE. State
+  scope, carve-outs, and enforcement honesty ("coverage is grounding/advisory; Camerata
+  ships no mechanical check") in prose that still works if a client's agent reads it as the
+  rule's text. Always at RULE level; nested in `[[sources]]` it is discarded and now fails
+  the build (REF 3.9).
+- **`[decision].question`** is asked OF the client's code, TO the architect: "How does the
+  API deduplicate retried mutations?" - and the options must read as its answers. A question
+  about Camerata ("...and is this ever pre-checked automatically?") is the option-shape
+  defect surfacing one field earlier.
+- **`escalation.condition`** grounds the governed agent: write an observable predicate over
+  the change in flight ("the change would modify or delete an existing test assertion"),
+  not a value judgment ("the change is risky"). The agent must be able to self-test it; the
+  server resolves `severity` authoritatively, so the condition carries no severity prose.
+
+---
+
+## Field interactions an author must respect
+
+Stated here as authoring rules; mechanics and citations in the reference.
+
+1. **`kind` x `violates`.** No `violates = true` option on a `decision`-kind rule (build
+   gate). A `why` opening `Rejected:` requires `violates = true` on any kind that permits
+   the flag (build gate); on a `decision`-kind rule the same prose is an advisory signal
+   that the KIND is wrong, pinned to a roster. Converse convention: every `violates` option's
+   `why` opens with `Rejected:`.
+2. **Severity bounds order.** `min_severity <= max_severity` and
+   `deviation_ceiling <= max_severity`, both build-gated; exact vocabulary
+   `critical|high|medium|low|info` (a typo is NOT a no-op - gotcha 1 - the gates catch it).
+   `min_severity = "low"|"info"` is inert; if you meant "cap at low", the field is
+   `max_severity`. `deviation_ceiling` is INERT on a `defect`-kind rule (no Deviation rows
+   exist to clamp). If the rule's prose names a severity, transcribe it: "at least X" ->
+   `min_severity`, "never more than X" -> `max_severity`.
+3. **`inspectable = false` is emit-only, totally.** The rule still emits to the client repo
+   and still proposes/arms in the UI, but it has NO scan surface at all - no ledger entry,
+   not in "verified clean", not in "rules checked", not even in "rules not run". Never set
+   it `false` to quiet a noisy rule; that is what severity bounds and `opt_in_only` are for.
+4. **`opt_in_only` x `default`.** `opt_in_only = true` means no unattended scan ever runs
+   the rule; it pairs naturally with `default = false` (architect consciously chooses), and
+   `default = false` on a `default_with_exceptions` rule is legitimate, NOT a contradiction
+   (gotcha 2's retraction). But `default = false` costs real output: no Fix line, no floor
+   text, no effort band, no escalation until a project persists a `chosen_option`.
+5. **`default = true` obligations.** `[decision].default` must match an `[[option]].id`
+   character-for-character (a dangling id is UNGATED and silently degrades everything that
+   resolves through the default - gotcha 11), and that option must carry `remediation`
+   (build gate). CI-tier options with `remediation` must also carry `effort`, value exactly
+   `low|medium|high` (presence is gated, the VALUE is not - gotcha 12).
+6. **`verification` must arm.** `grounded`/`verified`/`policy` only (build gate); `grounded`
+   requires at least one real external `[[sources]]` URL, and `policy` is the honest label
+   when there is none. Omitting the field is the A7 trap (defaults `draft`, disarmed
+   everywhere).
+7. **Per-source notes go in `relevance`,** rule applicability in rule-level `qualifies`;
+   `qualifies` inside `[[sources]]` fails the build.
+8. **New folder/stack = wiring, not just TOML:** stack detection, `domains_for_stack`, and
+   `domain_to_glob`, plus a proposed-rules test - or every rule in the pack is orphaned.
 
 ---
 
@@ -248,6 +555,11 @@ specifically "a human decides."
 3. **If it is a floor rule (`SEC-`/`ARCH-`):** it MUST have a real layer-1 detector, and confirm it is
    injected via `enforced_gate_rules()` / `governed_role`.
 4. **Options:** stable ids; if `default = true`, the `[decision].default` points at a real option id.
+4b. **Every option passes the sentence tests.** Non-violates: "The codebase consistently
+   follows ___". Violates: "This codebase was judged to follow ___". And LABEL-3: a scan of
+   the repo alone can decide the option. An option describing what CAMERATA does (scope,
+   placement, severity) is a rule-shape defect - see "Options describe the client's code,
+   never Camerata". Check the voice of every client-facing field against the audience table.
 5. **Honesty in `qualifies`:** if Camerata does NOT ship the mechanical check for this rule, say that
    the coverage is grounding/advisory (don't imply enforcement that isn't there). See the test-tamper
    rule's `qualifies` for the model.
