@@ -326,11 +326,34 @@ are just where a violation becomes a client-visible false statement.
 - On a NON-violates option, `why` is read by the model and the operator only: state why this
   alternative is legitimate ("A legitimate choice when...", "The natural fit because...").
 - On a `violates` option, `why` is CLIENT-ARTIFACT: `apply_alternative_decision` interpolates
-  it verbatim into the defect finding's detail, directly after the label. It must open with
-  the literal token `Rejected:` (build gate, section 10.4 of the reference) and the sentence
-  AFTER the token must be client-readable fault prose: the concrete failure mode, in terms of
-  their system's behavior, no Camerata vocabulary. Known wart: the `Rejected:` token itself
-  currently ships inside that client sentence; write the clause so it survives that framing.
+  it verbatim into the defect finding's detail, directly after the label. **It must be
+  client-readable FAULT-FIRST prose**: open on the concrete failure mode, in terms of their
+  system's behaviour, with no Camerata vocabulary. The commonest defect in this field is
+  opening on the upside ("Simpler to code, but…", "Works but…", "Appropriate only for…"),
+  which is the correct voice for a NON-violates `why` and produces, here, a client's
+  high-severity security finding whose detail opens by calling the state *appropriate*.
+
+  **Correction, 2026-10-19.** An earlier version of this bullet said the `why` "must open with
+  the literal token `Rejected:` (build gate)". **That is wrong in both halves and the error was
+  mine, not the corpus's.** `RULES_REFERENCE.md` §10.4 is explicit: the gate
+  (`options_with_rejected_prose_but_no_violates_flag`) checks ONE direction only — `Rejected:`
+  prose implies the flag. The converse, a flagged option whose `why` lacks the token, is
+  **not** gated and never has been. This guide's own field-interaction §1 states it correctly;
+  only this bullet was wrong, and it was wrong in the section an author actually reads for the
+  field.
+
+  The measured corpus position, which is why this matters: **71 of 377 `violates` options open
+  with the token, 18%.** It is not a corpus convention at all — it is one authoring lineage's
+  habit. `supabase` is 32/32; `rust` 0/48, `csharp` 0/38, `python` 0/32, `go` 0/30, `java`
+  0/26, `agentic` 0/21 and `ruby` 0/18 are all zero. An author trusting the retracted sentence
+  would have concluded that 82% of the corpus violates a build gate, and a bulk prefix pass
+  would have committed 306 more options to a token this guide elsewhere calls a wart that
+  corrupts the client sentence.
+
+  **So: `Rejected:` is OPTIONAL. Fault-first prose is MANDATORY.** The token is one way to get
+  fault-first and not the only way; where it is already present, leave it. Whether to keep,
+  strip, or gate it corpus-wide is an open decision recorded for the owner — do not bulk-add
+  it, and do not treat its absence as a finding.
 
 ### `remediation`: the Fix line
 
