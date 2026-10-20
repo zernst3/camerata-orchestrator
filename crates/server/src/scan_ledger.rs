@@ -339,6 +339,9 @@ pub struct ScanLedger {
     /// What this scan was actually FED. See [`ScanInputFacts`].
     #[serde(default)]
     input: ScanInputFacts,
+    /// Whether the sealed rows' paths are really paths. See [`PathHygiene`].
+    #[serde(default)]
+    path_hygiene: PathHygiene,
 }
 
 /// The facts about a scan's INPUT, recorded so the integrity gate can judge them.
@@ -397,6 +400,123 @@ pub struct ScanInputFacts {
     pub audit_model: Option<String>,
 }
 
+/// W21 — whether every row's `path` is actually a repository-relative FILE PATH.
+///
+/// # The two shapes this counts, both measured in a shipped export
+///
+/// On the clean 2026-10-18 hearth export, 42 of 237 rows carried something other than a path
+/// in the field a client reads as one:
+///
+/// - **32 absolute paths**, every one from the ESLint preview tier, of the form
+///   `/Users/<auditor>/Documents/Repos/.../app/admin/page.tsx`. That discloses the auditor's
+///   username and directory habits, and it is useless to the client, who cannot open a path
+///   rooted on a machine they have no access to.
+/// - **10 prose paths**, where an unparseable evidence citation put the whole sentence in the
+///   field: `"app/api/bookings/route.ts:15-39 — booking insert, payment insert, and slot
+///   update execute as three separate awaits with no transaction boundary"`, 180 characters
+///   rendered as a file path in the PDF and the workbook.
+///
+/// Both sources are fixed. This counts what reaches the SEALED row set anyway, because a
+/// future tier can reintroduce either and neither source fix can see that happen.
+///
+/// # Why it is computed at the seal point
+///
+/// [`crate::onboard::ScanReport::seal`] is the documented moment the row set becomes final —
+/// every row-adding pass has run and no exporter can mutate it afterwards. That is the only
+/// place where "every row" is a complete and stable statement, and it is upstream of all
+/// three exporters, so one audit covers the PDF, the workbook and the JSON rather than
+/// needing a check per renderer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathHygiene {
+    /// Rows examined.
+    #[serde(default)]
+    pub rows_total: usize,
+    /// Rows whose `path` is absolute — a POSIX leading `/` or a Windows `C:\` / `C:/` drive
+    /// prefix. Always wrong in an artifact: the client's checkout is somewhere else.
+    #[serde(default)]
+    pub absolute: usize,
+    /// Rows whose `path` contains a backslash separator. Wrong even on Windows, because the
+    /// artifacts and the client's own tooling both address files with forward slashes.
+    #[serde(default)]
+    pub backslash: usize,
+    /// Rows whose `path` is prose rather than a path: it carries an em/en-dash note
+    /// separator, joins several locations with `, `, or exceeds any plausible path length.
+    #[serde(default)]
+    pub prose: usize,
+    /// One offending value, truncated, so a failure names something instead of only counting.
+    /// A gate that reports "7 bad paths" sends somebody grepping; one that quotes the worst
+    /// row sends them to the right file.
+    #[serde(default)]
+    pub worst_example: Option<String>,
+    /// Distinct rows failing at least one axis. Tracked rather than derived, because the
+    /// three counts overlap unpredictably: 32 absolute plus 10 prose is 42 bad rows when the
+    /// sets are disjoint and 32 when prose is a subset, and a max() or a sum would be wrong
+    /// in opposite directions.
+    #[serde(default)]
+    pub offending_rows: usize,
+}
+
+impl PathHygiene {
+    /// Classify one row's `path`. Returns `(absolute, backslash, prose)`.
+    ///
+    /// The prose signals are deliberately narrow and drawn from the measured defect rather
+    /// than from what prose could look like in principle. A real repository path may contain
+    /// spaces (the hearth fixture lives under `Camerata tests/`), so spaces alone prove
+    /// nothing; `" - "` is excluded too, despite the citation parser splitting on it, because
+    /// a hyphen with spaces is plausible enough in a path that flagging it would cry wolf.
+    /// What a path never contains is an em-dash note separator, a `, ` joining two locations,
+    /// or 200 characters.
+    pub fn classify(path: &str) -> (bool, bool, bool) {
+        let bytes = path.as_bytes();
+        let absolute = path.starts_with('/')
+            || (bytes.len() > 2
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && (bytes[2] == b'\\' || bytes[2] == b'/'));
+        let backslash = path.contains('\\');
+        let prose =
+            path.contains(" — ") || path.contains(" – ") || path.contains(", ") || path.len() > 200;
+        (absolute, backslash, prose)
+    }
+
+    /// `true` when nothing is wrong.
+    pub fn is_clean(&self) -> bool {
+        self.absolute == 0 && self.backslash == 0 && self.prose == 0
+    }
+
+    /// Audit a whole row set. `paths` is every sealed row's `path`.
+    pub fn audit<'a>(paths: impl Iterator<Item = &'a str>) -> Self {
+        let mut h = Self::default();
+        for path in paths {
+            h.rows_total += 1;
+            if path.is_empty() {
+                // An intentionally unlocated row (W21: an unparseable citation now yields an
+                // empty path rather than prose). Absence is correct here, not a defect.
+                continue;
+            }
+            let (absolute, backslash, prose) = Self::classify(path);
+            if absolute {
+                h.absolute += 1;
+            }
+            if backslash {
+                h.backslash += 1;
+            }
+            if prose {
+                h.prose += 1;
+            }
+            if absolute || backslash || prose {
+                h.offending_rows += 1;
+                // Keep the LONGEST offender: prose paths are the hardest to recognise from a
+                // count alone, and they are the long ones.
+                if h.worst_example.as_ref().is_none_or(|w| w.len() < path.len()) {
+                    h.worst_example = Some(path.chars().take(160).collect());
+                }
+            }
+        }
+        h
+    }
+}
+
 impl ScanLedger {
     pub fn new() -> Self {
         Self::default()
@@ -420,6 +540,17 @@ impl ScanLedger {
     /// read cannot be shown to have read the right thing.
     pub fn input(&self) -> &ScanInputFacts {
         &self.input
+    }
+
+    /// Record the sealed row set's path hygiene. Called from
+    /// [`crate::onboard::ScanReport::seal`], the one point the row set is final.
+    pub fn record_path_hygiene(&mut self, hygiene: PathHygiene) {
+        self.path_hygiene = hygiene;
+    }
+
+    /// Whether the sealed rows' paths are really paths. See [`PathHygiene`].
+    pub fn path_hygiene(&self) -> &PathHygiene {
+        &self.path_hygiene
     }
 
     /// Queue the honest "config-gated, reviewed semantically instead" disclosure for

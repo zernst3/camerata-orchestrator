@@ -828,7 +828,16 @@ impl ScanReport {
     /// gate appended to a private clone INSIDE `build_report_json` while the xlsx/JSON siblings
     /// read the un-injected original) fails to compile instead of silently reintroducing the
     /// row-set divergence.
-    pub fn seal(self) -> SealedReport {
+    pub fn seal(mut self) -> SealedReport {
+        // W21: audit every row's `path` HERE, because this is the one moment "every row" is
+        // a complete and stable statement, and it is upstream of all three exporters — so
+        // one audit covers the PDF, the workbook and the JSON rather than needing a check
+        // per renderer. Recorded into the ledger so `camerata integrity-gate` can judge it
+        // from a ledger read off disk, days later and elsewhere.
+        let hygiene = crate::scan_ledger::PathHygiene::audit(
+            self.findings.iter().map(|f| f.path.as_str()),
+        );
+        self.ledger.record_path_hygiene(hygiene);
         SealedReport(self)
     }
 }

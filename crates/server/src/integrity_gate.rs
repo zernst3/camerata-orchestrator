@@ -303,6 +303,9 @@ pub struct IntegrityVerdict {
     /// 2026-10-16 self-ingestion survived five repos: the coverage block looked healthy and
     /// nothing on screen said the digest had tripled.
     pub input: crate::scan_ledger::ScanInputFacts,
+    /// W21 — whether the sealed rows' paths are really paths, echoed for the same reason as
+    /// [`Self::input`]: a PASS should state its own basis.
+    pub path_hygiene: crate::scan_ledger::PathHygiene,
 }
 
 /// One tier's coverage facts. See [`IntegrityVerdict::tier_summary`].
@@ -415,6 +418,44 @@ pub fn evaluate(ledger: &ScanLedger, opts: &IntegrityGateOptions) -> IntegrityVe
                      ran over nothing. Every rule is then vacuously 'clean', which is the one \
                      failure mode a coverage summary cannot distinguish from real health."
                 .to_string(),
+        });
+    }
+
+    // ── 1c. PATH hygiene of the sealed rows (W21). ───────────────────────────────────────
+    //
+    // Both known sources are fixed (the external-tool tier normalises to repo-relative; an
+    // unparseable evidence citation now yields an empty path instead of its own prose). This
+    // is the backstop: a future tier can reintroduce either shape, and neither source fix can
+    // observe that happening. Default (all zero) when nothing recorded it, which reads as
+    // clean — correct, because a report with no rows has no bad paths.
+    let hygiene = ledger.path_hygiene();
+    if !hygiene.is_clean() {
+        let mut parts: Vec<String> = Vec::new();
+        if hygiene.absolute > 0 {
+            parts.push(format!("{} absolute", hygiene.absolute));
+        }
+        if hygiene.backslash > 0 {
+            parts.push(format!("{} with backslash separators", hygiene.backslash));
+        }
+        if hygiene.prose > 0 {
+            parts.push(format!("{} carrying prose rather than a path", hygiene.prose));
+        }
+        failures.push(IntegrityFailure {
+            code: "path_hygiene".to_string(),
+            detail: format!(
+                "{} of {} sealed rows do not carry a repository-relative file path ({}){}. A \
+                 client cannot open an absolute path rooted on the auditor's machine, and an \
+                 absolute one additionally discloses the auditor's username and directory \
+                 layout. The 2026-10-18 hearth export shipped 42 such rows.",
+                hygiene.offending_rows,
+                hygiene.rows_total,
+                parts.join(", "),
+                hygiene
+                    .worst_example
+                    .as_deref()
+                    .map(|w| format!("; worst: `{w}`"))
+                    .unwrap_or_default(),
+            ),
         });
     }
 
@@ -565,6 +606,7 @@ pub fn evaluate(ledger: &ScanLedger, opts: &IntegrityGateOptions) -> IntegrityVe
         justified_skips,
         tier_summary,
         input: ledger.input().clone(),
+        path_hygiene: ledger.path_hygiene().clone(),
     }
 }
 
@@ -620,6 +662,15 @@ pub fn render(verdict: &IntegrityVerdict) -> String {
         "Camerata's own artifacts admitted",
         i.engine_artifacts_admitted,
         if i.engine_artifacts_admitted == 0 { "" } else { "   <-- the engine audited its own output" }
+    );
+    let h = &verdict.path_hygiene;
+    let _ = writeln!(
+        out,
+        "  {:<52} {} of {} rows{}",
+        "rows whose path is not a repo-relative path",
+        h.offending_rows,
+        h.rows_total,
+        if h.is_clean() { "" } else { "   <-- absolute, prose, or backslash" }
     );
     out.push('\n');
 
@@ -1112,6 +1163,83 @@ mod tests {
         let verdict = evaluate(&healthy_ledger(), &IntegrityGateOptions::default());
         assert!(verdict.passed(), "clean input must pass: {:?}", verdict.failures);
         assert_eq!(healthy_input().engine_artifacts_admitted, 0);
+    }
+
+    /// W21 — the backstop over the SEALED row set.
+    ///
+    /// Both known sources of a bad path are fixed, so this exists for the third one nobody
+    /// has written yet. The shapes are the two measured in the 2026-10-18 hearth export: 32
+    /// absolute paths from the ESLint preview tier disclosing the auditor's home directory,
+    /// and 10 rows where an unparseable evidence citation put a 180-character sentence in
+    /// the field a client reads as a file path.
+    #[test]
+    fn req_w21_absolute_and_prose_paths_in_the_sealed_rows_fail_the_gate() {
+        use crate::scan_ledger::PathHygiene;
+
+        let paths = vec![
+            // Clean, and the majority — so a failure here cannot be the gate refusing
+            // everything.
+            "app/api/checkout/route.ts",
+            "supabase/migrations/0003_bookings.sql",
+            // Intentionally unlocated. W21 made an unparseable citation yield an empty path;
+            // absence is correct and must NOT count against hygiene.
+            "",
+            // The real absolute shape.
+            "/Users/auditor/Documents/Repos/clients/acme/app/admin/page.tsx",
+            // The real prose shape.
+            "app/api/bookings/route.ts:15-39 — booking insert, payment insert, and slot \
+             update execute as three separate awaits with no transaction boundary",
+            // Windows separators.
+            "src\\handlers\\checkout.ts",
+        ];
+        let h = PathHygiene::audit(paths.iter().copied());
+        assert_eq!(h.rows_total, 6);
+        assert_eq!(h.absolute, 1, "one absolute path");
+        assert_eq!(h.prose, 1, "one prose path");
+        assert_eq!(h.backslash, 1, "one backslash path");
+        assert_eq!(h.offending_rows, 3, "three DISTINCT bad rows");
+        assert!(!h.is_clean());
+        assert!(
+            h.worst_example.as_deref().is_some_and(|w| w.contains("transaction boundary")),
+            "the worst example should be the prose one, the hardest to spot from a count: {:?}",
+            h.worst_example
+        );
+
+        let mut l = healthy_ledger();
+        l.record_path_hygiene(h);
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(!verdict.passed());
+        let f = verdict
+            .failures
+            .iter()
+            .find(|f| f.code == "path_hygiene")
+            .expect("expected a path_hygiene failure");
+        assert!(f.detail.contains("3 of 6"), "{}", f.detail);
+        assert!(f.detail.contains("worst:"), "must name an offender, not just count: {}", f.detail);
+    }
+
+    /// A repository path may legitimately contain spaces, and the prose signals must not
+    /// fire on one. The hearth fixture itself lives under `Camerata tests/`, so this is the
+    /// exact false positive that would have made the gate cry wolf on every real run.
+    #[test]
+    fn req_w21_path_hygiene_does_not_cry_wolf_on_ordinary_paths() {
+        use crate::scan_ledger::PathHygiene;
+        let h = PathHygiene::audit(
+            [
+                "app/listings/[id]/page.tsx",
+                "Camerata tests/hearth/app/admin/page.tsx",
+                "src/my-service/orders.rs",
+                "docs/decisions/2026-05-14-per-resource-permission-flags.md",
+                "a/very/deeply/nested/path/that/goes/on/for/quite/a/while/but/is/still/a/real/path/handler.ts",
+                "",
+            ]
+            .into_iter(),
+        );
+        assert!(h.is_clean(), "ordinary paths must pass: {h:?}");
+        assert_eq!(h.offending_rows, 0);
+
+        let verdict = evaluate(&healthy_ledger(), &IntegrityGateOptions::default());
+        assert!(verdict.passed(), "{:?}", verdict.failures);
     }
 
     #[test]
