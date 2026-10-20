@@ -339,32 +339,49 @@ pub(crate) enum Disposition {
 /// `tests::a_preview_finding_with_suppressed_baseline_status_is_never_baseline_accepted` for
 /// the test-time guard.
 pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Disposition {
-    match wire {
-        Some(d) => match d.state.as_str() {
-            "Confirmed" => Disposition::Confirmed,
-            "Ignored" => Disposition::Ignored,
-            "TechDebt" => {
-                if d.bucket == "Now" {
-                    Disposition::TechDebtNow
-                } else {
-                    Disposition::TechDebtLater
-                }
+    // W28: what the row's OWN STATUS implies, with no triage decision in play. Used both when
+    // there is no wire entry and when there is one this version cannot read — see below.
+    let from_status = || match finding.status.as_str() {
+        "suppressed-baseline" if !finding.preview => Disposition::BaselineAccepted,
+        "suppressed-inline" => Disposition::WaivedInline,
+        _ => Disposition::Unresolved,
+    };
+
+    let Some(d) = wire else {
+        return from_status();
+    };
+
+    match d.state.as_str() {
+        "Confirmed" => Disposition::Confirmed,
+        "Ignored" => Disposition::Ignored,
+        "TechDebt" => {
+            if d.bucket == "Now" {
+                Disposition::TechDebtNow
+            } else {
+                Disposition::TechDebtLater
             }
-            "FalsePositive" => {
-                debug_assert!(
-                    false,
-                    "FalsePositive must be partitioned out before classify() is called; see \
-                     build_report_json. Falling through to Unresolved rather than panicking."
-                );
-                Disposition::Unresolved
-            }
-            _ => Disposition::Unresolved,
-        },
-        None if finding.status == "suppressed-baseline" && !finding.preview => {
-            Disposition::BaselineAccepted
         }
-        None if finding.status == "suppressed-inline" => Disposition::WaivedInline,
-        None => Disposition::Unresolved,
+        "FalsePositive" => {
+            debug_assert!(
+                false,
+                "FalsePositive must be partitioned out before classify() is called; see \
+                 build_report_json. Falling through to the status rather than panicking."
+            );
+            from_status()
+        }
+        // W28 — an UNRECOGNISED state falls back to the status, not to `Unresolved`.
+        //
+        // This arm used to return `Unresolved`, which renders "Open (recommended: …)". That
+        // asserted a human judgment nobody made: an unrecognised state is a parse miss or a
+        // producer from a different version, never a decision to leave the row open. On a
+        // row whose own `status` reads `suppressed-baseline` it also made the export
+        // self-contradicting, and the 2026-10-16 sweep shipped 38 rows in exactly that shape.
+        //
+        // A RECOGNISED state still wins over the status, above: an auditor who confirmed or
+        // ignored a baseline-suppressed row made a real decision this session, and
+        // overriding the suppression is what a disposition is for. The fallback applies only
+        // where there is no decision to honour.
+        _ => from_status(),
     }
 }
 
@@ -6670,6 +6687,63 @@ mod tests {
     /// direct row of its own, and `ARCH-OBSERVABILITY-SILENT-FAILURE-1` likewise. Both were
     /// therefore eligible for "What's healthy" while their findings sat inside another row —
     /// the report telling a client their committed secret is a verified-clean rule.
+    /// W28 — a row's `status` and its `disposition` must not contradict each other.
+    ///
+    /// `classify` consults `finding.status` only in its `None`-wire arms. When a wire entry
+    /// EXISTS but carries a state this function does not recognise, the `_` arm returns
+    /// `Unresolved` — which renders as "Open (recommended: …)" — without ever looking at the
+    /// status that says the row is baseline-suppressed.
+    ///
+    /// An unrecognised state is not a triage decision; it is a parse miss or a producer from
+    /// a different version. Treating it as "the auditor left this open" asserts a human
+    /// judgment that nobody made, and it contradicts the row's own status in the same export.
+    /// The 2026-10-16 sweep shipped 38 rows in exactly this shape.
+    ///
+    /// A RECOGNISED state must still win: an auditor who explicitly confirmed or ignored a
+    /// baseline-suppressed row has made a real decision this session, and that is precisely
+    /// what a disposition is for.
+    #[test]
+    fn req_w28_an_unrecognised_disposition_state_falls_back_to_status_not_to_open() {
+        let mut suppressed = finding("SEC-1", "a.rs", 1, "high");
+        suppressed.status = "suppressed-baseline".to_string();
+
+        // No wire at all: already correct today, pinned so the fallback cannot regress.
+        assert_eq!(classify(&suppressed, None), Disposition::BaselineAccepted);
+
+        // A wire entry whose state this version does not know. Must NOT become Open.
+        let unknown = DispositionWire {
+            state: "SomeFutureState".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify(&suppressed, Some(&unknown)),
+            Disposition::BaselineAccepted,
+            "an unrecognised state is a parse miss, not a decision to leave the row open - \
+             and reporting it Open contradicts the row's own baseline-suppressed status"
+        );
+
+        // An EMPTY state is the same case and the likelier one in practice.
+        let empty = DispositionWire::default();
+        assert_eq!(classify(&suppressed, Some(&empty)), Disposition::BaselineAccepted);
+
+        // The converse, so the fix cannot swallow real triage: a RECOGNISED state still wins
+        // over the status, because that is an actual human judgment this session.
+        let confirmed = DispositionWire {
+            state: "Confirmed".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify(&suppressed, Some(&confirmed)),
+            Disposition::Confirmed,
+            "an explicit triage decision must still override a baseline suppression"
+        );
+
+        // And a row with no suppression and an unknown state is genuinely Unresolved - the
+        // fallback must not invent a disposition where the status offers none.
+        let plain = finding("SEC-2", "b.rs", 2, "low");
+        assert_eq!(classify(&plain, Some(&unknown)), Disposition::Unresolved);
+    }
+
     #[test]
     fn req_w23_a_rule_absorbed_into_another_rows_locations_is_never_verified_clean() {
         let mut carrier = finding("SEC-NO-VENDOR-TOKEN-1", ".env.production", 4, "critical");
