@@ -549,6 +549,30 @@ pub fn preview_tool_ids_for_rules<'r>(
 /// Severity normalized to the `Finding.severity` vocabulary (`high`/`medium`/
 /// `low`/`info`), from a tool's own severity string. Conservative default:
 /// `medium` (a preview is advisory; don't over- or under-state it).
+/// W24 — normalise a tool's raw level, then cap it by what that tool's severity MEANS.
+///
+/// `norm_severity` maps "error" to `high`. For Semgrep that is correct: it is a security
+/// scanner and its error level is a security judgement. For a STYLE LINTER it is not —
+/// ESLint and Clippy "error" means the project chose to fail its build on that lint, which
+/// is a strictness preference and says nothing about exploitability.
+///
+/// The 2026-10-18 hearth export shipped 31 ESLint preview rows at HIGH, outranking every
+/// planted security finding in the queue. The rules were `no-non-null-assertion`,
+/// `no-explicit-any`, `react-hooks/exhaustive-deps` and `no-console` — all real code-quality
+/// signals, none of them a HIGH, and all of them sitting above a live exposure.
+///
+/// Ruff and Semgrep are deliberately NOT capped. Semgrep is a security scanner outright, and
+/// Ruff carries the bandit-derived S-prefix family (S608 hardcoded SQL and friends), so
+/// neither is a pure style linter and a blanket cap would bury real security findings. The
+/// line is drawn on what the tool's severity is ABOUT, not on whether it is a "linter".
+fn capped_preview_severity(tool: ScanTool, raw: &str) -> String {
+    let normalised = norm_severity(raw);
+    match tool {
+        ScanTool::Eslint | ScanTool::Clippy if normalised == "high" => "medium".to_string(),
+        _ => normalised,
+    }
+}
+
 fn norm_severity(s: &str) -> String {
     match s.trim().to_ascii_lowercase().as_str() {
         "error" | "high" | "critical" | "blocker" => "high",
@@ -661,7 +685,7 @@ pub fn parse_sarif(repo: &str, tool: ScanTool, json: &str) -> anyhow::Result<Vec
                 &path,
                 line,
                 &rule_id,
-                &norm_severity(level),
+                level,
                 &message,
             ));
         }
@@ -768,7 +792,7 @@ pub fn parse_eslint_json(repo: &str, json: &str) -> anyhow::Result<(Vec<Finding>
                 path,
                 line,
                 rule_id,
-                &norm_severity(severity),
+                severity,
                 &message,
             ));
         }
@@ -870,7 +894,7 @@ pub fn parse_clippy_json(repo: &str, ndjson: &str) -> anyhow::Result<Vec<Finding
             &path,
             line_no,
             code,
-            &norm_severity(level),
+            level,
             &text,
         ));
     }
@@ -906,6 +930,12 @@ fn preview_finding(
     message: &str,
 ) -> Finding {
     let tool_name = tool.name();
+    // W24 — the ONE place a preview row's severity is decided, normalisation and tool cap
+    // together. It used to be `norm_severity` applied at each of the three parser call
+    // sites, which left no single point that knew both the raw level AND which tool produced
+    // it; the cap below needs both.
+    let severity = capped_preview_severity(tool, severity);
+    let severity = severity.as_str();
     let detail = if message.is_empty() {
         format!(
             "Found by {tool_name} during this scan ({rule_id}). This check has not yet been \
@@ -2251,9 +2281,15 @@ mod tests {
             .unwrap();
         assert_eq!(hook.rule_id, "react-hooks/rules-of-hooks");
         assert_eq!(hook.line, 5);
+        // W24 (2026-10-20): was `"high"`. This fixture is parsed as `ScanTool::Eslint`, so
+        // the style-linter cap applies - a SARIF "error" from eslint still means the project
+        // chose to fail its build on that lint, not that the finding is a security high. The
+        // same SARIF path carries Semgrep, which is NOT capped; see
+        // `capped_preview_severity` for why the line is drawn on what a tool's severity is
+        // about rather than on the file format it arrives in.
         assert_eq!(
-            hook.severity, "high",
-            "SARIF 'error' level normalizes to high"
+            hook.severity, "medium",
+            "an eslint SARIF 'error' is capped at medium like any other style-linter error"
         );
 
         // External-tool provenance on every variant — never our own deterministic tier,
@@ -2423,6 +2459,44 @@ mod tests {
     /// internal engineering phrasing like "NOT enforced until wired into CI" or raw gate
     /// jargon. The message-present and message-absent branches both get a client-readable
     /// rewrite.
+    /// W24 — a STYLE LINTER's severity is a project config choice, not a security verdict.
+    ///
+    /// `norm_severity` maps a tool's "error" to `high`. For Semgrep that is right: it is a
+    /// security scanner and its error level is a security judgement. For ESLint and Clippy it
+    /// is not — "error" there means the project chose to fail its build on that lint, which
+    /// says nothing about exploitability.
+    ///
+    /// The 2026-10-18 hearth export shipped 31 ESLint preview rows at HIGH, outranking every
+    /// planted security HIGH in the queue. The rules were `no-non-null-assertion`,
+    /// `no-explicit-any`, `react-hooks/exhaustive-deps` and `no-console`. Each is a real
+    /// code-quality signal and none is remotely a HIGH, and putting them above a genuine
+    /// exposure spends the reader's attention in the wrong order.
+    #[test]
+    fn req_w24_style_linter_errors_do_not_outrank_security_findings() {
+        let sev = |tool: ScanTool, raw: &str| {
+            preview_finding("me/api", tool, "a.ts", 1, "some-rule", raw, "msg").severity
+        };
+
+        // The two pure style linters cap at medium however strict the project's config is.
+        for tool in [ScanTool::Eslint, ScanTool::Clippy] {
+            assert_eq!(
+                sev(tool, "error"),
+                "medium",
+                "{tool:?} 'error' is the project's own strictness setting, not a security \
+                 verdict - it must not outrank a real exposure"
+            );
+            // Below the cap is untouched: a warning is still a warning.
+            assert_eq!(sev(tool, "warning"), "medium");
+            assert_eq!(sev(tool, "note"), "low");
+        }
+
+        // Semgrep IS a security scanner; its error level is a security judgement and keeps
+        // its mapping. Ruff likewise carries bandit-derived security rules (the S-prefix
+        // family, e.g. S608 hardcoded SQL), so it is not a pure style linter either.
+        assert_eq!(sev(ScanTool::Semgrep, "error"), "high");
+        assert_eq!(sev(ScanTool::Ruff, "error"), "high");
+    }
+
     #[test]
     fn preview_finding_detail_has_no_engineering_phrasing() {
         let no_message = preview_finding("me/api", ScanTool::Ruff, "a.py", 1, "S608", "medium", "");
@@ -3299,9 +3373,16 @@ mod tests {
         assert_eq!(eq.path, "/repo/app.js");
         assert_eq!(eq.line, 2);
         assert_eq!(eq.repo, "me/web");
+        // W24 (2026-10-20): was `"high"`, asserting that eslint severity 2 maps straight
+        // through. That mapping was the defect, not the contract. An eslint "error" is the
+        // scanned PROJECT's own strictness setting - it means they chose to fail their build
+        // on that lint - and reading it as a security severity put 31 style rows above every
+        // planted exposure on the 2026-10-18 hearth export. `capped_preview_severity` now
+        // caps the two pure style linters at medium; Semgrep and Ruff are untouched because
+        // their severities genuinely are security judgements.
         assert_eq!(
-            eq.severity, "high",
-            "eslint severity 2 (error) maps to high"
+            eq.severity, "medium",
+            "a style linter's 'error' is the project's strictness choice, capped at medium"
         );
         assert!(eq.preview);
         assert_eq!(eq.preview_tool.as_deref(), Some("eslint"));
