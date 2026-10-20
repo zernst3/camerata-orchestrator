@@ -1,5 +1,5 @@
 id = "CICD-SEMGREP-SECURITY-SCAN-1"
-title = "Run the Semgrep security suite (CI + scan preview)"
+title = "Run the Semgrep security suite in CI"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "mechanical"
@@ -15,6 +15,9 @@ opt_in_only = true
 # the scan preview and at layer-2 as well as in CI — NOT layer3-only.
 layer3_only = false
 verification = "grounded"
+qualifies = """
+How the engine tracks this: register Semgrep in the project's `.camerata/checks.toml` manifest as a deterministic check source so the engine composes its findings at the gate and in the agent loop rather than re-implementing the analysis. Because Community Edition is single-file and fast, it is the preferred tool for the in-loop / scan-preview path — it runs at scan time and at Camerata's Layer 2 as well as in CI, and its SARIF output folds into Camerata triage with stable rule ids. The paid Pro tier's cross-file engine and managed platform are a CI / platform-tier capability and are not run at the scan preview or in the agent loop.
+"""
 
 [[sources]]
 url = "https://semgrep.dev/"
@@ -41,7 +44,7 @@ why = "Semgrep is a mature, deterministic static-analysis engine. Camerata compo
 [[option]]
 id = "semgrep-community-edition"
 label = "Semgrep Community Edition (free, LGPL-2.1 OSS CLI)"
-directive = "Wire the free Semgrep Community Edition CLI into CI and make it available to the local scan preview. CE is licensed LGPL-2.1, runs on ANY repository including private/closed-source ones at no cost, and analyzes a single file at a time (no whole-program build), which keeps it fast enough to run at scan time, at layer-2, and in CI. Install the CLI (`pip install semgrep` or the official container/binary), pin a version, and run it against a Camerata-supplied config — typically `--config p/ci` or the curated community rule packs (the registry ships roughly 3,000 community rules across languages). Emit SARIF (`--sarif --output results.sarif`) so the findings fold into Camerata triage with stable rule ids, and fail the CI job on findings at or above the chosen severity. Because CE is single-file, prefer it for the in-loop / scan-preview path where speed matters; treat its findings as deterministic preview findings until the CI story wires the gate. Keep the rule selection and severity threshold pinned in the repo so the gate does not drift."
+directive = "Run the free Semgrep Community Edition CLI in CI. CE is licensed LGPL-2.1, runs on ANY repository including private/closed-source ones at no cost, and analyzes a single file at a time (no whole-program build), which keeps it fast. Install the CLI (`pip install semgrep` or the official container/binary), pin an exact version, and run it against a pinned config — typically `--config p/ci` or the curated community rule packs (the registry ships roughly 3,000 community rules across languages). Pin the rule selection and severity threshold in the repo so the gate does not drift, emit SARIF (`--sarif --output results.sarif`) for stable rule ids, and fail the CI job on findings at or above the chosen severity threshold."
 remediation = """
 Install the free Semgrep Community Edition CLI and wire it into CI (and the local scan preview, if applicable) to run its security rule set against the codebase on every relevant run. Verify by confirming a CI run produces Semgrep findings and that the tool completes within the pipeline's time budget.
 """
