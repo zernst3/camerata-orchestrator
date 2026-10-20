@@ -37,7 +37,7 @@ why = "An existing test is the one artifact in the diff the agent cannot be trus
 escalation = { condition = "the change would modify or delete an existing test or fixture (adding a brand-new test file, or pure-addition hunks, is always fine)", severity = "hard-pause" }
 
 [[option]]
-id = "allow-modifying-tests-within-the-same-change-whe"
+id = "allow-modifying-tests-within-the-same-change-when-justified"
 violates = true
 label = "Allow modifying tests within the same change when justified"
 directive = "the agent may modify or delete existing tests within the same change as the code change, on the strength of a written justification, without a separate human approval of the test edit itself"

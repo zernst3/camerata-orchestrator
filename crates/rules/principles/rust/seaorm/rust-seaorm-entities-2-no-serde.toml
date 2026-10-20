@@ -10,11 +10,11 @@ verification = "grounded"
 
 [decision]
 question = "What position does the project take on: No serde derives on the SeaORM Model (load-bearing)?"
-default = "no-serde-derives-on-the-seaorm-model-load-bearin"
+default = "no-serde-derives-on-the-seaorm-model-load-bearing"
 why = "The compiler then enforces the hexagonal boundary at compile time: code physically cannot JSON-encode a Model directly. Deriving serde on the Models removes that compile-time enforcement and lets code encode Models directly to JSON, which breaks the hexagonal boundary the rule is paying for. Allowing per-entity opt-in to serde derives moves the decision to the wrong level: whether a payload shape gets serialized is a per-endpoint DTO question, not a per-Model question, and the per-Model opt-in collapses those two decisions into one."
 
 [[option]]
-id = "no-serde-derives-on-the-seaorm-model-load-bearin"
+id = "no-serde-derives-on-the-seaorm-model-load-bearing"
 label = "No serde derives on the SeaORM Model (load-bearing)"
 directive = "Entity Models do not derive Serialize/Deserialize, which forces every API response through an explicit DTO plus mapper."
 remediation = """

@@ -23,11 +23,11 @@ title = "tokio::process::Command::kill_on_drop"
 
 [decision]
 question = "What position does the project take on: the app reaps every subprocess it spawns and cleans every temp artifact it writes?"
-default = "the-app-owns-the-lifecycle-of-its-subprocesses-a"
+default = "the-app-owns-its-subprocess-and-temp-artifact-lifecycle"
 why = "An app that spawns helper processes (scanners, linters, build tools, CLIs) and writes temporary scratch owns their lifecycle — the OS will not clean up for it. A child whose spawning future is dropped on timeout or cancel keeps running unless the spawn opted into kill-on-drop, so without an explicit disposition the default outcome is orphaned processes that accumulate across runs. Temporary files and directories that are not RAII-cleaned accumulate on disk for the same reason. Leaving subprocess and temp lifecycle implicit makes the failure invisible until processes pile up or the disk fills, and reclaiming them then needs manual intervention."
 
 [[option]]
-id = "the-app-owns-the-lifecycle-of-its-subprocesses-a"
+id = "the-app-owns-its-subprocess-and-temp-artifact-lifecycle"
 label = "The app owns the lifecycle of its subprocesses and temp artifacts — reaped and RAII-cleaned"
 directive = "Every spawned subprocess carries a kill-on-drop / kill-on-cancel disposition (Rust/tokio: `Command::kill_on_drop(true)`, or the stack equivalent) so a dropped, timed-out, or cancelled operation terminates the child instead of orphaning it. Children that outlive a single await, or the host process itself, are tracked and killed on shutdown. Every temporary file or directory uses RAII auto-cleanup (e.g. `tempfile`'s `TempDir`/`NamedTempFile`) or is explicitly removed when its operation ends. After a timeout or an app close, no spawned child survives and no scratch is left on disk."
 remediation = """

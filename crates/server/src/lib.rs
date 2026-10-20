@@ -16727,7 +16727,7 @@ mod tests {
                     .uri(format!("/api/projects/{}/rescan-alternatives", p.id))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-r"}]}"#,
+                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-repository-methods"}]}"#,
                     ))
                     .unwrap(),
             )
@@ -16763,7 +16763,7 @@ mod tests {
                     .uri(format!("/api/projects/{}/rescan-alternatives", p.id))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-r"}]}"#,
+                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-repository-methods"}]}"#,
                     ))
                     .unwrap(),
             )
@@ -16871,7 +16871,7 @@ mod tests {
                 "me/api",
                 vec![
                     ("TESTING-PYRAMID-1", "pyramid-many-unit-fewer-integration-few-e2e"),
-                    ("RUST-DOMAIN-7", "explicit-unitofwork-parameter-on-transactional-r"),
+                    ("RUST-DOMAIN-7", "explicit-unitofwork-parameter-on-transactional-repository-methods"),
                 ],
             ),
         );
@@ -16910,7 +16910,7 @@ mod tests {
         );
         assert_eq!(
             sel("RUST-DOMAIN-7"),
-            Some("explicit-unitofwork-parameter-on-transactional-r".to_string())
+            Some("explicit-unitofwork-parameter-on-transactional-repository-methods".to_string())
         );
     }
 
@@ -16936,7 +16936,7 @@ mod tests {
                 "me/api",
                 vec![
                     ("TESTING-PYRAMID-1", "pyramid-many-unit-fewer-integration-few-e2e"),
-                    ("RUST-DOMAIN-7", "explicit-unitofwork-parameter-on-transactional-r"),
+                    ("RUST-DOMAIN-7", "explicit-unitofwork-parameter-on-transactional-repository-methods"),
                 ],
             ),
         );

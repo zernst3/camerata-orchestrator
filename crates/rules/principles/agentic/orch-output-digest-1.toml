@@ -18,11 +18,11 @@ title = "Google SRE Book — Monitoring Distributed Systems (alert on symptoms, 
 
 [decision]
 question = "How should routines report their output?"
-default = "local-artifacts-a-single-consolidated-daily-dige"
+default = "local-artifacts-a-single-consolidated-daily-digest"
 why = "Signal-to-noise: one clean ranked digest is read; N direct pings get muted. A fail-safe (alert if the consolidator hasn't run in over N hours) catches silent failure of the digest itself. Per-routine direct notifications are noisier by construction, because each routine notifies on its own cadence and priority, and the human ends up either filtering manually or muting everything once the noise crosses the attention threshold. Batching everything with no prioritization preserves volume control but loses urgency, because critical items sit in the same queue as routine output and the routine output drowns the signal that needed to break through."
 
 [[option]]
-id = "local-artifacts-a-single-consolidated-daily-dige"
+id = "local-artifacts-a-single-consolidated-daily-digest"
 label = "local artifacts + a single consolidated daily digest"
 directive = "Autonomous routines produce local artifacts (commits, state files) and write to a shared inbox. A single daily consolidator ranks all routines' output by priority and sends one digest, rather than each routine pinging directly. Critical items break through this cadence and notify immediately."
 remediation = """

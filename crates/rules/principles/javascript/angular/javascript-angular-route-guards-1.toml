@@ -18,11 +18,11 @@ title = "Angular API — CanActivateFn"
 
 [decision]
 question = "What position does the project take on: Protected routes are guarded by canActivate guards, not checked in component ngOnInit?"
-default = "protected-routes-are-guarded-by-canactivate-guard"
+default = "protected-routes-are-guarded-by-canactivate-guards"
 why = "A canActivate route guard is evaluated before the route activates, making the authorization decision at the boundary. If the guard denies access, the component is never instantiated, and no setup work (subscriptions, state initialization, data fetching) occurs. If authorization is checked inside ngOnInit or a component method, the component is already loaded, its lifecycle is running, and the user might see a partial view before being redirected. This is an authorization bypass that is invisible: the component is in memory, rendering is underway, and only after initialization does the check run and redirect away. The correct pattern is to attach a guard to the route in the routing configuration, have the guard check permissions, and return true (allow) or false/UrlTree (deny). The component is never instantiated if the guard denies access. The rule is: all protected routes must have a canActivate guard; checking authorization inside a component is forbidden."
 
 [[option]]
-id = "protected-routes-are-guarded-by-canactivate-guard"
+id = "protected-routes-are-guarded-by-canactivate-guards"
 label = "Protected routes are guarded by canActivate guards, not checked in component ngOnInit"
 directive = "All routes that require authentication or authorization are protected by a canActivate guard attached to the route configuration in the routing module. The guard checks permissions and returns true (allow navigation) or false / UrlTree (deny and redirect). Components do not check authorization in ngOnInit or component methods; the guard is the sole authorization boundary. A component loaded via a route without a guard cannot assume the user is authenticated or has permission to view it."
 remediation = """

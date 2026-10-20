@@ -19,11 +19,11 @@ title = "RFC 9457 — Problem Details for HTTP APIs"
 
 [decision]
 question = "What position does the project take on: Error responses use a structured envelope with stable machine-readable codes?"
-default = "error-responses-use-a-structured-envelope-with-s"
+default = "error-responses-use-a-structured-envelope-with-stable-machine-readable-codes"
 why = "Stringly-typed error messages are a leading source of brittle client code because logic ends up doing substring matches on text that was meant for humans. Stable machine-readable codes let clients build reliable retry, fallback, and UX behavior without coupling to wording. Returning plain string error messages forces clients to pattern-match on text; one copy edit silently breaks every consumer that pattern-matched the old wording. Returning HTTP status codes only without a body envelope does not carry enough resolution to distinguish between three different validation failures that share the same status, so clients cannot react appropriately. Per-endpoint custom error shapes force clients to write per-endpoint parsing, and the surface area grows with every new endpoint, instead of shrinking to a single shape across the API."
 
 [[option]]
-id = "error-responses-use-a-structured-envelope-with-s"
+id = "error-responses-use-a-structured-envelope-with-stable-machine-readable-codes"
 label = "Error responses use a structured envelope with stable machine-readable codes"
 directive = "Every 4xx and 5xx response uses the same shape: a top-level error object containing a code (a stable identifier like INVALID_EMAIL or RATE_LIMITED), a message (a human-readable description), and an optional details object for field-level errors or context. Codes are documented and remain stable across releases; messages may evolve freely. Clients pattern-match on code, never on message. Enforced at the controller layer with a single error-rendering middleware that all handlers route through."
 remediation = """

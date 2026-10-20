@@ -14671,7 +14671,7 @@ mod export_invariants_gate {
             "ARCH-EXPLICIT-TX-1".to_string(),
             crate::ai_audit::RuleRecommendation {
                 rule_id: "ARCH-EXPLICIT-TX-1".to_string(),
-                recommended_option_id: "services-own-the-transaction-lifecycle-repositor"
+                recommended_option_id: "services-own-the-transaction-lifecycle-repositories-receive-the-handle"
                     .to_string(),
                 recommendation_reasoning: "the codebase already does it this way".to_string(),
                 hallucinated: false,

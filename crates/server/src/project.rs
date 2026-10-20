@@ -972,13 +972,13 @@ mod tests {
             .set_rule_chosen_option(
                 &a.id,
                 "RUST-DOMAIN-7",
-                "explicit-unitofwork-parameter-on-transactional-r",
+                "explicit-unitofwork-parameter-on-transactional-repository-methods",
             )
             .expect("project A exists");
         assert!(matched, "A's selection for this rule must be found and updated");
         assert_eq!(
             store.get(&a.id).unwrap().ruleset.selections[0].chosen_option.as_deref(),
-            Some("explicit-unitofwork-parameter-on-transactional-r")
+            Some("explicit-unitofwork-parameter-on-transactional-repository-methods")
         );
         // B must be untouched.
         assert!(store.get(&b.id).unwrap().ruleset.selections[0].chosen_option.is_none());

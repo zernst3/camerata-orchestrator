@@ -27,11 +27,11 @@ title = "Buschmann et al. — Pattern-Oriented Software Architecture, Volume 1: 
 
 [decision]
 question = "What position does the project take on: Strict layering — services orchestrate, repositories own data access?"
-default = "strict-layering-services-orchestrate-repositorie"
+default = "strict-layering-services-orchestrate-repositories-own-data-access"
 why = "Prevents business logic hiding inside the query layer; keeps each layer testable and swappable. Mixing layers and allowing DB access anywhere leaks business logic into the query layer, where it becomes harder to test in isolation and harder to surface during review, because reviewers naturally focus on the layer the change appears to belong to. This is the umbrella architectural principle; `arch-handler-no-db-1` (call-site AST check on handler bodies) and `arch-no-cross-boundary-imports-1` (import-graph AST check) are two narrower, mechanically-precise checks that each enforce one facet of it. The three-way split is deliberate, not redundant — see `docs/decisions/2026-06-19_ast_architectural_rule_tier.md`."
 
 [[option]]
-id = "strict-layering-services-orchestrate-repositorie"
+id = "strict-layering-services-orchestrate-repositories-own-data-access"
 label = "Strict layering — services orchestrate, repositories own data access"
 directive = "Controllers handle HTTP only; services hold framework-agnostic business logic; repositories own all DB query calls. Enforce the boundary with lint (block direct DB access outside the data layer), with the AST checks in `arch-handler-no-db-1` and `arch-no-cross-boundary-imports-1` as the concrete enforcement mechanisms. Exception: transaction flow control belongs in services."
 remediation = """

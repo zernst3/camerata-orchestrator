@@ -940,12 +940,12 @@ mod tests {
         assert!(p.ruleset.selections[0].chosen_option.is_none());
         let ok = p.set_rule_chosen_option(
             "RUST-DOMAIN-7",
-            "explicit-unitofwork-parameter-on-transactional-r",
+            "explicit-unitofwork-parameter-on-transactional-repository-methods",
         );
         assert!(ok, "a matching selection must be found and updated");
         assert_eq!(
             p.ruleset.selections[0].chosen_option.as_deref(),
-            Some("explicit-unitofwork-parameter-on-transactional-r")
+            Some("explicit-unitofwork-parameter-on-transactional-repository-methods")
         );
     }
 

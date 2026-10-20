@@ -10,11 +10,11 @@ verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Module-level doc comment citing the schema source?"
-default = "module-level-doc-comment-citing-the-schema-sourc"
+default = "module-level-doc-comment-citing-the-schema-source"
 why = "Makes drift detection a one-click trace: from the entity to the schema authority that defines it. Omitting the citation from the entity file forces drift checks to be reverse-engineered each time, since reviewers cannot tell at a glance which migration or schema doc defines the columns they are reading. Citing the source in a separate docs/ file or wiki page drifts from the entity over time: updates to one almost never propagate to the other, and the docs page eventually contradicts the code. Relying on git history to trace the schema origin works for shallow histories but breaks down after a few migrations and stops working entirely after squash merges, rebases, or migration consolidations rewrite the history that the trace would have followed."
 
 [[option]]
-id = "module-level-doc-comment-citing-the-schema-sourc"
+id = "module-level-doc-comment-citing-the-schema-source"
 label = "Module-level doc comment citing the schema source"
 directive = "Each entity file opens with a //! doc comment citing the source-of-truth schema location (e.g. the migration path or schema doc reference)."
 remediation = """

@@ -21,7 +21,7 @@ question = "What versioning scheme does the project's API adopt: a version in th
 why = "All four are real ways to evolve an API, and the right one follows from who consumes the API and how independently it must evolve, not from a presumed winner. A version in the URL path is the most discoverable scheme — the version is visible in a curl command, a router log, and a trace — and pairs naturally with strict additive evolution within a version, which lets client teams migrate on their own schedule; it is the natural fit for a public or multi-team API where versions must be obvious and long-lived. Header-based versioning keeps URLs clean and lets a resource keep one canonical address across versions, which suits content-type-driven APIs and clients that already negotiate via headers, in exchange for the version being less visible at a glance. In-place evolution with no version segment is the lightest scheme and the right fit when the server and its only client ship together (one team, one deployable), where a coordinated change costs nothing and a version segment would be pure ceremony. Content negotiation across multiple representations is the most expressive scheme and earns its weight where clients genuinely need to select among representations, at the cost of machinery most clients must implement correctly. Choose by how the API is consumed — public/multi-team and long-lived (favoring URL or header versioning), internal and co-deployed (favoring in-place evolution), or representation-driven (favoring content negotiation)."
 
 [[option]]
-id = "api-versions-live-in-the-url-prefix-changes-with"
+id = "api-versions-live-in-the-url-prefix-changes-within-a-version-are-additive-only"
 label = "API versions live in the URL prefix; changes within a version are additive only"
 directive = "Public endpoints carry an explicit version in the URL path: /v1/orgs, /v2/orgs, and so on. Within a published version, no field is renamed, removed, or has its type changed; only additive changes are allowed (new optional fields, new endpoints, looser validation). Breaking changes ship as a new major version; older versions remain available for a documented deprecation window before retirement."
 remediation = """
@@ -48,7 +48,7 @@ Add a version query parameter (for example ?version=2) that the endpoint reads t
 why = "Cheap to implement and debug: the version is visible in a browser address bar, a server access log, and a shared link without needing to inspect headers or restructure routes, and it can be added to an existing unversioned API without moving endpoints. The trade-offs: query parameters are easy for clients to omit or drop when following a link or building a request by hand (there's no path segment forcing the issue), they get mixed in with other query parameters used for filtering/pagination/sorting, and they don't compose as cleanly with HTTP caching keyed on the path. It suits internal or lower-traffic APIs more than a public API with many independent client teams."
 
 [[option]]
-id = "clients-pin-to-a-release-date-via-a-version-head"
+id = "clients-pin-to-a-release-date-via-a-version-header-date-pinned-versioning"
 label = "clients pin to a release date via a version header (date-pinned versioning)"
 directive = "Clients pin to a specific release date via a version header (Stripe's model: a Stripe-Version: 2024-06-20 header), and the API applies whatever behavior was current as of that date for that account/client. The server maintains a changelog of dated behavior changes and can apply per-request date-based shims to serve older-dated clients the older behavior on the same endpoints, without a version number ever appearing in the URL or route tree."
 remediation = """
@@ -57,7 +57,7 @@ Add a dated version header (for example Version: 2024-06-20) that the endpoint r
 why = "Avoids the discrete-major-version problem entirely: instead of clients jumping between a handful of published versions (v1, v2, v3), each client is pinned to the exact date it integrated, and small breaking changes ship continuously with no need to bundle them into a big-bang major version or maintain parallel route trees. New accounts default to the latest date, so the API's default behavior keeps moving forward without action. The cost is real: the server must carry a growing table of per-date behavioral differences and apply the right shim per request indefinitely (or until a deprecation/migration policy retires old dates), which is meaningfully more runtime bookkeeping than a small, fixed set of URL-versioned route trees. It fits an API with a large number of independent client integrations and a team disciplined enough to maintain the changelog-of-shims machinery; it's overkill for a small number of coordinated clients."
 
 [[option]]
-id = "the-api-has-no-version-segment-at-all-and-evolve"
+id = "the-api-has-no-version-segment-at-all-and-evolves-in-place"
 label = "the API has no version segment at all and evolves in place"
 directive = "The API has no version segment at all and evolves in place; each change applies to all current clients, and breaking changes are coordinated directly with the consumers rather than isolated behind a version."
 remediation = """

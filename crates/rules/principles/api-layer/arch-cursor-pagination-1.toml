@@ -30,7 +30,7 @@ Add opaque cursor-based pagination to the list endpoint: return a next_cursor in
 why = "Anchors each page to a stable position in the result set, so a reader stays correct under concurrent inserts and deletes rather than silently skipping or duplicating rows. The natural fit for large or actively-changing lists (feeds, activity, anything unbounded); the trade-off is that cursors are opaque, so they do not support jumping to an arbitrary page or showing a numbered page bar."
 
 [[option]]
-id = "list-endpoints-paginate-by-offset-page-n-page-si"
+id = "list-endpoints-paginate-by-offset-page-n-page-size-k"
 label = "list endpoints paginate by offset (page=N, page_size=K)"
 directive = "List endpoints paginate by offset: the client requests a page number and page size (page=N, page_size=K), and the server returns that slice along with a total count where useful for a page index."
 remediation = """
@@ -48,7 +48,7 @@ Remove pagination from the list endpoint and return the full result set in a sin
 why = "The simplest possible contract — one request, the whole list — and exactly right when the list has a small fixed ceiling (a country list, a status enum, a short reference table) where any paging machinery would be overhead the data never justifies. It depends on that bound actually holding, so it is the wrong shape for any list that can grow without limit."
 
 [[option]]
-id = "list-endpoints-expose-both-cursor-and-offset-pag"
+id = "list-endpoints-expose-both-cursor-and-offset-pagination-shapes"
 label = "list endpoints expose both cursor and offset pagination shapes"
 directive = "List endpoints expose both cursor and offset pagination shapes and let the client choose which to use per request."
 remediation = """

@@ -18,11 +18,11 @@ title = "Stripe — Idempotent Requests"
 
 [decision]
 question = "What position does the project take on: Non-GET writes that trigger external side effects require an idempotency key?"
-default = "non-get-writes-that-trigger-external-side-effect"
+default = "non-get-writes-that-trigger-external-side-effects-require-an-idempotency-key"
 why = "Network retries are inevitable. Without idempotency keys, a client cannot safely retry after a timeout because the original may have succeeded silently. With keys, the client retries freely until it gets a definitive response, and the server never double-executes. Allowing retries without keys means the client risks double-charging or sending duplicates on every timeout, because the network cannot tell the client whether the original request reached the server. Deduplicating via natural keys works only when natural keys exist, are stable, and uniquely identify the intended effect, and many real operations have no such key (a payment intent, an outbound email, an external job enqueue). Making the client responsible for not retrying pushes correctness onto every consumer; one careless caller produces duplicates and the server has no way to defend against it."
 
 [[option]]
-id = "non-get-writes-that-trigger-external-side-effect"
+id = "non-get-writes-that-trigger-external-side-effects-require-an-idempotency-key"
 label = "Non-GET writes that trigger external side effects require an idempotency key"
 directive = "POST, PUT, PATCH, and DELETE endpoints that produce external side effects (charge a card, send an email, enqueue a downstream job, write to a message queue) require an Idempotency-Key header on each request. The server stores the response keyed by that key; a retry with the same key returns the stored response instead of running the operation again. Reads and writes that are naturally idempotent at the storage layer may omit this. The key-retention window is bounded (commonly 24 hours) and documented per endpoint. A violation of THIS rule is a side-effecting write ENDPOINT that has no idempotency-key mechanism in use at all — not the mere presence of an idempotency-key helper/utility function in the codebase, and not a helper that is defined but not (yet) called from any endpoint. An unused helper is a dead-code/hygiene concern for a DIFFERENT rule, never evidence of an idempotency defect under this one; do not report it here."
 remediation = """

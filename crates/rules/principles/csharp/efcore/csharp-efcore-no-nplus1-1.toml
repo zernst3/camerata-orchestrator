@@ -30,7 +30,7 @@ directive = "UseLazyLoadingProxies() is registered in DbContext configuration. N
 why = "A loop over a result set that reads navigation properties issues one query per element, so the round-trip count scales with the data and the endpoint degrades as the tables grow. Nothing in the source marks where the queries happen, so the problem is found only through load testing or by reading query logs."
 
 [[option]]
-id = "explicit-load"
+id = "explicit-loading-via-context-entry-entity-collection-reference-load"
 label = "Explicit loading via context.Entry(entity).Collection/Reference().Load()"
 directive = "Related data is loaded on demand via context.Entry(entity).Collection(e => e.Items).LoadAsync() after the parent query, in code that explicitly decides when to load each relationship."
 why = "More explicit than lazy loading but still issues per-entity round-trips when called in a loop. Appropriate for single-entity detail views that conditionally need related data; inappropriate as the general strategy for collection queries."

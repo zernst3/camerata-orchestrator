@@ -15,11 +15,11 @@ relevance = "Authority note (author-facing): low authority — supports capturin
 
 [decision]
 question = "What position does the project take on: Three audit-column strategies; pick by table semantics?"
-default = "three-audit-column-strategies-pick-by-table-sema"
+default = "three-audit-column-strategies-pick-by-table-semantics"
 why = "A blanket created_by/modified_by/created_at/modified_at quartet on every table is wasteful (most user-generated rows never have a modified_by consumer) and misleading (event-log rows have no meaningful creator). Tagging the strategy by what produces the rows keeps the schema honest about its own provenance and avoids columns that are always NULL or always equal to a value already encoded elsewhere. Putting the full four-column audit quartet on every table wastes storage, misleads about who edited what for system-generated rows, and produces always-NULL columns in tables where the strategy does not apply. Skipping audit columns entirely loses the attribution that admin and user-generated tables genuinely consume in workflows, and makes incident review and rollback significantly harder. Using ORM-level lifecycle hooks instead of explicit columns couples the audit trail to the framework; rows written outside the ORM (data migrations, replication, direct SQL maintenance) get no audit data."
 
 [[option]]
-id = "three-audit-column-strategies-pick-by-table-sema"
+id = "three-audit-column-strategies-pick-by-table-semantics"
 label = "Three audit-column strategies; pick by table semantics"
 directive = """
 Pick one of three audit-column strategies per table, by what produces the rows.

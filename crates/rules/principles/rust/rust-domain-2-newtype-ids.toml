@@ -27,7 +27,7 @@ question = "How are entity identifiers typed: a distinct newtype per entity, a b
 why = "All three are legitimate ways to represent IDs, and the right one follows from how much the project values compile-time distinction between identifier kinds against how much type machinery it wants to carry. A distinct newtype per entity (UserId(Uuid), OrganizationId(Uuid)) makes the type system reject passing one kind of ID where another is expected, moving wrong-ID-to-wrong-function mistakes from runtime to compile time; its cost is a wrapper type and conversions at the persistence and HTTP boundaries. A bare Uuid everywhere is the simplest and most direct representation, with no wrappers to define or convert and trivial interop at every boundary; its trade-off is that every ID is the same type, so the compiler cannot catch a UserId used where an OrganizationId was meant. A single generic ID type parameterized on a phantom marker gives one ID definition while still distinguishing kinds at compile time; its trade-off is that the phantom parameter has no runtime presence, so any conversion through a representation that drops it (a JSON payload, a SQL row, a log line) collapses the distinction at the boundary. Choose by how much the project weights compile-time ID safety against representational simplicity."
 
 [[option]]
-id = "newtype-ids-every-id-is-a-wrapper-never-a-bare-u"
+id = "newtype-ids-every-id-is-a-wrapper-never-a-bare-uuid"
 label = "Newtype IDs (every ID is a wrapper, never a bare Uuid)"
 directive = "UserId(Uuid), OrganizationId(Uuid); bare Uuid only at persistence and HTTP boundaries."
 remediation = """

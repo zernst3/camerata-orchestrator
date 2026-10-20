@@ -54,7 +54,7 @@ const EXHAUSTIVE_DEPS_DEGENERATE_OPTION: &str = "dependency-arrays-are-trimmed-t
 /// The option each rule's `[decision] default` must name — the CORRECT behavior, never the
 /// degenerate one.
 const SILENT_FAILURE_CORRECT_OPTION: &str = "log-or-justify-every-caught-error";
-const EXHAUSTIVE_DEPS_CORRECT_OPTION: &str = "effect-and-memo-dependency-arrays-list-every-rea";
+const EXHAUSTIVE_DEPS_CORRECT_OPTION: &str = "effect-and-memo-dependency-arrays-list-every-reactive-value-the-body-reads";
 
 /// Load the real shipped corpus, or `None` when it is not checked out — the same `path.exists()`
 /// skip guard every other corpus-reading test in this crate uses.

@@ -426,6 +426,12 @@ what/where/impact. Same placeholder machinery as `remediation`.
   wrongness includes any rename, and any rule-id prefix chosen without checking the
   identity-driven behaviors (`SEC-`/`ARCH-` floor injection, `ARCH-OBSERVABILITY-` severity
   cap + informational routing, `ORCH-/SPIRIT-/PROC-` alternatives exclusion - REF 3.1).
+- **Never truncate an option id mid-word.** An id may be shorter than the full label slug
+  (a concise complete noun phrase is the house style), but it must end on a word boundary - a
+  client reading `convention_option_id: "…-persisten"` in `findings.json` sees a broken field.
+  There is no slug-length cap; write a complete phrase and stop at a natural clause end. The
+  `w_group4_no_truncated_option_ids` gate fails any id that is a mid-word prefix of its label
+  slug, so the historical 48-char truncation cannot recur.
 
 ---
 

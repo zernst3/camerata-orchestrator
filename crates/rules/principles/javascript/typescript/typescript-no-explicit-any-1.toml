@@ -16,11 +16,11 @@ linter = "@typescript-eslint: no-explicit-any"
 
 [decision]
 question = "What position does the project take on: any is forbidden; unknown is the typed escape hatch at boundaries?"
-default = "any-is-forbidden-unknown-is-the-typed-escape-hat"
+default = "any-is-forbidden-unknown-is-the-typed-escape-hatch-at-boundaries"
 why = "any is not a type, it is an instruction to the compiler to stop checking: a value typed any propagates through every assignment, call, and property access it touches, disabling type checking transitively along the way, so one any near a boundary can silently void the guarantees of a large region of otherwise-typed code. unknown serves the same 'I do not know the shape yet' purpose without the contagion: it accepts any value but permits no operation until the code narrows it (a type guard, a schema parse, an assertion), which forces the validation to happen exactly where untrusted data enters. Reaching for any to make an error go away works at that line and moves the failure somewhere with no type information, where it resurfaces as a runtime TypeError far from the cast; unknown keeps the obligation visible and local to the boundary where the shape is actually unknown."
 
 [[option]]
-id = "any-is-forbidden-unknown-is-the-typed-escape-hat"
+id = "any-is-forbidden-unknown-is-the-typed-escape-hatch-at-boundaries"
 label = "any is forbidden; unknown is the typed escape hatch at boundaries"
 directive = "Explicit any annotations are forbidden. At boundaries where a value's type is genuinely not known at compile time (parsed JSON, third-party payloads, dynamic input), the value is typed unknown and narrowed via a type guard or validated via a schema parser before use. Where any is truly unavoidable, it is isolated behind a single commented lint-disable rather than spread through the surrounding types."
 remediation = """

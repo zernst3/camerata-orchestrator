@@ -22,11 +22,11 @@ title = "Panickssery, Bowman, Feng — LLM Evaluators Recognize and Favor Their 
 
 [decision]
 question = "What position does the project take on: The reviewer agent for any change is distinct from the author agent?"
-default = "the-reviewer-agent-for-any-change-is-distinct-fr"
+default = "the-reviewer-agent-for-any-change-is-distinct-from-the-author-agent"
 why = "An agent that reviews its own output inherits its own blindspots: the architectural drift the author missed at write time is the same drift the same agent will miss at review time. A separate reviewer breaks that loop by bringing a different prompt or model context to the diff. Reading the diff against the commitments rather than against the author's reasoning forces the reviewer to evaluate the change as written, not as the author intended it to read, which is the only way the review catches the cases where intent and implementation drifted apart. Having the same agent review its own output is the failure mode this rule exists to prevent, since the author's blindspots transfer directly to the review. Using a different instance of the same model with the same prompt catches some blindspots but shares model-level priors, so subtle drift survives both passes anyway. Letting the reviewer read the author's reasoning trace alongside the diff lets the author's framing color the reviewer's evaluation and weakens the independence the rule exists to preserve."
 
 [[option]]
-id = "the-reviewer-agent-for-any-change-is-distinct-fr"
+id = "the-reviewer-agent-for-any-change-is-distinct-from-the-author-agent"
 label = "The reviewer agent for any change is distinct from the author agent"
 directive = "The agent that reviews a change is a separate agent from the one that authored it. Author and reviewer differ in some load-bearing configuration: a different prompt, a different principles set, a different model, or a combination of those. The reviewer reads the diff, the change's stated intent, and the codified architectural commitments. The reviewer does not read the author agent's reasoning trace. This separation holds across all orchestrated work regardless of whether author and reviewer share a model family."
 remediation = """
