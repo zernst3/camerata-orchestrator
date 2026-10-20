@@ -1289,6 +1289,7 @@ pub async fn audit_repos(
     // how large the repo was. `scan_repos` (the lighter phase-1 preview) already did this
     // correctly; this mirrors that logic over the SAME `files` this loop already reads.
     let mut files_excluded_total = 0usize;
+    let mut engine_artifacts_total = 0usize;
     let mut code_chars_total = 0usize;
     let mut code_lines_total = 0usize;
     let mut lang_lines_total: std::collections::BTreeMap<String, usize> =
@@ -1412,6 +1413,12 @@ pub async fn audit_repos(
             }) => {
                 files_total += files.len();
                 files_excluded_total += excluded_noise;
+                // W19: must stay zero. Non-zero means Camerata admitted its own artifacts as
+                // source — the 2026-10-16 defect. Fed to the integrity gate below.
+                engine_artifacts_total += files
+                    .iter()
+                    .filter(|(path, _)| files::is_engine_artifact(path))
+                    .count();
                 code_chars_total += files.iter().map(|(_, c)| c.len()).sum::<usize>();
                 let (repo_lines, repo_lang_lines) = propose::count_source_lines(&files);
                 code_lines_total += repo_lines;
@@ -2077,6 +2084,16 @@ pub async fn audit_repos(
     // without an asterisk. `osv_scanner_version` is the PINNED version Camerata provisions
     // (`tool_provisioning::OSV_SCANNER_VERSION`) — the dep-audit pass itself runs AFTER this
     // function returns (in the caller), gated on the same `run_deterministic` flag.
+    // W19: hand the integrity gate what this scan was actually FED. Recorded at the same
+    // point provenance is stamped, because that is where the file totals and the resolved
+    // model are both settled, and the two must not be able to disagree.
+    report.ledger.record_input(crate::scan_ledger::ScanInputFacts {
+        files_scanned: files_total,
+        files_excluded: files_excluded_total,
+        code_chars: code_chars_total,
+        engine_artifacts_admitted: engine_artifacts_total,
+        audit_model: model.map(str::to_string),
+    });
     report.provenance = ScanProvenance {
         audited_refs,
         audit_model: model.map(str::to_string),

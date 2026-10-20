@@ -285,6 +285,27 @@ pub struct ExtractedRepo {
     pub excluded_noise: usize,
 }
 
+impl ExtractedRepo {
+    /// How many ADMITTED files are Camerata's own artifacts ([`is_engine_artifact`]).
+    ///
+    /// Must be zero. Non-zero means the engine is about to audit its own output, which is the
+    /// 2026-10-16 defect (`.camerata-scan-cache.json` collected as source, 63% of the audit
+    /// prompt). `is_noise_path` now excludes them, so this is the regression guard on that
+    /// fix rather than a live counter — it is fed to the integrity gate's
+    /// `engine_self_ingestion` family.
+    ///
+    /// Computed over the FINAL admitted list rather than counted at the collection sites, on
+    /// purpose: there are two of those today and a third would silently miss a counter, while
+    /// "what actually got through" is both the invariant we care about and impossible to
+    /// bypass by adding a new collection path.
+    pub fn engine_artifacts_admitted(&self) -> usize {
+        self.files
+            .iter()
+            .filter(|(path, _)| is_engine_artifact(path))
+            .count()
+    }
+}
+
 /// Read a repo's auditable files from its LOCAL working tree — the local-first scan source.
 ///
 /// When the directory is a git repo (`.git` exists) the walk is

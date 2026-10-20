@@ -212,6 +212,17 @@ pub struct IntegrityGateOptions {
     /// graded run: "AI/semantic review not requested this run" is an honest disclosure and a
     /// completely unacceptable state in which to spend $26 grading the semantic tier.
     pub require_semantic_tier: bool,
+    /// When `true`, a scan that did not record which model its audit pass used is a
+    /// `model_unrecorded` failure.
+    ///
+    /// Separate from the tier switches because it is not a coverage question: the tier can
+    /// have run perfectly and still leave the run unusable as EVIDENCE. A graded sweep exists
+    /// to compare one engine against another, and an unrecorded model makes that comparison
+    /// unfalsifiable in both directions — which is precisely what happened on 2026-10-16 and
+    /// cost a week of reasoning about a regression that did not exist.
+    ///
+    /// Relaxed for a smoke scan, where nobody is comparing anything.
+    pub require_recorded_model: bool,
 }
 
 impl Default for IntegrityGateOptions {
@@ -248,6 +259,7 @@ impl Default for IntegrityGateOptions {
                 RuleTier::Semantic,
             ],
             require_semantic_tier: true,
+            require_recorded_model: true,
         }
     }
 }
@@ -264,6 +276,11 @@ impl IntegrityGateOptions {
         Self {
             required_tiers: Vec::new(),
             require_semantic_tier: false,
+            // A smoke scan compares nothing against anything, so an unrecorded model costs
+            // it nothing. `engine_self_ingestion` and `empty_input` are NOT relaxed here:
+            // auditing our own cache file corrupts a cheap local scan exactly as much as a
+            // graded one, and it is free to detect.
+            require_recorded_model: false,
         }
     }
 }
@@ -280,6 +297,12 @@ pub struct IntegrityVerdict {
     /// Per-tier `(rules_recorded, rules_that_ran, findings_emitted)`, in
     /// [`RuleTier::all`] order. The coverage picture, so a PASS is still informative.
     pub tier_summary: Vec<TierSummary>,
+    /// W19 — what the scan was FED, echoed into the verdict so a PASS states its own basis.
+    ///
+    /// A gate that prints "everything ran" without printing what it ran OVER is how the
+    /// 2026-10-16 self-ingestion survived five repos: the coverage block looked healthy and
+    /// nothing on screen said the digest had tripled.
+    pub input: crate::scan_ledger::ScanInputFacts,
 }
 
 /// One tier's coverage facts. See [`IntegrityVerdict::tier_summary`].
@@ -342,6 +365,55 @@ pub fn evaluate(ledger: &ScanLedger, opts: &IntegrityGateOptions) -> IntegrityVe
             detail: "the ledger recorded no rules and no stages — either no scan ran, or the \
                      scan did not record that it ran. A gate cannot confirm a scan it has no \
                      evidence of."
+                .to_string(),
+        });
+    }
+
+    // ── 1b. INPUT integrity (W19). ───────────────────────────────────────────────────────
+    //
+    // Every other family in this function asks about the MACHINERY: did the tier run, was the
+    // skip justified, do the stages reconcile. All of them passed on 2026-10-16 for a scan
+    // whose audit prompt was 63% Camerata's own prior output, and the defect reached a client
+    // report. The question nobody was asking is the cheapest one: WAS THE RIGHT THING FED IN.
+    //
+    // Deliberately placed before the tier checks. An input defect makes every downstream
+    // observation untrustworthy, so reporting "the semantic tier ran" above "the semantic
+    // tier was shown the engine's own cache file" would be ordering the symptom first.
+    let input = ledger.input();
+    if input.engine_artifacts_admitted > 0 {
+        failures.push(IntegrityFailure {
+            code: "engine_self_ingestion".to_string(),
+            detail: format!(
+                "{} file(s) matching Camerata's own reserved `.camerata-` prefix were admitted \
+                 into the scan — the engine audited its own output. On 2026-10-16 this put \
+                 174,236 characters of a prior run's findings into a hearth audit prompt, \
+                 displaced real source to ~35% of what the model read, and shipped a CRITICAL \
+                 located inside `.camerata-scan-cache.json` at queue position #1. No finding \
+                 from this scan can be trusted.",
+                input.engine_artifacts_admitted
+            ),
+        });
+    }
+    if opts.require_recorded_model && input.audit_model.is_none() {
+        failures.push(IntegrityFailure {
+            code: "model_unrecorded".to_string(),
+            detail: "the audit model was not recorded. `None` means UNRECORDED, not \
+                     'no model ran' — resolution falls through to `CAMERATA_AUDIT_MODEL` and \
+                     then the client default, so the run used something and did not say what. \
+                     That is disqualifying before a graded run: the 2026-10-16 sweep recorded \
+                     `claude-sonnet-5` on its baseline and nothing on either later run, which \
+                     left 'did the engine regress' neither confirmable nor refutable."
+                .to_string(),
+        });
+    }
+    // Guarded on `!is_empty()` so an empty ledger reports `empty_ledger` once rather than
+    // also reporting the three input facts it trivially lacks.
+    if !ledger.is_empty() && input.files_scanned == 0 {
+        failures.push(IntegrityFailure {
+            code: "empty_input".to_string(),
+            detail: "the scan recorded rules or stages but zero files scanned — the pipeline \
+                     ran over nothing. Every rule is then vacuously 'clean', which is the one \
+                     failure mode a coverage summary cannot distinguish from real health."
                 .to_string(),
         });
     }
@@ -492,6 +564,7 @@ pub fn evaluate(ledger: &ScanLedger, opts: &IntegrityGateOptions) -> IntegrityVe
         failures,
         justified_skips,
         tier_summary,
+        input: ledger.input().clone(),
     }
 }
 
@@ -526,6 +599,29 @@ pub fn render(verdict: &IntegrityVerdict) -> String {
 
     out.push_str("PRE-FLIGHT INTEGRITY GATE\n");
     out.push_str("=========================\n\n");
+
+    let i = &verdict.input;
+    out.push_str("Input (what the scan was fed):\n");
+    let _ = writeln!(
+        out,
+        "  {:<52} {} scanned, {} excluded as noise",
+        "files", i.files_scanned, i.files_excluded
+    );
+    let _ = writeln!(out, "  {:<52} {}", "code characters", i.code_chars);
+    let _ = writeln!(
+        out,
+        "  {:<52} {}",
+        "audit model",
+        i.audit_model.as_deref().unwrap_or("NOT RECORDED")
+    );
+    let _ = writeln!(
+        out,
+        "  {:<52} {}{}",
+        "Camerata's own artifacts admitted",
+        i.engine_artifacts_admitted,
+        if i.engine_artifacts_admitted == 0 { "" } else { "   <-- the engine audited its own output" }
+    );
+    out.push('\n');
 
     out.push_str("Coverage by engine:\n");
     for t in &verdict.tier_summary {
@@ -570,6 +666,7 @@ pub fn render(verdict: &IntegrityVerdict) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::scan_ledger::ScanInputFacts;
     use super::*;
     use crate::scan_ledger::StageAccounting;
 
@@ -590,7 +687,26 @@ mod tests {
         let mut acc = StageAccounting::default();
         acc.push_merge("AI-ADVISORY-DUP-1", "SEC-FLOOR-1");
         l.record_stage("cross-family-merge", 4, 3, acc);
+        l.record_input(healthy_input());
         l
+    }
+
+    /// W19 — what a CLEAN scan's input looks like. Zero engine artifacts, a real file count,
+    /// and a recorded model.
+    ///
+    /// Every fixture in this module gained this when the input-integrity families landed, and
+    /// that is the point rather than busywork: before it, these ledgers asserted a "healthy
+    /// scan" while recording nothing about what the scan had been fed, which is exactly the
+    /// blind spot that let a run whose prompt was 63% Camerata's own output pass this gate on
+    /// five repos.
+    fn healthy_input() -> ScanInputFacts {
+        ScanInputFacts {
+            files_scanned: 87,
+            files_excluded: 12,
+            code_chars: 98_522,
+            engine_artifacts_admitted: 0,
+            audit_model: Some("claude-sonnet-5".to_string()),
+        }
     }
 
     #[test]
@@ -615,6 +731,7 @@ mod tests {
     #[test]
     fn req_i2_a_tier_that_recorded_rules_but_ran_none_fails_as_a_dark_tier() {
         let mut l = ScanLedger::new();
+        l.record_input(healthy_input());
         l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 10, 0);
         l.record_rule("AI-ADVISORY-1", RuleTier::Semantic, true, None, 10, 0);
         // 41 taint rules selected; not one of them ran.
@@ -642,6 +759,7 @@ mod tests {
     #[test]
     fn req_i2_a_required_tier_that_recorded_nothing_at_all_fails_as_absent() {
         let mut l = ScanLedger::new();
+        l.record_input(healthy_input());
         l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 10, 0);
         l.record_rule("AI-ADVISORY-1", RuleTier::Semantic, true, None, 10, 0);
         // Nothing whatsoever recorded for ExternalTool.
@@ -890,6 +1008,112 @@ mod tests {
 
     /// req_i2: an empty ledger is never a pass. A gate that green-lights "no evidence a scan
     /// happened" is worse than no gate, because it manufactures confidence.
+    /// W19 — the gate now asks whether the right thing was FED IN, which is the question
+    /// that was never asked and the one that mattered.
+    ///
+    /// On 2026-10-16 a hearth scan was 63% Camerata's own prior output: the engine had
+    /// written `.camerata-scan-cache.json` into the scanned repo and collected it back as
+    /// source, taking `code_chars` from 103,307 to 277,543 at an unchanged 88 files. Twelve
+    /// rules then found nothing, THIS GATE PASSED, and the defect was caught by an external
+    /// grader reading a shipped client report.
+    ///
+    /// Every pre-existing family would pass that ledger again today, because each asks about
+    /// the machinery and the machinery ran perfectly over the wrong input.
+    #[test]
+    fn req_w19_a_scan_that_audited_its_own_output_fails_the_gate() {
+        let mut l = healthy_ledger();
+        l.record_input(ScanInputFacts {
+            files_scanned: 88,
+            code_chars: 277_543,
+            engine_artifacts_admitted: 1,
+            ..healthy_input()
+        });
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(!verdict.passed(), "self-ingestion must never pass");
+        assert!(
+            verdict.failures.iter().any(|f| f.code == "engine_self_ingestion"),
+            "expected engine_self_ingestion, got {:?}",
+            verdict.failures
+        );
+        assert_eq!(verdict.exit_code(), 1);
+
+        // And it is NOT relaxed by the smoke profile. Auditing our own cache corrupts a cheap
+        // local scan exactly as much as a graded one, and detecting it is free.
+        let smoke = evaluate(&l, &IntegrityGateOptions::smoke());
+        assert!(
+            smoke.failures.iter().any(|f| f.code == "engine_self_ingestion"),
+            "smoke must still catch self-ingestion, got {:?}",
+            smoke.failures
+        );
+    }
+
+    /// W19 — an unrecorded model is disqualifying before a graded run.
+    ///
+    /// `None` means UNRECORDED, not "no model ran": resolution falls through to
+    /// `CAMERATA_AUDIT_MODEL` and then the client default, so the run used something and did
+    /// not say what. The 2026-10-16 sweep recorded `claude-sonnet-5` on its baseline and
+    /// nothing on either later run, which left "did the engine regress" neither confirmable
+    /// nor refutable — a week of reasoning about a regression that did not exist.
+    ///
+    /// Relaxed for smoke, where nothing is being compared to anything.
+    #[test]
+    fn req_w19_an_unrecorded_audit_model_blocks_a_graded_run_but_not_a_smoke_scan() {
+        let mut l = healthy_ledger();
+        l.record_input(ScanInputFacts { audit_model: None, ..healthy_input() });
+
+        let graded = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(
+            graded.failures.iter().any(|f| f.code == "model_unrecorded"),
+            "a graded run must refuse an unrecorded model, got {:?}",
+            graded.failures
+        );
+
+        let smoke = evaluate(&l, &IntegrityGateOptions::smoke());
+        assert!(
+            !smoke.failures.iter().any(|f| f.code == "model_unrecorded"),
+            "a smoke scan compares nothing, so it must not care: {:?}",
+            smoke.failures
+        );
+    }
+
+    /// W19 — rules and stages recorded over ZERO files is the one shape a coverage summary
+    /// cannot tell apart from real health: every rule is vacuously clean.
+    #[test]
+    fn req_w19_a_scan_over_zero_files_fails_even_though_every_rule_ran() {
+        let mut l = healthy_ledger();
+        l.record_input(ScanInputFacts {
+            files_scanned: 0,
+            code_chars: 0,
+            ..healthy_input()
+        });
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(
+            verdict.failures.iter().any(|f| f.code == "empty_input"),
+            "expected empty_input, got {:?}",
+            verdict.failures
+        );
+
+        // An EMPTY ledger reports `empty_ledger` and must not also report `empty_input` —
+        // one defect, one message.
+        let empty = evaluate(&ScanLedger::new(), &IntegrityGateOptions::default());
+        assert!(empty.failures.iter().any(|f| f.code == "empty_ledger"));
+        assert!(
+            !empty.failures.iter().any(|f| f.code == "empty_input"),
+            "an empty ledger must not double-report: {:?}",
+            empty.failures
+        );
+    }
+
+    /// The W20 regression guard: a clean scan records zero engine artifacts and still passes.
+    /// Without this, the three tests above could all be satisfied by a gate that fails
+    /// everything.
+    #[test]
+    fn req_w19_a_clean_input_still_passes() {
+        let verdict = evaluate(&healthy_ledger(), &IntegrityGateOptions::default());
+        assert!(verdict.passed(), "clean input must pass: {:?}", verdict.failures);
+        assert_eq!(healthy_input().engine_artifacts_admitted, 0);
+    }
+
     #[test]
     fn req_i2_an_empty_ledger_never_passes() {
         let verdict = evaluate(&ScanLedger::new(), &IntegrityGateOptions::default());
@@ -906,6 +1130,7 @@ mod tests {
     fn req_i2_a_scoped_out_semantic_tier_is_justified_for_a_smoke_scan_and_a_blocker_before_grading(
     ) {
         let mut l = ScanLedger::new();
+        l.record_input(healthy_input());
         l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 10, 1);
         l.record_rule("TAINT-SQLI-1", RuleTier::ExternalTool, true, None, 10, 0);
         l.record_rule(
@@ -1175,6 +1400,7 @@ mod tests {
         // And the entry a real recording site produces classifies the same way, so the
         // producer and the gate are pinned to each other rather than to a literal.
         let mut l = ScanLedger::new();
+        l.record_input(healthy_input());
         l.record_corpus_load_failure("SEC-NO-SILENT-CORPUS-DROP-1");
         let entry = l.rule("SEC-NO-SILENT-CORPUS-DROP-1").expect("just recorded");
         assert_eq!(

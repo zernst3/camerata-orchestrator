@@ -336,6 +336,65 @@ pub struct ScanLedger {
     /// Transient scan-time plumbing only.
     #[serde(skip)]
     not_applicable_pending: BTreeSet<String>,
+    /// What this scan was actually FED. See [`ScanInputFacts`].
+    #[serde(default)]
+    input: ScanInputFacts,
+}
+
+/// The facts about a scan's INPUT, recorded so the integrity gate can judge them.
+///
+/// # Why the gate needed this, and why it lives on the ledger
+///
+/// Every family the gate had asked a question about the MACHINERY: did the tier run, was the
+/// skip justified, do the stages reconcile. All of them were satisfied on 2026-10-16 by a
+/// hearth scan whose audit prompt was **63% Camerata's own prior output** — the engine had
+/// written `.camerata-scan-cache.json` into the scanned repo and collected it back as source
+/// on the next run, displacing real code until `code_chars` went from 103,307 to 277,543 at
+/// an unchanged 88 files. Twelve rules then "found nothing", the gate passed, and the defect
+/// was caught only by an external grader reading a shipped client report.
+///
+/// No output-side check could have caught that honestly. A regression floor comparing this
+/// export against a previous one would have reported twelve rule regressions and sent
+/// somebody to read twelve rule definitions — which is exactly what happened, twice, before
+/// the input was measured. **The question "did we feed it the right thing" is cheaper, is
+/// decidable, and is the one that was never asked.**
+///
+/// These live on the LEDGER rather than being passed alongside it because
+/// `camerata integrity-gate --ledger <path>` evaluates a ledger read from disk, often on a
+/// different machine or days later. A fact the gate cannot find in that file is a fact the
+/// standalone gate cannot check at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanInputFacts {
+    /// Files admitted into the scan, after noise pruning.
+    #[serde(default)]
+    pub files_scanned: usize,
+    /// Files pruned as build/dep/cache/generated noise before scanning.
+    #[serde(default)]
+    pub files_excluded: usize,
+    /// Characters of code across the admitted files — the honest size of the digest the model
+    /// was shown.
+    #[serde(default)]
+    pub code_chars: usize,
+    /// Files admitted whose path matched the engine's own reserved `.camerata-` prefix
+    /// (`onboard::files::is_engine_artifact`).
+    ///
+    /// **This must be zero.** Any other value means Camerata audited its own output, which is
+    /// the 2026-10-16 defect exactly. Counted at collection time, where the predicate already
+    /// runs, so recording it costs nothing and needs no new instrumentation — a gate that
+    /// needs new instrumentation to work is a gate that silently passes until somebody
+    /// remembers to instrument.
+    #[serde(default)]
+    pub engine_artifacts_admitted: usize,
+    /// The model the audit pass actually used, as resolved rather than as requested.
+    ///
+    /// `None` means NOT RECORDED, which is not the same as "no model ran" — the resolution
+    /// chain falls through to `CAMERATA_AUDIT_MODEL` and then the client default, and only an
+    /// explicit caller pick used to be written down. That gap made every before/after
+    /// comparison in the 2026-10-16 sweep unfalsifiable: the baseline recorded
+    /// `claude-sonnet-5` and both later runs recorded nothing, so "the engine regressed" could
+    /// be neither confirmed nor refuted. A graded run must not repeat that.
+    #[serde(default)]
+    pub audit_model: Option<String>,
 }
 
 impl ScanLedger {
@@ -345,6 +404,22 @@ impl ScanLedger {
 
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty() && self.stages.is_empty()
+    }
+
+    /// Record what this scan was fed. See [`ScanInputFacts`].
+    ///
+    /// Called once, at the point the file collection and the model resolution are both
+    /// settled. Overwrites rather than accumulates: these are facts about one scan, not a
+    /// running total, and a second call means a second scan that should have its own ledger.
+    pub fn record_input(&mut self, input: ScanInputFacts) {
+        self.input = input;
+    }
+
+    /// What this scan was fed. Default (all zero, no model) when nothing recorded it — which
+    /// the gate treats as unproven rather than clean, since a scan that did not say what it
+    /// read cannot be shown to have read the right thing.
+    pub fn input(&self) -> &ScanInputFacts {
+        &self.input
     }
 
     /// Queue the honest "config-gated, reviewed semantically instead" disclosure for
