@@ -133,7 +133,22 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
     `is_code_auditable_rule` gating on `inspectable` rather than a name prefix; D6/D7 severity
     **ceiling** tables still using raw `contains` (the same shape as the fixed D5 floor bug,
     where `urls` matched `rls`); R1 `cargo fmt`; R2.
-19c. **Fourteen supabase rules need an OPTION REWRITE, not a revoicing (found 2026-10-20).**
+19d. **Per-branch severity has no structural home (found 2026-10-20, W26 item).**
+
+    `SEC-NO-SENSITIVE-DATA-IN-LOGS-1` wants two severities by branch — a logged credential is
+    HIGH (a live, reusable secret), logged regulated PII is MEDIUM (a serious exposure but not
+    itself a credential). `min_severity`/`max_severity` are whole-rule bounds, so only the
+    floor (MEDIUM) is structural; the HIGH-for-credentials branch is model-proposed with
+    nothing enforcing it. The W25 directive revoicing removed the literal "HIGH finding" /
+    "MEDIUM finding" words (severity words never belong in a client-emitted directive) and
+    kept the substance as a blast-radius sentence, but the KEYING is still unenforced. This is
+    the general shape of a W26 gap: a rule whose branches differ in severity cannot say so in
+    the schema. If per-branch severity matters for more than this one rule, it is a schema
+    question (a per-option or per-predicate severity), not a wording fix. Also: this rule has
+    no `qualifies` field at all, so its detection vocabulary had nowhere to move and stayed in
+    the directive as where-to-look specifics (permitted by the guide).
+
+19c. **[DONE 2026-10-20, commit 910697d] Fourteen supabase rules needed an OPTION REWRITE, not a revoicing.**
 
     The supabase revoicing pass (`12e8f69`) deliberately left fourteen `violates` options
     alone, and the reasoning should not be rediscovered: they describe Camerata's own REPORT
