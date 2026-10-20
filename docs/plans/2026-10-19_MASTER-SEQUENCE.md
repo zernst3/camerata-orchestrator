@@ -133,6 +133,38 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
     `is_code_auditable_rule` gating on `inspectable` rather than a name prefix; D6/D7 severity
     **ceiling** tables still using raw `contains` (the same shape as the fixed D5 floor bug,
     where `urls` matched `rls`); R1 `cargo fmt`; R2.
+19b. **The eslint residual, narrowed 2026-10-20 — it is NOT provisioning.**
+
+    `live_eslint_detects_a_real_exhaustive_deps_violation` has been the single failing test
+    all session. Established by direct experiment:
+
+    - All five packages ARE provisioned (eslint 10.12.0, @typescript-eslint 8.71.2,
+      react-hooks 7.1.1, jest 29.17.0) and the bundled flat config IS copied into the
+      workspace, byte-identical to `assets/eslint/camerata.config.mjs`.
+    - The config loads, imports `eslint-plugin-react-hooks` successfully, and registers it.
+    - **Running Camerata's EXACT argv by hand produces the expected finding**: `--config
+      <workspace>/camerata.config.mjs --rule '{"react-hooks/exhaustive-deps":"error"}'
+      --format json .` with cwd = the scanned repo returns
+      `['no-console', 'no-unused-vars', 'react-hooks/exhaustive-deps']`.
+
+    So the tooling is healthy and the failure is inside the Rust path — most likely the
+    selector-to-package mapping (`scan_tools.rs:296-301` / `:337`) leaving `runnable` empty,
+    so eslint runs with no `--rule` overrides. NOT YET CONFIRMED; that is the next thing to
+    check.
+
+    **Two theories I pursued and disproved, recorded so nobody re-runs them.** (1) "ESLint 10
+    ignores files outside the config's base path" — real message, real behaviour, but only
+    when an ABSOLUTE target path is passed, and Camerata passes `.`. (2) "The config's
+    `catch { reactHooksPlugin = undefined }` silently swallows a failed plugin import" — the
+    swallow is real and worth hardening, but the import succeeds in the real workspace. The
+    first theory survived twenty minutes because I read a truncated `head -c 600` of the JSON
+    that cut off before the react-hooks message. **Do not diagnose this one from truncated
+    output.**
+
+    Separately and still wanted regardless: PIN the eslint package versions in the tool
+    manifest. `package.json` currently carries `"eslint":"^10.12.0"`, so an unpinned
+    reinstall can move a major version under the engine with no signal.
+
 19a. **Test-isolation residual (found 2026-10-20).**
     `rescan_alternatives_blocked_when_project_is_api_backend_with_no_key` fails intermittently
     under the parallel harness because it calls `std::env::remove_var("ANTHROPIC_API_KEY")`.
