@@ -21,15 +21,17 @@ use camerata_rules::{corpus_path, load_corpus_lenient};
 
 const VENDOR: &[&str] = &["Camerata", "camerata", ".camerata"];
 
-/// The literal suppression directive a client types in their own code to waive a finding
-/// (`// camerata:allow RULE-ID -- reason`). It is the one vendor-named string that is
-/// FUNCTIONALLY required in client-facing text — the exact token the client must write, the
-/// same way an eslint suppression names eslint. It is permitted only as the how-to in a
-/// `remediation`, never fronted in a convention statement; a separate decision (renaming the
-/// token vendor-neutral) is an engine change recorded for the owner.
+/// Owner ruling (2026-10-20): the vendor name must not appear in ANY client-facing field,
+/// including the `camerata:allow` suppression token. The earlier carve-out assumed the token
+/// was "functionally required in client-facing text, the same way an eslint suppression names
+/// eslint" — but that assumption is false for this product's delivery model: the client does
+/// not run the engine (the operator runs the scan and hands over a report), so a client-facing
+/// Fix line telling them to "add a `// camerata:allow` comment" names a tool they don't run and
+/// an action they can't take. The suppression token's only legitimate homes are the engine
+/// source (never shipped) and author/operator-facing fields (`qualifies`, `[decision].why`,
+/// non-`violates` `why`) — never a field that reaches the product package.
 fn names_vendor(text: &str) -> bool {
-    let without_token = text.replace("camerata:allow", "");
-    VENDOR.iter().any(|v| without_token.contains(v))
+    VENDOR.iter().any(|v| text.contains(v))
 }
 
 #[tokio::test]

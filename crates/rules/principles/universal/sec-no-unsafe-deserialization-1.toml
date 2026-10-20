@@ -87,7 +87,7 @@ reconstruction. When a test must call an unsafe deserialiser on a controlled fix
 that call with an explicit suppression comment that explains why the input is trusted.
 """
 remediation = """
-Replace the unsafe deserializer call (yaml.load without a safe loader, pickle.load, PHP unserialize(), Ruby Marshal.load, .NET BinaryFormatter, or similar) on untrusted input with its safe equivalent (SafeLoader, a schema-validated parser, or a format that doesn't execute arbitrary code on load). If the input is genuinely from a fully trusted, sandboxed source, keep the unsafe call only behind a `// camerata:allow SEC-NO-UNSAFE-DESERIALIZATION-1 -- <reason>` suppression comment documenting that trust boundary. Verify by feeding the deserializer a crafted malicious payload and confirming it is rejected or safely parsed rather than executing arbitrary code.
+Replace the unsafe deserializer call (yaml.load without a safe loader, pickle.load, PHP unserialize(), Ruby Marshal.load, .NET BinaryFormatter, or similar) on untrusted input with its safe equivalent (SafeLoader, a schema-validated parser, or a format that doesn't execute arbitrary code on load). If the input is genuinely from a fully trusted, sandboxed source, keep the unsafe call only behind an explicit, reviewed suppression comment documenting that trust boundary. Verify by feeding the deserializer a crafted malicious payload and confirming it is rejected or safely parsed rather than executing arbitrary code.
 """
 effort = "medium"
 finding_headline = "Your `<path>` file deserializes data using a function that can run arbitrary code."
