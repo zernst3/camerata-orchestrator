@@ -4428,10 +4428,25 @@ pub fn build_report_json(
     // comment above for the full "0 in Coverage, listed as verified clean" bug this closes.
     // "Healthy" is global (not per-category, unlike the scorecard above), so this folds every
     // `also_matches` id in directly rather than going through the per-category map.
+    //
+    // W23 (2026-10-20): `also_locations` is folded in for the SAME reason, and its omission
+    // was the C5-1 defect one channel over. `also_matches` carries a same-location demotion
+    // (a rule id set); `also_locations` carries a MERGE ABSORPTION (one entry per absorbed
+    // finding, each with its own originating `rule_id`). A rule that survived only as an
+    // absorbed location fired just as genuinely as one that survived as a demotion, and
+    // listing it clean is the same false statement.
+    //
+    // Measured on the 2026-10-18 hearth export: SEC-NO-SECRET-FILE-1 (a committed
+    // `.env.production`, CRITICAL) had two `also_locations` entries and no direct row, and
+    // ARCH-OBSERVABILITY-SILENT-FAILURE-1 one. Both were eligible for "What's healthy" — the
+    // report would have told the client their committed secret belonged to a verified-clean
+    // rule.
     let rule_ids_with_any_finding: std::collections::HashSet<String> = code_findings
         .iter()
         .flat_map(|(f, _, _, _)| {
-            std::iter::once(f.rule_id.clone()).chain(f.also_matches.iter().cloned())
+            std::iter::once(f.rule_id.clone())
+                .chain(f.also_matches.iter().cloned())
+                .chain(f.also_locations.iter().map(|l| l.rule_id.clone()))
         })
         .collect();
     // W1: "verified clean" is sourced from the LEDGER (`ran && findings_emitted == 0`) when
@@ -6641,6 +6656,53 @@ mod tests {
     }
 
     // ── S6: what's-healthy caps long lists and reports a remainder count ──────
+
+    /// W23 — a rule whose finding was ABSORBED by a merge is not "verified clean".
+    ///
+    /// C5-1 already closed this for `also_matches` (a same-location demotion), and its
+    /// comment above `rule_ids_with_any_finding` explains exactly why: a rule that survived
+    /// only as an absorbed member still genuinely fired, so listing it as clean is a false
+    /// statement about the client's code. But `also_locations` — the merge-absorption
+    /// channel, one entry per absorbed FINDING rather than per rule id — was never folded in.
+    ///
+    /// This is not hypothetical. On the 2026-10-18 hearth export `SEC-NO-SECRET-FILE-1`
+    /// (a committed `.env.production`, CRITICAL) appeared with `also_locations = 2` and no
+    /// direct row of its own, and `ARCH-OBSERVABILITY-SILENT-FAILURE-1` likewise. Both were
+    /// therefore eligible for "What's healthy" while their findings sat inside another row —
+    /// the report telling a client their committed secret is a verified-clean rule.
+    #[test]
+    fn req_w23_a_rule_absorbed_into_another_rows_locations_is_never_verified_clean() {
+        let mut carrier = finding("SEC-NO-VENDOR-TOKEN-1", ".env.production", 4, "critical");
+        carrier.also_locations = vec![crate::onboard::MergedLocation {
+            repo: "owner/repo".to_string(),
+            path: ".env.production".to_string(),
+            line: 1,
+            rule_id: "SEC-NO-SECRET-FILE-1".to_string(),
+            snippet: "committed secret file".to_string(),
+            consequence: false,
+        }];
+
+        // Both rules were audited. Only the carrier has a row of its own.
+        let report = report_with(
+            vec![carrier],
+            vec!["SEC-NO-VENDOR-TOKEN-1", "SEC-NO-SECRET-FILE-1", "SEC-UNRELATED-1"],
+        );
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        let healthy: Vec<&str> =
+            json.whats_healthy.rules.iter().map(|r| r.rule_id.as_str()).collect();
+        assert!(
+            !healthy.contains(&"SEC-NO-SECRET-FILE-1"),
+            "a rule absorbed into another row's `also_locations` still FIRED; listing it as \
+             verified clean tells the client a real finding does not exist. healthy = {healthy:?}"
+        );
+        // The converse, so this cannot pass by emptying the section: a rule that genuinely
+        // found nothing is still reported clean.
+        assert!(
+            healthy.contains(&"SEC-UNRELATED-1"),
+            "a genuinely clean rule must still be listed: {healthy:?}"
+        );
+    }
 
     #[test]
     fn whats_healthy_caps_at_ten_and_reports_further_clean_count() {
