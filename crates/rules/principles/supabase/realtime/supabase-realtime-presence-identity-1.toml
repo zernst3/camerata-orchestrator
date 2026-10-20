@@ -5,13 +5,11 @@ layer = "platform"
 enforcement = "prose"
 kind = "defect"
 inspectable = true
-# Severity ceiling, transcribed from this rule's own prose: "Flag as medium-to-high severity
-# (scaled by how sensitive the extra field is)" — an explicitly bounded range topping out at
-# high.
+# Severity bounds. Rationale: the harm here scales with WHICH field rode along, so this rule is
+# deliberately a range rather than a point. A raw email address or full legal name broadcast to
+# everyone in the room tops out at high; an internal id or role field with no direct PII value
+# sits at the medium floor. A point severity would misreport one end or the other.
 max_severity = "high"
-# Severity floor, transcribed from this rule's own prose: "Flag as medium-to-high severity (scaled
-# by how sensitive the extra field is)". An explicit RANGE -- its bottom is the floor, its top is
-# the ceiling above.
 min_severity = "medium"
 default = true
 verification = "grounded"
@@ -49,14 +47,19 @@ user/session object to `track()` just because it is already available in scope.
 
 [[option]]
 id = "presence-payload-scoped-to-what-the-feature-needs"
-label = "Construct a minimal presence payload from exactly the fields the consuming UI displays; never pass a full user/session object to track()"
+label = "Presence payloads carry only the fields the consuming UI displays, never a whole user or session object"
 directive = """
-Read the object passed to `channel.track(...)` alongside the UI code that reads the resulting presence state.
-Flag as medium-to-high severity (scaled by how sensitive the extra field is) a payload including fields the
-consuming UI never renders or uses — especially a raw email address, full legal name, or an internal id/role field:
-"Your presence payload includes `<field>`, which every other subscriber on this channel receives, but your UI
-never displays it. This leaks it to anyone else in the same room/document for no functional reason." A payload
-limited to display name/handle, avatar, and status-shaped fields the UI actually consumes is conforming.
+The object passed to `channel.track(...)` is built for presence specifically: a display name or
+pseudonymous handle, an avatar URL, and whatever status the feature shows (online, typing, viewing).
+Nothing else. An existing user or session object is never passed straight through because it was
+already in scope — `channel.track(currentUser)` is the shortcut this avoids.
+
+Presence broadcasts whatever it is given to every other subscriber on the channel, merged into a
+shared state object each of them receives in full. So a field that rode along inside a convenient
+object — a raw email address, a full legal name, an internal id or role — reaches everyone else in
+the same room or document, whether or not any interface ever renders it, and whether or not the
+user would have agreed to share it with the strangers alongside them. The exposure is at broadcast
+time, so what the receiving UI chooses to display does not bound it.
 """
 remediation = """
 Replace the object passed to `track()` at `<call site>` with a minimal payload constructed specifically for
@@ -71,6 +74,6 @@ why = "A purpose-built presence payload costs one small object-literal change at
 [[option]]
 id = "pass-the-full-user-object-to-track-for-convenience"
 violates = true
-label = "Pass the existing user/session object directly to track(), relying on client-side UI code to only render the fields it needs"
-directive = "Call channel.track(currentUser) (or an equivalent full user/session object already in scope) rather than constructing a minimal presence-specific payload, relying on the receiving client's UI to select and render only the fields it cares about."
+label = "The full user or session object is passed to track(), with the receiving UI rendering only what it needs"
+directive = "`channel.track(currentUser)` — or an equivalent full user or session object already in scope — is passed straight through instead of a minimal presence-specific payload, and the receiving client's UI selects which of those fields to render."
 why = "Rejected: every OTHER subscriber's client receives the full payload over the wire the instant it's tracked, regardless of what that client's UI chooses to render — a client-side rendering choice provides zero protection against the data already having been transmitted to, and readable by, every other participant (via dev tools, a modified client, or simply reading the merged presence state object directly in application code). The exposure happens at broadcast time, not at render time, so scoping the fix to the UI layer leaves the actual leak fully intact."

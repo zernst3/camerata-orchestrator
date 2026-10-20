@@ -14,8 +14,10 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "emit a high-severity finding:
-# 'One of your database functions runs ...'".
+# Severity floor. Rationale: an unpinned search_path on a SECURITY DEFINER function lets an
+# attacker create a colliding object in a schema they control and have it resolved and executed
+# with the definer's elevated privileges — the attack PostgreSQL's own CREATE FUNCTION security
+# notes exist to warn about, and Splinter's 0011 lint. High.
 min_severity = "high"
 default = true
 verification = "grounded"
@@ -63,15 +65,19 @@ first place.
 
 [[option]]
 id = "require-search-path-on-definer-functions"
-label = "Flag every SECURITY DEFINER function lacking SET search_path; recommend SECURITY INVOKER when DEFINER isn't required"
+label = "SECURITY DEFINER functions pin search_path, and SECURITY INVOKER is used wherever elevation is unnecessary"
 directive = """
-Parse each CREATE FUNCTION statement as a whole. When it carries SECURITY DEFINER and does NOT
-carry a SET search_path clause, emit a high-severity finding: "One of your database functions runs
-with elevated power but resolves names loosely — a known Postgres attack lets someone swap in their
-own code underneath it." Remediation, in priority order: (1) if the function does not actually need
-elevated privileges, switch to SECURITY INVOKER (the Postgres default) and remove DEFINER entirely;
-(2) if DEFINER is genuinely required, add `SET search_path = <trusted_schema(s)>, pg_temp` — with
-pg_temp listed last so the temporary schema is searched last, per Postgres's own guidance.
+Functions default to SECURITY INVOKER, and that default is kept unless the function genuinely needs
+to act with privileges its caller does not have. Minimising DEFINER is the first control, not an
+alternative to the second one.
+
+Where DEFINER is genuinely required, the function pins its name resolution:
+`SET search_path = <trusted schemas>, pg_temp`, with `pg_temp` listed last so the temporary schema
+is searched last, per PostgreSQL's own guidance. A DEFINER function executes with its creator's
+privileges regardless of who calls it, so if it resolves an unqualified table or function name
+through the caller's mutable search_path, an attacker can create an object with a colliding name in
+a schema they control and have it executed with those elevated privileges instead of the intended
+one. Pinning the path is what removes that substitution.
 """
 remediation = """
 For `<function-name>`, first check whether it actually needs elevated privileges: if not, remove

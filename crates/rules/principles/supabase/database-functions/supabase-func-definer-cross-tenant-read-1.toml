@@ -14,9 +14,11 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "Severity is High." A flat "Severity is
-# High" is a floor of high with no escalation NAMED, which does not forbid one -- and this rule is
-# IDOR-in-the-database, genuinely critical-class, so it deliberately carries NO ceiling.
+# Severity floor. Rationale: this is IDOR inside the database — a broadly-granted SECURITY DEFINER
+# read whose filtering id comes from the caller, with the RLS that would have constrained it
+# bypassed by the DEFINER privileges. Any caller matching the grant substitutes another tenant's
+# id and reads their rows (CWE-639). A floor of high, and deliberately NO ceiling: nothing about
+# this shape forbids a critical where reachability or data sensitivity warrants it.
 min_severity = "high"
 default = true
 verification = "grounded"
@@ -67,21 +69,23 @@ caller-supplied shared secret/signature compared against a stored value.
 
 [[option]]
 id = "require-caller-identity-check-in-privileged-cross-tenant-reads"
-label = "Flag a SECURITY DEFINER read filtered by its own parameter, granted to anon/public/authenticated, with no identity/role/ownership/secret check in its body"
+label = "A SECURITY DEFINER function that filters rows by a caller-supplied id checks that id against the caller"
 directive = """
-Parse each CREATE FUNCTION/PROCEDURE body as a whole and correlate it against every GRANT EXECUTE
-statement in the same scanned SQL corpus. When a function is declared SECURITY DEFINER, has at
-least one declared parameter, its body contains no standalone INSERT/UPDATE/DELETE/TRUNCATE/MERGE
-statement, it is GRANTed EXECUTE to anon, public, or authenticated, its body equates a column
-against one of its own declared parameters, and its body contains none of the recognized
-authorization-predicate idioms, emit a finding: "This SECURITY DEFINER function returns rows
-filtered only by a caller-supplied parameter and is reachable by a broad role, but never checks
-that parameter against who the caller is — any caller matching the grant can substitute any id and
-read another tenant's or user's rows." Severity is High. Remediation, in priority order: (1) add a
-server-side identity check at the top of the function body before returning rows (e.g. `if
-auth.uid() <> (select owner_id from <table> where id = p_id) then raise exception ...;`); (2)
-derive the filtering id from `auth.uid()` directly instead of accepting it as a caller-supplied
-parameter at all, when the function is only ever meant to return the CALLER's own rows.
+A SECURITY DEFINER function runs with its creator's privileges, so the Row Level Security that would
+normally decide which rows a caller may see never runs. When such a function is granted EXECUTE to
+`anon`, `public` or `authenticated`, and selects rows by matching a column against one of its own
+parameters, the function body is the only place entitlement can be established — and it establishes
+it, before returning anything. A session or JWT identity read (`auth.uid()`, `auth.jwt()`,
+`current_user`, `session_user`, a `request.jwt` claims read) compared against the owner or tenant
+column, a call to a role/ownership-check function, or a caller-supplied shared secret compared
+against a stored value all satisfy this; any of the three makes the supplied id's relationship to
+the caller provable. Where the function is only ever meant to return the caller's OWN rows, the
+better shape is to derive the id from `auth.uid()` and not accept it as a parameter at all.
+
+Without that check, any caller matching the grant substitutes another tenant's id and reads their
+rows — IDOR, with the bypass happening inside the database rather than in a web handler. A UI that
+declines to render the button is not a substitute: the PostgREST RPC endpoint reaches the function
+directly regardless of what the interface shows.
 """
 remediation = """
 For `<function-name>`, add a server-side identity check as the FIRST statement in the function

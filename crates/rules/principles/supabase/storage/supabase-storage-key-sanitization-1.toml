@@ -5,12 +5,14 @@ layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "Flag as high severity: 'Your
-# upload path is the ...'".
+# Severity floor. Rationale: a client filename used as the storage key carries two failure modes
+# at once — path traversal into key-space the uploader was never meant to reach (CWE-22, which in
+# Supabase Storage means shadowing or overwriting another user's object), and silent
+# collision/overwrite plus enumerability between users uploading the same ordinary name. High.
 min_severity = "high"
 default = true
 verification = "grounded"
-qualifies = "Enforced by a scan over storage upload call sites (`.from(bucket).upload(path, ...)` / `.uploadToSignedUrl(...)` and server-side equivalents) for a destination-path argument built directly from an unsanitized client-controlled value — the browser `File.name`, a multipart field's `originalname`, or a raw query/body/form parameter — with no server-generated component (a UUID, a content hash, or an owner-id-prefixed path) and no rejection of path-traversal sequences (`../`, a leading `/`, URL-encoded traversal, null bytes). Conformance holds when every upload path is either entirely server-generated or is a sanitized, owner-scoped prefix plus a server-generated suffix; it fails when the object key is the client's original filename (or a trivial concatenation of it) with no traversal rejection and no collision-proof uniqueness."
+qualifies = "Enforced by a scan over storage upload call sites (`.from(bucket).upload(path, ...)` / `.uploadToSignedUrl(...)` and server-side equivalents) for a destination-path argument built directly from an unsanitized client-controlled value — the browser `File.name`, a multipart field's `originalname`, or a raw query/body/form parameter — with no server-generated component (a UUID, a content hash, or an owner-id-prefixed path) and no rejection of path-traversal sequences (`../`, a leading `/`, URL-encoded traversal, null bytes). Conformance holds when every upload path is either entirely server-generated or is a sanitized, owner-scoped prefix plus a server-generated suffix; it fails when the object key is the client's original filename (or a trivial concatenation of it) with no traversal rejection and no collision-proof uniqueness. Ambiguous call sites are routed, not asserted: where the destination path comes from a helper whose caller is not visible in the scanned file, the site is marked needs_review rather than claimed as a violation."
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html"
@@ -41,14 +43,21 @@ case for free: a UUID has no `../` to reject in the first place.
 
 [[option]]
 id = "server-generates-the-key-rejects-traversal"
-label = "Generate the object key server-side (UUID/hash, optionally owner-id-prefixed); never use the client's filename as the path"
+label = "Storage object keys are generated server-side; the client's filename is never used as the path"
 directive = """
-Scan storage upload call sites for a destination-path argument built from `file.name`, `.originalname`, or a raw
-client-supplied parameter with no server-generated component. Flag as high severity: "Your upload path is the
-visitor's own filename. Two uploads named the same thing overwrite each other, and a crafted filename can escape the
-intended folder." Where a path is partially client-influenced (e.g. an owner-id prefix the server itself sets,
-followed by a server-generated suffix), treat it as conforming. Where the path is ambiguous (helper function whose
-caller isn't visible in the scanned file), mark `needs_review` rather than asserting a violation.
+The destination path at every upload call site is a server-generated identifier — a UUID or a
+content hash — optionally prefixed with the authenticated user's id for natural per-user scoping
+(`${auth.uid()}/${uuid()}.${ext}`). It is never `file.name`, a multipart `originalname`, or a raw
+query/body/form parameter. The client's original filename is kept where it belongs: a database
+column, for display, with no role in addressing the object.
+
+That closes two problems at once. A client filename containing `../`, a leading `/`, or a null
+byte resolves somewhere in the bucket's key-space the uploader was never meant to reach, which in
+Supabase Storage means shadowing or overwriting another user's object whenever the policy scoping
+is less than perfectly precise. And two users uploading an ordinary `invoice.pdf` collide, while a
+predictable key is guessable by anyone else. A UUID has no traversal sequence to filter and no
+name to collide. Client-supplied path components are still rejected for `..`, a leading `/`, or a
+null byte, as defence in depth rather than as the primary control.
 """
 remediation = """
 In `<file>`, replace the upload path with a server-generated identifier — a UUID or content hash — optionally
@@ -66,6 +75,6 @@ why = "A server-generated key removes both failure modes (traversal and collisio
 [[option]]
 id = "sanitize-but-keep-client-filename-as-the-key"
 violates = true
-label = "Strip only `../` sequences from the client filename but keep it as the object key"
-directive = "Apply a blocklist filter that strips or rejects `../` sequences from the client-supplied filename, then use the remaining string as the storage object key unchanged."
+label = "The client's filename is stripped of `../` sequences and then used as the object key"
+directive = "A blocklist filter strips or rejects `../` sequences from the client-supplied filename, and the remaining string is used unchanged as the storage object key."
 why = "Rejected: a blocklist against one traversal spelling is an incomplete defense (URL-encoded traversal, backslash variants on some storage backends, or simply a null byte can still slip through a hand-rolled filter), and even a perfectly sanitized filename is still the client's own string — two uploads of `report.pdf` from two different users still collide or overwrite, and a predictable filename is still trivially enumerable. Sanitizing in place treats only the traversal symptom while leaving the underlying trust-the-client-string problem, and the collision/enumeration risk, fully intact."

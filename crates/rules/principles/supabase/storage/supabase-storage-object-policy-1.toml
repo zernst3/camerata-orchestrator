@@ -5,14 +5,15 @@ layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# Severity ceiling, transcribed from this rule's own prose: "Write/delete matches are high severity;
-# read-only matches are medium with `needs_review`, mirroring the RLS-permissive-true severity
-# split" — a fully enumerated split whose top is high, mirroring a rule that rejects critical.
+# Severity ceiling. Rationale: storage authorization IS RLS on storage.objects, so this rule
+# mirrors SUPABASE-RLS-PERMISSIVE-TRUE-1's bounds for the same reason — publicly readable buckets
+# are a routine, often intentional pattern, so the ceiling stays at high and never reaches
+# critical.
 max_severity = "high"
-# Severity floor, transcribed from this rule's own prose -- a MULTI-BRANCH rule, so the
-# rule-level floor is the LOWEST severity its prose names: "Write/delete matches are high
-# severity ... read-only unscoped policies are medium with `needs_review`, mirroring
-# SUPABASE-RLS-PERMISSIVE-TRUE-1's read/write severity split."
+# Severity floor. Rationale: same two-branch split as its table-policy sibling, floored at the
+# LOWER branch so it cannot inflate either. An unconditional or unscoped INSERT/UPDATE/DELETE
+# policy lets anyone upload into, overwrite, or delete from the bucket and is the high branch; a
+# read-only unscoped policy is the medium one, routed to review rather than asserted.
 min_severity = "medium"
 default = true
 verification = "grounded"
@@ -27,7 +28,7 @@ url = "https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/index.html"
 title = "OWASP Top 10:2021 — A01 Broken Access Control"
 
 [decision]
-question = "Are storage.objects policies granting unconditional or unscoped anon write/delete access flagged, with the finding naming the specific bucket?"
+question = "Do any storage.objects policies grant unconditional or unscoped anon write/delete access to a bucket?"
 default = "flag-unscoped-object-policies-by-bucket"
 why = """
 Supabase documents storage authorization explicitly as RLS applied to the storage.objects table:
@@ -50,14 +51,18 @@ already covers generically.
 
 [[option]]
 id = "flag-unscoped-object-policies-by-bucket"
-label = "Flag unscoped/unconditional storage.objects policies, naming the specific bucket from the policy's bucket_id predicate"
+label = "storage.objects policies scope writes and deletes to the object's owner, per bucket"
 directive = """
-Scan CREATE POLICY statements targeting storage.objects. Extract the bucket_id literal from the
-predicate when present. Flag policies with USING (true) / WITH CHECK (true) targeting anon/public,
-or INSERT/UPDATE/DELETE policies with no ownership/folder scoping, as high severity: "Anyone can
-upload into — or delete from — your `<bucket>` bucket, not just the file's owner." SELECT-only
-unscoped policies are medium with `needs_review`, mirroring SUPABASE-RLS-PERMISSIVE-TRUE-1's
-read/write severity split.
+Storage authorization is Row Level Security on the `storage.objects` table — Supabase allows no
+uploads to a bucket until a policy on that table permits them — so every concern that applies to a
+table policy applies here unchanged.
+
+Policies on `storage.objects` that cover INSERT, UPDATE or DELETE scope the operation to the
+object's owner: `using (bucket_id = '<bucket>' and owner = auth.uid())`, or a folder-prefix
+convention keyed to the user's id. They are not `USING (true)` / `WITH CHECK (true)`, and they do
+not grant to `anon` or `public` without an ownership predicate, because either shape lets anyone
+upload into, overwrite, or delete from the bucket rather than just the person whose file it is.
+Read access is scoped the same way unless the bucket's contents are deliberately public.
 """
 remediation = """
 Rewrite the `storage.objects` policy scoped to the `<bucket>` bucket so writes/deletes require

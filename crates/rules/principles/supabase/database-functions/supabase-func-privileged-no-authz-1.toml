@@ -14,9 +14,10 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "Severity is High." Same reading as its
-# folder sibling: a flat minimum naming no escalation, and this is a privileged write with no
-# authorization check, so no ceiling.
+# Severity floor. Rationale: a mutating SECURITY DEFINER function reachable by a broad role with
+# no identity check is a privilege-escalation primitive — the RLS that would gate the write is
+# bypassed by the DEFINER privileges, and nothing inside the function replaces it (CWE-862). High,
+# and deliberately no ceiling: a privileged write with no authorization at all can warrant more.
 min_severity = "high"
 default = true
 verification = "grounded"
@@ -68,20 +69,22 @@ authorizes the call). A function gated by any of these is not the defect this ru
 
 [[option]]
 id = "require-authz-predicate-in-privileged-mutating-functions"
-label = "Flag a mutating SECURITY DEFINER function granted to anon/public/authenticated with no identity/role/ownership/secret check in its body"
+label = "A SECURITY DEFINER function that writes, and is granted to a broad role, checks the caller before writing"
 directive = """
-Parse each CREATE FUNCTION/PROCEDURE body as a whole and correlate it against every GRANT EXECUTE
-statement in the same scanned SQL corpus. When a function is declared SECURITY DEFINER, its body
-contains a standalone INSERT/UPDATE/DELETE/TRUNCATE/MERGE statement, it is GRANTed EXECUTE to
-anon, public, or authenticated, and its body contains none of the recognized authorization-
-predicate idioms, emit a finding: "This SECURITY DEFINER function performs a privileged write and
-is reachable by a broad role, but never checks who the caller is before writing — any caller
-matching the grant can trigger the write regardless of ownership or entitlement." Severity is
-High. Remediation, in priority order: (1) add a server-side identity/ownership check at the top of
-the function body before the write (e.g. `if auth.uid() <> owner_id then raise exception ...;`),
-or a role-check function call (e.g. `has_role(auth.uid(), 'admin')`); (2) if no caller should be
-able to invoke this function directly at all, revoke the broad grant and invoke it only from a
-trusted server-side path instead.
+A SECURITY DEFINER function executes with its creator's privileges whoever calls it, so the Row
+Level Security policies that would gate a write never run. When such a function performs an
+INSERT, UPDATE, DELETE, TRUNCATE or MERGE and is granted EXECUTE to `anon`, `public` or
+`authenticated` — roles reachable straight from the PostgREST RPC endpoint — its own body carries
+the authorization check, as the first statement, before the write. Three shapes satisfy that, all
+genuine server-side controls: a session or JWT identity read (`auth.uid()`, `auth.jwt()`,
+`current_user`, `session_user`, a `request.jwt` claims read) compared against an owner or role
+column; a call to a role, ownership or permission-check function; or a caller-supplied shared
+secret or signature compared against a stored value, as a webhook-style control where the secret
+itself is what authorizes. Where no end-user role should be able to invoke the function at all,
+the grant is revoked instead and the function is called only from a trusted server-side path.
+
+A check in the UI is not one of these. Access-control decisions are enforced on the server, and the
+RPC endpoint reaches the function regardless of what any interface renders.
 """
 remediation = """
 For `<function-name>`, add a server-side authorization check as the FIRST statement in the

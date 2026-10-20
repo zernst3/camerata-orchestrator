@@ -5,8 +5,10 @@ layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "Flag as high severity: 'Your
-# login ...'".
+# Severity floor. Rationale: the redirect URL is where the session is handed off once
+# authentication completes, so a wildcard covering hosts the project does not control is not a
+# cosmetic open redirect — it is a session-token exfiltration path reachable by anyone who can
+# register a sibling subdomain on the same shared platform. High.
 min_severity = "high"
 default = true
 verification = "grounded"
@@ -42,14 +44,17 @@ and to prefer exact URLs for anything that doesn't genuinely need wildcard cover
 
 [[option]]
 id = "scope-redirect-allowlist-to-exact-known-origins"
-label = "Flag wildcard redirect entries whose scope includes a shared/third-party hosting domain; prefer exact URLs or project-owned-domain wildcards"
+label = "Every redirect allowlist entry is an exact URL or a wildcard on a domain this project's own DNS controls"
 directive = """
-Scan `additional_redirect_urls` (and the dashboard-exported equivalent) for a bare `*` entry, or a wildcard
-occupying a full host/domain segment on a known shared hosting domain (`*.vercel.app`, `*.netlify.app`,
-`*.github.io`, `*.herokuapp.com`, and comparable PaaS preview-domain patterns). Flag as high severity: "Your login
-redirect allowlist includes `<pattern>`, which matches any subdomain on a shared hosting platform — including ones
-an attacker can register. A crafted login link can redirect a real user's session to an attacker's page." A
-wildcard scoped to a domain the project's own DNS controls (`*.preview.yourapp.com`) is conforming.
+`additional_redirect_urls` lists exact URLs the app actually redirects to. Where wildcard coverage is
+genuinely needed — typically to cover per-branch preview deploys — the wildcard is scoped to a
+subdomain structure only this project's DNS can create (`https://*.preview.ourapp.com`). It is never a
+bare `*`, and never a wildcard spanning a shared hosting provider's domain (`*.vercel.app`,
+`*.netlify.app`, `*.github.io`, `*.herokuapp.com` and comparable PaaS preview domains), because
+anyone with a free account on those platforms can register a sibling subdomain the allowlist would
+then treat as trusted. The redirect target is where the session is handed off after authentication
+completes, so a host the project does not control is a session-exfiltration destination, not just a
+bounce to the wrong page.
 """
 remediation = """
 Replace `<pattern>` in `additional_redirect_urls` with either the exact URL(s) your app actually redirects to, or
@@ -64,6 +69,6 @@ why = "A redirect allowlist entry that matches hosts the project does not contro
 [[option]]
 id = "wildcard-redirect-for-convenience-across-all-previews"
 violates = true
-label = "Use a bare or shared-hosting-domain wildcard to cover every preview/staging deployment without restriction"
-directive = "additional_redirect_urls includes a bare `*` or a wildcard scoped to an entire shared hosting provider's domain, accepted for convenience so every preview deploy URL works without maintaining an allowlist."
+label = "The redirect allowlist contains a bare wildcard or one spanning a shared hosting provider's whole domain"
+directive = "`additional_redirect_urls` includes a bare `*`, or a wildcard covering an entire shared hosting provider's domain, so every preview-deploy URL works without maintaining an allowlist — and so does any page an attacker stands up on a sibling subdomain."
 why = "Rejected: the convenience of not maintaining an allowlist is bought by accepting that anyone who can register a subdomain on the same shared hosting provider — which in most cases means anyone with a free account on that platform — can stand up a page the redirect allowlist treats as trusted. Combined with the OAuth/magic-link handoff being exactly where a session gets created, this is not a cosmetic open redirect; it is a session-token exfiltration path, which is a categorically worse outcome than the maintenance cost of a project-scoped wildcard or an exact-URL list."

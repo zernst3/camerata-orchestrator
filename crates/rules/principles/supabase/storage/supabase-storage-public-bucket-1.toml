@@ -5,15 +5,16 @@ layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# Severity ceiling, transcribed from this rule's own prose: "flagged with
-# `needs_review`, not an automatic critical", and again "`needs_review`, not an automatic
-# critical" — the conforming failure mode is an explicit high-severity needs_review row, and
-# the rejected option is literally "flag only suspicious-named buckets, at critical severity".
+# Severity ceiling. Rationale: public buckets are a completely standard, intentional pattern —
+# avatars, product photos, marketing assets. A scanner asserting critical on every one of them
+# would be wrong most of the time in a typical app, so the publicness fact alone can never reach
+# critical; whether THIS bucket's contents should be public is a judgement left to the reader.
 max_severity = "high"
-# Severity floor, transcribed from this rule's own prose: "emit a high-severity
-# `needs_review` finding naming the bucket". Floor and ceiling are both high: read together
-# with the ceiling above ("not an automatic critical"), the prose pins this rule at exactly
-# high. needs_review is a routing qualifier here, not a severity.
+# Severity floor. Rationale: a public bucket bypasses access control entirely for reads — every
+# object in it is downloadable by anyone who has or guesses the URL, with no signed URL, no auth
+# header and no RLS evaluation on that path (CWE-732 when the contents are sensitive). That fact
+# is worth naming every time. Floor and ceiling are both high: this rule is pinned at exactly
+# high, with review routing — not a lower severity — carrying the uncertainty.
 min_severity = "high"
 default = true
 verification = "grounded"
@@ -32,7 +33,7 @@ url = "https://cwe.mitre.org/data/definitions/732.html"
 title = "CWE-732: Incorrect Permission Assignment for Critical Resource"
 
 [decision]
-question = "Is every public storage bucket surfaced as a named, needs_review finding rather than silently accepted or automatically flagged critical?"
+question = "Is every bucket marked public one whose entire contents are meant to be downloadable by anyone with the link?"
 default = "flag-public-buckets-needs-review"
 why = """
 Supabase's own bucket-fundamentals docs state it directly: "When a bucket is designated as
@@ -54,16 +55,19 @@ certainty the scanner does not have — `needs_review`, not an automatic critica
 
 [[option]]
 id = "flag-public-buckets-needs-review"
-label = "Name every public bucket in the report as needs_review, prioritizing name/usage signals that suggest sensitive content"
+label = "Every bucket marked public holds only content meant to be downloadable by anyone with the link"
 directive = """
-Scan migrations for `insert into storage.buckets` / `update storage.buckets set public = true`,
-and application code for `createBucket(..., { public: true })`. For every bucket found public,
-emit a high-severity `needs_review` finding naming the bucket: "Your `<bucket>` bucket is public:
-every file in it is downloadable by anyone who has or guesses the link." Where the bucket's name or
-referencing code (e.g. an `invoices`/`documents`/`uploads` table or upload handler) suggests
-private content, note that signal explicitly in the finding to help the reader prioritize; where
-the name suggests intentional public use (avatars, public-assets, media), note that too, without
-downgrading the review requirement.
+Marking a bucket public — `public = true` in a `storage.buckets` insert or update, or
+`createBucket(name, { public: true })` — bypasses access control for retrieving and serving its
+files. Every object inside becomes downloadable by anyone who has or can guess its URL: no signed
+URL, no auth header, and no RLS evaluation on that read path, whatever policies exist on
+`storage.objects` (those still gate upload, delete and move, but not public reads).
+
+So publicness is a per-bucket decision about contents, made deliberately. Avatars, product photos
+and marketing assets are genuinely public and belong in a public bucket. Anything a user would
+expect to be theirs — documents, invoices, uploads — goes in a private bucket with owner-scoped
+policies for the operations the app actually performs, and is served through signed URLs. A bucket
+whose name says `avatars` but holds user documents is private; the contents decide, not the name.
 """
 remediation = """
 Confirm whether every file in the `<bucket>` bucket is meant to be publicly downloadable by

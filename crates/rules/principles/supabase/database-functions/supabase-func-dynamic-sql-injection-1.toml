@@ -16,9 +16,12 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "Severity is High by default;
-# Critical when the same function is GRANTed ...". The clearest floor construction in the
-# corpus: a named minimum plus a named escalation above it.
+# Severity floor. Rationale: an attacker-controlled value flowing into an EXECUTE'd string built
+# without escaping is SQL injection inside the database (CWE-89), invisible to any checker that
+# only reads application-language source. High is the minimum, and deliberately no ceiling: the
+# reachability escalation recorded in `qualifies` — a co-present GRANT EXECUTE to
+# anon/public/authenticated, which puts the injection one unauthenticated API call away — raises
+# the same defect to critical, and a ceiling here would silently flatten that.
 min_severity = "high"
 default = true
 verification = "grounded"
@@ -67,19 +70,18 @@ trigger it changes the urgency.
 
 [[option]]
 id = "require-escaping-or-bound-dynamic-sql"
-label = "Flag every EXECUTE'd dynamic-SQL string assembled via || or format()'s %s with a non-literal operand; require %L/%I or USING instead"
+label = "Dynamic SQL is assembled with format()'s %L/%I or a bound USING argument, never with || or %s"
 directive = """
-Parse each CREATE FUNCTION/PROCEDURE body as a whole. When it contains an EXECUTE statement whose
-assembled query string is built via `||` concatenation with at least one non-literal segment, or
-via a `format()` call whose template contains `%s` alongside at least one non-literal argument,
-emit a finding: "This function runs a dynamically-assembled query via EXECUTE built with
-[mechanism] rather than an escaping/bound channel — an attacker-controlled value flowing into
-this expression can inject arbitrary SQL." Severity is High by default; Critical when the same
-scanned SQL corpus also contains a `GRANT EXECUTE ON FUNCTION <this function> TO
-anon|public|authenticated`. Remediation, in priority order: (1) use format()'s `%I` to quote an
-identifier (table/column name) or `%L` to quote a literal value, replacing any `%s` whose argument
-is not a hardcoded constant; (2) pass the value as a bound `USING` argument to EXECUTE instead of
-concatenating it into the string at all.
+Every query string a database function builds and runs through `EXECUTE` is assembled through a
+channel that neutralises its inputs. `format()`'s `%L` quotes a value as an SQL literal and `%I`
+quotes it as an identifier; `EXECUTE '... $1 ...' USING value` binds the value the way a prepared
+statement's placeholder does. Any of those is safe regardless of what flows into it.
+
+`||` concatenation and `format()`'s `%s` are not: `%s` inserts its argument verbatim with no
+escaping, which makes it exactly as exposed as naive concatenation. Once a string has been
+assembled that way, the SQL parser has no distinction left between the code the author wrote and
+the data a caller supplied, so an attacker-controlled value injects arbitrary SQL. Fully static
+EXECUTE strings are fine; the defect is the non-escaping channel, not dynamic SQL itself.
 """
 remediation = """
 For `<function-name>`, replace the unsafe interpolation with an escaping or bound channel: use

@@ -5,8 +5,10 @@ layer = "platform"
 enforcement = "prose"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "Report at high severity when no
-# such check is found: 'Anyone who changes the file id in ...'".
+# Severity floor. Rationale: the object path is attacker-controlled the moment it arrives in the
+# request, and signing a URL for it is functionally granting read access to that object. Changing
+# the id downloads someone else's file (CWE-639) — and where the handler uses a service_role
+# client, no RLS evaluation runs on that call at all, so nothing else catches it. High.
 min_severity = "high"
 default = true
 verification = "grounded"
@@ -48,15 +50,21 @@ which is the actual dominant failure mode in practice.
 
 [[option]]
 id = "require-ownership-check-before-signing"
-label = "Require an explicit ownership/entitlement check on the exact object before signing or downloading it"
+label = "Every handler signing or downloading a client-supplied object path first checks the caller owns that object"
 directive = """
-For every handler that calls createSignedUrl or download with a path argument sourced from client input (a route
-param, query string, or request body field), evaluate whether the handler validates that the requesting user owns
-or is otherwise entitled to that SPECIFIC object before the storage call — typically a database lookup keyed by
-both the object identifier and the caller's user id, or an explicit storage.objects owner check, rather than
-trusting the policy alone. Report at high severity when no such check is found: "Anyone who changes the file id in
-this request can download someone else's file." When a check is found, report it as informational (what the check
-validates), not a finding.
+Wherever `createSignedUrl` or `download` is called with a path that came from the request — a route
+parameter, a query string, a body field — the handler first confirms the requesting user is
+entitled to that EXACT object. In practice that is a lookup keyed on both the object identifier and
+the caller's user id (`where object_path = $1 and owner_id = $2`, not just the path), or an explicit
+`storage.objects` owner check. Signing a URL is functionally granting read access, so the check
+happens before the storage call, not after it.
+
+Two reasons the surrounding policy is not enough on its own. A handler that builds its storage
+client with a service_role key bypasses RLS entirely, so no policy is evaluated on that call at
+all and the handler's own logic is the complete access control. And even on the anon or
+authenticated key, a policy scoped to a bucket or folder still permits signing any object inside
+that scope — the handler is the only place that knows which single object this particular request
+was supposed to reach.
 """
 remediation = """
 In `<file>`, before calling createSignedUrl/download with the client-supplied object path, add an explicit lookup
@@ -72,6 +80,6 @@ why = "The object id/path is attacker-controlled the instant it comes from the r
 [[option]]
 id = "trust-the-storage-objects-rls-policy-alone"
 violates = true
-label = "Rely on the storage.objects RLS policy to gate who can sign/download which object; add no handler-level check"
-directive = "Do not add an application-level entitlement check in the download/signed-URL handler; treat the storage.objects RLS policy (SUPABASE-STORAGE-OBJECT-POLICY-1) as sufficient authorization for whatever object path the client supplies."
+label = "Download and signed-URL handlers pass the client's object path straight through, relying on the storage.objects policy"
+directive = "Handlers pass the client-supplied object path directly into `createSignedUrl`/`download` with no entitlement check of their own, treating the `storage.objects` RLS policy as sufficient authorization for whatever path arrives."
 why = "Rejected: a handler that constructs its storage client with a service_role key bypasses RLS entirely, so there is no policy evaluation happening on that call at all — this is the dominant real-world shape of this bug, and policy-only coverage misses it completely. Even with the anon/authenticated client, a policy scoped to a folder or bucket rather than an exact object still permits signing a URL for any object within that scope, which is broader than what a specific feature intends; the handler is the only place that knows which single object this particular request is supposed to be allowed to touch."

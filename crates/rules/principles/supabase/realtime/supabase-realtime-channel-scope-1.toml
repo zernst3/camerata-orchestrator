@@ -5,8 +5,10 @@ layer = "platform"
 enforcement = "prose"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "Flag as high severity a topic
-# built ..." -- stated twice, both branches at the same single severity.
+# Severity floor. Rationale: both branches land in the same place and neither is the lesser. An
+# enumerable topic lets an attacker iterate adjacent values into channels meant for other users;
+# a raw client-controlled topic with no server-side entitlement binding is the same
+# user-controlled-key shape (CWE-639) applied to a pub/sub identifier. High for both.
 min_severity = "high"
 default = true
 verification = "grounded"
@@ -47,16 +49,23 @@ adjacent numbers.
 
 [[option]]
 id = "topics-are-unguessable-and-authorization-checked"
-label = "Build topics from server-issued/unguessable identifiers, and pair every non-public topic with a realtime.messages authorization check"
+label = "Channel topics are server-issued or unguessable, and every non-public topic is authorization-checked"
 directive = """
-Read the channel-topic construction at each `supabase.channel(...)` call site. Flag as high severity a topic built
-from a sequential integer or other predictable pattern: "Your channel topic `<pattern>` is enumerable — an
-attacker can guess adjacent values and join channels meant for other users/resources." Flag as high severity a
-topic built from a raw, client-editable value (unvalidated route param or query string) with no server-side check
-that the requester is entitled to that resource before the channel is joined: "Nothing validates that this caller
-is actually entitled to the resource named by this channel topic before they connect." Note explicitly, as part of
-the finding, that an unguessable topic alone is not sufficient without the realtime.messages policy
-SUPABASE-REALTIME-AUTHORIZATION-1 requires.
+A channel topic is an arbitrary string the client picks, so two properties are established
+deliberately rather than assumed.
+
+The topic is not enumerable: it embeds an unguessable identifier such as a UUID tied to the
+resource, never a sequential integer or other predictable pattern that lets someone iterate adjacent
+values into channels meant for other users. And the server, not the client, decides which topics a
+given authenticated user may request — a raw route parameter or query string is never passed
+through as a topic without a server-side check that the caller is entitled to that resource.
+
+Unguessability is not the access control, though. Topic names leak through entirely ordinary paths —
+a shared link, browser history, a referrer header, a support screenshot, a log line — so every
+non-public topic is also a `private: true` channel with a matching `realtime.messages` policy, so
+that knowing the name is insufficient on its own. The two solve different problems: an unguessable
+topic with no policy is obscurity, and an authorized but sequentially-numbered topic is still
+trivially enumerable by anyone authorized for their own.
 """
 remediation = """
 Construct `<topic>` from a server-issued or genuinely unguessable identifier (a UUID tied to the resource, not a
@@ -72,6 +81,6 @@ why = "Topic secrecy and topic authorization solve different problems and neithe
 [[option]]
 id = "treat-an-unguessable-topic-name-as-sufficient-access-control"
 violates = true
-label = "Use a UUID or other hard-to-guess topic name and treat that alone as sufficient, without a realtime.messages policy"
-directive = "Construct channel topics from unguessable identifiers (UUIDs) and rely on that unguessability as the channel's access control, without also configuring the channel as private or adding a matching realtime.messages RLS policy."
+label = "Channel topics are unguessable UUIDs, and that unguessability is the channel's only access control"
+directive = "Topics are built from unguessable identifiers such as UUIDs, and nothing further gates the channel: it is not marked private and no matching `realtime.messages` policy exists, so knowing the topic name is sufficient to join."
 why = "Rejected: this is security through obscurity applied to a value that routinely leaks through entirely ordinary channels a developer doesn't think of as a secret-disclosure path — a shared link, browser history, a referrer header, a support screenshot, a logging pipeline that happens to capture the URL. Once the identifier is known to anyone outside the intended audience, there is no second check behind it, because the whole point of this option is that no realtime.messages policy exists to catch that case."

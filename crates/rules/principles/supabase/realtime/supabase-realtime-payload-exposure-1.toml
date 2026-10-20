@@ -5,8 +5,9 @@ layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "Flag as high severity: 'Your
-# subscription to `<table>` changes sends the FULL row -- including `<column>` ...'".
+# Severity floor. Rationale: the exposure is at transmission, not display — a sensitive column
+# fans out over the wire to every subscriber of the change stream, where RLS gated only WHO may
+# subscribe and never WHICH COLUMNS reach them (CWE-200). Nothing downstream can undo it. High.
 min_severity = "high"
 default = true
 verification = "grounded"
@@ -44,14 +45,19 @@ see that a document changed is not necessarily someone who should see every colu
 
 [[option]]
 id = "scope-sensitive-columns-out-of-realtime-payloads"
-label = "Scope Postgres Changes subscriptions with select, and hand-construct Broadcast payloads to exclude sensitive columns"
+label = "Realtime payloads carry only the columns the feature needs, never the full row by default"
 directive = """
-Scan `postgres_changes` subscriptions with no `select` option on a table whose columns include a sensitive-looking
-name. Flag as high severity: "Your subscription to `<table>` changes sends the FULL row — including `<column>` —
-to every subscriber, by default. Use the select option to send only the columns this feature actually needs."
-Separately scan Broadcast payload construction for a sensitive-looking column being included in the serialized
-object; flag identically. A `select` that already scopes to a safe subset, or a payload that never includes a
-sensitive column, is conforming.
+A Postgres Changes subscription sends the FULL row on every change event unless told otherwise, so
+every subscription names the columns it needs through the `select` option rather than accepting
+that default. The primary key is always included; everything else is there because the feature
+reads it. The same discipline applies to hand-constructed Broadcast payloads: the payload object is
+built from an explicit allowlist of fields, not by serializing the whole row or entity.
+
+RLS decides WHO may subscribe to a change stream. It says nothing about WHICH COLUMNS of an
+authorized row reach them — a user correctly entitled to know that a document changed is not
+necessarily someone who should see the owner's email, a billing field, or an internal note that
+rode along because the subscription was set up to watch one status column. The exposure happens at
+transmission, so filtering in the receiving client does not prevent it.
 """
 remediation = """
 Add a `select` option to the `postgres_changes` subscription on `<table>`, naming only the columns this feature's UI
@@ -67,6 +73,6 @@ why = "The select option (Postgres Changes) or a hand-built payload allowlist (B
 [[option]]
 id = "broadcast-the-full-row-and-filter-sensitive-fields-client-side"
 violates = true
-label = "Send the full row via the default postgres_changes behavior or a full-row Broadcast payload, filtering sensitive fields out in the receiving client"
-directive = "Accept the default full-row payload for Postgres Changes subscriptions, or broadcast the complete entity object, relying on client-side code to decide which fields to display or discard after receipt."
+label = "Realtime payloads carry the full row, with sensitive fields filtered out in the receiving client"
+directive = "Postgres Changes subscriptions keep the default full-row payload, or Broadcast sends the complete entity object, and the receiving client's own code decides which fields to display or discard after the data has arrived."
 why = "Rejected: by the time a client-side filter runs, the sensitive data has already been transmitted to and received by that client — a filter that only controls what's RENDERED does nothing to prevent the browser's network tab, a malicious or modified client, or a compromised extension from reading the full payload off the wire. The column-level exposure this rule targets happens at TRANSMISSION, not display, so a remediation scoped to the display layer leaves the actual defect (every subscriber receiving every column) fully intact."

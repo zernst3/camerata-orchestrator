@@ -23,7 +23,7 @@ url = "https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/index.html"
 title = "OWASP Top 10:2021 — A01 Broken Access Control"
 
 [decision]
-question = "Does every table reachable from an API-exposed schema have Row Level Security enabled, verified against the REPLAYED END-STATE of the migration timeline rather than a single migration file?"
+question = "Does every table reachable from an API-exposed schema have Row Level Security enabled?"
 default = "enforce-rls-enabled-replayed-end-state"
 why = """
 A Supabase table in an exposed schema (public by default) is reachable through PostgREST using
@@ -56,17 +56,22 @@ step, never assert live state from the repo alone.
 
 [[option]]
 id = "enforce-rls-enabled-replayed-end-state"
-label = "Flag every exposed-schema table whose replayed migration-timeline end-state has no RLS enabled"
+label = "Every table in an API-exposed schema has Row Level Security enabled"
 directive = """
-Run the migration-timeline replay (or read the declarative schema snapshot when present) to
-compute each table's final RLS state. For every table reachable from an API-exposed schema whose
-final state has RLS disabled or never enabled, emit a critical finding naming the table and the
-migration file + line that last established the state, phrased as: "Your `<table>` table has no
-Row Level Security. Anyone holding your public API key — which ships in your frontend — can read
-and write every row." Always append the honest caveat: this is what the repository shows; confirm
-against the live database, since dashboard-only changes are invisible to a repo scan. Tables in
-schemas not exposed via SUPABASE-EXPOSURE-SCHEMAS-1's config parse are demoted to a
-defense-in-depth note rather than a critical.
+Every table reachable through an API-exposed schema — `public` by default, plus any schema named in
+`[api] schemas` — ends the migration history with
+`ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` in force, and carries at least one policy scoping
+who may read and write it. RLS alone with zero policies denies everyone, which is safe but is
+usually not what the feature wanted.
+
+This matters more here than in an ordinary Postgres deployment: an exposed table is reachable
+through PostgREST using the anon key, which ships inside the frontend bundle by design. There is no
+application firewall in front of PostgREST, so RLS is the only thing standing between an anonymous
+internet request and the table's rows. Whether RLS is on is a fact about the ORDERED migration
+history, not about any one file — a later migration can enable what an earlier one left off, or
+disable what an earlier one turned on — so the state that counts is the one the last relevant
+statement leaves behind, or the declarative `supabase/schemas/*.sql` snapshot where the project
+keeps one.
 """
 remediation = """
 Add `ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` in a new migration (or update your

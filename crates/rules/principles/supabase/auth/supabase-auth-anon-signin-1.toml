@@ -12,7 +12,7 @@ inspectable = true
 min_severity = "high"
 default = true
 verification = "grounded"
-qualifies = "Enforced by a two-part scan: (1) supabase/config.toml's `[auth] enable_anonymous_sign_ins = true` (or the equivalent dashboard-exported setting); when present, (2) scan CREATE POLICY statements granted `to authenticated` for any reference to `is_anonymous` anywhere in the predicate. Conformance holds when every policy that is semantically meant to gate a capability for permanent, identity-verified users (posting content under a real identity, financial actions, anything the product would not want a disposable session to perform) excludes anonymous sessions via `(auth.jwt()->>'is_anonymous')::boolean is false`; it fails when anonymous sign-ins are enabled and no policy in the corpus references is_anonymous at all, since every `to authenticated` policy is then silently also a policy for anonymous users."
+qualifies = "Enforced by a two-part scan: (1) supabase/config.toml's `[auth] enable_anonymous_sign_ins = true` (or the equivalent dashboard-exported setting); when present, (2) scan CREATE POLICY statements granted `to authenticated` for any reference to `is_anonymous` anywhere in the predicate. Conformance holds when every policy that is semantically meant to gate a capability for permanent, identity-verified users (posting content under a real identity, financial actions, anything the product would not want a disposable session to perform) excludes anonymous sessions via `(auth.jwt()->>'is_anonymous')::boolean is false`; it fails when anonymous sign-ins are enabled and no policy in the corpus references is_anonymous at all, since every `to authenticated` policy is then silently also a policy for anonymous users. Partial coverage is routed, not asserted: where SOME but not all plausibly-permanent-user-gating policies reference `is_anonymous`, the un-annotated ones are marked needs_review rather than flagged, because table and column names alone cannot tell a scan which policies need the exclusion."
 
 [[sources]]
 url = "https://supabase.com/docs/guides/auth/auth-anonymous"
@@ -48,15 +48,17 @@ an untouched policy set that predates the feature.
 
 [[option]]
 id = "require-is-anonymous-exclusion-on-permanent-user-policies"
-label = "When anon sign-ins are enabled, require at least one is_anonymous-aware restrictive policy; flag silent extension of the pre-existing policy set"
+label = "Policies gating permanent-user capabilities exclude anonymous sessions via the JWT's is_anonymous claim"
 directive = """
-When `enable_anonymous_sign_ins = true` is found, scan every `CREATE POLICY ... to authenticated` statement in the
-corpus for a reference to `is_anonymous`. If NONE of them reference it, flag at high severity: "Anonymous sign-ins
-are enabled, but none of your access policies distinguish a real account from a disposable one — every policy
-written for `authenticated` users now also applies to anyone who never signed up." Where some but not all
-plausibly-permanent-user-gating policies reference it, mark the un-annotated ones `needs_review` rather than
-asserting a violation, since not every policy needs the exclusion and a scan cannot always tell which do from table
-and column names alone.
+Anonymous sign-ins are assigned the same `authenticated` role a permanent, signed-up account gets, so
+`to authenticated` alone does not distinguish the two. Every capability this product intends for a
+verified permanent identity — posting under a persistent profile, anything financial, anything a
+disposable session should not be able to do — is gated by a RESTRICTIVE policy checking
+`(select (auth.jwt()->>'is_anonymous')::boolean) is false`. Restrictive, not permissive: permissive
+policies OR together, so a single unscoped permissive policy would still let the session through.
+Capabilities deliberately open to anonymous sessions stay open — that is the point of enabling the
+feature — but the choice is made per capability and visible in the policy, never inherited by default
+from a policy set written before anonymous sign-ins existed.
 """
 remediation = """
 Add a RESTRICTIVE policy (not permissive) to `<table>` checking
@@ -72,6 +74,6 @@ why = "Supabase's own documentation calls this out as the single thing a project
 [[option]]
 id = "enable-anonymous-signins-without-reviewing-existing-policies"
 violates = true
-label = "Enable anonymous sign-ins and leave the existing authenticated-role policy set untouched"
-directive = "Turn on enable_anonymous_sign_ins without auditing or updating any existing RLS policy that grants to the authenticated role."
+label = "Anonymous sign-ins are enabled while no policy granting to the authenticated role checks is_anonymous"
+directive = "`enable_anonymous_sign_ins` is on, and the RLS policies granting to the `authenticated` role are the ones written before the feature existed: none of them reference `is_anonymous`, so every capability they gate is reachable by a disposable session as well as a permanent account."
 why = "Rejected: this is precisely the gap Supabase's own documentation warns against. Every policy written before anonymous sign-ins existed was authored under the assumption that `authenticated` meant a real, verified account; turning the feature on without revisiting those policies silently and retroactively extends every one of them to anonymous sessions, with no code change anywhere making that extension visible to a reviewer."

@@ -42,16 +42,21 @@ pattern re-signs on every access: store the object's PATH in the database (not a
 
 [[option]]
 id = "short-ttl-never-persisted"
-label = "Scope expiresIn to the actual viewing window; store only the object path, and re-sign on every access"
+label = "Signed URLs expire within the real viewing window, and only the object path is ever stored"
 directive = """
-For every `createSignedUrl` call site, extract the literal `expiresIn` value. Flag as `needs_review` any expiry at
-day-scale or longer with no comment or surrounding logic explaining why the content needs that long a window (e.g.
-a deliberately long-lived public-share link is a legitimate use case, but it should read as a deliberate choice,
-not a default left untouched). Separately, scan for the `signedUrl` the call returns being passed into an
-INSERT/UPDATE statement's value list; flag that as a distinct, higher-severity finding regardless of the expiry
-chosen: "Your `<table>.<column>` stores a signed download link rather than the file's path. It stays usable to
-whoever reads that column for as long as the link's expiry allows, independent of any access check on the table
-itself."
+A signed URL is a bearer credential: whoever holds the string can download the object until it
+expires, with no further authentication. `createSignedUrl`'s `expiresIn` is that credential's
+entire lifetime, so it is scoped to how long the recipient genuinely needs — a page load, an email
+click, a short download window — rather than set generously long against the risk of expiring too
+soon. A long expiry mostly extends how long a forwarded or intercepted link keeps working. Where
+a deliberately long-lived share link IS the feature, the value reads as a decision, with the
+reason beside it.
+
+The generated URL string is never written to a database column. Persisting it creates a second,
+durable copy of the credential in a place designed to hold data, not secrets — its real exposure
+is then governed by that table's policies, backups, replicas and export paths, none of which know
+the value is supposed to stop working at a given time. What gets stored is the object's PATH,
+which is not a secret, and `createSignedUrl` is called fresh each time a client needs to download.
 """
 remediation = """
 In `<file>`, scope the `createSignedUrl` expiry to how long the recipient actually needs the link to remain valid
@@ -67,6 +72,6 @@ why = "Re-signing on read instead of persisting the URL removes an entire durabl
 [[option]]
 id = "cache-the-signed-url-in-a-column-for-reuse"
 violates = true
-label = "Generate the signed URL once and persist it in a column so later reads can skip re-signing"
-directive = "Call createSignedUrl once (typically at upload or first-request time), write the resulting URL string into a database column, and serve that stored value on subsequent requests instead of calling createSignedUrl again."
+label = "A signed URL is generated once and persisted in a column, and later reads serve the stored value"
+directive = "`createSignedUrl` is called once, typically at upload or first-request time; the resulting URL string is written to a database column, and subsequent requests serve that stored value rather than re-signing."
 why = "Rejected: persisting the signed URL creates a durable secondary copy of a bearer credential in a location — a table column — that was not designed as a secret store. Its exposure now depends on the table's own RLS policy, backups, replicas, and any export path, none of which the expiry value accounts for. Engineers choosing this pattern also tend to pick an unusually long expiresIn specifically so the cached value doesn't go stale, which compounds the problem: the one mechanism that bounds a signed URL's lifetime (its expiry) gets weakened at exactly the call site whose output is about to be copied somewhere durable."

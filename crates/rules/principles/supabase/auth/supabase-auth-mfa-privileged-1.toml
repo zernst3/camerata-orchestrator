@@ -5,8 +5,9 @@ layer = "platform"
 enforcement = "prose"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "Report at high severity when no
-# such check is found: 'This privileged action can be performed by ...'".
+# Severity floor. Rationale: a privileged action reachable by any password-only session means a
+# stolen or phished password reaches role grants, financial operations and admin routes exactly
+# as if MFA had never been built — CWE-308 on the highest-value actions in the system. High.
 min_severity = "high"
 default = true
 verification = "grounded"
@@ -45,14 +46,16 @@ service-role handlers) and asking whether an aal2 check gates it.
 
 [[option]]
 id = "require-aal2-on-privileged-actions"
-label = "Require an aal2 check on privileged roles/actions; flag privileged surfaces reachable by any aal1 session"
+label = "Privileged actions require a verified second factor (aal2), not merely an authenticated session"
 directive = """
-For every action already identified as privileged (admin-only routes, role/permission grants, SECURITY DEFINER
-functions performing cross-tenant or financial operations, service-role-backed handlers), evaluate whether an aal2
-check gates it — `(auth.jwt()->>'aal') = 'aal2'` in an RLS policy, or an equivalent `getAuthenticatorAssuranceLevel`
-check server-side. Report at high severity when no such check is found: "This privileged action can be performed by
-any logged-in session, whether or not MFA was ever set up or verified." When a check is found, report it as
-informational.
+Every action this project treats as privileged — admin-only routes, role and permission grants,
+SECURITY DEFINER functions performing cross-tenant or financial operations, service-role-backed
+handlers — is gated on a verified second factor before it proceeds: `(select auth.jwt()->>'aal') =
+'aal2'` in the RLS policy, or the `getAuthenticatorAssuranceLevel()` equivalent in a server-side
+handler. A password-only session carries `aal1` and does not reach these actions, whether or not
+that user has ever enrolled an MFA factor. Which actions count as privileged is this project's
+judgement — own-content edits in a notes app do not need the bar a role grant does — but the bar,
+once set, is enforced by an `aal` check and not by enrollment being available.
 """
 remediation = """
 Add a restrictive policy or server-side check requiring `(select auth.jwt()->>'aal') = 'aal2'` before `<action>`
@@ -69,6 +72,6 @@ why = "Supabase exposes the aal claim specifically so sensitive actions can requ
 [[option]]
 id = "treat-mfa-enrollment-as-sufficient-without-enforcement"
 violates = true
-label = "Offer MFA enrollment but do not require aal2 anywhere; treat enrollment alone as sufficient hardening"
-directive = "Support MFA enrollment for users who opt in, but do not add any aal2 check to privileged roles, actions, or policies — an enrolled user's unverified (aal1) session is treated identically to a verified (aal2) one."
+label = "MFA enrollment is offered but no privileged action checks aal, so a password-only session reaches all of them"
+directive = "Users may enroll an MFA factor, but no policy or handler checks the session's `aal` claim, so an enrolled user's unverified (aal1) session reaches every privileged action exactly as a verified (aal2) one does."
 why = "Rejected: an MFA factor that is enrolled but never REQUIRED provides no protection against the scenario MFA exists to defend — a password-only session (stolen password, successful phishing) still reaches every privileged action exactly as if MFA did not exist, because nothing ever checks whether the second factor was actually verified for this session. Enrollment without enforcement is security theater for the specific threat model MFA is meant to close."

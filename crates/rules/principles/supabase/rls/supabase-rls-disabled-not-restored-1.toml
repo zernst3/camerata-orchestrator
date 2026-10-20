@@ -16,14 +16,16 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "this is always SEVERITY_CRITICAL,
-# because a deliberate-but-unrestored disable" is its own defect, and "emit a CRITICAL finding
-# naming the table". Deliberately NO ceiling: this is the control case for a rule that must never
-# be capped.
+# Severity floor. Rationale: an explicit DISABLE that nobody restored is unambiguous in a way a
+# never-considered table is not — something deliberately turned protection off and the matching
+# re-enable was dropped or landed on the wrong object. That conclusion does not soften with the
+# exposure gate's own verdict or with whatever a co-located RLS rule computes for the same table,
+# which is exactly why it is pinned at critical here. Deliberately NO ceiling: this is the
+# control case for a rule that must never be capped.
 min_severity = "critical"
 default = true
 verification = "grounded"
-qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS-ENABLED-1, but over its OWN general-SQL timeline (**/*.sql, not scoped to supabase/migrations|schemas) so it also covers non-Supabase Postgres layouts: once a table's per-statement protection history is known, this rule flags a table whose CURRENT replayed end-state has RLS explicitly disabled (a real `DISABLE ROW LEVEL SECURITY` statement, not merely a table that never had RLS touched at all — that is SUPABASE-RLS-ENABLED-1's concern) and where the disable was never correctly restored — either no matching re-enable exists anywhere in the history, or the next re-enable statement in that migration targeted a DIFFERENT table (a copy-paste typo). Fires independent of supabase/config.toml exposure scoping and independent of any co-located rule's own severity: an explicit disable nobody restored is a security-relevant authoring defect in its own right, not a PostgREST-reachability question. Conformance holds when every table that is ever explicitly disabled is, by the end of the replayed timeline, correctly re-enabled on the SAME table."
+qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS-ENABLED-1, but over its OWN general-SQL timeline (**/*.sql, not scoped to supabase/migrations|schemas) so it also covers non-Supabase Postgres layouts: once a table's per-statement protection history is known, this rule flags a table whose CURRENT replayed end-state has RLS explicitly disabled (a real `DISABLE ROW LEVEL SECURITY` statement, not merely a table that never had RLS touched at all — that is SUPABASE-RLS-ENABLED-1's concern) and where the disable was never correctly restored — either no matching re-enable exists anywhere in the history, or the next re-enable statement in that migration targeted a DIFFERENT table (a copy-paste typo). Fires independent of supabase/config.toml exposure scoping and independent of any co-located rule's own severity: an explicit disable nobody restored is a security-relevant authoring defect in its own right, not a PostgREST-reachability question. Conformance holds when every table that is ever explicitly disabled is, by the end of the replayed timeline, correctly re-enabled on the SAME table. Carries the same repo-vs-production honesty caveat as SUPABASE-RLS-ENABLED-1: the migration history is what the repository can show, and a dashboard-only change is invisible to it, so live state is confirmed against production rather than asserted from the repo."
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/sql-altertable.html"
@@ -38,7 +40,7 @@ url = "https://cwe.mitre.org/data/definitions/284.html"
 title = "CWE-284: Improper Access Control"
 
 [decision]
-question = "When a table's Row Level Security was explicitly disabled somewhere in the migration history and never correctly restored on that SAME table, is that flagged as its own critical finding — independent of PostgREST exposure scoping and independent of any other RLS rule's severity?"
+question = "Was any table's Row Level Security explicitly disabled somewhere in the migration history and never correctly restored on that same table?"
 default = "flag-disabled-not-restored-as-critical"
 why = """
 A table that simply never had RLS touched (SUPABASE-RLS-ENABLED-1's plain case) reads as an
@@ -77,20 +79,18 @@ use) and this rule's `extra_domains = ["sql"]` arming both follow that same prec
 
 [[option]]
 id = "flag-disabled-not-restored-as-critical"
-label = "Flag every table whose RLS was explicitly disabled and never correctly restored as a distinct critical finding"
+label = "Every table whose RLS was explicitly disabled is re-enabled on that same table before the migrations end"
 directive = """
-Replay the migration timeline (Supabase-scoped AND general-SQL, per this rule's own breadth) to
-find every table whose CURRENT end-state has RLS disabled AND traces to an explicit `DISABLE
-ROW LEVEL SECURITY` statement (not a table that simply never had RLS touched). For each, check
-whether the next RLS-enabling statement in that same migration file targets the SAME table. If
-no re-enable exists anywhere in the history, or the next enable statement in that file targets a
-DIFFERENT table, emit a CRITICAL finding naming the table, the disabling statement's file/line,
-and — when a wrong-table re-enable was found — the mistargeted statement's own file/line, phrased
-to make the specific authoring defect legible (e.g. "Row Level Security was explicitly disabled
-on `<table>` ... and never re-enabled" or "... the next RLS-enabling statement ... turned
-protection back on for `<other-table>` instead"). Always independent of exposure-schema scoping
-and of any other RLS rule's own severity for the same table. Include the same repo-vs-production
-honesty caveat as SUPABASE-RLS-ENABLED-1.
+Turning Row Level Security off on a table is sometimes necessary mid-migration — a backfill, a
+hotfix, a data repair. When it happens, the matching
+`ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` is written in the same change, and it names the
+SAME table that was disabled. A migration that disables and re-enables several tables in one file
+is where this goes wrong: the re-enable is copied, the table name is not updated, and protection
+comes back for one table while another is left open with nothing in the diff to show it.
+
+So the end state of the migration history has no table sitting disabled as the residue of an
+explicit `DISABLE ROW LEVEL SECURITY`. Restoration is done forward, in a new migration, rather than
+by editing the migration that disabled it — the goal is protection now, not a rewritten history.
 """
 remediation = """
 For `<table>`, add `ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` in a new migration — do not

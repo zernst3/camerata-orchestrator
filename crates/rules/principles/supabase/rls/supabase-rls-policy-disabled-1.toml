@@ -5,8 +5,10 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "emit a critical finding distinct
-# from the bare SUPABASE-RLS-ENABLED-1" case.
+# Severity floor. Rationale: this is the more dangerous variant of a missing-RLS finding, not a
+# milder one. Written policies make the table LOOK protected in code review and in the migration
+# diff while Postgres never evaluates them, so the false sense of security is itself part of the
+# defect — Splinter's 0007. Critical.
 min_severity = "critical"
 default = true
 verification = "grounded"
@@ -22,7 +24,7 @@ title = "Supabase Database Linter — 0007_policy_exists_rls_disabled (\"Securit
 linter = "splinter: policy_exists_rls_disabled"
 
 [decision]
-question = "When a table has CREATE POLICY statements in its migration history but RLS is disabled in the replayed end-state, is that flagged as a distinct, higher-signal finding than a bare missing-RLS finding?"
+question = "Does any table carry CREATE POLICY statements while Row Level Security itself is left disabled?"
 default = "flag-policy-exists-rls-disabled"
 why = """
 This is a more dangerous variant of SUPABASE-RLS-ENABLED-1: the codebase LOOKS protected — a
@@ -44,14 +46,16 @@ shows, not a live-database assertion.
 
 [[option]]
 id = "flag-policy-exists-rls-disabled"
-label = "Flag tables with policies but RLS off as a distinct, higher-signal finding"
+label = "Every table that carries policies also has Row Level Security enabled, so the policies actually run"
 directive = """
-When the replayed end-state shows a table has one or more CREATE POLICY statements anywhere in its
-migration history AND RLS is disabled (or never enabled) in that same end-state, emit a critical
-finding distinct from the bare SUPABASE-RLS-ENABLED-1 case, naming the table and citing the
-migration file(s) that defined the policy and the one that (dis)established RLS. Phrase it as:
-"You wrote access rules for `<table>`, but they are switched off. The table looks protected in your
-code and is fully open in production." Include the repo-vs-production honesty caveat.
+A `CREATE POLICY` statement does nothing on its own. Postgres only evaluates a table's policies
+once `ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` is in force, so a table with policies written
+but RLS never enabled — or disabled again afterwards — is fully open, while the migration diff and
+the code review both show what reads as working access control.
+
+Every table carrying at least one policy therefore also has RLS enabled at the end of the
+migration history. Policies and the enable statement are authored together, and when a migration
+turns RLS off for a table that has policies, the re-enable goes in with it.
 """
 remediation = """
 Add `ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` in a new migration — the policies already

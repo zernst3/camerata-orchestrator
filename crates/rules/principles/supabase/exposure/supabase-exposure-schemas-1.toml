@@ -5,8 +5,9 @@ layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "emit a medium-severity finding:
-# 'Your API quietly serves ...'".
+# Severity floor. Rationale: an extra exposed schema widens the PostgREST surface to tables the
+# team may still assume are unreachable, but it is a review prompt rather than a demonstrated
+# exposure — whether those tables actually lack RLS is the neighbouring rules' question. Medium.
 min_severity = "medium"
 default = true
 verification = "grounded"
@@ -21,7 +22,7 @@ url = "https://supabase.com/docs/guides/cli/config"
 title = "Supabase docs — CLI config reference: [api] schemas in supabase/config.toml"
 
 [decision]
-question = "Is every non-default schema listed in [api] schemas flagged for RLS-coverage review, and does its parse result feed the exposed-schema set every other Supabase rule uses?"
+question = "Has every schema listed in [api] schemas beyond the default set been reviewed for RLS coverage on its tables?"
 default = "flag-non-default-exposed-schemas-and-feed-scope"
 why = """
 Supabase's CLI config reference documents `[api] schemas` directly as "Schemas to expose in your
@@ -44,15 +45,15 @@ negatives on tables in a second exposed schema.
 
 [[option]]
 id = "flag-non-default-exposed-schemas-and-feed-scope"
-label = "Flag every schema beyond the default three, and feed the parsed list as the exposed-schema scope for the rest of the RLS/exposure group"
+label = "Every schema exposed through the API beyond the default set has been reviewed for RLS coverage"
 directive = """
-Parse `[api] schemas` from supabase/config.toml. For any entry beyond the default
-["public", "storage", "graphql_public"], emit a medium-severity finding: "Your API quietly serves
-a second set of tables that were never reviewed for access rules." Recommend confirming every
-table in the additional schema has RLS enabled and reviewed policies. Independently of the finding,
-expose the full parsed schema list as the canonical 'exposed schemas' input consumed by every other
-supabase/rls/* and supabase/exposure/* rule, replacing any hardcoded assumption that `public` is
-the only exposed schema.
+`[api] schemas` in `supabase/config.toml` lists the schemas PostgREST serves, defaulting to
+`["public", "storage", "graphql_public"]`. Every schema added beyond that default gets an API
+endpoint for every table, view and function inside it — the same reachability `public` has. So
+adding one is paired with the review that goes with it: each table in the new schema has Row Level
+Security enabled and policies held to the same standard as the `public` tables, rather than
+inheriting an assumption, made when `public` was the only exposed schema, that nothing in here is
+reachable. A schema that was exposed by accident is removed from the list instead.
 """
 remediation = """
 Either remove `<schema>` from the `[api] schemas` list in `supabase/config.toml` if it was

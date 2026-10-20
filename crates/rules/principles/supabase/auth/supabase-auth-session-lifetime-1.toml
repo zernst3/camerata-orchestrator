@@ -5,9 +5,10 @@ layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "Flag
-# `enable_refresh_token_rotation = false` unconditionally at high severity". The JWT-expiry
-# side is explicitly scoped to `needs_review` and names no severity of its own.
+# Severity floor. Rationale: with rotation off, nothing in the system ever invalidates a leaked
+# refresh token — it mints new access tokens indefinitely, CWE-613 with no bound at all. That is
+# the branch the floor is set for. The jwt_expiry side is a risk-profile judgement with no single
+# correct value, carries no severity of its own, and is routed to review rather than asserted.
 min_severity = "high"
 default = true
 verification = "grounded"
@@ -46,13 +47,17 @@ again after the project scaffolded its config.toml.
 
 [[option]]
 id = "rotate-refresh-tokens-and-bound-jwt-expiry"
-label = "Keep refresh-token rotation on; treat an unusually long jwt_expiry as needs_review rather than silently accepted"
+label = "Refresh-token rotation stays on, and the access-token lifetime is a deliberate, documented choice"
 directive = """
-Scan config.toml's `[auth]` section. Flag `enable_refresh_token_rotation = false` unconditionally at high severity:
-"Refresh-token rotation is off. A single leaked refresh token stays valid forever — there's no mechanism that ever
-expires it." Flag a `jwt_expiry` set to several times the 3600-second default with no adjacent comment explaining
-the choice as `needs_review`: "Your access tokens stay valid for `<duration>`, well beyond Supabase's one-hour
-default — confirm this is deliberate for your app's risk profile, not an unreviewed setting."
+`enable_refresh_token_rotation` stays `true` in `supabase/config.toml`'s `[auth]` section. Rotation
+exchanges the old refresh token on every refresh, so a leaked one stops working as soon as the
+legitimate holder refreshes; with it off, nothing in the system ever expires that token and it mints
+new access tokens indefinitely. It is a security control with no functional downside, so there is no
+general-purpose reason to turn it off. `jwt_expiry` is a genuine risk-profile judgement — a
+low-sensitivity consumer app and one handling financial or health data differ legitimately — so this
+project either keeps it near Supabase's 3600-second default or records, in a comment beside the
+setting, why a longer-lived access token is right here. A longer expiry widens the window in which a
+stolen access token keeps working, so the number is chosen rather than inherited.
 """
 remediation = """
 In supabase/config.toml, set `enable_refresh_token_rotation = true` (the Supabase default) unless there is a
@@ -68,6 +73,6 @@ why = "Refresh-token rotation is a strictly beneficial, no-downside security con
 [[option]]
 id = "disable-rotation-or-extend-expiry-for-fewer-refreshes"
 violates = true
-label = "Disable refresh-token rotation or extend jwt_expiry to reduce how often clients need to refresh"
-directive = "Turn off enable_refresh_token_rotation, or set jwt_expiry to a long duration, so that client sessions need to refresh or re-authenticate less frequently."
+label = "Refresh-token rotation is off, or jwt_expiry is set long, so sessions refresh less often"
+directive = "`enable_refresh_token_rotation` is off, or `jwt_expiry` is set well beyond the one-hour default, so client sessions refresh or re-authenticate less frequently — and a stolen refresh or access token stays usable correspondingly longer."
 why = "Rejected: disabling rotation removes the ONLY mechanism that bounds a leaked refresh token's useful life — once off, a stolen refresh token is valid indefinitely, with no event (a legitimate refresh) that would ever invalidate it. Extending jwt_expiry for the same convenience reason widens the exposure window of a stolen access token proportionally. Both trade a real, uncapped security cost for a marginal reduction in how often a client-side refresh call fires, which is not a meaningful problem the rotation/expiry defaults were causing in the first place."

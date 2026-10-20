@@ -5,13 +5,14 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
-# Severity ceiling, transcribed from this rule's own prose: "Medium severity — this is an
-# availability/architecture smell, not a direct exposure, so it is a lower severity than the
-# missing-RLS and policy-disabled findings."
+# Severity ceiling. Rationale: RLS enabled with zero policies is deny-by-default — nobody gets
+# rows. That is an availability and architecture smell, not a data exposure, so it must sit below
+# the missing-RLS and policy-disabled findings rather than competing with them for alarm.
 max_severity = "medium"
-# Severity floor, transcribed from this rule's own prose: "emit a medium-severity finding",
-# and "it ships at medium severity and its remediation text should point the reader at both
-# possibilities". Floor and ceiling are both medium, from the same two sentences.
+# Severity floor. Rationale: it is still a real, repo-detectable signal with two possible causes
+# (a silently broken feature, or a service_role client reading the table and bypassing RLS
+# entirely), and the second is an architectural risk worth surfacing. Floor and ceiling are both
+# medium: diagnostic value, no direct exposure.
 min_severity = "medium"
 default = true
 verification = "grounded"
@@ -27,7 +28,7 @@ title = "Supabase Database Linter — 0008_rls_enabled_no_policy (\"No access ru
 linter = "splinter: rls_enabled_no_policy"
 
 [decision]
-question = "Is a table with RLS enabled but zero policies flagged, and at what severity relative to the missing-RLS findings?"
+question = "Does every table with Row Level Security enabled also carry at least one policy?"
 default = "flag-zero-policy-as-medium"
 why = """
 RLS enabled with no CREATE POLICY is deny-by-default in Postgres: anon and authenticated roles get
@@ -45,14 +46,20 @@ rather than assuming one.
 
 [[option]]
 id = "flag-zero-policy-as-medium"
-label = "Flag zero-policy RLS-enabled tables at medium severity, naming both possible causes"
+label = "Every table with Row Level Security enabled carries at least one policy"
 directive = """
-When the replayed end-state shows a table with RLS enabled and zero policies anywhere in its
-history, emit a medium-severity finding: "`<table>` is locked to everyone. Either a feature is
-broken, or your app is reading it with the master key — which skips security entirely." Point the
-remediation at checking (a) whether the anon/authenticated roles need policies added, and (b)
-whether a service_role client reads this table, in which case SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1
-covers the actual risk.
+RLS enabled with no `CREATE POLICY` is deny-by-default in Postgres: the `anon` and `authenticated`
+roles get zero rows and zero writes. So a table in that state is carrying a lock with no key cut
+for anyone, and it means one of two things, both worth knowing. Either a feature is silently
+failing because the roles it depends on were never granted anything, or the application only ever
+touches the table through a service_role-backed client — which bypasses RLS entirely and makes the
+table's own policies moot, moving the real access-control question into whichever handler
+constructs that client.
+
+Every RLS-enabled table therefore carries at least one policy scoping exactly which requests may
+read or write it. Where the table is genuinely only reached through a service_role path, RLS stays
+on with no policy deliberately, and the handler using that client carries the explicit
+authorization check instead.
 """
 remediation = """
 Add a `CREATE POLICY` for `<table>` scoping exactly which anon/authenticated requests may read
@@ -67,6 +74,6 @@ why = "The finding is a genuine repo-detectable signal (deny-by-default RLS) but
 [[option]]
 id = "treat-zero-policy-as-non-finding"
 violates = true
-label = "Do not flag zero-policy RLS-enabled tables at all (assume intentional lockdown)"
-directive = "Skip tables with RLS enabled and no policies; treat the deny-by-default state as an intentional, already-secure configuration requiring no report entry."
+label = "Tables are left RLS-enabled with zero policies, treated as an intentional, already-secure lockdown"
+directive = "Tables may stay RLS-enabled with no policy at all, the deny-by-default state being taken as an intentional and already-secure configuration rather than as a sign that a feature is broken or that access runs through a service_role client."
 why = "Rejected: a zero-policy table is exactly the shape a vibe-coded app produces when the developer enabled RLS (perhaps prompted by Supabase's dashboard nudge) and then gave up on writing policies, routing all access through the service_role key instead — which is a real architectural risk this report exists to surface, not a state to stay silent about. Silence here would mean the report misses the single clearest signal that a service_role bypass is in play."

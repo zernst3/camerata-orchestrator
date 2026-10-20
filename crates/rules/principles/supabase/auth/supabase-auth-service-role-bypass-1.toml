@@ -5,8 +5,9 @@ layer = "platform"
 enforcement = "prose"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "Report at high severity when"
-# the service-role path performs an action without checking the caller's entitlement.
+# Severity floor. Rationale: service_role carries BYPASSRLS, so on that code path the handler IS
+# the entire access-control layer. A missing check there is not a weaker version of an RLS gap,
+# it is the complete absence of authorization on a user-reachable path — CWE-862. High.
 min_severity = "high"
 default = true
 verification = "grounded"
@@ -46,14 +47,16 @@ severity) or a description of the check that exists.
 
 [[option]]
 id = "require-explicit-authz-on-service-role-paths"
-label = "Require an explicit authorization check in every user-reachable handler that uses a service_role client"
+label = "Every user-reachable handler that uses a service_role client performs its own authorization check"
 directive = """
-For every user-reachable handler (API route, server action, Edge Function) that constructs or
-receives a service_role-backed Supabase client, evaluate whether the handler validates the
-caller's entitlement to the specific action/row before performing it. Report at high severity when
-no such check is found: "One of your API routes uses the master key on behalf of whoever calls it.
-Your database security does not apply on that path." When a check is found, report it as
-informational (what the check validates), not a finding.
+Any handler a regular end user can reach — an API route, a server action, an Edge Function — that
+constructs or receives a service_role-backed Supabase client validates the caller's entitlement to
+the specific action and row before performing it. service_role carries BYPASSRLS: the moment that
+client is used, every Row Level Security policy that would have constrained the request stops
+applying, and the handler's own logic becomes the only access control on that path. So the check
+the policies would have made is made explicitly here instead — confirm the session identifies a
+specific user, then confirm that user is entitled to the exact row or action requested. "It runs on
+the server" is not that check; it answers only whether the key itself is reachable from the browser.
 """
 remediation = """
 In `<file>`, add an explicit authorization check before the service_role client performs its
@@ -67,6 +70,6 @@ why = "service_role bypassing RLS means the handler itself IS the entire access-
 [[option]]
 id = "trust-service-role-usage-in-any-server-side-code"
 violates = true
-label = "Treat any server-side (non-client-bundle) use of service_role as inherently trusted"
-directive = "Do not evaluate handler-level authorization for service_role usage as long as the client is constructed in server-side code (not shipped to the browser)."
+label = "Service_role handlers treat running on the server as their authorization and check no caller entitlement"
+directive = "User-reachable handlers construct a service_role client and act on it with no check of who is calling: being server-side code, rather than an explicit entitlement check, is what the handler relies on."
 why = "Rejected: 'runs on the server' answers the SUPABASE-KEY-SERVICE-ROLE-CLIENT-1 exposure question (is the secret itself reachable by the browser) but says nothing about whether the SERVER CODE checks who is calling it before acting with full privileges on their behalf. A server-side handler with no auth check still lets any authenticated (or even unauthenticated) caller trigger service_role-privileged actions against arbitrary rows; conflating 'server-side' with 'authorized' is the exact gap this rule exists to close."
