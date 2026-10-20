@@ -53,11 +53,11 @@ id = "status-all-internal"
 violates = true
 label = "All errors are returned as INTERNAL"
 directive = "Every error, regardless of cause, is wrapped as a gRPC status.Internal. The error message contains the full detail."
-why = "Simplifies error handling in handlers; trades semantic error codes for a single catch-all. Clients cannot distinguish between validation failures and transient server faults."
+why = "Every failure returns the same code, so callers cannot tell a bad request they should fix from a transient fault they should retry. Clients either retry everything, hammering the server with input that will never succeed, or retry nothing and surface permanent errors for faults that would have cleared on their own."
 
 [[option]]
 id = "status-inconsistent"
 violates = true
 label = "Status codes are assigned inconsistently across handlers"
 directive = "Different handlers map similar errors to different status codes; the error code does not reliably indicate the error kind."
-why = "Common in transitional codebases; makes client-side error handling impossible."
+why = "The same class of failure comes back with different codes from different methods, so no client can write one error-handling path that works across the API and each method has to be special-cased. This is the usual state of a service that grew without a convention, and the cost lands on every consumer rather than on the service."

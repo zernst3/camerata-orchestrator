@@ -31,7 +31,7 @@ id = "eager-globally"
 violates = true
 label = "FetchType.EAGER on all associations"
 directive = "All associations are annotated with FetchType.EAGER, loading every relationship on every query regardless of whether the caller needs it."
-why = "Eliminates N+1 by eliminating lazy loading; over-fetches on every query that only needs the parent, producing unnecessary joins and data transfer. Also creates Cartesian product issues when multiple EAGER collections are present on the same entity."
+why = "Every query loads the full object graph whether or not the caller needs it, so endpoints that want only the parent row pay for joins and data transfer they never use, and two EAGER collections on the same entity produce a Cartesian product that multiplies the rows returned. The over-fetching is unconditional and cannot be opted out of for an individual query."
 
 [[option]]
 id = "lazy-with-open-session-in-view"

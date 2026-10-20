@@ -5,9 +5,10 @@ layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
-# Severity floor, transcribed from this rule's own prose: "If NONE of them reference it,
-# flag at high severity: 'Anonymous sign-ins are enabled, but none of your access policies
-# distinguish a real account from a disposable one'".
+# Severity floor. Rationale: when anonymous sign-ins are on and NO policy anywhere references
+# is_anonymous, every pre-existing `to authenticated` policy silently also admits disposable
+# sessions — CWE-863 across the whole policy set at once, with no code change marking it. That
+# is a high-severity authorization gap, never an advisory note.
 min_severity = "high"
 default = true
 verification = "grounded"

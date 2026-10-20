@@ -43,7 +43,7 @@ id = "string-interpolation"
 violates = true
 label = "Queries are built by string concatenation or fmt.Sprintf"
 directive = "Handlers or repositories build SQL queries by concatenating strings or using fmt.Sprintf with variables, e.g., fmt.Sprintf(\"SELECT * FROM users WHERE name = '%s'\", userName)."
-why = "Easy to code for simple cases; high risk of SQL injection if any input is user-controlled or untrusted. Often undetectable until an attacker exploits it."
+why = "Any user-controlled value that reaches the interpolated string can change the SQL that executes, exposing or destroying data in the queried tables. Nothing fails at build time or under normal testing, so the defect typically stays in place until someone finds it deliberately."
 
 [[option]]
 id = "builder-no-raw-sql"

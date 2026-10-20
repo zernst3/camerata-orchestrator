@@ -29,7 +29,7 @@ id = "interpolate-with-escaping"
 violates = true
 label = "interpolate values into the query with manual escaping"
 directive = "Dynamic values are formatted into the SQL string with manual escaping or quoting rather than bound as parameters."
-why = "Reads naturally but is error-prone and incomplete; every site is a latent injection waiting for one unsanitized input."
+why = "Escaping is applied by hand at each callsite, so one query that misses it, or one value whose encoding the escape routine does not cover, lets user input change the SQL that runs. Nothing fails until the gap is found deliberately, and the correctly escaped callsites offer no protection for the one that was missed."
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/hardcoded-sql-expression/"

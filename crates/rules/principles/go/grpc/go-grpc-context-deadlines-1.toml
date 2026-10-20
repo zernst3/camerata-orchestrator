@@ -35,11 +35,11 @@ id = "background-context-in-services"
 violates = true
 label = "Services use context.Background() for downstream calls; deadlines do not propagate"
 directive = "RPC implementations receive the deadline context but use context.Background() or context.TODO() when calling other services or databases, effectively ignoring the client's deadline."
-why = "Trades deadline propagation for service independence; service operations can complete even if the originating request times out. Requires explicit per-service timeout configuration."
+why = "A service that starts from context.Background() is detached from the caller's deadline, so when the inbound request times out and the client has already given up, the service work keeps running and keeps holding its connections and memory. Every such service then needs its own explicit timeout, and anywhere that is omitted the operation is unbounded."
 
 [[option]]
 id = "ignore-deadlines"
 violates = true
 label = "Services ignore deadlines; no deadline enforcement"
 directive = "RPC implementations do not use the context deadline or pass context to outbound calls; operations run to completion regardless of the client deadline."
-why = "Simplifies service implementation; high risk of resource exhaustion and timeout-less hangs if any downstream service is slow."
+why = "Calls to downstream services are unbounded, so one slow dependency holds its callers open until the server runs out of connections, goroutines, or memory, and requests that never touched the slow dependency start failing too."

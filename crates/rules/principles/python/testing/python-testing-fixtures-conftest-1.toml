@@ -28,7 +28,7 @@ id = "setup-teardown-methods"
 violates = true
 label = "setUp / tearDown methods on TestCase classes"
 directive = "Tests are organized as unittest.TestCase subclasses with setUp and tearDown methods for setup and cleanup."
-why = "Compatible with pytest's runner but forgoes pytest's injection, composability, and scope controls. New code should prefer the fixture model."
+why = "setUp and tearDown methods cannot be injected, composed, or scoped, so expensive state is rebuilt for every test and sharing between test classes has to be expressed through inheritance rather than by naming a fixture. The methods still run under pytest, so existing tests need not be rewritten, but new tests written this way opt out of the mechanism the rest of the suite depends on."
 
 [[option]]
 id = "module-globals"

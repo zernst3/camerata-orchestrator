@@ -31,11 +31,11 @@ id = "per-handler-inline"
 violates = true
 label = "Each handler method re-implements authentication, logging, recovery inline"
 directive = "RPC handlers authenticate themselves by extracting metadata, perform logging inside the handler, recover from panics themselves."
-why = "Trades maintenance overhead and inconsistency for handler independence; requires each handler to redundantly implement cross-cutting concerns."
+why = "Auth and logging are reimplemented in every handler, so a new handler ships with whichever pieces its author remembered: a missing auth check leaves the method callable by anyone, and a missing log line leaves it invisible in production. Changing a cross-cutting concern then means editing every handler, and the ones that were already inconsistent are found only by reading all of them."
 
 [[option]]
 id = "hybrid-interceptor-handler"
 violates = true
 label = "Some concerns use interceptors, others are handled in-method"
 directive = "Logging and tracing use interceptors; authentication and error handling are implemented in individual handlers or a shared helper called from each handler."
-why = "Intermediate option; introduces inconsistency about which concerns are interceptor-based and which are not."
+why = "With some concerns in interceptors and others written inline, nobody reading a handler can tell what has already been applied to the request, so checks get duplicated in some paths and omitted in others. The split exists only as a convention in developers' heads, and nothing fails when a new handler assumes the wrong half."

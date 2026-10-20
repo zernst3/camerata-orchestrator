@@ -27,7 +27,7 @@ id = "lazy-loading-accepted"
 violates = true
 label = "access related objects on demand; accept N+1 queries"
 directive = "Related objects are accessed via attribute traversal as needed, with no `select_related` or `prefetch_related`; the resulting N+1 queries are accepted."
-why = "Correct for one-off scripts or tiny datasets; catastrophic for any view whose queryset size is user-controlled."
+why = "Rendering a list issues one extra query per row for each related object it touches, so a page that is fast against seed data makes hundreds of round trips once real data arrives and its response time scales with the result count. Survivable only where the result set is fixed and small, as in a one-off script."
 
 [[option]]
 id = "only-and-values"

@@ -35,7 +35,7 @@ id = "streaming-ignore-context"
 violates = true
 label = "Streaming loops ignore context cancellation; may loop indefinitely"
 directive = "Handlers read from the stream without checking context.Done(); goroutines may continue running after the client disconnects or the context deadline is reached."
-why = "Simplifies the loop logic; high risk of goroutine leaks and resource exhaustion."
+why = "The send loop keeps running after the client disconnects or the request is cancelled, so the goroutine, its stream, and everything they hold are never released. Under ordinary client churn these accumulate until the process exhausts memory or connection limits."
 
 [[option]]
 id = "streaming-close-unchecked"

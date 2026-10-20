@@ -32,7 +32,7 @@ id = "return-null"
 violates = true
 label = "return null to indicate absence"
 directive = "Methods return null to indicate a missing or absent value. Callers must explicitly check for null before using the return value."
-why = "Common but error-prone; callers can forget null checks, leading to NullPointerException. The contract of 'might be null' is not enforced by the type system."
+why = "A method that returns null gives the caller no signal that a check is required, so a missed check compiles cleanly and fails at runtime with a NullPointerException at whatever line dereferenced it, often far from the method that produced the null. The 'may be absent' half of the contract lives only in documentation, which the compiler cannot enforce."
 
 [[option]]
 id = "throw-exception"

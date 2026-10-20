@@ -37,7 +37,7 @@ id = "allow-broad-catch"
 violates = true
 label = "allow bare except / blind except Exception anywhere"
 directive = "Handlers may use bare `except:` or `except Exception:` anywhere to keep the code running through unexpected failures."
-why = "Maximizes apparent robustness but swallows interrupts and masks real bugs, so failures vanish instead of surfacing."
+why = "A bare or broad except swallows KeyboardInterrupt, SystemExit, and genuine programming errors alongside the failure it was written for, so the process continues in a state the code never anticipated and the original fault never reaches a log or an error tracker. The code looks more robust while making its failures undiagnosable."
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/bare-except/"

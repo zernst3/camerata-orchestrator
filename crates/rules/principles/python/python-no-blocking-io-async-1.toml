@@ -27,7 +27,7 @@ id = "blocking-in-async"
 violates = true
 label = "allow synchronous I/O directly in async handlers"
 directive = "Async handlers may call synchronous I/O directly when an async client is inconvenient, accepting that the call runs on the event-loop thread."
-why = "Simpler to write but stalls the entire event loop under load, collapsing throughput with no error to diagnose."
+why = "A blocking call inside an async function holds the event loop for its full duration, so every other request on that worker stalls behind it. Throughput collapses under load with no exception raised and nothing in the logs pointing back at the blocking call."
 
 [[sources]]
 url = "https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.loop.run_in_executor"

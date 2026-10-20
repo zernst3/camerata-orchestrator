@@ -29,14 +29,14 @@ id = "annotate-without-checker"
 violates = true
 label = "annotate signatures but run no type checker"
 directive = "Type hints are written on public signatures for documentation, but no static type checker runs in CI to verify them."
-why = "Gives the documentation benefit but no enforcement, so the annotations drift out of sync with the code over time."
+why = "Annotations that no checker verifies drift out of sync with the code as it changes, so they end up describing types the function no longer accepts or returns, and a reader who trusts them is actively misled. Nothing in CI catches the divergence."
 
 [[option]]
 id = "no-type-hints"
 violates = true
 label = "omit type hints and rely on runtime behavior"
 directive = "Functions are written without type annotations, and type correctness is verified only by tests and at runtime."
-why = "Keeps the source terser but forfeits every static guarantee and pushes type errors to runtime, often in production."
+why = "Without annotations a type error is discovered only when the offending line runs, which for an error path or a rarely taken branch usually means in production. No checker or editor can tell a caller what a function accepts, so the contract exists only inside the implementation."
 
 [[sources]]
 url = "https://peps.python.org/pep-0484/"

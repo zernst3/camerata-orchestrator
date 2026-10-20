@@ -28,7 +28,7 @@ id = "mock-freely-with-plain-doubles"
 violates = true
 label = "Mock any collaborator with plain double() to maximize isolation"
 directive = "Use plain double('Name', method: value) freely throughout all spec layers. Every collaborator beyond the immediate unit under test is mocked."
-why = "Maximum speed and isolation, but creates phantom specs that diverge from the real object's API silently."
+why = "Plain doubles do not verify that the methods they stub exist on the real object, so a spec keeps passing after the real API is renamed or its signature changes, and the suite reports green on code that cannot actually run. The specs are fast and isolated because they are no longer connected to the thing they claim to test."
 
 [[sources]]
 url = "https://rspec.info/features/3-12/rspec-mocks/verifying-doubles/"

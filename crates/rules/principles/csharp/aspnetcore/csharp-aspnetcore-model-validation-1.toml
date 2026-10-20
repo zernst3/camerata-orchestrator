@@ -27,7 +27,7 @@ id = "manual-modelstate-guards"
 violates = true
 label = "Manual ModelState.IsValid checks in each action method"
 directive = "Controllers do not carry [ApiController]. Each action method that accepts a model parameter checks ModelState.IsValid at the top of its body and returns BadRequest(ModelState) when false, before proceeding to business logic."
-why = "Works but requires consistent repetition in every action; the pattern is forgotten or omitted under time pressure, and the consequence is silent processing of malformed data rather than a build-time or early-runtime signal."
+why = "The ModelState check has to be repeated in every action, so an action that omits it processes malformed input as though it had been validated, and the problem surfaces later as bad data or an unexpected exception rather than as a 400. Nothing at build time or startup flags the missing guard, and it is omitted most often in exactly the actions written under time pressure."
 
 [[option]]
 id = "no-model-validation"

@@ -40,4 +40,4 @@ id = "string-concatenation-with-escaping"
 violates = true
 label = "build query strings by concatenating with manual escaping"
 directive = "Dynamic values are added to SQL strings via concatenation with custom escaping or quoting logic rather than parameterized binding."
-why = "Reads naturally but is fragile and error-prone; every site is a latent injection waiting for unsanitized input. Escaping is incomplete across database dialects and contexts."
+why = "Escaping is applied by hand at each callsite, so one query that misses it lets user input change the SQL that runs against your database. Escape routines are also incomplete across dialects and contexts, which means a callsite that looks correctly escaped can still be exploitable, and nothing fails until it is."

@@ -27,7 +27,7 @@ id = "lazy-loading-via-proxies"
 violates = true
 label = "Lazy loading enabled via proxies; navigation properties loaded on first access"
 directive = "UseLazyLoadingProxies() is registered in DbContext configuration. Navigation properties are virtual, and EF Core loads them on first access via proxy interception. No Include calls are required."
-why = "Convenient for exploratory code and small datasets; produces silent N+1 queries for any loop over a result set that accesses navigation properties, and is invisible until load testing or query logging reveals the extra round-trips."
+why = "A loop over a result set that reads navigation properties issues one query per element, so the round-trip count scales with the data and the endpoint degrades as the tables grow. Nothing in the source marks where the queries happen, so the problem is found only through load testing or by reading query logs."
 
 [[option]]
 id = "explicit-load"

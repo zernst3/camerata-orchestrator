@@ -31,11 +31,11 @@ id = "manual-sql-alters"
 violates = true
 label = "Schema changes are applied manually via direct SQL ALTER statements"
 directive = "Developers run SQL commands directly in the database to add columns, create indexes, etc., without corresponding migration code."
-why = "Quick for one-off changes; becomes untrackable and unreproducible at scale. New environments diverge; rollbacks are manual and error-prone."
+why = "Schema changes exist only as SQL somebody ran by hand, so there is no record of what was applied to which database. New environments come up with a different schema from production, a rollback has to be reconstructed from memory, and two people can apply conflicting changes without either noticing. This holds up only for a single one-off change against a single database."
 
 [[option]]
 id = "autoversion-only"
 violates = true
 label = "Only AutoMigrate is used; no explicit migration versioning"
 directive = "GORM's db.AutoMigrate(&User{}, &Profile{}) is called at startup; the schema is derived from and additively synced to the Go structs, with no separate migration files."
-why = "Convenient for rapid development; lacks version history and explicit control. Cannot roll back to a previous schema state if needed, and cannot express destructive changes (dropping or renaming a column) since AutoMigrate only adds."
+why = "AutoMigrate only adds columns and indexes, so dropping or renaming a column silently does nothing and the old column stays in the database indefinitely. There is no version history, so there is no way to return a schema to a known state or to tell which changes a given environment has already received. Workable only in early development, before any data has to survive."

@@ -27,7 +27,7 @@ id = "permissive-imports"
 violates = true
 label = "allow wildcard imports and implicit surface"
 directive = "Wildcard imports are permitted and modules expose whatever is defined at the top level as their de facto public surface."
-why = "Convenient but obscures where names come from, defeats static tooling, and lets new exports silently shadow local names."
+why = "A wildcard import makes it impossible to tell from the file where a name came from, so editor navigation and static analysis stop working, and an upstream module that adds an export can silently shadow a local name and change this file's behaviour without this file changing at all."
 
 [[sources]]
 url = "https://peps.python.org/pep-0008/#imports"

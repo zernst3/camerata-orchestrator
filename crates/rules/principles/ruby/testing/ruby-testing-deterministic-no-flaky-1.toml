@@ -27,7 +27,7 @@ id = "fixed-order-no-cleanup"
 violates = true
 label = "Run tests in defined order; rely on AR rollback implicitly"
 directive = "Tests run in definition order (default before config.order = :random was added). No explicit DatabaseCleaner configuration; rely on ActiveRecord rollback happening automatically."
-why = "Simpler setup but hides order-dependent failures and can leak database state across examples in the same transaction group."
+why = "Running examples in a fixed order lets one example quietly depend on state another left behind, so the suite passes while hiding a dependency that breaks the moment the order changes or an example is run on its own. Without cleanup, database rows leak between examples in the same transaction group and the failure shows up in an unrelated test."
 
 [[sources]]
 url = "https://www.fastruby.io/blog/rspec/debug/how-to-debug-non-deterministic-specs.html"

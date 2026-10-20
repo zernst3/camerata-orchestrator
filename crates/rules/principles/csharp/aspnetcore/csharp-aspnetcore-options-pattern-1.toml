@@ -27,7 +27,7 @@ id = "raw-iconfiguration-injection"
 violates = true
 label = "IConfiguration injected into services; values read by string key"
 directive = "Services accept IConfiguration in their constructor and read values via configuration['Section:Key'] or configuration.GetValue<T>('Key'). No POCO binding or startup validation."
-why = "Injecting IConfiguration directly is simpler to set up and avoids the POCO and registration boilerplate, which makes it attractive for small services or early prototypes. The cost is significant: string-keyed reads are untyped, the service's configuration requirements are invisible from its constructor signature, and missing or misspelled keys produce silent null values at runtime rather than a startup failure that surfaces before any requests are served."
+why = "Configuration is read by string key at the point of use, so a missing or misspelled key yields null at runtime instead of failing at startup, and the service's configuration requirements are invisible from its constructor signature. The values are untyped, so a setting that should be a number or a duration is only ever as correct as the string it came from, and a wrong value is discovered through the behaviour it causes. Only a service whose entire configuration surface fits in a single reading escapes this."
 
 [[option]]
 id = "hardcoded-fallbacks"

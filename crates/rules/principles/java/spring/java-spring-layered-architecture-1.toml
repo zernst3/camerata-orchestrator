@@ -41,7 +41,7 @@ id = "controller-accesses-repository-directly"
 violates = true
 label = "Controllers inject repositories directly for simple CRUD endpoints"
 directive = "For endpoints that perform simple CRUD operations (list, get by ID, delete), the @RestController injects the @Repository or Spring Data interface directly, bypassing the service layer. A service layer is introduced only when business logic is needed."
-why = "Reduces boilerplate for simple CRUD; bypasses @Transactional service-layer semantics, encourages business-logic creep into controllers as requirements evolve, and creates inconsistency between endpoints that do and do not use the service layer."
+why = "The controller bypasses the service layer's @Transactional boundary, so a request that performs more than one write can commit part of it and leave the rest unapplied. Business rules then accumulate in the controller as requirements grow, and endpoints that do go through the service layer start behaving differently from the ones that do not, for reasons a reader of either cannot see."
 
 [[option]]
 id = "no-formal-layering"

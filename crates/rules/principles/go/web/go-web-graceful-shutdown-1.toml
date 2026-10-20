@@ -31,11 +31,11 @@ id = "immediate-termination"
 violates = true
 label = "Server terminates immediately on signal"
 directive = "The application ignores shutdown signals or calls os.Exit immediately upon receiving them, terminating all in-flight requests and goroutines."
-why = "Simplicity; trades request consistency and clean shutdown for speed. In-flight requests are interrupted mid-operation, potentially leaving partial transactions and resource leaks."
+why = "Terminating without draining cuts requests off mid-operation, so a write that had started but not committed leaves partial data behind and the client gets a connection reset instead of a response. Every deploy and every restart does this to whatever traffic was in flight at the time."
 
 [[option]]
 id = "shutdown-no-timeout"
 violates = true
 label = "Graceful shutdown without a deadline; waits indefinitely for requests to complete"
 directive = "Shutdown is called without a context deadline; the server waits for all in-flight requests to complete, no matter how long it takes."
-why = "Ensures all requests complete; risks indefinite hangs if a request is stuck or loops endlessly."
+why = "One request that is stuck or looping never finishes, so the shutdown never completes and the process hangs until something kills it, which then interrupts every other in-flight request anyway. Waiting without a bound turns a single bad request into a failed deploy."

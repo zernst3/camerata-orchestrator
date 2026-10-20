@@ -31,7 +31,7 @@ id = "preauthorize-on-controller-methods"
 violates = true
 label = "@PreAuthorize on @RequestMapping methods in controllers only"
 directive = "@PreAuthorize is applied to controller action methods rather than service methods. Service methods carry no authorization annotations. A background job or alternative entry point that calls the service method gets no authorization check unless the developer explicitly adds @PreAuthorize to that entry point as well."
-why = "Simpler when all callers are HTTP controllers; fails silently when the same service method is called from a new entry point (scheduled task, message listener, integration test) that bypasses the controller-level check."
+why = "The authorization check lives on the controller, so the moment the same service method is reached from a scheduled task, a message listener, or an integration test, it executes with no check at all and nothing reports that one was skipped. The protection holds only for as long as HTTP remains the single entry point."
 
 [[option]]
 id = "manual-role-check-in-controller"

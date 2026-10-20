@@ -35,7 +35,7 @@ id = "raw-map-access"
 violates = true
 label = "Handlers access raw maps or unvalidated json.RawMessage"
 directive = "Handlers receive request payloads as raw map[string]interface{} or json.RawMessage, extract fields manually, and validate them with ad-hoc checks inside the handler or a shared helper."
-why = "Trades type safety and validation consistency for flexibility in handling arbitrary or evolving payloads; requires explicit per-handler validation and error handling."
+why = "Request bodies are read as untyped maps, so a missing field, a wrong type, or an out-of-range value is not caught at the boundary and arrives in the handler body, or in the database, as whatever the client sent. Each handler has to re-implement its own validation, and the ones that do it incompletely fail silently rather than returning a 400."
 
 [[option]]
 id = "string-based-parsing"

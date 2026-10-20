@@ -33,7 +33,7 @@ id = "always-track"
 violates = true
 label = "All queries tracked; AsNoTracking never used"
 directive = "No AsNoTracking calls appear. All returned entities are attached to the change tracker regardless of whether they will be mutated."
-why = "Simplest query authoring; wastes memory and CPU allocating and maintaining change-tracking snapshots for entities that are only read, not written."
+why = "Every entity returned by a read-only query gets a change-tracking snapshot allocated and maintained for it, so read endpoints consume more memory and CPU than the work requires and the overhead scales with the size of the result set. Nothing is ever written back from those snapshots."
 
 
 [[sources]]

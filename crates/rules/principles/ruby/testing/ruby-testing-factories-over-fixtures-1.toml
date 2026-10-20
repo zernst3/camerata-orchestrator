@@ -27,14 +27,14 @@ id = "rails-fixtures"
 violates = true
 label = "Use Rails YAML fixtures for all test data"
 directive = "All test data lives in test/fixtures/*.yml and is loaded via fixtures :all in every test class."
-why = "Ships with Rails and requires no gems, but creates invisible coupling between tests and fixed attribute values in a separate file."
+why = "Fixtures couple every test to attribute values held in a separate file, so changing one value to suit a new test silently changes the data underneath every existing test that loads the same fixture, and reading a test does not show what the record it depends on actually contains. Requiring no additional gems is their one advantage over factories."
 
 [[option]]
 id = "bare-active-record-create"
 violates = true
 label = "Create test objects with Model.create or Model.new inline in each test"
 directive = "Each test creates its own objects with explicit ActiveRecord calls and attribute hashes."
-why = "Fully explicit and self-contained but duplicates boilerplate across all tests and diverges silently when model validations change."
+why = "Every test builds its records by hand, so the same setup is duplicated across the suite and, when a model gains a validation or a required association, each copy has to be found and updated; the ones that are missed fail with errors about the model rather than about what the test was checking. The setup is fully explicit, and that explicitness is exactly what has to be maintained."
 
 [[sources]]
 url = "https://github.com/thoughtbot/factory_bot"

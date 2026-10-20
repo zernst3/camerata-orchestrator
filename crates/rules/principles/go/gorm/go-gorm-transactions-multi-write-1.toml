@@ -40,7 +40,7 @@ id = "no-transactions"
 violates = true
 label = "Writes are not coordinated; no transaction wrapping"
 directive = "Multiple writes are performed as separate db.Create(...) calls without a transaction wrapper. If one fails mid-operation, the database is left in a partial state."
-why = "Simpler to code; high risk of consistency violations. Acceptable only for truly independent writes with no invariants (e.g., logging)."
+why = "A failure part-way through a multi-write operation leaves the earlier writes committed and the later ones not, so the database holds a state no code path was written to handle and someone has to repair it by hand. Tolerable only where the writes share no invariant at all, as with append-only logging."
 
 [[option]]
 id = "transaction-one-per-request"

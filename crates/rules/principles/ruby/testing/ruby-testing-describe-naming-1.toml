@@ -29,7 +29,7 @@ id = "freeform-strings"
 violates = true
 label = "Use arbitrary strings for all describe/context/it blocks"
 directive = "Describe blocks take any string; no convention on # vs . prefix or context wording."
-why = "Flexible but loses readable failure messages and breaks rubocop-rspec naming cops."
+why = "Freeform describe strings produce failure output that names neither the method nor the condition under test, so a failing example in CI gives no indication of what broke without opening the file. rubocop-rspec's naming cops cannot check the suite either, so the inconsistency spreads unchecked."
 
 [[sources]]
 url = "https://www.betterspecs.org/"

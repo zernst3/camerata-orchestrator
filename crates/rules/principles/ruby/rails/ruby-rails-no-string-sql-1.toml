@@ -35,7 +35,7 @@ id = "sanitize-sql-for-conditions"
 violates = true
 label = "manually sanitize with sanitize_sql_for_conditions"
 directive = "Dynamic values are passed through `ActiveRecord::Base.sanitize_sql_for_conditions` or `connection.quote` before interpolation into a SQL string."
-why = "Reduces injection risk but is error-prone: missing a sanitize call at any one site reintroduces the vulnerability, and the code is harder to audit than explicit bind parameters."
+why = "Protection depends on a sanitize call being present at every single site, so the one query that omits it is injectable while the code around it looks safe, and an auditor has to inspect each query individually to tell the two apart. Bind parameters make the same guarantee structurally, without the per-site review."
 
 [[option]]
 id = "string-interpolation"

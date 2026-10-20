@@ -35,7 +35,7 @@ id = "per-handler-inline"
 violates = true
 label = "Each handler re-implements authentication, logging, recovery inline"
 directive = "Handlers authenticate themselves, perform logging themselves, recover from panics themselves, and manage timeouts themselves via context.WithTimeout."
-why = "Trades maintenance overhead and inconsistency for handler independence and explicit control within each route; the framework's middleware chain is not used for infrastructure concerns."
+why = "Logging, auth, and panic recovery are written into each route, so a route ships with whichever of them its author remembered and the gaps are invisible from the router. Any change to a cross-cutting concern has to be repeated in every route, and the routes that had already drifted apart are found only by reading all of them."
 
 [[option]]
 id = "decorator-pattern"

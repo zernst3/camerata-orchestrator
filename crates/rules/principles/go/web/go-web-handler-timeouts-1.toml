@@ -41,4 +41,4 @@ id = "no-timeouts"
 violates = true
 label = "No timeouts; handlers may block indefinitely"
 directive = "The server has no timeout configuration and handlers do not set deadlines; operations may take as long as they need."
-why = "Simplest to implement; high risk of goroutine leaks and server starvation if any handler blocks or is slow."
+why = "A handler that blocks has nothing to stop it, so slow clients and slow dependencies accumulate goroutines and connections until the server stops accepting new requests. There is no mechanism to shed a request that is never going to complete."

@@ -35,11 +35,11 @@ id = "no-context-in-queries"
 violates = true
 label = "Queries do not use context; no deadline enforcement at the database layer"
 directive = "Queries are called without context (db.Find(&users)) or with context.Background()."
-why = "Simpler to code; queries are not bounded by handler deadlines and may hang indefinitely if the database is slow."
+why = "Queries carry no deadline, so when the database is slow or a row is locked the handler blocks indefinitely: the connection stays checked out, the goroutine is never released, and the caller sees a request that hangs rather than one that fails. Cancelling the inbound request does not stop the query."
 
 [[option]]
 id = "context-sometimes"
 violates = true
 label = "Context is passed to some queries but not others"
 directive = "Some repository methods accept and use context; others ignore it. The pattern is inconsistent."
-why = "Common in transitional codebases; creates gaps in timeout enforcement and makes the codebase unpredictable."
+why = "Timeout enforcement reaches only the queries that happen to pass a context, so a single unconverted call hangs the whole request even though every other query in the path is bounded. Which operations are protected cannot be determined without reading every callsite, which is also the normal state of a codebase part-way through this conversion."

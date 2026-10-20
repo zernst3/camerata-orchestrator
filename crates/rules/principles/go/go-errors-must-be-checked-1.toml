@@ -39,4 +39,4 @@ id = "ignore-low-consequence-errors"
 violates = true
 label = "ignore errors from calls deemed low-consequence"
 directive = "Some error-returning calls are assumed to be low-consequence (e.g., closing a file handle, flushing a buffer, or calling Fprintf to log); their errors are discarded with blank assignments to reduce visual noise."
-why = "Reduces error-check clutter for truly safe callsites, but leads to silent bugs when assumptions about consequence are wrong, e.g., a deferred Close() fails because the write buffer never flushed."
+why = "Any callsite judged safe to ignore becomes a silent failure when that judgement turns out to be wrong: a deferred Close() whose write buffer never flushed returns an error nobody reads, so the data loss surfaces later as a truncated file rather than at the point it happened. Nothing in the code records which callsites were actually reviewed, so the reduction in error-check clutter is paid for by failures that leave no trace."

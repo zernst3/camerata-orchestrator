@@ -27,7 +27,7 @@ id = "ad-hoc-middleware-order"
 violates = true
 label = "Middleware is ordered by developer discretion at the time of addition"
 directive = "Middleware is added to the pipeline in the order that seems reasonable at the time, without enforcing a canonical sequence. Developers rely on documentation or runtime errors to discover incorrect ordering."
-why = "Ad-hoc ordering gives developers flexibility to place middleware where it seems contextually appropriate and avoids the overhead of learning and enforcing a canonical sequence. The cost is that correctness becomes accidental: when the sequence happens to be right nothing fails, but a single out-of-order addition produces silent auth bypass or broken CORS preflight that is invisible at startup and surfaces only under specific request patterns in production."
+why = "Pipeline correctness becomes accidental: when the order happens to be right nothing fails, and one middleware registered in the wrong place produces an authorization check that runs after the endpoint has already handled the request, or a CORS preflight that never gets a response. Neither failure appears at startup. They surface in production under specific request patterns, and the symptom gives no indication that ordering is the cause."
 
 
 [[sources]]

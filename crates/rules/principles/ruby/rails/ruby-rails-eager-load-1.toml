@@ -27,7 +27,7 @@ id = "select-n-plus-1-accepted"
 violates = true
 label = "load associations lazily; accept N+1 queries"
 directive = "Associations are loaded on demand as each record is accessed, with no explicit `includes` or `eager_load`; N+1 queries are accepted as a consequence."
-why = "Correct for tiny datasets or one-off scripts; catastrophic for any endpoint whose result count is user-controlled."
+why = "Each record in the result set triggers its own query for its associations, so the query count grows with the result count and an endpoint whose page size the caller controls can issue hundreds of round trips for one request. Survivable only where the result set is fixed and small, as in a one-off script."
 
 [[option]]
 id = "manual-sql-join"
