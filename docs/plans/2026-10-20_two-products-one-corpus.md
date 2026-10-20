@@ -194,3 +194,47 @@ batch list names "5 api-layer payment directives" and "universal gate-mechanics 
 does NOT clearly cover the SQL directive family or the javascript one. **The wording batch is
 undersized; widen it to this full ~15 before the graded sweep, because unlike the 14 this
 ships to clients today.**
+
+---
+
+## RESOLVED (2026-10-20): the inspectable axis, and "no vendor name client-facing"
+
+Zach settled both questions this section raised.
+
+### inspectable gates scanning ONLY, never emission — and that is already how it works
+Verified at the code level: `arm.rs::render_rule` (the emit path) never references `inspectable`;
+its only consumer is `inspectable_rules_for_scan`, applied at the top of the scan. So an
+`inspectable = false` rule is removed from the scans and STILL emits into the client's
+AGENTS.md/CONVENTIONS.md, and the client can still select it. Exactly the behaviour Zach
+described as correct.
+
+**So "about the client ⟺ scannable" holds, with one exception, and that exception is the whole
+answer to the confusion.** A client property that does not live in a scannable file — commit
+messages, branch names, CI run history, Supabase dashboard-only settings — is about the client,
+should emit, but a working-tree scan cannot read it. The four `process/` rules (commit/branch
+metadata) are exactly this: `inspectable = false` is CORRECT (a scan can't read git metadata)
+and they still emit. There is no flag bug and no decision needed; the earlier "blocked on Zach"
+framing was wrong, and I own that — I had conflated "is it client-facing" (settled yes) with
+"is the flag right" (settled yes).
+
+The only residual is documentation: `RULE_AUTHORING.md` should state that `inspectable` means
+"assessable from the WORKING TREE" — VCS metadata and external/dashboard config are out of the
+scan's reach, so a rule about them is `inspectable = false` and still emits. That is a doc clause,
+not a behaviour change.
+
+### The product never names itself in client-facing text
+Zach: "Camerata should not be addressed at all in anything client facing … Camerata should be
+able to use the directives without it itself being mentioned by name." No one else operates the
+engine, so the vendor name has no client reader.
+
+Enforced by `w25_no_vendor_name_client_facing`: no `directive`, `remediation`, `label`,
+`finding_headline`, `finding_detail`, rule `title`, `[[sources]].title`, or `violates`-option
+`why` may contain "Camerata"/".camerata". Author-facing fields (`qualifies`, `[decision].*`,
+`relevance`, non-`violates` `why`) may — that is where "how the engine tracks this" goes.
+
+**One functional exception, flagged for a later decision:** the literal suppression token
+`camerata:allow` (the syntax a client TYPES to waive a finding, like `eslint-disable`) is
+permitted, but only as the how-to inside a `remediation`, never fronted in a convention
+statement. It is the one vendor-named string a client genuinely must see. Making it
+vendor-neutral (renaming the suppression token engine-side) is a product decision left open — the
+corpus work removes every OTHER client-facing mention.
