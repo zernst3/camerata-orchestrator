@@ -54,19 +54,17 @@ and the sink.
 id = "redact-sensitive-values-before-logging"
 label = "Redact, mask, hash, or omit a secret/credential or regulated-PII value before any log call that could emit it"
 directive = """
-Scan for a value whose own identity marks it as a secret/credential (an identifier or object field
-matching token/secret/password/passwd/api_key/apikey/private_key/access_token/authorization/session/
-cookie, or a value read from a secret-shaped environment variable) or as regulated PII (ssn,
-social_security, credit_card/card_number, PAN, cvv/cvc) flowing — directly, through string
-concatenation/interpolation, or through an intermediate variable — into a logging sink
-(console.log/warn/error/debug, a logger.*/log.* call, print/pprint, println!/eprintln!/dbg!,
-System.out/err.*, fmt.Print*, Rails.logger.*) with no redact/mask/scrub/sanitize/hash/truncate
-helper (or equivalent `[REDACTED]`-style placeholder) applied to the value first. A secret/credential
-reaching the sink this way is a HIGH finding; a regulated-PII value reaching the sink this way is a
-MEDIUM finding — the two are calibrated differently because a live credential in a log line is directly
-reusable by anyone who can read that log, while PII is a real exposure but not itself a credential.
-A value that has passed through a redaction/masking/hashing helper before the sink call is conforming
-regardless of which class it belongs to.
+A secret, credential, or regulated PII value never reaches a logging sink unredacted. Before any logging
+call that could emit it — console.log/warn/error/debug, a logger.*/log.* call, print/pprint,
+println!/eprintln!/dbg!, System.out/err.*, fmt.Print*, Rails.logger.* — a value whose own identity marks
+it as a secret or credential (a field or identifier matching
+token/secret/password/passwd/api_key/apikey/private_key/access_token/authorization/session/cookie, or a
+value read from a secret-shaped environment variable) or as regulated PII (ssn, social_security,
+credit_card/card_number, PAN, cvv/cvc) is passed through a redact/mask/scrub/sanitize/hash/truncate helper,
+reduced to a `[REDACTED]`-style placeholder, or dropped from the call's arguments entirely — whether it
+would flow in directly, through string concatenation/interpolation, or through an intermediate variable. A
+logged credential is the graver case, since it hands any reader of that log a live, reusable credential;
+logged regulated PII is a serious exposure and compliance breach but is not itself a reusable credential.
 """
 remediation = """
 Redact, mask, hash, or drop the sensitive value before it reaches the log call — pass it through the

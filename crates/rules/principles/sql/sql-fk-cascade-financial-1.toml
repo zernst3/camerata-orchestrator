@@ -51,11 +51,13 @@ applies to SUPABASE-STORAGE-PUBLIC-BUCKET-1's bucket-naming heuristic.
 id = "restrict-or-null-cascades-into-financial-records"
 label = "Flag ON DELETE CASCADE from a routine table into a financial/audit/historical-named table; prefer RESTRICT or SET NULL"
 directive = """
-Scan FOREIGN KEY declarations for `ON DELETE CASCADE` where the referenced table's name matches a financial/audit/
-historical heuristic (invoice, payment, transaction, order, ledger, audit_log, charge, receipt, statement, and
-close variants). Flag as high severity: "Deleting a row in `<referencing_table>` would permanently destroy
-matching rows in `<referenced_table>` — including records you likely need to keep for accounting or audit
-purposes." Ambiguous table-name matches are `needs_review` rather than asserted outright.
+A foreign key from a routine, user-mutable table (a session, cart, profile edit, or anything deleted in the
+ordinary course of the product) into a financial, audit, or historical record (an invoice, payment, transaction,
+order, ledger entry, audit log, charge, receipt, or statement) never uses `ON DELETE CASCADE`; it uses `ON DELETE
+RESTRICT`/`NO ACTION`, or a nullable FK with `ON DELETE SET NULL`. Deleting the routine-course row therefore can
+never silently and irreversibly destroy the financial or audit record that exists to document what happened — the
+delete is either blocked until the reference is handled explicitly, or the reference is nulled, rather than
+cascading the record away.
 """
 remediation = """
 Change the foreign key from `<referencing_table>` to `<referenced_table>` from `ON DELETE CASCADE` to `ON DELETE

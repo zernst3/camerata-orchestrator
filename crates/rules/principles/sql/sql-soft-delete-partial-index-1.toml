@@ -44,12 +44,13 @@ policy predicate itself — rather than trusting every future caller to add it.
 id = "partial-unique-constraints-and-default-filtered-reads"
 label = "Scope unique constraints to exclude soft-deleted rows; filter soft-deleted rows out by default rather than per-caller"
 directive = """
-Scan tables carrying a soft-delete column for a sibling UNIQUE constraint/index with no partial `WHERE` qualifier
-excluding soft-deleted rows; flag as high severity: "Your `<table>` table can't let a user reuse `<column>`'s value
-after a soft-deleted row occupies it — the unique constraint doesn't know the conflicting row is gone." Separately,
-inspect whether default read paths (an RLS policy, a default ORM scope, a shared base query) exclude soft-deleted
-rows without each caller opting in; flag as `needs_review` (semantic judgment) when soft-deleted rows appear
-reachable through a path with no deleted_at/is_deleted predicate at all.
+On a table that uses a soft-delete column (deleted_at, is_deleted, archived_at, or a close variant), every unique
+constraint is partial — scoped with `WHERE deleted_at IS NULL` (or the equivalent) so uniqueness is enforced only
+among live rows and a value from a soft-deleted row can be reused — and ordinary reads exclude soft-deleted rows by
+default through a shared layer (an RLS policy predicate, a default ORM scope, or a view) rather than requiring every
+individual query, policy, or report to remember its own `WHERE deleted_at IS NULL` predicate. A soft-deleted row is
+therefore never surfaced as if it were live, and reuse of its previously-unique value is never blocked by a
+constraint that cannot tell the conflicting row is gone.
 """
 remediation = """
 Replace the plain unique constraint on `<table>.<column>` with a partial unique index scoped to live rows:

@@ -46,13 +46,13 @@ already crediting the account defeats the purpose of verifying at all.
 id = "verify-signature-before-processing"
 label = "Verify the provider's signature against the raw body before any business logic runs; reject unverified events"
 directive = """
-Scan webhook route handlers whose body is parsed into a payment-provider event shape. Flag as CRITICAL severity any
-such handler with no call to the provider's signature-verification function (or an equivalent raw HMAC comparison
-against the configured signing secret) before the event's `type`/payload fields are read for business-logic
-purposes. Also flag a handler that calls the verification function against an ALREADY-JSON-PARSED body rather than
-the raw request bytes, since most providers' signatures are computed over the exact raw byte sequence and will
-never validate against a re-serialized body. A handler that verifies first and returns 400 on failure, before
-touching the payload, is conforming.
+Every payment-provider webhook handler verifies the provider's cryptographic signature against the raw, unparsed
+request body before any business logic reads the event, and rejects the request (returns 400) on failure. The
+verification uses the provider's own helper (e.g. Stripe's `constructEvent`/`constructEventAsync`) or an equivalent
+raw HMAC comparison against the configured signing secret and the documented signature header, and it runs against
+the exact raw request bytes — not a body already re-serialized by generic JSON body-parsing middleware, which does
+not reproduce the bytes the signature was computed over. Only after verification succeeds does the handler read the
+event's `type`/payload to drive any state change (order status, subscription state, refund trigger).
 """
 remediation = """
 In the webhook route handler, add the provider's signature-verification call (e.g. Stripe's `constructEvent` with

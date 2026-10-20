@@ -56,13 +56,14 @@ Low structurally rather than letting a model's enthusiasm inflate it.
 id = "log-or-justify-every-caught-error"
 label = "Every caught/inspected error is logged, rethrown, transformed, or explicitly justified; no empty catch/except/rescue bodies"
 directive = """
-Scan for a catch/except/rescue block (or an explicit error-value check that does not propagate the
-error upward) whose body contains no call to the project's logger, no rethrow/return of the error (or a
-wrapped version of it), and no inline comment explaining why the silence is intentional. Flag a match as
-a LOW finding (never higher — see `qualifies`): the block is empty, contains only a comment, or merely
-discards the error binding (`_ = err`, a bare `pass`, a caught variable never referenced). A block that
-logs the error, propagates it, or carries a justifying comment is conforming regardless of what else it
-does.
+A caught or inspected error is never discarded with zero action. Every catch/except/rescue block that
+does not rethrow or return the error upward, and every explicit error-value check (Go's `if err != nil`,
+a Rust `Err(e)` match arm) that does not propagate it, either calls the project's logger with the error
+or carries an inline comment that explicitly justifies the silence (a best-effort cleanup step, a
+known-benign race). A block that is empty, holds only a comment, or merely discards the error binding (a
+bare `pass`, `_ = err`, a caught variable never referenced) is exactly the lost-signal case this forbids;
+a block that logs the error, propagates it, or carries a justifying comment is conforming regardless of
+what else it does.
 """
 remediation = """
 Add a call to the project's existing logger (passing the caught error/exception so its message and

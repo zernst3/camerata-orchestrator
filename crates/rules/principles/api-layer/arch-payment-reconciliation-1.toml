@@ -43,12 +43,13 @@ rule targets is the complete ABSENCE of either one, not the specific implementat
 id = "webhook-or-scheduled-reconciliation"
 label = "Maintain local state via webhook-driven updates, a scheduled reconciliation job against the provider's API, or both"
 directive = """
-Survey the integration for either: (a) a webhook endpoint that updates local order/payment/subscription state in
-response to provider-emitted events covering the states the application tracks (success, failure, refund, dispute,
-subscription renewal/cancellation, as applicable), or (b) a scheduled job that periodically queries the provider's
-API for the current status of locally-open/pending payment records and corrects any mismatch. An integration with
-at least one of these, covering the states the application actually tracks, is conforming; an integration relying
-solely on the initial synchronous charge-call response with no later correction path is not.
+Local order, payment, and subscription state is kept in sync with the provider's own authoritative record through
+at least one correction path beyond the initial synchronous charge response: either (a) a webhook endpoint that
+updates local state in response to provider-emitted events covering the states the application tracks (success,
+failure, refund, dispute, subscription renewal/cancellation, as applicable), or (b) a scheduled job that
+periodically queries the provider's API for the current status of locally-open or pending payment records and
+corrects any mismatch. At least one such mechanism exists and covers the states the application actually tracks, so
+the local record is never left to diverge silently from the provider's state after the charge call returns.
 """
 remediation = """
 Add a webhook endpoint (verified per ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1) that subscribes to the provider's

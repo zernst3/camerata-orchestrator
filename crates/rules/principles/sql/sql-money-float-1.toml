@@ -46,12 +46,12 @@ impossible to write by accident.
 id = "money-is-numeric-or-integer-minor-units"
 label = "Flag money-shaped columns declared as real/double precision; require numeric/decimal or an exact integer minor-units type"
 directive = """
-Scan column declarations for a money-shaped name (amount, price, cost, fee, balance, total, subtotal, tax, charge,
-payout, salary, or a currency-minor-unit suffix) typed `real`, `double precision`, `float4`, `float8`, or an ORM
-`Float`/`double` type. Flag as high severity: "Your `<table>.<column>` column stores a dollar amount as floating
-point. Summed totals and equality checks on this column can silently drift from the exact value." Columns whose
-name is ambiguously money-shaped (could plausibly be a ratio, confidence score, or non-monetary quantity) are
-`needs_review` rather than asserted.
+Money and currency columns are stored as `numeric`/`decimal` (with a scale matching the currency's minor unit,
+typically 2) or as an exact integer in minor units (e.g. `amount_cents integer`), never as `real`, `float4`,
+`double precision`, `float8`, or a floating-point ORM column type. Column names in this class include amount,
+price, cost, fee, balance, total, subtotal, tax, charge, payout, salary, and currency-minor-unit-suffixed names.
+Because the storage type is exact, summed totals and equality comparisons on these columns cannot silently drift
+the way IEEE-754 binary floating point does.
 """
 remediation = """
 Change `<table>.<column>` from a floating-point type to `numeric(precision, scale)` (choosing scale to match your

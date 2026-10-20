@@ -56,13 +56,14 @@ schema itself silently accepting anything.
 id = "pick-one-enum-strategy-by-volatility-and-cross-table-reuse"
 label = "Constrain closed-set columns via native enum, CHECK list, or lookup-table FK, chosen by how often the set changes and whether it's reused"
 directive = """
-Scan text/varchar columns whose name suggests a closed set (status, state, role, type, kind, tier, category) for
-the absence of a CHECK constraint, native enum type, or lookup-table FK. Flag as medium severity: "Your
-`<table>.<column>` column is meant to hold one of a fixed set of values, but the database accepts any string —
-nothing stops a typo or a bad migration from inserting a value your application code was never written to handle."
-Pick the constraint mechanism by the set's volatility and reuse: a small, stable, single-table set fits a native
-enum or CHECK list; a set that changes often, needs descriptive metadata, or is shared across multiple tables fits
-a lookup-table FK.
+A column that represents a closed set of values — a status, state, role, type, kind, tier, or category — is
+constrained at the database by one of three mechanisms rather than left as a bare, unconstrained text/varchar
+column whose valid set lives only in application code: a native PostgreSQL enum type, a `CHECK (<column> IN (...))`
+list, or a foreign key to a lookup table. The mechanism is chosen by how the set behaves: a small, stable,
+single-table set fits a native enum or CHECK list; a set that changes often, needs descriptive metadata, or is
+shared across multiple tables fits a lookup-table FK. Whichever is chosen, an out-of-set value (a typo, a bad
+migration, a write from another service) is rejected by the database itself, not merely by whichever application
+validator happens to run.
 """
 remediation = """
 Add a `CHECK (<column> IN (...))` constraint listing the valid values, convert `<column>` to a native PostgreSQL

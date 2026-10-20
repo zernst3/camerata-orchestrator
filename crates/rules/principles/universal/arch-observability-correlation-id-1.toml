@@ -42,15 +42,15 @@ incident investigation would need it intact.
 id = "one-id-generated-at-the-edge-and-threaded-through"
 label = "Generate/extract one correlation id at the request's entry point, attach it to every log line for that request, and forward it on every downstream call"
 directive = """
-Scan a request-handling path (an HTTP handler, a message consumer, a job's execution path) for whether
-a correlation/request id is: (1) generated or extracted once at the entry point (middleware, or the
-consumer's own dispatch code) rather than ad hoc per-handler; (2) attached to the logger's context (MDC,
-a structured-log field, or an explicit argument) so every log line written while handling that request
-carries it, not just some of them; and (3) forwarded as a header (or equivalent) on any outbound
-HTTP/RPC call the handler makes. Flag, as a LOW finding (never higher — see `qualifies`), a request path
-where log lines inside the SAME handler show no shared id, where an outbound call visibly drops it, or
-where a handler mints its own new id instead of reusing (or deriving a child span from) the one
-generated at the entry point.
+A single request's handling path (an HTTP handler, a message consumer, a job's execution path) carries one
+correlation/request id end to end: (1) it is generated or extracted once at the entry point (the first
+middleware, or the consumer's own dispatch code) rather than minted ad hoc per-handler; (2) it is attached
+to the logger's per-request context (MDC, a structured-log field, or an explicit argument) so every log line
+written while handling that request carries it, not just some of them; and (3) it is forwarded as a header
+(or equivalent) on every outbound HTTP/RPC call the handler makes, so a downstream service's own logs join
+back to the same originating request. A handler neither logs without the shared id, drops it on an outbound
+call, nor replaces it with a freshly minted id instead of reusing (or deriving a child span from) the one
+generated at the edge.
 """
 remediation = """
 Add (or reuse, if one already exists elsewhere in the repo) a middleware/entry-point step that generates

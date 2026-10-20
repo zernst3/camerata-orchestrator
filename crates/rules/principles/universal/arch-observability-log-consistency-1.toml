@@ -11,7 +11,7 @@ inspectable = true
 max_severity = "low"
 default = true
 verification = "grounded"
-qualifies = "This is an INCONSISTENCY check, not a 'you must adopt structured logging' stance — it only fires once a repo has ALREADY adopted a structured logger (slog/zap/winston/pino/slf4j/serilog/tracing, or an equivalent project-specific wrapper) and some OTHER call site in the same repo still uses a bare print/console-style call alongside it. For Go and Java specifically, the 'always use structured logging' stance itself is already covered by GO-LOGGING-STRUCTURED-1 and JAVA-LOGGING-STRUCTURED-1 (both full-severity, per-language prose rules) — this rule does not re-litigate that stance for those two languages; it exists for (a) every OTHER stack (Python, JS/TS, Rust, C#, Ruby) where no per-language stance rule already covers the question, and (b) the cross-stack/multi-language case where the inconsistency is between files or layers rather than within a single language's own convention. Camerata ships no detector for this; it reaches the codebase only through the semantic/AI audit pass, and `ai_audit`'s D8 observability cap plus `report_export::is_informational`'s structural bypass force this rule's findings to severity Low and out of every action bucket regardless of the model's proposed severity."
+qualifies = "This is an INCONSISTENCY check, not a 'you must adopt structured logging' stance — it only fires once a repo has ALREADY adopted a structured logger (slog/zap/winston/pino/slf4j/serilog/tracing, or an equivalent project-specific wrapper) and some OTHER call site in the same repo still uses a bare print/console-style call alongside it. For Go and Java specifically, the 'always use structured logging' stance itself is already covered by GO-LOGGING-STRUCTURED-1 and JAVA-LOGGING-STRUCTURED-1 (both full-severity, per-language prose rules) — this rule does not re-litigate that stance for those two languages; it exists for (a) every OTHER stack (Python, JS/TS, Rust, C#, Ruby) where no per-language stance rule already covers the question, and (b) the cross-stack/multi-language case where the inconsistency is between files or layers rather than within a single language's own convention. Camerata ships no detector for this; it reaches the codebase only through the semantic/AI audit pass, and `ai_audit`'s D8 observability cap plus `report_export::is_informational`'s structural bypass force this rule's findings to severity Low and out of every action bucket regardless of the model's proposed severity. A bare print/console-style call that is the CLI tool's actual stdout product, or that appears in a test or script file where print output IS the point, is out of scope and not flagged."
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
@@ -42,12 +42,13 @@ question (the per-language stance rules), not this one.
 id = "one-logger-for-the-whole-repo"
 label = "Every log call site in the repo goes through the same adopted structured logger; no bare print/console-style calls alongside it"
 directive = """
-Scan for a repo that already uses a structured logger (slog/zap/winston/pino/slf4j/serilog/tracing, or
-an equivalent project-specific wrapper) at one or more call sites. Within that same repo, flag a bare
-print/console.log/puts/fmt.Println-style call that is clearly emitting a log-shaped message (an
-operational event, an error, a status update — not a CLI tool's actual stdout product, and not a
-test/script file where print output IS the point) as a LOW finding (never higher — see `qualifies`). A
-call site that goes through the adopted logger is conforming regardless of its level or format.
+In a repository that has already adopted a structured logger (slog/zap/winston/pino/slf4j/serilog/tracing,
+or an equivalent project-specific wrapper) at one or more call sites, every log-shaped call site goes
+through that logger; a bare print/console.log/puts/fmt.Println-style call emitting an operational event, an
+error, or a status update does not sit alongside it. Every such message therefore lands in the same
+structured format and the same aggregated stream as the rest of the repo's logs, rather than a fraction of
+them bypassing the logger a log aggregator was built to parse. A call site that goes through the adopted
+logger is conforming regardless of its level or format.
 """
 remediation = """
 Replace the ad hoc print/console-style call with a call through the repo's existing structured logger,
