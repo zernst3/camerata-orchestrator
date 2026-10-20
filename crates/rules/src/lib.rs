@@ -2720,6 +2720,95 @@ pub fn rules_declaring_deviation_ceiling(set: &RuleSet) -> Vec<String> {
     found
 }
 
+/// Rank the free-form lowercase severity vocabulary (`"info"` < `"low"` < `"medium"` <
+/// `"high"` < `"critical"`). An unrecognized string ranks as `high` (3) — conservative: an
+/// unknown cap is treated as capable of reaching high, never silently exempted.
+fn severity_rank(s: &str) -> u8 {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "info" | "informational" => 0,
+        "low" => 1,
+        "medium" => 2,
+        "high" => 3,
+        "critical" => 4,
+        _ => 3,
+    }
+}
+
+/// Whether `rule` can export a finding at HIGH severity or above, faithful to how severity
+/// actually anchors at scan/export time:
+///
+/// - A declared `min_severity` floor of high+ forces it.
+/// - A `violates` option's finding anchors at `"high"` (see [`Rule::max_severity`]'s and the
+///   alternatives-pass docs), so any rule carrying one can reach high.
+/// - A `default_with_exceptions`/`decision` rule's ordinary CONSISTENCY DEVIATION is clamped to
+///   `"medium"` BY DEFAULT (`report_export::clamp_deviation_severity`) and only reaches high if
+///   the rule authored a `deviation_ceiling` of high+.
+/// - A `defect`-kind finding anchors at `"high"` (SEC-/ARCH- floor injection pushes to
+///   high/critical; a plain confirmed defect anchors high), bounded only by a `max_severity`
+///   cap if one is declared.
+///
+/// A plain decision/exceptions rule with no `violates` option, no high `deviation_ceiling`, and
+/// no high `min_severity` therefore CANNOT emit high+ — its deviations clamp to medium — and is
+/// correctly excluded.
+pub fn rule_can_emit_high_plus(rule: &Rule) -> bool {
+    if rule.min_severity.as_deref().is_some_and(|s| severity_rank(s) >= 3) {
+        return true;
+    }
+    if rule.options.iter().any(|o| o.violates) {
+        return true;
+    }
+    if rule.deviation_ceiling.as_deref().is_some_and(|s| severity_rank(s) >= 3) {
+        return true;
+    }
+    if rule.is_defect_kind() {
+        return match rule.max_severity.as_deref() {
+            Some(cap) => severity_rank(cap) >= 3,
+            None => true,
+        };
+    }
+    false
+}
+
+/// W26 (fix-and-estimate quality): every rule that can emit a HIGH+ finding must carry at least
+/// one `[[sources]]` citation, because a high-severity row a client reads with no source behind
+/// it is exactly the "no high+ row without a citation" defect. Returns the offending rule ids,
+/// sorted. A `draft` rule legitimately has empty sources, so it is excluded — it cannot ship a
+/// client finding in the first place.
+pub fn high_plus_rules_without_citation(set: &RuleSet) -> Vec<String> {
+    let mut found: Vec<String> = set
+        .iter()
+        .filter(|r| r.verification != Verification::Draft)
+        .filter(|r| rule_can_emit_high_plus(r))
+        .filter(|r| r.sources.is_empty())
+        .map(|r| r.id.0.clone())
+        .collect();
+    found.sort();
+    found
+}
+
+/// W26 counterpart: every rule that can emit a HIGH+ finding must have at least one option
+/// carrying a non-empty remediation. `report_export::resolve_fix` resolves a finding's Fix line
+/// from the option it was judged against (the model's recommended option), falling back to the
+/// rule's `default_option`; whichever option it lands on, a fix exists only if some option
+/// authored a remediation. A high+ rule with NO remediated option anywhere can never produce a
+/// Fix line for any finding — the unambiguous corpus-static form of "no high+ row without a
+/// fix". (A rule with `default_option = None` but remediations on its options is fine: a
+/// violation is always tagged with the recommended option, which carries the fix. The stronger
+/// per-option guarantee is a runtime concern at the export boundary, where the resolved option
+/// is known.) Returns offending rule ids, sorted. `RuleOption::remediation` is already
+/// normalized to `None` when blank at load time.
+pub fn high_plus_rules_without_any_fix(set: &RuleSet) -> Vec<String> {
+    let mut found: Vec<String> = set
+        .iter()
+        .filter(|r| r.verification != Verification::Draft)
+        .filter(|r| rule_can_emit_high_plus(r))
+        .filter(|r| r.options.iter().all(|o| o.remediation.is_none()))
+        .map(|r| r.id.0.clone())
+        .collect();
+    found.sort();
+    found
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Rule-subset selection (pure — RUST-PURE-STATE-TRANSITIONS-1)
 // ────────────────────────────────────────────────────────────────────────────
