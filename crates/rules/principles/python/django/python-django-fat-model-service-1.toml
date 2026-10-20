@@ -3,7 +3,7 @@ title = "Business logic lives in model methods or a service layer, not in views"
 domain = "python:django"
 layer = "framework"
 enforcement = "structured"
-kind = "decision"
+kind = "default_with_exceptions"
 inspectable = true
 # Deviation-ceiling escape hatch, INHERITED from ARCH-STRICT-LAYERING-1: severity must describe
 # the PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the
@@ -36,12 +36,14 @@ why = "Model methods and service modules are independently unit-testable and cal
 
 [[option]]
 id = "fat-views"
+violates = true
 label = "put business logic directly in view functions or class-based view methods"
 directive = "View functions or CBV methods contain business rules, ORM queries for domain purposes, and cross-model coordination inline."
 why = "Ties logic to the HTTP stack; logic is unreachable from non-HTTP entry points without faking a request, and cannot be unit-tested without the web layer."
 
 [[option]]
 id = "fat-serializers"
+violates = true
 label = "push business logic into DRF serializer create/update methods"
 directive = "Business rules for create and update operations live in `Serializer.create()` and `Serializer.update()` methods of Django REST Framework serializers."
 why = "A common but problematic pattern: serializers are validation + serialization adapters, not a business logic layer; pushing orchestration into them creates the same testability and reuse problem as fat views."

@@ -3,7 +3,7 @@ title = "Controllers are thin HTTP adapters; business logic lives in service obj
 domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
-kind = "decision"
+kind = "default_with_exceptions"
 inspectable = true
 # Deviation-ceiling escape hatch, INHERITED from ARCH-STRICT-LAYERING-1: severity must describe
 # the PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the
@@ -36,6 +36,7 @@ why = "Thin controllers keep logic independently testable, reusable from non-HTT
 
 [[option]]
 id = "fat-controller"
+violates = true
 label = "put business logic and orchestration directly in controller actions"
 directive = "Controller actions contain business rules, database queries, and cross-resource coordination inline, rather than delegating to service objects or model methods."
 why = "Mixes transport concerns with domain concerns; logic becomes reachable only through HTTP and is hard to test or reuse."

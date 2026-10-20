@@ -3,7 +3,7 @@ title = "Route handlers are thin; business logic lives in a service layer separa
 domain = "python:flask"
 layer = "framework"
 enforcement = "structured"
-kind = "decision"
+kind = "default_with_exceptions"
 inspectable = true
 # Deviation-ceiling escape hatch, INHERITED from ARCH-STRICT-LAYERING-1: severity must describe
 # the PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the
@@ -36,6 +36,7 @@ why = "Service modules are independently unit-testable and callable from any ent
 
 [[option]]
 id = "logic-in-route-handler"
+violates = true
 label = "put business logic inline in route handler functions"
 directive = "Route handler functions contain business rules, database queries, and external API calls inline alongside request parsing and response formatting."
 why = "Couples logic to the Flask request context; logic is testable only through the HTTP layer and is unreachable from non-HTTP entry points without faking a request."

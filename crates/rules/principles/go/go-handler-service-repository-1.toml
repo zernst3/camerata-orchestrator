@@ -3,7 +3,7 @@ title = "Business logic is layered: HTTP handlers call services, services call r
 domain = "go"
 layer = "architecture"
 enforcement = "structured"
-kind = "decision"
+kind = "default_with_exceptions"
 inspectable = true
 # Deviation-ceiling escape hatch, INHERITED from ARCH-STRICT-LAYERING-1: severity must describe
 # the PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the
@@ -36,6 +36,7 @@ why = "A service layer makes business logic reusable and testable in isolation; 
 
 [[option]]
 id = "logic-in-handlers"
+violates = true
 label = "put business logic and data access directly in handlers"
 directive = "HTTP handlers directly execute business rules, make database queries, and shape the response."
 why = "Ties the logic to the HTTP stack: it cannot be reused outside HTTP or tested without the web framework; rules get duplicated across endpoints."
