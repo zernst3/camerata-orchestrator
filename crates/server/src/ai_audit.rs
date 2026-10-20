@@ -1813,6 +1813,25 @@ fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
         return f;
     }
 
+    // W24 severity anchor: a test-coverage rule is never CRITICAL.
+    //
+    // Critical in this report means an unauthenticated exposure or a full compromise. A
+    // missing test is real work and belongs in the findings, but it was never the thing an
+    // attacker exploited, and ranking it beside "anyone can read every row" spends the
+    // client's alarm on the wrong row. Cap-only at high, so a genuinely serious gap still
+    // outranks ordinary debt; the anchor only removes the top rung.
+    if crate::is_test_coverage_class(&f.rule_id) && f.severity == "critical" {
+        f.severity = "high".to_string();
+        f.calibration_rationale = Some(
+            "Severity ceiling: this is a test-coverage rule. Critical is reserved for an \
+             unauthenticated exposure or a full compromise; missing coverage is real work \
+             but was never the exploited thing, so it is capped at High rather than ranked \
+             beside a live exposure."
+                .to_string(),
+        );
+        return f;
+    }
+
     let text = calibration_floor_scan_text(&f);
 
     if mentions_cors_misconfig(&text) {
@@ -12635,6 +12654,53 @@ mod tests {
     /// shipped at HIGH, held, each carrying text that undercut its own severity. The flag
     /// makes the same judgement structural, and the cap removes that contradiction by
     /// construction rather than asking a renderer to notice it.
+    /// W24 severity anchor — a test-coverage rule never ships at CRITICAL.
+    ///
+    /// Critical in this report means an unauthenticated exposure or a full compromise.
+    /// Missing coverage is real work and belongs in the findings, but it was never the thing
+    /// an attacker exploited, and ranking it beside "anyone can read every row" spends the
+    /// client's alarm on the wrong row.
+    #[test]
+    fn req_w24_a_test_coverage_rule_is_capped_below_critical() {
+        let capped = |rule: &str, sev: &str| {
+            let f = Finding {
+                rule_id: rule.to_string(),
+                severity: sev.to_string(),
+                ..Finding::default()
+            };
+            apply_severity_ceiling_rules(vec![f]).remove(0)
+        };
+
+        let out = capped("JAVASCRIPT-TESTING-NO-DISABLED-TESTS-1", "critical");
+        assert_eq!(out.severity, "high", "a test rule must not ship at critical");
+        assert!(
+            out.calibration_rationale
+                .as_deref()
+                .is_some_and(|r| r.contains("test-coverage")),
+            "the demotion must explain itself: {:?}",
+            out.calibration_rationale
+        );
+
+        // Cap-only: a genuinely serious coverage gap still outranks ordinary debt, so High
+        // and below are untouched. The anchor removes the top rung, not the ranking.
+        for sev in ["high", "medium", "low", "info"] {
+            assert_eq!(
+                capped("CSHARP-TESTING-AAA-STRUCTURE-1", sev).severity,
+                sev,
+                "the anchor caps critical only; {sev} must pass through"
+            );
+        }
+
+        // A real exposure still reaches critical — the anchor must not be a blanket demotion.
+        assert_eq!(capped("SUPABASE-RLS-ENABLED-1", "critical").severity, "critical");
+
+        // Segment-anchored, so a rule that merely CONTAINS the letters is unaffected. The D5
+        // floor bug raised anything containing "urls" because it also contains "rls"; this
+        // is the same trap one rule over.
+        assert!(!crate::is_test_coverage_class("SEC-NO-ATTESTING-TOKEN-1"));
+        assert!(crate::is_test_coverage_class("GO-TESTING-BLACK-BOX-PKG-TEST-1"));
+    }
+
     #[test]
     fn req_w31_a_could_be_intentional_row_is_capped_at_low() {
         let cap = |sev: &str| {

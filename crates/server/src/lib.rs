@@ -5827,6 +5827,28 @@ pub(crate) fn is_observability_convention_class(rule_id: &str) -> bool {
     rule_id.starts_with(OBSERVABILITY_CONVENTION_RULE_PREFIX)
 }
 
+/// W24 — rules about TEST COVERAGE, identified by rule id rather than by prose.
+///
+/// A missing or weak test is real work and belongs in the report. It is not a CRITICAL,
+/// which in this report means an unauthenticated exposure or a full compromise: no test was
+/// ever the thing an attacker exploited. Shipping one at Critical alongside "anyone can read
+/// every row" spends the client's alarm on the wrong row and devalues the findings next to
+/// it, which is the whole reason severity anchors exist.
+///
+/// Matched on the rule ID, not on the finding's text. The corpus has 56 rules with `TESTING`
+/// in the id across every language pack, and the id is authored while the text is generated
+/// — so this cannot drift with a reworded detail, and it cannot misfire on a security finding
+/// that merely MENTIONS tests. That distinction is not theoretical here: the D5 severity
+/// floor matched substrings and raised anything containing "urls" because it also contains
+/// "rls".
+pub(crate) fn is_test_coverage_class(rule_id: &str) -> bool {
+    // Segment-anchored, so `TESTING-` matches as a word and a hypothetical
+    // `SEC-NO-ATTESTING-TOKEN-1` does not.
+    rule_id
+        .split('-')
+        .any(|seg| seg.eq_ignore_ascii_case("TESTING"))
+}
+
 /// Map ANY finding's rule id (floor OR any preview tool) to a normalized security
 /// category string, or `None` when no category mapping exists. Used by
 /// `dedup_scan_previews` for cross-tool dedup: two findings on the same
