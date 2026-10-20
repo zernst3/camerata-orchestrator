@@ -4611,8 +4611,23 @@ pub fn build_report_json(
     // several sites of ONE leaked credential as separate rows. A skipped row is simply not
     // chosen for THIS box; `do_now_sorted`/`matrix.do_now` are never mutated, so it still ships
     // normally everywhere else the report lists do-now findings.
+    //
+    // W24 (2026-10-20): the credential-token check above is gated on `!root_cause_keys
+    // .is_empty()`, so a row carrying NO token skipped it entirely and was always selected.
+    // Three rows of one rule — three tables missing RLS, three endpoints missing one guard —
+    // could therefore fill all three slots, which the graders observed as "top-3 listing one
+    // root cause three times".
+    //
+    // The fallback is the RULE ID. For THIS box that is the right granularity even though
+    // the rows are all genuine: the box asks the client to do three things this week, and
+    // three instances of one rule are one thing ("enable RLS on these tables"). Spending
+    // every slot on it hides the other two problems, which is the opposite of what the box
+    // is for. Everywhere else the report still lists all of them — `do_now_sorted` and
+    // `matrix.do_now` are untouched, exactly as the credential check already promised.
     let mut top3_do_now: Vec<&FindingRefJson> = Vec::new();
     let mut selected_root_causes: std::collections::HashSet<&str> =
+        std::collections::HashSet::new();
+    let mut selected_rule_ids: std::collections::HashSet<&str> =
         std::collections::HashSet::new();
     for f in &do_now_sorted {
         if top3_do_now.len() >= 3 {
@@ -4622,9 +4637,10 @@ pub fn build_report_json(
             && f.root_cause_keys
                 .iter()
                 .any(|k| selected_root_causes.contains(k.as_str()));
-        if shares_selected_root_cause {
+        if shares_selected_root_cause || selected_rule_ids.contains(f.rule_id.as_str()) {
             continue;
         }
+        selected_rule_ids.insert(f.rule_id.as_str());
         top3_do_now.push(f);
         selected_root_causes.extend(f.root_cause_keys.iter().map(String::as_str));
     }
@@ -6702,6 +6718,52 @@ mod tests {
     /// A RECOGNISED state must still win: an auditor who explicitly confirmed or ignored a
     /// baseline-suppressed row has made a real decision this session, and that is precisely
     /// what a disposition is for.
+    /// W24 — "Three things this week" must name three distinct problems.
+    ///
+    /// The distinctness check exists, and it works, but it is gated on
+    /// `!f.root_cause_keys.is_empty()`. A row carrying NO credential token therefore skips
+    /// the check entirely and is always selected, so three rows of the same rule — three
+    /// tables missing RLS, three endpoints missing the same guard — can fill all three slots.
+    ///
+    /// For this box specifically that is wrong even though the rows are genuine. The box asks
+    /// the client to do three things this week; three instances of one rule are ONE thing
+    /// ("enable RLS on these tables"), and spending all three slots on it hides the other two
+    /// problems entirely. The graders saw exactly this: a top-3 listing one root cause three
+    /// times.
+    #[test]
+    fn req_w24_three_things_never_spends_all_slots_on_one_rule() {
+        // Three rows of ONE rule, then two genuinely different problems. All do-now severity,
+        // and none carries a root-cause credential token — the gap in the existing check.
+        let mut findings = vec![
+            finding("SUPABASE-RLS-ENABLED-1", "db/a.sql", 1, "critical"),
+            finding("SUPABASE-RLS-ENABLED-1", "db/b.sql", 2, "critical"),
+            finding("SUPABASE-RLS-ENABLED-1", "db/c.sql", 3, "critical"),
+            finding("SEC-NO-SECRET-FILE-1", ".env.production", 1, "critical"),
+            finding("ARCH-EXACT-DECIMALS-1", "db/pay.sql", 9, "critical"),
+        ];
+        for f in &mut findings {
+            f.located = true;
+        }
+        let report = report_with(findings, vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        let picked: Vec<&str> =
+            json.three_things.items.iter().map(|i| i.rule_id.as_str()).collect();
+        let distinct: std::collections::HashSet<&str> = picked.iter().copied().collect();
+        assert_eq!(
+            picked.len(),
+            distinct.len(),
+            "the three-things box must name three DIFFERENT problems; one rule filling \
+             several slots hides the others: {picked:?}"
+        );
+        // And the other two problems must actually surface, which is the point of the box.
+        assert!(
+            distinct.contains("SEC-NO-SECRET-FILE-1")
+                && distinct.contains("ARCH-EXACT-DECIMALS-1"),
+            "the genuinely distinct problems must not be crowded out: {picked:?}"
+        );
+    }
+
     #[test]
     fn req_w28_an_unrecognised_disposition_state_falls_back_to_status_not_to_open() {
         let mut suppressed = finding("SEC-1", "a.rs", 1, "high");
