@@ -6396,6 +6396,36 @@ async fn run_routed_passes(
 ///   safety net (`report_export::downgrade_unlocated_above_informational`) correctly demotes
 ///   that one shape to `info` rather than asserting an unverifiable "high" with nothing to
 ///   point at.
+/// D7 — strip the corpus's `Rejected:` AUTHORING token from prose about to reach a client.
+///
+/// A `violates` option's `why` is interpolated verbatim into the defect detail a client
+/// reads. The corpus's strongest authoring convention asks that `why` to open with the
+/// literal token `Rejected:` — it forces the author to write a fault rather than a neutral
+/// alternative, and the folder that adopted it scored 17 of 17 correct in the 244-rule
+/// `violates` audit while others ran as low as 59 percent. The convention earns its keep at
+/// authoring time and has no business in the deliverable.
+///
+/// Stripping at the render boundary rather than migrating the corpus is the owner's ruling
+/// (2026-10-19): it costs one function, leaves all 71 existing uses correct, and avoids
+/// touching 306 options to delete a token the authoring guide elsewhere calls a wart.
+///
+/// Only an OPENING token is removed, and the following clause is re-capitalised so the
+/// sentence still reads. A `why` that merely discusses something being rejected keeps its
+/// prose — see the test.
+fn strip_authoring_token(why: &str) -> String {
+    const TOKEN: &str = "rejected:";
+    let trimmed = why.trim_start();
+    if trimmed.len() < TOKEN.len() || !trimmed[..TOKEN.len()].eq_ignore_ascii_case(TOKEN) {
+        return why.to_string();
+    }
+    let rest = trimmed[TOKEN.len()..].trim_start();
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 fn apply_alternative_decision(
     effective_selected: &mut [(String, String)],
     repo: &str,
@@ -6442,7 +6472,9 @@ fn apply_alternative_decision(
              corpus), so it is reported as a defect rather than treated as a satisfied \
              alternative, even though the rule's own alternatives pass genuinely decided this \
              is what the repo does. {}",
-            option.label, option.why, recommendation_reasoning
+            option.label,
+            strip_authoring_token(&option.why),
+            recommendation_reasoning
         ),
         located,
         evaluated_option_id: Some(option.id.clone()),
@@ -12660,6 +12692,40 @@ mod tests {
     /// Missing coverage is real work and belongs in the findings, but it was never the thing
     /// an attacker exploited, and ranking it beside "anyone can read every row" spends the
     /// client's alarm on the wrong row.
+    /// D7 — the `Rejected:` authoring token never reaches the client.
+    ///
+    /// A `violates` option's `why` is interpolated VERBATIM into the defect detail, directly
+    /// after the label. The corpus's strongest authoring convention asks that `why` to open
+    /// with the literal token `Rejected:` — and 71 of 377 flagged options do — so the client
+    /// currently reads "…was judged to follow "X" for RULE-1 — Rejected: this conflates…".
+    ///
+    /// A build-time authoring convention leaking into a paid deliverable is the same
+    /// internal-vocabulary defect as the detector-voice labels, in a field nobody looked at.
+    /// Stripping it at the render boundary is the owner's ruling (2026-10-19) because it
+    /// costs one function and leaves the 71 existing uses correct, where a corpus migration
+    /// would have touched 306 options to remove a token the guide elsewhere calls a wart.
+    #[test]
+    fn req_d7_the_rejected_token_is_stripped_before_the_client_sees_it() {
+        // The token, with the sentence after it capitalised as an author would write it.
+        assert_eq!(
+            strip_authoring_token("Rejected: this conflates a performance optimisation with a security defect."),
+            "This conflates a performance optimisation with a security defect.",
+            "the token goes, and the clause after it still opens like a sentence"
+        );
+        // Case and spacing as actually authored across the corpus.
+        assert_eq!(strip_authoring_token("Rejected:  already lower case here."), "Already lower case here.");
+        assert_eq!(strip_authoring_token("rejected: lowercase token"), "Lowercase token");
+
+        // A `why` that never used the convention is untouched - 306 of 377 options.
+        let plain = "Each record triggers its own query, so latency grows with the result set.";
+        assert_eq!(strip_authoring_token(plain), plain);
+
+        // And the word must only be stripped as an OPENING TOKEN. A `why` that legitimately
+        // discusses something being rejected keeps its prose.
+        let mentions = "The request is rejected: the server returns 403 before touching the row.";
+        assert_eq!(strip_authoring_token(mentions), mentions);
+    }
+
     #[test]
     fn req_w24_a_test_coverage_rule_is_capped_below_critical() {
         let capped = |rule: &str, sev: &str| {
