@@ -101,10 +101,26 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
     - **Caveat:** severity-transcription comments quote directive prose these rewrites delete.
 12. **Corpus Group 1** — 17 inert `violates` options describing Camerata's detector design.
     Verified runtime-inert; safe anywhere, parked here to batch with the wording.
-13. **Corpus Group 4** — truncated option ids. 1,101 ids, **18 hardcoded in Rust**, zero
-    persisted selections. **Fix the generator in the same pass** or the next rule reproduces it.
-14. **W26 fix and estimate quality.** Predicate-aware templates, contradiction gate, magnitude
-    sanity, no high-or-above row without a fix and citation.
+13. **Corpus Group 4** — truncated option ids. ✅ DONE (`383ea21`). 72 mid-word-truncated ids
+    de-truncated to full/clean-trimmed label slugs; 55 `[decision].default` + only 4 remaining
+    hardcoded Rust refs updated in lockstep (b4fb2ab had already cut the 18 to 4); zero persisted
+    selections so no migration. Generator fixed mechanically: `w_group4_no_truncated_option_ids`
+    gate fails any mid-word-prefix id, so the 48-char cap cannot recur. Boundary-complete short
+    ids left alone.
+14. **W26 fix and estimate quality.** Corpus-static half DONE (`155cab1`, `7bee157`):
+    - ✅ **No high+ row without a fix and a citation** — `w26_high_plus_fix_and_citation`, with a
+      faithful `rule_can_emit_high_plus` (floor / violates-option / high ceiling / defect-kind;
+      a plain decision rule whose deviations clamp to medium is excluded). One real gap fixed:
+      GO-HANDLER-SERVICE-REPOSITORY-1 got its three authorities as `[[sources]]`.
+    - ✅ **Magnitude sanity** — `options_with_invalid_effort` locks effort to low/medium/high
+      (0 invalid). Function `effort_hours_bounds` already monotonic. High+ options without an
+      authored effort are left alone — effort is optional by design, "not yet estimated" is
+      honest, forcing a number is fabrication.
+    - ⏳ **Contradiction gate, placeholder gate, floor-rows-always-estimated** — RUNTIME/export
+      concerns (they operate on a rendered row with its resolved option + fix text), so they
+      move to W27 where the export path is reopened. A runtime non-contradiction self-check on
+      `fix_specific` already exists; the one authored-corpus instance (hot-read-cache) was fixed
+      in `d0ea2ea`. Predicate-aware fix TEMPLATES is an authoring-ergonomics item, deferred.
 15. **W27 PDF rebuild** per `2026-10-16_pdf-design-final.md`. Last, because restructuring a
     renderer over wrong data bakes the wrong shape in. Carries:
     - R-id persistence at first export + read-back (D3). **A recomputed counter renumbers by
