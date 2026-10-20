@@ -18,7 +18,7 @@
 
 use camerata_rules::{
     corpus_path, high_plus_rules_without_any_fix, high_plus_rules_without_citation,
-    load_corpus_lenient,
+    load_corpus_lenient, options_with_invalid_effort,
 };
 
 #[tokio::test]
@@ -47,6 +47,21 @@ async fn req_w26_every_high_plus_rule_has_a_resolvable_fix() {
         "these rules can emit a HIGH+ finding but NO option authors a remediation, so \
          `resolve_fix` can never produce a Fix line for any finding of the rule. Author a \
          remediation on the conforming option:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+#[tokio::test]
+async fn req_w26_authored_effort_is_a_valid_tier() {
+    let (corpus, errors) = load_corpus_lenient(&corpus_path()).await;
+    assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+    let offenders = options_with_invalid_effort(&corpus);
+    assert!(
+        offenders.is_empty(),
+        "these options author an `effort` outside the low/medium/high tier vocabulary; \
+         `effort_hours_bounds` would silently map it to 'not yet estimated', stripping the \
+         estimate off every finding of the rule:\n  {}",
         offenders.join("\n  ")
     );
 }

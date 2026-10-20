@@ -2809,6 +2809,29 @@ pub fn high_plus_rules_without_any_fix(set: &RuleSet) -> Vec<String> {
     found
 }
 
+/// W26 (magnitude sanity on estimates): every authored option `effort` must be exactly one of
+/// the three-tier vocabulary `"low"` / `"medium"` / `"high"`. `effort` is a free-form
+/// `Option<String>`, unvalidated at load, and `report_export::effort_hours_bounds` maps anything
+/// outside the set to "not yet estimated" — so a typo like `"lo"` or a stray `"2 days"` would
+/// silently strip the estimate off every finding of the rule rather than erroring. Returns
+/// `"<rule-id> / <option-id>: '<value>'"` for each offender, sorted. (Blank efforts are already
+/// normalized to `None` at load and are a legitimate "not yet estimated" state, so they are not
+/// flagged — only a NON-blank value outside the set is.)
+pub fn options_with_invalid_effort(set: &RuleSet) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for rule in set.iter() {
+        for opt in &rule.options {
+            if let Some(effort) = opt.effort.as_deref() {
+                if !matches!(effort, "low" | "medium" | "high") {
+                    found.push(format!("{} / {}: '{}'", rule.id.0, opt.id, effort));
+                }
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Rule-subset selection (pure — RUST-PURE-STATE-TRANSITIONS-1)
 // ────────────────────────────────────────────────────────────────────────────
