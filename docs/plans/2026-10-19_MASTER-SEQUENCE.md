@@ -133,6 +133,37 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
     `is_code_auditable_rule` gating on `inspectable` rather than a name prefix; D6/D7 severity
     **ceiling** tables still using raw `contains` (the same shape as the fixed D5 floor bug,
     where `urls` matched `rls`); R1 `cargo fmt`; R2.
+19c. **Fourteen supabase rules need an OPTION REWRITE, not a revoicing (found 2026-10-20).**
+
+    The supabase revoicing pass (`12e8f69`) deliberately left fourteen `violates` options
+    alone, and the reasoning should not be rediscovered: they describe Camerata's own REPORT
+    POLICY rather than a state of the client's code — "Flag every SECURITY DEFINER function
+    regardless of grants", "Grep each migration file independently", "Do not author a
+    storage-specific rule", "Skip reporting on buckets with safe-sounding names".
+
+    Wording cannot fix them. LABEL-2 requires the label to name the bad STATE, and there is no
+    bad client state in these options to name. Re-voicing the label while the `why` still
+    argues about scanner behaviour would ship an option whose two client-facing halves
+    disagree — worse than the current honest tool voice.
+
+    They need the same judgement-per-rule treatment `SUPABASE-AUTH-GETSESSION-SERVER-1` and
+    `SUPABASE-RLS-INITPLAN-1` received in `7cdaa9c`, new option ids included. Note those two
+    resolved DIFFERENTLY from each other (one a `defect`, one staying a `decision` with no
+    `violates`), so this is fourteen decisions, not one batch.
+
+    `AUTH-EDGE-JWT-1`, `FUNC-DEFINER-CROSS-TENANT-READ-1`, `FUNC-DYNAMIC-SQL-INJECTION-1`,
+    `FUNC-PRIVILEGED-NO-AUTHZ-1`, `FUNC-SEARCH-PATH-1`, `EXPOSURE-MATVIEW-1`,
+    `EXPOSURE-SCHEMAS-1`, `KEY-SERVICE-ROLE-CLIENT-1`, `RLS-DISABLED-NOT-RESTORED-1`,
+    `RLS-ENABLED-1`, `RLS-PERMISSIVE-TRUE-1`, `RLS-POLICY-DISABLED-1`,
+    `STORAGE-OBJECT-POLICY-1`, `STORAGE-PUBLIC-BUCKET-1`.
+
+    Their CONFORMING options are already rewritten, so the emitted governance and the scan
+    prompt are both correct today; only the rejected-option half is outstanding.
+
+    Also noted in the same pass: `SUPABASE-STORAGE-SIGNED-URL-1` has NO severity bounds at
+    all, and a relative severity ordering that survives only as prose in `[decision].why`. It
+    is the one place in the pack where a severity claim has no structured home.
+
 19b. **The eslint residual, narrowed 2026-10-20 — it is NOT provisioning.**
 
     `live_eslint_detects_a_real_exhaustive_deps_violation` has been the single failing test
