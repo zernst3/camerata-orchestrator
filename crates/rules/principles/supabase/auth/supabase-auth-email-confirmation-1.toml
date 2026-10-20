@@ -3,7 +3,7 @@ title = "A production-linked config disables email confirmation only deliberatel
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
-kind = "decision"
+kind = "default_with_exceptions"
 inspectable = true
 # Severity floor, transcribed from this rule's own prose: "flag at high severity: 'Email
 # confirmation is off ...'".
@@ -66,6 +66,7 @@ why = "The local-dev default exists purely to remove mail-server friction from `
 
 [[option]]
 id = "leave-confirmations-off-matching-local-dev-default"
+violates = true
 label = "Carry the local-dev scaffold default (enable_confirmations = false) into the production-linked configuration unreviewed"
 directive = "Keep enable_confirmations = false in the configuration that is pushed to the remote/production project, matching whatever the CLI scaffolded by default, without a deliberate review of whether production should require confirmation."
 why = "Rejected: this is precisely the gap the rule targets. The default exists for local-development convenience, not because unconfirmed production signups are an acceptable security posture — carrying it forward unreviewed means anyone, including someone impersonating a real user's email address, can authenticate under an identity nobody ever confirmed they own."

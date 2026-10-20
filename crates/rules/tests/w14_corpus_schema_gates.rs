@@ -276,9 +276,11 @@ Rejected: authored as a block string, which starts with a newline.
 ///
 /// Hardcoded deliberately rather than derived: a derived list moves with the corpus and could
 /// not catch a NEW rule drifting into this shape, which is exactly what this roster prevents.
-const DECISION_KIND_RULES_WITH_REJECTED_PROSE: [&str; 7] = [
-    // On the A5.7 hold list: "the rule's own question is phrased as a yes/no compliance check,
-    // not an open style choice — could be an under-authored default_with_exceptions".
+const DECISION_KIND_RULES_WITH_REJECTED_PROSE: [&str; 4] = [
+    // Stays `decision` by the owner's 2026-10-12 A5.7 ruling, recorded alongside the
+    // SILENT-FAILURE resolution below: "the rule's own question is phrased as a yes/no
+    // compliance check, not an open style choice — could be an under-authored
+    // default_with_exceptions". Could be, and the ruling was that it is not.
     "ARCH-OBSERVABILITY-CORRELATION-ID-1 / correlate-after-the-fact-by-timestamp-and-content",
     //
     // RESOLVED 2026-10-12 by the owner's A5.7 ruling, and REMOVED from this roster as the
@@ -290,20 +292,32 @@ const DECISION_KIND_RULES_WITH_REJECTED_PROSE: [&str; 7] = [
     // `decision`-kind rule and GATE 1b no longer has anything to say about it. GATE 1 ("every
     // `Rejected:` option on a flag-permitting kind carries the flag") now covers it instead,
     // and `req_w15_silent_failure_is_defect_kind_with_the_discard_option_flagged` pins it.
-    // `ARCH-OBSERVABILITY-CORRELATION-ID-1` above stays `decision` by the same ruling.
     //
-    "ARCH-SERVER-CLIENT-PROJECTION-1 / pass-raw-query-result-rely-on-ui-to-not-render-extra-fields",
-    "ARCH-SERVER-CLIENT-PROJECTION-1 / strip-sensitive-fields-client-side-after-hydration",
+    // RESOLVED 2026-10-20, the A5.7 hold having been LIFTED by the owner on 2026-10-19
+    // ("you can make the updates as needed"). Same deliberate roster edit, same reasoning:
+    //   ARCH-SERVER-CLIENT-PROJECTION-1 / pass-raw-query-result-rely-on-ui-to-not-render-extra-fields
+    //   ARCH-SERVER-CLIENT-PROJECTION-1 / strip-sensitive-fields-client-side-after-hydration
+    //   SUPABASE-AUTH-EMAIL-CONFIRMATION-1 / leave-confirmations-off-matching-local-dev-default
+    // All three options already described states of the CLIENT'S code, and each `why` named
+    // only costs rather than any context in which the choice is right — so only the `kind`
+    // was wrong. Both rules are now `default_with_exceptions` with those options flagged, and
+    // `w22_a57_resolved_kinds.rs` pins them in both directions (the fault IS flagged, the
+    // conforming option is NOT). Their entries are gone from here because a resolved rule is
+    // no longer `decision`-kind and GATE 1b has nothing to say about it.
+    //
+    // NOT resolved with them, and still `decision`, because their options do not describe the
+    // client's code at all — they describe DETECTOR SCOPE and CAMERATA'S OWN REPORT POLICY
+    // respectively. Reclassifying those would flag an option that was never about the scanned
+    // repository, so they need their options REWRITTEN first; see the two entries below.
+    //
     // NOT on the hold list — classified a clear `decision`. See the doc comment above.
     "SEC-NO-RAW-SQL-CONCAT-1 / escape-then-concatenate",
-    // On the A5.7 hold list.
-    "SUPABASE-AUTH-EMAIL-CONFIRMATION-1 / leave-confirmations-off-matching-local-dev-default",
-    // On the A5.7 hold list, and a distinct sub-shape: this rule's alternatives describe
-    // DETECTOR SCOPE (flag everywhere vs. only server paths), not the scanned repo's own
-    // behaviour, so `violates` has nothing to mean on it in either direction.
+    // A distinct sub-shape: this rule's alternatives describe DETECTOR SCOPE (flag everywhere
+    // vs. only server paths), not the scanned repo's own behaviour, so `violates` has nothing
+    // to mean on it in either direction. Needs an option rewrite, not a reclassification.
     "SUPABASE-AUTH-GETSESSION-SERVER-1 / flag-getsession-everywhere-unscoped",
-    // On the A5.7 hold list, same detector/reporting-policy sub-shape: the options describe how
-    // CAMERATA'S OWN REPORT should classify an initplan finding, not a codebase choice.
+    // Same detector/reporting-policy sub-shape: the options describe how CAMERATA'S OWN
+    // REPORT should classify an initplan finding, not a codebase choice.
     "SUPABASE-RLS-INITPLAN-1 / bundle-as-a-standard-security-finding",
 ];
 
