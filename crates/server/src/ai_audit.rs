@@ -278,6 +278,37 @@ impl UsageMeter {
     }
 }
 
+/// Resolve the model the audit pass will actually use: the caller's explicit pick, else
+/// `CAMERATA_AUDIT_MODEL`, else the client's compiled-in default.
+///
+/// # Why this is a function and not three copies of four lines
+///
+/// It was three copies. `audit_repo` picked a model one way, `generate_fix_specifics`
+/// re-derived it with a comment reading "Resolve the model the same way `audit_pass` does",
+/// and what reached `ScanProvenance.audit_model` was neither — it was the caller's RAW pick,
+/// so a run driven by `CAMERATA_AUDIT_MODEL` or by the default recorded `None`.
+///
+/// That is not a tidiness problem. `None` in provenance was read for months as "no model
+/// ran", when it actually meant "nobody wrote down which model ran", and the 2026-10-16
+/// five-repo sweep recorded `claude-sonnet-5` on its baseline and nothing on either later
+/// run. The whole before/after comparison was therefore unfalsifiable in both directions, and
+/// a week went into reasoning about an engine regression that did not exist.
+///
+/// Returning the RESOLVED value means provenance can state what ran, the integrity gate's
+/// `model_unrecorded` family can mean what it says, and a future reader of an export can tell
+/// the two cases apart.
+pub fn resolve_audit_model(caller_pick: Option<&str>) -> String {
+    caller_pick
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var("CAMERATA_AUDIT_MODEL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string())
+}
+
 /// A snapshot of real audit usage, serialized onto the scan report for the UI's
 /// actual-vs-estimated readout.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -4016,27 +4047,7 @@ async fn run_passes_batch(
         );
     }
 
-    let model = {
-        // Resolve the model the same way `audit_pass` does: caller's explicit pick wins,
-        // else CAMERATA_AUDIT_MODEL, else the Llm client's default.
-        let m = audit_model.map(str::to_string).or_else(|| {
-            std::env::var("CAMERATA_AUDIT_MODEL")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        });
-        // Build a throwaway request to let the Llm client resolve the model.
-        let dummy = LlmRequest::new("")
-            .with_model(m.unwrap_or_default());
-        // model_for is private, but we replicate its logic here (empty -> default_model).
-        // We use the model the caller would pass to audit_pass, which is the string itself.
-        dummy.model
-    };
-    // Use the default model if the resolved model is empty.
-    let model = if model.trim().is_empty() {
-        crate::llm::DEFAULT_MODEL.to_string()
-    } else {
-        model
-    };
+    let model = resolve_audit_model(audit_model);
 
     let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
     let n_c = chunks.len();
@@ -12566,6 +12577,34 @@ mod tests {
             "must state explicitly that nothing is selected: {block}"
         );
         assert!(!block.contains("CURRENTLY SELECTED"));
+    }
+
+    /// W19 — provenance must state the model that RAN, not the one the caller happened to
+    /// name. Three copies of this resolution existed and what reached provenance was none of
+    /// them: it was the caller's raw pick, so a run driven by `CAMERATA_AUDIT_MODEL` or by
+    /// the default recorded `None`.
+    ///
+    /// That ambiguity is what made the 2026-10-16 five-repo sweep unfalsifiable. Its baseline
+    /// recorded `claude-sonnet-5` and both later runs recorded nothing, so "did the engine
+    /// regress" could be neither confirmed nor refuted, and a week went into a regression
+    /// that did not exist.
+    #[test]
+    fn req_w19_resolve_audit_model_prefers_the_caller_then_env_then_the_default() {
+        // The caller's explicit pick always wins.
+        assert_eq!(resolve_audit_model(Some("claude-sonnet-5")), "claude-sonnet-5");
+
+        // Blank is not a pick. Falling through on an empty string is what makes
+        // `--model ""` behave like omitting the flag rather than selecting nothing.
+        assert_eq!(resolve_audit_model(Some("   ")), crate::llm::DEFAULT_MODEL);
+
+        // No pick and no env: the compiled-in default, NAMED rather than left as None.
+        // This is the case that used to record nothing.
+        assert_eq!(resolve_audit_model(None), crate::llm::DEFAULT_MODEL);
+        assert!(
+            !resolve_audit_model(None).trim().is_empty(),
+            "the resolved model is always a real name - an empty string here would \
+             reintroduce the ambiguity this function exists to remove"
+        );
     }
 
     #[test]

@@ -2096,16 +2096,28 @@ pub async fn audit_repos(
     // W19: hand the integrity gate what this scan was actually FED. Recorded at the same
     // point provenance is stamped, because that is where the file totals and the resolved
     // model are both settled, and the two must not be able to disagree.
+    // Computed once and shared with provenance below, so the gate and the export can never
+    // disagree about whether a model ran.
+    let ai_ran_for_ledger = report.actual_usage.as_ref().is_some_and(|u| u.calls > 0);
     report.ledger.record_input(crate::scan_ledger::ScanInputFacts {
         files_scanned: files_total,
         files_excluded: files_excluded_total,
         code_chars: code_chars_total,
         engine_artifacts_admitted: engine_artifacts_total,
-        audit_model: model.map(str::to_string),
+        // The RESOLVED model, not the caller's raw pick. Recording the pick is what made
+        // `None` ambiguous between "no model ran" and "nobody wrote it down", and left the
+        // 2026-10-16 before/after comparison unfalsifiable. See `resolve_audit_model`.
+        audit_model: ai_ran_for_ledger.then(|| crate::ai_audit::resolve_audit_model(model)),
     });
+    // W19: record the model that ACTUALLY ran, resolved, not the caller's raw pick — but
+    // only when the AI tier ran at all. A floor-only or compliance-blocked run made zero
+    // model calls, and naming a model there would be a different lie from the one being
+    // fixed. Zero calls is the honest signal: `None` then means "no model ran", which is
+    // what a reader always assumed it meant.
+    let ai_ran = ai_ran_for_ledger;
     report.provenance = ScanProvenance {
         audited_refs,
-        audit_model: model.map(str::to_string),
+        audit_model: ai_ran.then(|| crate::ai_audit::resolve_audit_model(model)),
         calibration_model: calibration_model.map(str::to_string),
         mode: match mode {
             crate::ai_audit::ScanMode::Sequential => "sequential",
