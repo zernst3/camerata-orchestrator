@@ -66,10 +66,17 @@ inspectable = true | false     # REQUIRED since 2026-10-12 (W16); see below
   to pick, and what each one makes the engine do, read `docs/RULES_REFERENCE.md` - that is the
   single source of truth for the taxonomy and should not be restated here.
 - **`inspectable` is mandatory too, and the build enforces it.** It answers one question: can a
-  scan of a repository say anything true about this rule at all? `false` means EMITTED, NEVER
-  SCANNED - the rule still ships into the client's `AGENTS.md`/`CONVENTIONS.md` as a directive
-  governing future work, but it is removed from the scan before arming, so it never claims a
-  verified-clean result on a codebase it cannot be checked against. Like `kind`, there is
+  scan of a repository say anything true about this rule at all? The scan sees the WORKING TREE
+  only - the files as they sit on disk - never VCS metadata (commit messages, branch names, PR
+  history) and never external configuration (a CI dashboard, a cloud console). A rule whose
+  subject lives entirely outside the working tree (e.g. "every commit subject cites the
+  convention id", "branches follow a naming scheme") is therefore legitimately `inspectable =
+  false`: it is a real directive the client's agents must follow, it SHOULD still emit into
+  `CONVENTIONS.md`, but a working-tree scan has nothing to check it against. That is the test -
+  "assessable from the working tree", not "important" or "worth emitting". `false` means
+  EMITTED, NEVER SCANNED - the rule still ships into the client's `AGENTS.md`/`CONVENTIONS.md` as
+  a directive governing future work, but it is removed from the scan before arming, so it never
+  claims a verified-clean result on a codebase it cannot be checked against. Like `kind`, there is
   deliberately no default: `rules_missing_inspectable` in `crates/rules/src/lib.rs` fails the build
   on an absent value, because guessing `true` would ship an unassessable rule as "verified clean"
   in a paid deliverable and guessing `false` would silently stop a real check from running. 26 of
