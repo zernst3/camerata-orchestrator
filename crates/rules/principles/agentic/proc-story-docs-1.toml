@@ -15,7 +15,8 @@ title = "Decision: PostStoryHook — per-story documentation emission (PROC-STOR
 
 [[sources]]
 url = "https://diataxis.fr/"
-title = "Diátaxis — a systematic framework for technical documentation (low — supports splitting documentation by audience/purpose, not the per-story-id keying)"
+title = "Diátaxis — a systematic framework for technical documentation"
+relevance = "Authority note (author-facing): low — supports splitting documentation by audience/purpose, not the per-story-id keying"
 
 [decision]
 question = "How does the project capture durable, in-repo documentation for a change (beyond the commit/PR record)?"

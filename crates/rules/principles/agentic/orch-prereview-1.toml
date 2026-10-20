@@ -19,7 +19,8 @@ title = "Decision: Cross-agent rules — the integration gate (pipeline: execute
 
 [[sources]]
 url = "https://research.google/pubs/modern-code-review-a-case-study-at-google/"
-title = "Sadowski et al. — Modern Code Review: A Case Study at Google (low — supports pre-merge review generally, not an AI-reviewer-specific mandate)"
+title = "Sadowski et al. — Modern Code Review: A Case Study at Google"
+relevance = "Authority note (author-facing): low — supports pre-merge review generally, not an AI-reviewer-specific mandate"
 
 [decision]
 question = "How should AI-authored changes flow toward the human review gate?"

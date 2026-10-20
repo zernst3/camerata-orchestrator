@@ -20,7 +20,8 @@ title = "PostgreSQL — Foreign Keys: ON DELETE CASCADE deletes the referencing 
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
-title = "OWASP Logging Cheat Sheet (low authority — supports the general principle that records needed for accountability must remain available for audit/incident review; the specific financial/audit-table carve-out from ordinary cascade behavior is this rule's own judgment, not something the cheat sheet itself prescribes)"
+title = "OWASP Logging Cheat Sheet"
+relevance = "Authority note (author-facing): low authority — supports the general principle that records needed for accountability must remain available for audit/incident review; the specific financial/audit-table carve-out from ordinary cascade behavior is this rule's own judgment, not something the cheat sheet itself prescribes"
 
 [decision]
 question = "Does a foreign key from a routine, user-mutable table into a financial, audit, or historical record use ON DELETE CASCADE, silently destroying that record when the ordinary-course row is deleted?"

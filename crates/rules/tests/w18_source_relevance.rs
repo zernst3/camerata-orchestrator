@@ -487,15 +487,26 @@ async fn req_w18_the_nineteen_migrated_annotations_are_loaded_from_the_corpus() 
     }
 
     // The migration must not have invented annotations anywhere else, and must not have missed
-    // one: exactly 19 sources in the whole corpus carry `relevance` today.
+    // one — but `relevance` is no longer exclusively the go/testing migration's.
+    //
+    // W25 (2026-10-20) moved authority GRADES out of client-facing source titles ("ASP.NET
+    // Core — Middleware (low authority — …)") into `relevance`, which is author-facing and
+    // reaches no artifact. That is the field's intended second use, not unreviewed spread, so
+    // the count rises from 19 to 19 + 13. The guard's PURPOSE survives: a count other than the
+    // reviewed total still fails, so a 33rd `relevance` appearing without being added here is
+    // caught exactly as before. Each of the 13 is a source whose title carried an authority
+    // grade; `w25_source_title_grading` pins that no title carries one anymore.
+    const W25_AUTHORITY_NOTE_SOURCES: usize = 13;
     let total: usize = set
         .iter()
         .map(|r| r.sources.iter().filter(|s| s.relevance.is_some()).count())
         .sum();
     assert_eq!(
-        total, 19,
-        "exactly the 19 migrated annotations may carry `relevance`; a different count means the \
-         migration lost one or the field is spreading unreviewed"
+        total,
+        19 + W25_AUTHORITY_NOTE_SOURCES,
+        "expected the 19 migrated go/testing annotations plus the {W25_AUTHORITY_NOTE_SOURCES} \
+         W25 authority-note moves; a different count means the migration lost one, or `relevance` \
+         is spreading beyond those two reviewed populations"
     );
 }
 

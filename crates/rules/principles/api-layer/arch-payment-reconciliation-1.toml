@@ -15,7 +15,8 @@ title = "Stripe — Webhooks: best practice is to rely on webhook events (not ju
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
-title = "OWASP Logging Cheat Sheet (low authority — supports the general principle that state affecting money must be auditable and correctable after the fact; the specific reconciliation mechanism is this rule's own judgment grounded in the provider's documented async-state behavior, not something the cheat sheet itself prescribes)"
+title = "OWASP Logging Cheat Sheet"
+relevance = "Authority note (author-facing): low authority — supports the general principle that state affecting money must be auditable and correctable after the fact; the specific reconciliation mechanism is this rule's own judgment grounded in the provider's documented async-state behavior, not something the cheat sheet itself prescribes"
 
 [decision]
 question = "Does the application have a mechanism — webhook-driven updates, a scheduled reconciliation job, or both — that can correct local order/payment state after the fact, or is the synchronous charge-call response treated as the final word?"
