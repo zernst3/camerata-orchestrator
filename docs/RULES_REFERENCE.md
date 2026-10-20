@@ -1015,8 +1015,20 @@ then never engages.
 
 ### 5.3 `directive`
 
-- Default empty string (`lib.rs:735-736`). The DETECTION/enforcement recipe, written for an
-  agent/model, not a client.
+- Default empty string (`lib.rs:735-736`). The rule's behavioural requirement, in ONE voice
+  for three readers: the scanning model (as an adopted rule to check code against), the
+  client's own agents, and the client's engineers.
+
+  **Correction, 2026-10-20.** This read "The DETECTION/enforcement recipe, written for an
+  agent/model, not a client", which is wrong in both halves and is the sentence
+  `RULE_AUTHORING.md`'s 2026-10-19 correction identifies as the misreading that let detector
+  voice into the whole `supabase/` pack. `directive` DOES reach the client —
+  `arm.rs::render_rule` emits it verbatim into their `AGENTS.md`/`CONVENTIONS.md` — and that
+  is the product rather than a leak. And a scanner-recipe directive is wrong for the model
+  too: the scan prompt introduces the list as "the rules the project has ADOPTED", so
+  "Regex-scan for X / Emit a high-severity finding" tells a language model to impersonate a
+  regex engine instead of telling it what the code must be. There is no reader for whom the
+  recipe phrasing is correct. See `RULE_AUTHORING.md`, "The MULTI-AUDIENCE fields".
 - **Consumers:**
   - The semantic audit prompt: the selected rule list is literally
     `- [RULE-ID] directive` lines (`ai_audit.rs:356`), where the directive is the

@@ -2057,14 +2057,30 @@ pub(crate) fn is_uncited_ai_finding(
 /// specific table/function/bucket in THIS codebase is a property of the finding.
 ///
 /// # `remediation`, never `directive` (2026-09-13 product-review Fix 1)
-/// `directive` is the rule's DETECTION/enforcement recipe — internal, agent-facing instructions
-/// for how Camerata itself finds this defect (e.g. "Regex-scan supabase/config.toml for
-/// `verify_jwt=false`… feed the matched source to the prose tier…"). It leaks internals and
-/// confuses a paying client. `remediation` is a SEPARATE, authored field: 2-4 imperative
-/// sentences telling the CLIENT what to change, where, and how to verify the fix. This function
-/// binds ONLY to `remediation` and must NEVER fall back to `directive` (or any other rule field)
-/// when `remediation` is absent — fail-safe here means silently omitting the Fix block, not
-/// leaking the recipe. See `docs/design/2026-09-13_audit-deliverable-review-fixes.md` Fix 1.
+/// `remediation` is an authored field with one job: 2-4 imperative sentences telling the
+/// CLIENT what to change, where, and how to verify the fix. This function binds ONLY to it and
+/// must NEVER fall back to `directive` or any other rule field when it is absent — fail-safe
+/// here means silently omitting the Fix block. See
+/// `docs/design/2026-09-13_audit-deliverable-review-fixes.md` Fix 1.
+///
+/// **Correction, 2026-10-20.** This comment used to justify that rule by calling `directive`
+/// "the rule's DETECTION/enforcement recipe — internal, agent-facing instructions for how
+/// Camerata itself finds this defect", which "leaks internals and confuses a paying client".
+/// The BEHAVIOUR is right and unchanged; the characterisation was wrong, and
+/// `docs/RULE_AUTHORING.md`'s 2026-10-19 correction identifies it as the misreading that let
+/// detector voice into the corpus in the first place.
+///
+/// `directive` is not internal. `arm.rs::render_rule` emits it VERBATIM into the client's own
+/// `AGENTS.md`/`CONVENTIONS.md` as a convention their project follows — which is the product,
+/// not a leak. A well-written directive is a behavioural commitment an engineer or agent in
+/// that repo can follow, and it is perfectly fine in front of a client. What is not fine is a
+/// directive written as a scanner recipe, and that text is wrong for the scanning MODEL too,
+/// which gets told to behave like a regex engine instead of being told what the code must do.
+///
+/// So the reason this function binds only to `remediation` is narrower than the old comment
+/// claimed, and still sound: a directive states what the code must BE, while a Fix line must
+/// say what to CHANGE and how to verify it. Those are different sentences, and substituting
+/// one for the other produces a Fix block that restates the problem.
 ///
 /// Returns `None` (never a fabricated sentence, never `directive`) when: the corpus is absent,
 /// the rule id has no corpus entry, the rule has no options at all, the rule has no adopted

@@ -44,7 +44,7 @@ pub use self_ref::{
 // Pull private/crate-internal helpers into scope for the orchestration functions and
 // test module (via `use super::*`).
 pub(crate) use audit::{
-    build_rule_alternatives, classify_repo_findings, is_ci_tier_rule, is_code_auditable_rule,
+    build_rule_alternatives, classify_repo_findings, is_ci_tier_rule,
     is_semantic_multi_option_rule,
 };
 // Re-export camerata_gateway test-scope primitives so the test module's `use super::*`
@@ -1411,14 +1411,24 @@ pub async fn audit_repos(
     // model finding that duplicates a deterministic one at the same site collapses back
     // into a single row (`crate::ai_audit::merge_semantic_groups`), never doubling a row.
     //
-    // ONE exclusion remains, and it is NOT about enforcement tier: GOVERNANCE / PROCESS /
-    // ORCHESTRATION rules are dropped from the CODE audit. `ORCH-*` / `SPIRIT-*` /
-    // `PROC-*` describe how the fleet and team OPERATE (track AI spend, split
-    // author/reviewer agents, cite convention ids in commits, document decisions). They
-    // are correct to ARM into a repo's governance, but auditing application SOURCE
-    // against them is a category error ("this app doesn't track its AI token budget").
-    // The arm path still installs them; only the AI code-audit prompt is filtered
-    // (`is_code_auditable_rule`).
+    // NO exclusion remains here.
+    //
+    // **Correction, 2026-10-20.** This said "ONE exclusion remains ... GOVERNANCE / PROCESS /
+    // ORCHESTRATION rules are dropped from the CODE audit ... only the AI code-audit prompt
+    // is filtered (`is_code_auditable_rule`)". That is no longer true and had not been for
+    // some time. `semantic_rule_ids_for_repo`'s own contract is "EVERY rule in `selected`
+    // that applies to `spec`. No other filter, of any kind", and `is_code_auditable_rule`'s
+    // only live consumer is now `is_semantic_multi_option_rule` — it gates the ALTERNATIVES
+    // pass, not the code audit. `mechanical_gate.rs:330` already recorded that the old filter
+    // "NO LONGER EXISTS"; these two comments were simply never updated to match.
+    //
+    // The evidence was sitting in plain sight the whole time: `is_code_auditable_rule` is
+    // imported at the top of this file and never called in it, which the compiler has been
+    // reporting as an unused import. That warning is now resolved by deleting the import.
+    //
+    // The consequence of believing the stale version is real: `ORCH-*`/`PROC-*` rules with
+    // `inspectable = true` DO reach the model's conformance prompt today, so an auditor
+    // reasoning from these comments would wrongly conclude a whole family is out of scope.
     //
     // Scope by REPO: which rules reach a given repo's LLM audit is decided PER REPO
     // inside the loop, from each `SelectedRule`'s binding — so a multi-repo scan runs
@@ -1476,9 +1486,9 @@ pub async fn audit_repos(
                     .iter()
                     .filter(|(p, _)| is_test_or_fixture_path(p))
                     .count();
-                // The SEMANTIC (LLM-audited) rule set for THIS repo: every rule bound to it (or
-                // project-level), minus ONLY the governance/process families
-                // (`is_code_auditable_rule`) — not code, so not code-auditable. As of the W4
+                // The SEMANTIC (LLM-audited) rule set for THIS repo: every rule bound to it
+                // (or project-level), with NO family exclusion — see the correction above;
+                // `is_code_auditable_rule` gates the alternatives pass, not this. As of the W4
                 // root-cause fix, this NO LONGER excludes a rule just because it has a
                 // deterministic gate arm, a registered architectural checker, or a declared
                 // CI-tier (`mechanical`/`architectural`) `enforcement`: see this function's
