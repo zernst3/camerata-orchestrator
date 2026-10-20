@@ -133,6 +133,16 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
     `is_code_auditable_rule` gating on `inspectable` rather than a name prefix; D6/D7 severity
     **ceiling** tables still using raw `contains` (the same shape as the fixed D5 floor bug,
     where `urls` matched `rls`); R1 `cargo fmt`; R2.
+19a. **Test-isolation residual (found 2026-10-20).**
+    `rescan_alternatives_blocked_when_project_is_api_backend_with_no_key` fails intermittently
+    under the parallel harness because it calls `std::env::remove_var("ANTHROPIC_API_KEY")`.
+    There are **40 process-global env mutations in `crates/server/src/lib.rs` alone**. Zach
+    flagged this class earlier in the effort ("three tests mutating one process-global env var
+    under a parallel harness - this should be fixed if it wasn't already"); the three named
+    then were fixed, the class was not. Verified pre-existing by stashing the W31 change and
+    reproducing on baseline. The fix is a serial-execution guard or a per-test env sandbox, not
+    another one-off.
+
 19. **Engine/doc items surfaced by the corpus audit:**
     - strip `Rejected:` at render (D7)
     - `report_export.rs:2042-2050` — `resolve_fix` doc comment still carries the repudiated
