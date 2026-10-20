@@ -46,7 +46,7 @@ id = "fat-serializers"
 violates = true
 label = "push business logic into DRF serializer create/update methods"
 directive = "Business rules for create and update operations live in `Serializer.create()` and `Serializer.update()` methods of Django REST Framework serializers."
-why = "A common but problematic pattern: serializers are validation + serialization adapters, not a business logic layer; pushing orchestration into them creates the same testability and reuse problem as fat views."
+why = "Rejected: DRF serializers are validation and serialization adapters, so orchestration placed in create()/update() is reachable only by deserializing a request - it cannot be called from a management command, a Celery task or a second serializer, and it cannot be unit-tested without constructing request data. It is the fat-view problem one layer in, and it is harder to see because the code looks like configuration."
 
 [[sources]]
 url = "https://docs.djangoproject.com/en/6.0/misc/design-philosophies/"
