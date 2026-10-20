@@ -276,7 +276,7 @@ Rejected: authored as a block string, which starts with a newline.
 ///
 /// Hardcoded deliberately rather than derived: a derived list moves with the corpus and could
 /// not catch a NEW rule drifting into this shape, which is exactly what this roster prevents.
-const DECISION_KIND_RULES_WITH_REJECTED_PROSE: [&str; 4] = [
+const DECISION_KIND_RULES_WITH_REJECTED_PROSE: [&str; 2] = [
     // Stays `decision` by the owner's 2026-10-12 A5.7 ruling, recorded alongside the
     // SILENT-FAILURE resolution below: "the rule's own question is phrased as a yes/no
     // compliance check, not an open style choice — could be an under-authored
@@ -310,15 +310,30 @@ const DECISION_KIND_RULES_WITH_REJECTED_PROSE: [&str; 4] = [
     // respectively. Reclassifying those would flag an option that was never about the scanned
     // repository, so they need their options REWRITTEN first; see the two entries below.
     //
-    // NOT on the hold list — classified a clear `decision`. See the doc comment above.
+    //
+    // RESOLVED 2026-10-20 by OPTION REWRITE rather than reclassification, which is why they
+    // took a second pass after the three above:
+    //   SUPABASE-AUTH-GETSESSION-SERVER-1 / flag-getsession-everywhere-unscoped
+    //   SUPABASE-RLS-INITPLAN-1 / bundle-as-a-standard-security-finding
+    // Both offered options that were never about the scanned repository — detector scope
+    // ("flag in server paths" vs "flag everywhere unscoped") and Camerata's own report
+    // policy ("recommend it opt-in" vs "report it as a standard security finding"). There
+    // was nothing in either set to flag, so changing `kind` alone would have marked an
+    // option that was never a client state as a client fault.
+    //
+    // They resolve DIFFERENTLY, which is the judgement worth recording. getSession() on a
+    // server path is a fault with no legitimate alternative (it "explicitly does not
+    // revalidate the token" — CWE-345), so that rule is now `kind = "defect"` with one
+    // conforming and one flagged client state. A bare auth.*() call in a policy predicate is
+    // a scale-dependent COST, not a fault — the rule's own prose calls the wrap "zero-risk,
+    // purely mechanical" and the rule carries `opt_in_only = true` — so it stays `decision`
+    // with two client-state options and NO `violates`, because flagging it would ship a
+    // high-severity defect for a choice that is correct on a small table.
+    // `w22_detector_voice_options_rewritten.rs` pins both.
+    //
+    // NOT on the hold list — classified a clear `decision`, and the roster's own documented
+    // "genuine finding the 244-rule audit missed". See the doc comment above.
     "SEC-NO-RAW-SQL-CONCAT-1 / escape-then-concatenate",
-    // A distinct sub-shape: this rule's alternatives describe DETECTOR SCOPE (flag everywhere
-    // vs. only server paths), not the scanned repo's own behaviour, so `violates` has nothing
-    // to mean on it in either direction. Needs an option rewrite, not a reclassification.
-    "SUPABASE-AUTH-GETSESSION-SERVER-1 / flag-getsession-everywhere-unscoped",
-    // Same detector/reporting-policy sub-shape: the options describe how CAMERATA'S OWN
-    // REPORT should classify an initplan finding, not a codebase choice.
-    "SUPABASE-RLS-INITPLAN-1 / bundle-as-a-standard-security-finding",
 ];
 
 /// req_w14 / GATE 1b, against the REAL shipped corpus: the set of `decision`-kind rules with

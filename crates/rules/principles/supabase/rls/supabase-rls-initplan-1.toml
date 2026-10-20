@@ -26,7 +26,7 @@ linter = "splinter: auth_rls_initplan"
 
 [decision]
 question = "Should RLS policies wrap auth.uid() / auth.jwt() calls in a scalar subselect ((select auth.uid())) to get per-query rather than per-row evaluation, and is this ever pre-checked automatically?"
-default = "wrap-auth-calls-opt-in"
+default = "auth-calls-wrapped-in-a-scalar-subselect"
 why = """
 An un-wrapped `auth.uid()` (or `auth.jwt()`) inside a policy's USING/WITH CHECK clause is
 re-evaluated by the Postgres planner for EVERY ROW the policy filters, because the planner cannot
@@ -47,14 +47,13 @@ concern, not by default alongside the security-tier RLS rules.
 """
 
 [[option]]
-id = "wrap-auth-calls-opt-in"
-label = "Recommend the scalar-subselect wrap for auth.*() calls in policies, opt-in only"
+id = "auth-calls-wrapped-in-a-scalar-subselect"
+label = "RLS policies wrap auth.*() calls in a scalar subselect so they evaluate once per query"
 directive = """
-Scan CREATE POLICY statements for un-wrapped `auth.uid()` / `auth.jwt()` calls inside USING/WITH
-CHECK. When found, emit a medium-severity, opt-in-only finding: "Your security rules re-check
-identity on every single row. Works today; melts the first time a table gets large." Remediation:
-rewrite the call as `(select auth.uid())` (or `(select auth.jwt())`), which the planner then
-evaluates once per query via its initplan mechanism instead of once per row.
+Every `auth.uid()` / `auth.jwt()` call inside a policy's `USING` or `WITH CHECK` clause is
+written in the scalar-subselect form `(select auth.uid())` / `(select auth.jwt())`. Postgres
+then evaluates it once per query through its initplan mechanism instead of once per row, so
+the policy's cost stays flat as the table grows rather than scaling with the row count.
 """
 remediation = """
 In the affected policy on `<table>`, replace bare `auth.uid()` / `auth.jwt()` calls in the
@@ -63,10 +62,17 @@ In the affected policy on `<table>`, replace bare `auth.uid()` / `auth.jwt()` ca
 Verify by re-running `EXPLAIN ANALYZE` on a representative query against `<table>` and confirming
 the auth function no longer appears once per row in the plan.
 """
-why = "The rewrite is a zero-risk, purely mechanical performance win with a real (if scale-dependent) cost when skipped; opt-in-only keeps it from crowding an audit report's security findings with a non-security item the architect may not yet care about."
+why = "The rewrite is zero-risk and purely mechanical, and it removes a per-row cost that is invisible on a small table and dominant on a large one."
 
 [[option]]
-id = "bundle-as-a-standard-security-finding"
-label = "Report initplan wrapping as a standard (non-opt-in) finding alongside the security RLS rules"
-directive = "Include the un-wrapped auth.*() finding in the default, pre-checked rule set and report it at the same tier as the security-relevant RLS findings, without an opt-in gate."
-why = "Rejected: this conflates a performance optimization with a security defect in a report whose entire credibility rests on precise severity framing for a non-technical buyer. Bundling a 'melts at scale' performance note into the same list as 'anyone can read every row' findings dilutes the security findings' urgency and misrepresents the rule's actual risk category — opt-in-only is the honest placement."
+id = "bare-auth-calls-in-policy-predicates"
+label = "RLS policies call auth.*() directly in their predicates, re-evaluating per row"
+directive = """
+Policy predicates call `auth.uid()` / `auth.jwt()` directly, and the planner re-evaluates the
+call for every row it tests.
+"""
+remediation = """
+Leave the predicates as they are. Revisit if `<table>` grows past the point where the per-row
+auth call shows up in `EXPLAIN ANALYZE` as a material share of query time.
+"""
+why = "Correct while the tables these policies guard stay small: the per-row evaluation is real but immaterial at low row counts, and the rewrite can be applied later with no behaviour change. It becomes the wrong choice once a guarded table grows, because the cost scales with the row count rather than with the result size."

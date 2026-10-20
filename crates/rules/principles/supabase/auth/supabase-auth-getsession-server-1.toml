@@ -3,7 +3,7 @@ title = "Server-side code must not trust getSession() for identity; use getClaim
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
-kind = "decision"
+kind = "defect"
 inspectable = true
 # Severity floor, transcribed from this rule's own prose: "Emit a high-severity finding:
 # 'Your server trusts a badge the visitor ...'".
@@ -22,7 +22,7 @@ title = "CWE-345: Insufficient Verification of Data Authenticity"
 
 [decision]
 question = "In server-execution-context code, must identity be established via getClaims() or getUser() rather than getSession()?"
-default = "flag-getsession-in-server-paths"
+default = "server-identity-via-getclaims-or-getuser"
 why = """
 Supabase's own server-side auth guidance states this almost verbatim: "Never trust
 supabase.auth.getSession() inside server code such as [middleware/Proxy]. It isn't guaranteed to
@@ -48,28 +48,37 @@ than an under-flagged ambiguous case.
 """
 
 [[option]]
-id = "flag-getsession-in-server-paths"
-label = "Flag getSession() calls in server-execution-context files; ambiguous paths get needs_review"
+id = "server-identity-via-getclaims-or-getuser"
+label = "Server-side identity is established with getClaims() or getUser(), never getSession()"
 directive = """
-Regex-scan for `getSession(` within files matching server-boundary path heuristics
-(middleware.*, app/**/route.*, +page.server.*, hooks.server.*, api/, and equivalent
-framework conventions). Emit a high-severity finding: "Your server trusts a badge the visitor
-printed themselves instead of checking it at the desk. A forged cookie can impersonate any user."
-Remediation: replace the identity check with `getClaims()` (local signature verification, the
-current default recommendation) or `getUser()` (network-verified, when full freshness is required).
-Paths that do not clearly resolve as server-only are flagged `needs_review` instead of asserted.
+Every server execution path that establishes who the caller is — middleware, route handlers,
+server actions, server-rendered page loaders, Edge Functions — derives that identity from
+`getClaims()` (verifies the JWT signature locally) or `getUser()` (round-trips to the auth
+server for a fully fresh record, when that freshness matters). `getSession()` is not used for
+any authorization decision on the server: it reads whatever is in the cookie and explicitly
+does not revalidate it, so a forged or expired token is returned as though it were valid.
+Client-side `getSession()` is correct and unaffected — a React component checking whether to
+show a logged-in view crosses no trust boundary.
 """
 remediation = """
-In `<file>`, replace the `getSession()` call used for the identity/authorization check with
-`getClaims()` (verifies the JWT signature locally; the current default recommendation) or
-`getUser()` (round-trips to the auth server for a fully fresh record, when that freshness
-matters). Verify by confirming a request carrying a forged or expired session cookie is now
-rejected rather than treated as a valid, logged-in user.
+In `<file>`, replace the `getSession()` call used for the identity or authorization check with
+`getClaims()` (local signature verification; the current default recommendation) or `getUser()`
+(network-verified, when full freshness is required). Verify by confirming a request carrying a
+forged or expired session cookie is now rejected rather than treated as a valid, logged-in user.
 """
-why = "getSession() explicitly does not revalidate the token per Supabase's own docs; server code making an authorization decision on an unrevalidated value is the textbook CWE-345 shape, and the path scoping keeps the legitimate client-side usage out of the finding set."
+why = "getClaims() and getUser() both verify the token before returning an identity, so an authorization decision made on their result is made on something the server has actually checked."
 
 [[option]]
-id = "flag-getsession-everywhere-unscoped"
-label = "Flag every getSession() call in the codebase, client or server, without path scoping"
-directive = "Treat any call to getSession() anywhere in the repository as a finding, regardless of whether the call site executes on the client or the server."
-why = "Rejected: getSession() is the correct, intended API for client-side session reads (e.g. a React component checking whether a user is logged in for UI purposes) where there is no server trust boundary being crossed. An unscoped flag would produce a flood of false positives on ordinary client code, undermining the report's credibility on a rule whose server-side version is a genuine, well-documented risk."
+id = "server-trusts-getsession-for-identity"
+violates = true
+label = "Server code makes an authorization decision on getSession(), which does not revalidate the token"
+directive = """
+Server execution paths read the caller's identity from `getSession()` and authorize on it.
+"""
+remediation = """
+In `<file>`, replace the `getSession()` call used for the identity or authorization check with
+`getClaims()` (local signature verification; the current default recommendation) or `getUser()`
+(network-verified, when full freshness is required). Verify by confirming a request carrying a
+forged or expired session cookie is now rejected rather than treated as a valid, logged-in user.
+"""
+why = "Rejected: getSession() returns whatever the cookie contains without revalidating it, per Supabase's own documentation, so a forged or expired token is handed back as a valid identity and anyone able to craft a cookie can act as any user. Authorizing on an unrevalidated value is the textbook CWE-345 shape."
