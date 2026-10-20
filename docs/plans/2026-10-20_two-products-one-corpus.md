@@ -165,6 +165,18 @@ exceptions_rules` only touches `default_with_exceptions`, so a defect rule trips
 
 Needs Zach's go-ahead (corpus is protected). Not yet executed.
 
+### CORRECTION (2026-10-20, applied in commit 910697d): it was 9 rewrite / 5 delete, not 6/8
+
+The per-rule split above was wrong, and a pre-existing test caught it. My first pass deleted
+all 8 of the delete set; the W12 security gate
+(`req_w12_security_rules_are_defect_kind_with_exactly_one_violates_option`) then failed,
+because 3 of those 8 — RLS-DISABLED-NOT-RESTORED-1, RLS-PERMISSIVE-TRUE-1,
+STORAGE-OBJECT-POLICY-1 — are on the W12 security roster and MUST keep a violates option so
+they can report a fault. Fable's classification had not accounted for that invariant. Those 3
+flipped to rewrites (naming the unambiguous write-side fault), leaving **9 rewritten, 5
+deleted**. Pinned by `crates/rules/tests/w22_scanner_design_options_resolved.rs`. Executed and
+committed; this item is no longer pending.
+
 ### Scope correction that outranks the 14: the directive-voice defect is ~15 rules and IS client-facing
 Distinct from the 14. A NON-violates (selected-able) option's `directive` is emitted verbatim
 into the client's CONVENTIONS.md (`report_export.rs:2073`), and ~15 rules OUTSIDE supabase/
