@@ -66,9 +66,8 @@ the PostgREST API (only the wrapping view/function is).
 """
 why = "The finding is unconditional given the exposure fact — there is no RLS mechanism a materialized view could adopt — so naming every instance and explaining the structural limitation is the correct, honest framing rather than a probabilistic guess."
 
-[[option]]
-id = "ignore-materialized-views-treat-as-equivalent-to-regular-views"
-violates = true
-label = "Treat materialized views the same as ordinary views; rely on SUPABASE-RLS-VIEW-INVOKER-1's security_invoker check"
-directive = "Apply the security_invoker check to materialized views as if they were ordinary views, and skip a dedicated exposure rule."
-why = "Rejected: security_invoker is not a valid WITH-option for CREATE MATERIALIZED VIEW in Postgres — there is no RLS-equivalent mechanism to check for, so applying the ordinary-view rule would either silently no-op or produce a nonsensical finding. The exposure fact itself (materialized view + exposed schema) is the entire signal; a dedicated rule naming that structural limitation is the only correct treatment."
+# Design note (W22, 2026-10-20): this rule previously carried a second `[[option]]`
+# describing a REJECTED scanner/corpus design, not a client-code state. Removed — a
+# single-option defect is the right shape here, the fault is the absence of the option
+# above. The rejected design was: " security_invoker is not a valid WITH-option for CREATE MATERIALIZED VIEW in Postgres — there is no RLS-equivalent mechanism to check for, so applying the ordinary-view rule would either silently no-
+

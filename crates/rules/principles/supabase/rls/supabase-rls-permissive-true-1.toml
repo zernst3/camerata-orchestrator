@@ -84,8 +84,8 @@ intended public data remains readable by anon.
 why = "Write access under an unconditional true predicate has no legitimate justification and warrants an unqualified high-severity finding; read access under the same predicate is routinely intentional (public catalogs, reference data), so it is downgraded and routed to human review rather than asserted as a vulnerability."
 
 [[option]]
-id = "flag-all-true-predicates-uniformly-critical"
+id = "anon-or-public-policy-grants-write-via-true-predicate"
 violates = true
-label = "Flag every true-predicate anon/public policy as critical, regardless of read vs write"
-directive = "Treat any USING (true) or WITH CHECK (true) policy targeting anon/public as an automatic critical finding with no severity distinction between read and write access."
-why = "Rejected: a uniform critical severity would flag intentional, benign patterns (a public products table, a published-posts feed) at the same alarm level as an open write path to `orders` or `payments`. That erodes the report's credibility on exactly the finding class most likely to appear in legitimate vibe-coded apps — the fix is a severity split with `needs_review` on the read side, not silence and not uniform alarm."
+label = "A policy reachable by anon or public grants write access through an unconditional true predicate"
+directive = "A policy with `USING (true)` / `WITH CHECK (true)` on an INSERT/UPDATE/DELETE action (or an absent TO clause defaulting to public) lets anyone write every row."
+why = "Rejected: a true predicate on a write policy reachable by anon/public is an unconditional grant of write access to the world. A SELECT-only `USING (true)` for genuinely public data is the default option's reviewed case, not this."

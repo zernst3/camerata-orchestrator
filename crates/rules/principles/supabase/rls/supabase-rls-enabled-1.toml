@@ -84,17 +84,8 @@ by confirming an anon-key request without the right credentials is rejected.
 effort = "medium"
 why = "RLS is the only access-control layer between an anonymous PostgREST request (using the public anon key) and a table's rows. The end-state replay is the only mechanically-correct way to determine the CURRENT RLS state across an ordered migration history without both FP and FN failure modes."
 
-[[option]]
-id = "regex-grep-each-migration-independently"
-violates = true
-label = "Grep each migration file independently for ENABLE ROW LEVEL SECURITY (no timeline replay)"
-directive = "Scan each migration file in isolation for ENABLE ROW LEVEL SECURITY / DISABLE ROW LEVEL SECURITY and report per-file matches without reconstructing the ordered end-state."
-why = """
-Rejected: per-file regex cannot express state that changes ACROSS files. It produces false
-positives (flagging a table as unprotected when a LATER migration enables RLS the scanner never
-correlates to the same table) and, more dangerously, false negatives (RLS enabled in an early
-migration, silently disabled in a later one the naive scan treats as a second, unrelated finding
-rather than the final state). Both failure modes are unacceptable for a critical-severity finding
-in a paid audit report; the timeline-replay option is strictly more precise for the same detection
-surface.
-"""
+# Design note (W22, 2026-10-20): this rule previously carried a second `[[option]]`
+# describing a REJECTED scanner/corpus design, not a client-code state. Removed — a
+# single-option defect is the right shape here, the fault is the absence of the option
+# above. The rejected design was: per-file regex cannot express state that changes ACROSS files. It produces false positives (flagging a table as unprotected when a LATER migration enables RLS the scanner never correlates to the same 
+

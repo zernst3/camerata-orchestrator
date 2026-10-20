@@ -67,9 +67,8 @@ outside the existing policies' scope is now rejected.
 effort = "low"
 why = "Policies-with-RLS-off is a distinct failure mode from bare missing-RLS: it indicates a developer BELIEVES the table is protected, which changes both the remediation message (enable RLS; the policies are likely already correct) and the report's credibility (naming the exact gap between intent and reality is the paid-audit value)."
 
-[[option]]
-id = "fold-into-bare-missing-rls-finding"
-violates = true
-label = "Do not distinguish policy-exists-but-disabled from bare missing-RLS; report both as one finding type"
-directive = "Report any table with RLS disabled in its end-state as a single undifferentiated 'missing RLS' finding, whether or not policies exist for it."
-why = "Rejected: collapsing the two cases loses the highest-value signal in a vibe-coded audit — that the developer already wrote correct-looking policies and only needs RLS switched on, versus a table with no access-control thinking applied at all. The distinction changes the remediation instructions and materially changes how alarming the finding should read to a non-technical buyer."
+# Design note (W22, 2026-10-20): this rule previously carried a second `[[option]]`
+# describing a REJECTED scanner/corpus design, not a client-code state. Removed — a
+# single-option defect is the right shape here, the fault is the absence of the option
+# above. The rejected design was: " collapsing the two cases loses the highest-value signal in a vibe-coded audit — that the developer already wrote correct-looking policies and only needs RLS switched on, versus a table with no acces
+

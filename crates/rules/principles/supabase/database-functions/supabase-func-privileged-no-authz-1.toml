@@ -103,8 +103,8 @@ effort = "medium"
 why = "Postgres already has the primitives this fix needs (auth.uid()/current_user/session_user, a role-check function, or REVOKE) — the fix is adding one guard clause (or narrowing the grant), not introducing new infrastructure."
 
 [[option]]
-id = "flag-every-security-definer-function-regardless-of-grant-or-body"
+id = "privileged-mutating-function-without-authz-check"
 violates = true
-label = "Flag every SECURITY DEFINER function, regardless of grants or body contents"
-directive = "Treat the mere presence of SECURITY DEFINER as report-worthy, without checking whether the function writes, is broadly granted, or already contains an authorization check."
-why = "Rejected: SECURITY DEFINER is Postgres's documented mechanism for intentionally elevating privileges for a specific, audited reason (the search-path-pinning rule SUPABASE-FUNC-SEARCH-PATH-1 already covers its OWN distinct defect) — most SECURITY DEFINER functions are read-only, not granted to a broad role, or already properly guarded, and flagging all of them indiscriminately would bury the small number of genuinely unauthorized, broadly-reachable, mutating functions in noise, training the reader to ignore this rule's findings entirely."
+label = "A broadly-granted SECURITY DEFINER function writes with no identity, role, or ownership check"
+directive = "A SECURITY DEFINER function whose body performs an INSERT/UPDATE/DELETE/TRUNCATE, granted to anon/public/authenticated, checks nothing about the caller before writing — no identity, no role, no ownership, no validated secret."
+why = "Rejected: the DEFINER's privileges bypass RLS, so nothing else gates the write, and the PostgREST RPC endpoint reaches the function directly regardless of what the UI exposes."

@@ -79,9 +79,8 @@ request for a file in `<bucket>` is rejected once the bucket is private.
 """
 why = "Public buckets are a legitimate, common Supabase pattern; naming every one and asking rather than asserting keeps the report honest and prevents an avatar bucket from being reported with the same alarm as an exposed documents bucket, while still surfacing every case for the human reviewer to judge."
 
-[[option]]
-id = "flag-only-buckets-with-suspicious-names-as-critical"
-violates = true
-label = "Skip reporting on buckets with 'safe-sounding' names; flag only suspicious-named buckets, at critical severity"
-directive = "Apply a name-based allowlist/denylist heuristic (skip buckets named avatars/public-assets/media; flag buckets named documents/uploads/invoices as critical) and omit the rest from the report entirely."
-why = "Rejected: a name-based filter both under- and over-reports. A bucket literally named `avatars` can still contain user-uploaded private documents if the developer repurposed it; a bucket named `uploads` might genuinely be a public asset drop. Silently omitting buckets from the report (rather than naming all of them and flagging the ambiguous ones for review) also means a genuinely mis-scoped public bucket with an innocuous name never reaches the reader at all — the needs_review approach names every instance and lets a human make the actual call."
+# Design note (W22, 2026-10-20): this rule previously carried a second `[[option]]`
+# describing a REJECTED scanner/corpus design, not a client-code state. Removed — a
+# single-option defect is the right shape here, the fault is the absence of the option
+# above. The rejected design was: " a name-based filter both under- and over-reports. A bucket literally named `avatars` can still contain user-uploaded private documents if the developer repurposed it; a bucket named `uploads` might 
+

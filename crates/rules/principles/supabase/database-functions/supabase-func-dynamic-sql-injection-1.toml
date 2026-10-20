@@ -95,8 +95,8 @@ effort = "low"
 why = "Postgres's own format() function already ships the correct safe primitives (%L/%I) and EXECUTE already ships a bound-argument form (USING) — the fix is substituting the escaping/bound form for the non-escaping one, not introducing new infrastructure."
 
 [[option]]
-id = "flag-every-execute-regardless-of-interpolation-shape"
+id = "dynamic-sql-assembled-by-concatenation"
 violates = true
-label = "Flag every EXECUTE statement in a function body, regardless of how its string was assembled"
-directive = "Treat the mere presence of a dynamic EXECUTE as report-worthy, without checking whether the string was built via an escaping/bound channel."
-why = "Rejected: EXECUTE with a fully static string, EXECUTE ... USING a bound argument, and format() using only %L/%I are all the Postgres-documented SAFE patterns for dynamic SQL, not residual risk — flagging them anyway would produce a finding with no actionable remediation (the function is already doing the right thing) and would train the reader to distrust the report's other dynamic-SQL findings. The non-escaping channel (|| concatenation, format()'s %s) is the actual vulnerability condition, not EXECUTE by itself."
+label = "A function EXECUTEs a dynamic SQL string assembled by concatenation or unescaped interpolation"
+directive = "A function body EXECUTEs a query string built with `||` concatenation of a non-literal operand, or `format()`'s `%s` with a non-literal argument, inserting the value with no escaping."
+why = "Rejected: `||` and `%s` insert the value unescaped, so a value reaching a broadly-granted function is a SQL injection reachable from an unauthenticated API request. The safe forms are `format()` `%L`/`%I` or `EXECUTE … USING`."

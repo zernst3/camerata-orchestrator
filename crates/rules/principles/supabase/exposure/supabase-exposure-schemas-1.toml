@@ -64,9 +64,8 @@ reflects only the schemas you intend PostgREST to serve.
 """
 why = "A widened API surface via extra exposed schemas is a real, repo-detectable risk in its own right, and using this rule's parse as the single source of truth for 'what counts as exposed' keeps every other rule in the group correctly scoped instead of each independently (and inconsistently) assuming public is the only exposed schema."
 
-[[option]]
-id = "hardcode-public-as-the-only-exposed-schema-everywhere"
-violates = true
-label = "Hardcode `public` as the only exposed schema in every RLS/exposure rule; do not parse [api] schemas"
-directive = "Skip parsing [api] schemas; every consuming rule assumes only the public schema is API-exposed."
-why = "Rejected: this produces false negatives on any project using Supabase's documented custom-schemas feature — a table in a legitimately-exposed second schema with no RLS would be silently skipped by every RLS rule in the group, which is a worse failure than the extra-schema finding itself. Parsing once and sharing the result is also simpler than re-deriving exposure logic independently in six different rules."
+# Design note (W22, 2026-10-20): this rule previously carried a second `[[option]]`
+# describing a REJECTED scanner/corpus design, not a client-code state. Removed — a
+# single-option defect is the right shape here, the fault is the absence of the option
+# above. The rejected design was: " this produces false negatives on any project using Supabase's documented custom-schemas feature — a table in a legitimately-exposed second schema with no RLS would be silently skipped by every RLS r
+

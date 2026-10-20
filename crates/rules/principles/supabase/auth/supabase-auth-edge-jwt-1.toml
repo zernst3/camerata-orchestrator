@@ -73,8 +73,8 @@ effort = "medium"
 why = "Splitting mechanical evidence-gathering (the flag, which is deterministic and cheap) from the semantic judgment (does the body compensate, which needs an LLM reading real control flow) gives the report both completeness (every disabled-verification function is looked at) and precision (only genuinely uncompensated functions get the high-severity framing)."
 
 [[option]]
-id = "flag-verify-jwt-false-as-always-critical"
+id = "edge-function-disables-jwt-without-compensating-check"
 violates = true
-label = "Treat every verify_jwt = false function as a critical finding with no compensating-check review"
-directive = "Report every function with verify_jwt disabled as critical, without inspecting the function body for a compensating auth check."
-why = "Rejected: verify_jwt = false is a legitimate, Supabase-documented pattern for public webhook receivers and intentionally public endpoints. Flagging it unconditionally at critical severity would produce a false positive on every correctly-built webhook handler in the corpus, which is exactly the kind of naive-scanner mistake this audit product must not make (cf. the anon-key carve-out in SUPABASE-KEY-SERVICE-ROLE-CLIENT-1)."
+label = "An Edge Function disables JWT verification and its handler performs no compensating auth check"
+directive = "An Edge Function sets `verify_jwt = false` (or deploys with `--no-verify-jwt`) and its handler body performs no equivalent check of its own — no verified signature, no shared-secret check, no explicit authenticated-user gate — so it accepts requests from anyone on the internet."
+why = "Rejected: a function with JWT verification off and nothing in its place is unauthenticated by definition. The deliberately-public case — a webhook that validates the provider's own signature instead — carries that check inline; this is the case where nothing does."

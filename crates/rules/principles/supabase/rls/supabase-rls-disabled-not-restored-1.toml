@@ -105,8 +105,8 @@ effort = "low"
 why = "An explicit disable that is never restored is a distinct, higher-signal authoring defect from a table that simply never had RLS considered — it names a concrete missing or mistargeted statement, which changes both the remediation (restore forward, don't rewrite history) and the report's credibility. Firing independent of exposure scoping and of co-located rules' severity keeps this rule's signal from being silently absorbed into a lower-severity or non-exposed-schema demotion that would misrepresent a deliberate-but-unrestored disable as a routine oversight."
 
 [[option]]
-id = "fold-into-bare-missing-rls-finding"
+id = "table-rls-disabled-and-never-restored"
 violates = true
-label = "Do not distinguish explicit-disable-not-restored from bare missing-RLS; report both as one finding type"
-directive = "Report any table with RLS disabled in its end-state as a single undifferentiated 'missing RLS' finding, whether or not an explicit disable was ever issued or restored."
-why = "Rejected: collapsing the two cases loses the highest-value signal — that something deliberately turned protection off and the restore was dropped or mistargeted, versus a table where access control was simply never considered. The distinction changes the remediation instructions (restore forward vs. add RLS for the first time) and, in the wrong-table-re-enable shape, names a concrete copy-paste defect a bare missing-RLS finding cannot describe at all."
+label = "A table's RLS was explicitly disabled in a migration and never re-enabled by the timeline's end"
+directive = "The ordered migration timeline's end-state leaves a table with `ALTER TABLE … DISABLE ROW LEVEL SECURITY` and no later `ENABLE` on that same table — RLS turned off for a backfill or hotfix and never turned back on."
+why = "Rejected: a table left RLS-disabled at the end of the timeline is unprotected regardless of PostgREST exposure, and the common cause is a disable whose matching re-enable targets a different table."

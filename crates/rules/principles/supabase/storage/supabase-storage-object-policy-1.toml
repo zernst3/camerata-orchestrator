@@ -74,8 +74,8 @@ confirming one authenticated user can no longer upload into or delete another us
 why = "Storage authorization is RLS on storage.objects in every respect that matters for this check; naming the bucket from the policy's own bucket_id predicate is what turns a generic 'a policy is too permissive' finding into an actionable, buyer-legible one."
 
 [[option]]
-id = "treat-storage-policies-as-covered-by-the-generic-rls-rule"
+id = "unscoped-storage-write-policy-for-anon-or-public"
 violates = true
-label = "Do not author a storage-specific rule; rely on SUPABASE-RLS-PERMISSIVE-TRUE-1 running generically against storage.objects"
-directive = "Apply only the generic table-permissive-policy scan to storage.objects, without bucket-name extraction or storage-specific framing."
-why = "Rejected: SUPABASE-RLS-PERMISSIVE-TRUE-1 would still catch the true-predicate case, but its finding text says 'your `objects` table', which is meaningless to a non-technical buyer who has no idea storage.objects is where their file uploads live. The bucket-name extraction is the entire value-add — reporting 'your `uploads` bucket accepts anonymous writes' rather than 'the storage.objects table has a permissive policy' is the difference between an actionable finding and a confusing one."
+label = "A storage.objects write or delete policy for anon or public is unscoped to the object's owner"
+directive = "A `storage.objects` policy granting INSERT/UPDATE/DELETE to anon or public carries `USING (true)` / `WITH CHECK (true)` with no owner or per-user folder predicate, so anyone can upload into, overwrite, or delete from the bucket."
+why = "Rejected: an unscoped write grant on storage.objects reachable by anon/public is a world-writable bucket. A SELECT-only unscoped policy for deliberately public read data is the default option's reviewed case."

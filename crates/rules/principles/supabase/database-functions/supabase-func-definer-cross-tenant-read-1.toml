@@ -104,8 +104,8 @@ effort = "medium"
 why = "Postgres already has the primitives this fix needs (auth.uid()/current_user/session_user, a role-check function, or deriving the id from the caller's own claims) — the fix is adding one guard clause (or removing the parameter entirely), not introducing new infrastructure."
 
 [[option]]
-id = "flag-every-security-definer-read-regardless-of-grant-or-body"
+id = "definer-read-trusts-caller-supplied-id"
 violates = true
-label = "Flag every SECURITY DEFINER read-only function, regardless of grants, parameters, or body contents"
-directive = "Treat the mere presence of a SECURITY DEFINER read as report-worthy, without checking whether it filters by a caller-supplied parameter, is broadly granted, or already contains an authorization check."
-why = "Rejected: most SECURITY DEFINER read-only functions take no caller-supplied filtering parameter at all, are not granted to a broad role, or already check the caller's identity — flagging all of them indiscriminately would bury the small number of genuinely cross-tenant-reachable functions in noise, training the reader to ignore this rule's findings entirely. The caller-controlled-key shape (a parameter equated against a result column, with no identity check) is the actual CWE-639 vulnerability condition, not SECURITY DEFINER or even a WHERE-filtered read by itself."
+label = "A broadly-granted SECURITY DEFINER read filters rows by a caller-supplied id with no check tying it to the caller"
+directive = "A SECURITY DEFINER function that returns rows filtered by one of its own caller-supplied parameters, granted to anon/public/authenticated, performs no check tying that parameter to the caller's own identity, role, or a validated secret."
+why = "Rejected: SECURITY DEFINER bypasses the caller's RLS, so the function body is the only place the ownership check can live. Without it, the broad grant lets any caller substitute any id and read another tenant's rows."

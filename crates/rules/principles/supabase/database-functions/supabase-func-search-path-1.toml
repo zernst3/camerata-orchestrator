@@ -91,8 +91,8 @@ effort = "low"
 why = "search_path hijacking against a SECURITY DEFINER function is a well-documented, well-understood Postgres attack with a known, low-cost fix (SET search_path); folding the SECURITY INVOKER preference into this rule's remediation gives the report one clear finding instead of two overlapping, lower-value ones."
 
 [[option]]
-id = "flag-all-security-definer-functions-regardless-of-search-path"
+id = "definer-function-without-pinned-search-path"
 violates = true
-label = "Flag every SECURITY DEFINER function as a finding, regardless of whether search_path is already set"
-directive = "Treat the mere presence of SECURITY DEFINER as report-worthy, without checking whether SET search_path is already present."
-why = "Rejected: SECURITY DEFINER with a correctly pinned search_path is the Postgres-documented SAFE pattern, not a residual risk — flagging it anyway would produce a finding with no actionable remediation (the function is already doing the right thing) and would train the reader to distrust the report's other DEFINER-related findings. The absence of search_path is the actual vulnerability condition, not DEFINER by itself."
+label = "A SECURITY DEFINER function runs with no pinned search_path"
+directive = "A function declared SECURITY DEFINER carries no `SET search_path = <trusted schema>, pg_temp`, so an object created in a caller-writable schema can resolve with the definer's elevated privileges."
+why = "Rejected: without a pinned search_path a colliding object in a caller-writable schema executes with the definer's rights — the textbook search-path hijack. Functions that do not need elevation use SECURITY INVOKER instead."
