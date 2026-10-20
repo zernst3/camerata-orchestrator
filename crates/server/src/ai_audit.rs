@@ -6413,12 +6413,20 @@ async fn run_routed_passes(
 /// sentence still reads. A `why` that merely discusses something being rejected keeps its
 /// prose — see the test.
 fn strip_authoring_token(why: &str) -> String {
-    const TOKEN: &str = "rejected:";
+    /// The authoring tokens a `why` may open with. `Rejected:` is the documented convention
+    /// (71 of 377 flagged options); `Avoided:` turned up in
+    /// `PYTHON-TESTING-UNIT-LAYOUT-1 / scattered` during the 2026-10-20 rationale pass — the
+    /// same idea in another author's hand. A LIST rather than one constant, because the next
+    /// one will be neither of these and should cost one line to add rather than a bug report
+    /// from a client who read it.
+    const TOKENS: &[&str] = &["rejected:", "avoided:"];
     let trimmed = why.trim_start();
-    if trimmed.len() < TOKEN.len() || !trimmed[..TOKEN.len()].eq_ignore_ascii_case(TOKEN) {
+    let Some(token) = TOKENS.iter().find(|t| {
+        trimmed.len() >= t.len() && trimmed[..t.len()].eq_ignore_ascii_case(t)
+    }) else {
         return why.to_string();
-    }
-    let rest = trimmed[TOKEN.len()..].trim_start();
+    };
+    let rest = trimmed[token.len()..].trim_start();
     let mut chars = rest.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
@@ -12715,6 +12723,11 @@ mod tests {
         // Case and spacing as actually authored across the corpus.
         assert_eq!(strip_authoring_token("Rejected:  already lower case here."), "Already lower case here.");
         assert_eq!(strip_authoring_token("rejected: lowercase token"), "Lowercase token");
+
+        // `Avoided:` is the same leak by another author's hand - found in
+        // PYTHON-TESTING-UNIT-LAYOUT-1 / scattered during the 2026-10-20 rationale pass. A
+        // token list rather than one token, because the next one will not be either of these.
+        assert_eq!(strip_authoring_token("Avoided: makes coverage reporting harder."), "Makes coverage reporting harder.");
 
         // A `why` that never used the convention is untouched - 306 of 377 options.
         let plain = "Each record triggers its own query, so latency grows with the result set.";
