@@ -40,7 +40,7 @@ why = "A conventional-commit subject makes the commit history machine-parseable:
 [[option]]
 id = "enforce-conventional-commit-subject"
 label = "Enforce the conventional-commits subject shape"
-directive = "Every commit subject (the first line of the message) must parse as a conventional-commit header of the form `<type>(optional-scope)!: subject`, where `<type>` is one of the project's configured allowed types (see project Settings → VCS gate → conventional-commit). Enforced at layer 4 (CI) via a wired commit-message metadata check (e.g. commitlint) and at Camerata's VCS-action gate when Camerata authors the commit. A free-form subject is rejected pending correction or an auditable bypass. NOT enforced at the layer-2 code gate — the rule validates commit metadata, not the diff."
+directive = "Every commit subject parses as a conventional-commits header, `<type>(optional-scope)!: subject`, using one of the project's allowed types (for example `feat`, `fix`, `chore`), so the history is machine-readable for changelog and release tooling."
 remediation = """
 Rewrite the commit subject to follow the conventional-commits shape (type(optional-scope)!: subject), using one of the project's configured allowed types. Verify by attempting to commit with a non-conforming subject line and confirming the CI check rejects it.
 """
