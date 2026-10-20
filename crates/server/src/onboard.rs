@@ -245,6 +245,43 @@ pub struct Finding {
     /// ([`camerata_api_types::audit::UNSPECIFIED_KIND_TAG`]), NEVER as a silent `defect`.
     #[serde(default, flatten)]
     pub kind: Option<camerata_api_types::audit::FindingKind>,
+    /// W31 — the engine's read on whether this state might be DELIBERATE, as a flag rather
+    /// than as prose.
+    ///
+    /// # The problem this solves
+    ///
+    /// Some faults are indistinguishable from a deliberate choice by reading code alone. A
+    /// public storage bucket is the canonical case: nothing in a repository separates a
+    /// catalog-photo bucket that is public on purpose from a user-document bucket that is
+    /// public by accident, and inferring it from the bucket's NAME is exactly the
+    /// prose-matching this effort has been removing everywhere else.
+    ///
+    /// The engine already knew this and said so — in `detail` prose, as "very likely
+    /// intentional". No renderer, no severity pass and no ranker can read prose, so three
+    /// such rows shipped at HIGH, held, each carrying text that undercut its own severity.
+    ///
+    /// # Why a third axis rather than a `FindingKind` variant
+    ///
+    /// Three orthogonal questions, and collapsing any two of them loses information:
+    ///
+    /// * [`Self::kind`] — what KIND of statement this row is (defect, deviation, convention…).
+    /// * this flag — the ENGINE's read on whether the author meant it.
+    /// * the disposition — what the CURATOR decided.
+    ///
+    /// A flagged row is capped at INFO/LOW until a curator marks it a real violation, at
+    /// which point it takes its authored severity. That cap is the whole mechanical point:
+    /// it removes the "HIGH, held, detail says probably fine" contradiction by construction
+    /// rather than by asking a renderer to notice.
+    ///
+    /// # The client-facing consequence
+    ///
+    /// Today a finding is an accusation or it is absent. This adds a third outcome: "we found
+    /// this, it may well be deliberate, your call." An untriaged flagged row ships in that
+    /// voice rather than holding sign-off (owner's ruling, 2026-10-16) — the client-visible
+    /// result is honest either way, and holding sign-off would punish the curator for the
+    /// engine's uncertainty.
+    #[serde(default)]
+    pub could_be_intentional: bool,
 }
 
 /// One evidence site absorbed into a merged finding's [`Finding::also_locations`] during
@@ -291,6 +328,7 @@ impl Default for Finding {
     /// field doesn't break every literal.
     fn default() -> Self {
         Self {
+            could_be_intentional: false,
             repo: String::new(),
             path: String::new(),
             line: 0,
@@ -3710,6 +3748,7 @@ mod tests {
             ),
         ];
         let mk = |path: &str, line: usize, rule: &str, snip: &str| Finding {
+            could_be_intentional: false,
             repo: "me/api".into(),
             kind: None,
             path: path.into(),
@@ -3751,6 +3790,7 @@ mod tests {
     fn tech_debt_body_groups_by_repo() {
         let findings = vec![
             Finding {
+                could_be_intentional: false,
                 repo: "me/api".into(),
                 kind: None,
                 path: "a.rs".into(),
@@ -3776,6 +3816,7 @@ mod tests {
                 calibration_rationale: None,
             },
             Finding {
+                could_be_intentional: false,
                 repo: "me/web".into(),
                 kind: None,
                 path: "b.tsx".into(),
@@ -3822,6 +3863,7 @@ mod tests {
     /// Helper: build a minimal Finding for a given repo.
     fn finding_for(repo: &str, path: &str, line: usize, rule_id: &str) -> Finding {
         Finding {
+            could_be_intentional: false,
             repo: repo.to_string(),
             kind: None,
             path: path.to_string(),
@@ -3971,6 +4013,7 @@ mod tests {
     #[test]
     fn tech_debt_csv_escapes_special_fields_correctly() {
         let f = Finding {
+            could_be_intentional: false,
             repo: "me/api".into(),
             kind: None,
             path: "src/tricky,path.rs".into(),

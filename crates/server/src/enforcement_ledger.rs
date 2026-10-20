@@ -482,6 +482,7 @@ mod tests {
     async fn capture_scan_findings_is_noop_with_none_ledger() {
         let ledger = EnforcementLedger::none();
         let findings = vec![crate::onboard::Finding {
+            could_be_intentional: false,
             repo: "owner/repo".to_string(),
             kind: None,
             path: "src/db.py".to_string(),
@@ -551,6 +552,7 @@ mod tests {
         let findings = vec![
             // Active floor finding → should be recorded (no panic).
             crate::onboard::Finding {
+                could_be_intentional: false,
                 repo: "owner/repo".to_string(),
                 kind: None,
                 path: "src/db.py".to_string(),
@@ -577,6 +579,7 @@ mod tests {
             },
             // Suppressed finding → skipped silently (no panic).
             crate::onboard::Finding {
+                could_be_intentional: false,
                 repo: "owner/repo".to_string(),
                 kind: None,
                 path: "src/legacy.py".to_string(),
@@ -603,6 +606,7 @@ mod tests {
             },
             // Non-floor rule → skipped silently (no panic).
             crate::onboard::Finding {
+                could_be_intentional: false,
                 repo: "owner/repo".to_string(),
                 kind: None,
                 path: "src/some.rs".to_string(),

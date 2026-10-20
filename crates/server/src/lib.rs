@@ -24148,6 +24148,7 @@ mod tests {
             code_lines_by_language: Vec::new(),
             excluded_mechanical_rules: Vec::new(),
             findings: vec![crate::onboard::Finding {
+                could_be_intentional: false,
                 repo: "owner/repo".to_string(),
                 kind: None,
                 path: "src/main.rs".to_string(),

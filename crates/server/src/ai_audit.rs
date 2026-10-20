@@ -645,6 +645,7 @@ pub fn parse_ai_findings(
                 _ => detail,
             };
             findings.push(Finding {
+                could_be_intentional: false,
                 repo: repo.to_string(),
                 path: f["path"].as_str().unwrap_or("(repo)").to_string(),
                 line: f["line"].as_u64().unwrap_or(0) as usize,
@@ -1754,6 +1755,35 @@ fn mentions_client_only_privilege_gate(text: &str) -> bool {
 /// finding's prose, and must never demote it). R3 is a full bidirectional clamp like R2; R4 is
 /// cap-only like R1. R1 is checked last.
 fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
+    // W31 — checked FIRST, and cap-only.
+    //
+    // A row the engine flagged as possibly deliberate cannot be told apart from a deliberate
+    // choice by reading code: nothing in a repository separates a catalog-photo bucket that
+    // is public on purpose from a user-document bucket that is public by accident. The
+    // engine already knew that and said so in `detail` prose, where no severity pass, ranker
+    // or renderer can read it — so three such rows shipped at HIGH, held, each carrying text
+    // undercutting its own severity.
+    //
+    // The cap removes that contradiction by construction instead of asking a renderer to
+    // notice it. It runs before every other rule here because it is a statement about
+    // CONFIDENCE rather than about the fault's class, and a confidence cap that could be
+    // overridden by a class-based ceiling would not be a cap.
+    //
+    // Cap, never clamp: an `info` row stays `info`. Raising the severity of a row we are
+    // explicitly unsure about would be inventing certainty in the other direction. The
+    // authored severity is not lost — a curator who marks the row a real violation restores
+    // it, which is the point of keeping the engine's read and the curator's decision on
+    // separate axes.
+    if f.could_be_intentional && severity_rank(&f.severity) > severity_rank("low") {
+        let was = f.severity.clone();
+        f.severity = "low".to_string();
+        f.calibration_rationale = Some(format!(
+            "Severity cap: this state may be intentional, and the repository alone cannot \
+             show whether it is. Capped from {was} to low pending a reviewer's call; it \
+             returns to {was} if confirmed as a real violation."
+        ));
+        return f;
+    }
     // D8 (owner-mandated opinion-class cap): the ARCH-OBSERVABILITY-* convention class
     // (a swallowed error logged nowhere, inconsistent unstructured logging alongside an
     // adopted structured logger, missing correlation/request id propagation) is SEMANTIC
@@ -5789,6 +5819,7 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
         location_seen.insert((l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone()))
     });
     Finding {
+        could_be_intentional: false,
         repo: primary.repo.clone(),
         path: primary.path.clone(),
         line: primary.line,
@@ -8232,6 +8263,7 @@ mod tests {
 
     fn site_finding(rule_id: &str, path: &str, line: usize, sev: &str, title: &str) -> Finding {
         Finding {
+            could_be_intentional: false,
             repo: "o/r".to_string(),
             kind: None,
             path: path.to_string(),
@@ -9143,6 +9175,7 @@ mod tests {
 
     fn finding(rule: &str, sev: &str) -> Finding {
         Finding {
+            could_be_intentional: false,
             repo: "me/api".into(),
             kind: None,
             path: "a.rs".into(),
@@ -11779,6 +11812,7 @@ mod tests {
     #[test]
     fn bug7_merge_location_group_earliest_appearance_wins_on_tie() {
         let make = |rule: &str, sev: &str, snippet: &str| Finding {
+            could_be_intentional: false,
             repo: "r/r".to_string(),
             kind: None,
             path: "src/lib.rs".to_string(),
@@ -12588,6 +12622,65 @@ mod tests {
     /// recorded `claude-sonnet-5` and both later runs recorded nothing, so "did the engine
     /// regress" could be neither confirmed nor refuted, and a week went into a regression
     /// that did not exist.
+    /// W31 — a row the engine thinks MIGHT be deliberate is capped at low, by construction.
+    ///
+    /// Some faults cannot be told apart from a deliberate choice by reading code. A public
+    /// storage bucket is the canonical case: nothing in a repository separates a
+    /// catalog-photo bucket that is public on purpose from a user-document bucket that is
+    /// public by accident, and inferring it from the bucket's NAME is the prose-matching this
+    /// effort has been removing everywhere else.
+    ///
+    /// The engine already knew, and said so in `detail` prose ("very likely intentional").
+    /// Prose is unreadable to every severity pass, ranker and renderer, so three such rows
+    /// shipped at HIGH, held, each carrying text that undercut its own severity. The flag
+    /// makes the same judgement structural, and the cap removes that contradiction by
+    /// construction rather than asking a renderer to notice it.
+    #[test]
+    fn req_w31_a_could_be_intentional_row_is_capped_at_low() {
+        let cap = |sev: &str| {
+            let f = Finding {
+                rule_id: "SUPABASE-STORAGE-PUBLIC-BUCKET-1".to_string(),
+                severity: sev.to_string(),
+                could_be_intentional: true,
+                ..Finding::default()
+            };
+            apply_severity_ceiling_rules(vec![f]).remove(0)
+        };
+
+        for sev in ["critical", "high", "medium"] {
+            let out = cap(sev);
+            assert_eq!(
+                out.severity, "low",
+                "a {sev} row the engine flagged as possibly deliberate must not ship at {sev}"
+            );
+            assert!(
+                out.calibration_rationale
+                    .as_deref()
+                    .is_some_and(|r| r.to_lowercase().contains("intentional")),
+                "the cap must say WHY, or a reader sees an unexplained demotion: {:?}",
+                out.calibration_rationale
+            );
+        }
+
+        // Cap, not clamp. An INFO row stays info — raising it would be inventing severity for
+        // a row we are explicitly unsure about.
+        assert_eq!(cap("info").severity, "info");
+        assert_eq!(cap("low").severity, "low");
+
+        // The converse, so the cap cannot be satisfied by demoting everything: an unflagged
+        // row of the same rule keeps its authored severity.
+        let unflagged = Finding {
+            rule_id: "SUPABASE-STORAGE-PUBLIC-BUCKET-1".to_string(),
+            severity: "high".to_string(),
+            ..Finding::default()
+        };
+        assert_eq!(
+            apply_severity_ceiling_rules(vec![unflagged]).remove(0).severity,
+            "high",
+            "an unflagged row must keep its authored severity"
+        );
+    }
+
     #[test]
     fn req_w19_resolve_audit_model_prefers_the_caller_then_env_then_the_default() {
         // The caller's explicit pick always wins.

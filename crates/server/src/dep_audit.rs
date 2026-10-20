@@ -199,6 +199,7 @@ pub fn parse_osv_json(
                 };
 
                 out.push(Finding {
+                    could_be_intentional: false,
                     repo: repo.to_string(),
                     path: lockfile_rel.clone(),
                     line: 0,

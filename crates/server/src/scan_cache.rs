@@ -353,6 +353,7 @@ mod tests {
 
     fn finding(repo: &str, path: &str, rule: &str) -> Finding {
         Finding {
+            could_be_intentional: false,
             repo: repo.to_string(),
             kind: None,
             path: path.to_string(),
