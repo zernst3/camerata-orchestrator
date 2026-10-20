@@ -115,3 +115,70 @@ works. They are not waste — they are what makes the orchestrator governable by
 standard. The problem is only that they share a namespace with the client-facing corpus, so
 every pass over "the rules" has to re-derive which kind it is looking at. That is the cost
 being paid repeatedly, and it is the thing worth fixing.
+
+---
+
+## RESOLVED (2026-10-20, Fable-verified from source): the 14, and the shape
+
+The "14 supabase options" question is settled. A Fable agent verified every claim below
+against source; two corrections to my earlier analysis are folded in.
+
+### What is wrong with them
+Each of the 14 is a 2-option `kind = "defect"` rule. The first option names what the
+CLIENT'S code should do (correct, client-facing). The second, `violates = true`, names **a
+Camerata detection/corpus design that was considered and rejected** — "flag every definer
+function regardless of grants", "grep each migration independently", "do not author a storage
+rule, rely on another", "report both as one finding type". An option is meant to answer "what
+does this repo do"; this one answers "what should the scanner do". Category error.
+
+Live consequence: **none today.** Defect-kind rules are excluded from the alternatives pass
+(`onboard/audit.rs:413`, `!is_defect_kind()`), so the option text reaches neither the scan
+prompt nor the client; `arm.rs::render_rule` emits only the selected option's directive.
+Correction to my own wording: the `violates` flag is not globally inert — it has a live
+consumer in `apply_alternative_decision` (`ai_audit.rs:6445`) — it is UNREACHABLE for these
+rules because they never enter that pass. Same practical result, different reason. (Residual:
+`Rule::resolved_option` has no violates guard, so nothing structural stops a future path from
+arming one; none does today.)
+
+### Are there others? No.
+TRUE total of the shape corpus-wide: **14, all in supabase/.** Zero elsewhere. All 22
+non-supabase keyword suspects were false positives — genuine client states that happen to open
+"rely on" (JAVA-RESOURCE-MANAGEMENT-1's "rely on GC to close resources"), or the separate
+label-voice defect (SQL-MONEY-FLOAT-1's correct option with a scanner-voiced label). This is
+exactly why the sweep needed reading, not grep.
+
+### The fix, per rule
+Two schema-valid moves (single-option defect rules are a proven shape — 5 ship today; the
+`[decision]` block stays because it populates `default_option`; `suspicious_default_with_
+exceptions_rules` only touches `default_with_exceptions`, so a defect rule trips nothing):
+
+- **(a) Rewrite the violates option to the bad CLIENT state** — 6 rules, where a concrete
+  detectable fault state exists distinct from "didn't follow the default":
+  AUTH-EDGE-JWT-1, FUNC-DEFINER-CROSS-TENANT-READ-1, FUNC-DYNAMIC-SQL-INJECTION-1,
+  FUNC-PRIVILEGED-NO-AUTHZ-1, FUNC-SEARCH-PATH-1, KEY-SERVICE-ROLE-CLIENT-1.
+- **(b) Delete the violates option** (single-option defect), rationale to `[decision].why` or
+  a TOML comment — 8 rules, where the default option already fully defines the required state,
+  and for PERMISSIVE-TRUE / PUBLIC-BUCKET the read-side call is deliberately needs_review that
+  a violates option would wrongly assert: EXPOSURE-MATVIEW-1, EXPOSURE-SCHEMAS-1,
+  RLS-DISABLED-NOT-RESTORED-1, RLS-ENABLED-1, RLS-PERMISSIVE-TRUE-1, RLS-POLICY-DISABLED-1,
+  STORAGE-OBJECT-POLICY-1, STORAGE-PUBLIC-BUCKET-1.
+
+Needs Zach's go-ahead (corpus is protected). Not yet executed.
+
+### Scope correction that outranks the 14: the directive-voice defect is ~15 rules and IS client-facing
+Distinct from the 14. A NON-violates (selected-able) option's `directive` is emitted verbatim
+into the client's CONVENTIONS.md (`report_export.rs:2073`), and ~15 rules OUTSIDE supabase/
+have directives that open in scanner voice ("Scan column declarations... Flag as high
+severity"). Verified on sql-money-float-1, arch-no-pan-storage-1,
+arch-webhook-signature-verification-1, sec-no-sensitive-data-in-logs-1,
+arch-observability-silent-failure-1. Full set: the SQL directive family (money-float,
+timestamptz, fk-cascade-financial, enum-text-constraint, soft-delete-partial-index,
+privileged-write-audit), the api-layer payment family (no-pan-storage,
+payment-reconciliation, refund-authorization, webhook-signature-verification), the
+ARCH-OBSERVABILITY trio, sec-no-sensitive-data-in-logs-1, javascript-public-env-prefix-secret-1.
+
+The supabase revoicing pass (`12e8f69`) fixed this inside supabase/ only. The Phase-3 wording
+batch list names "5 api-layer payment directives" and "universal gate-mechanics sentences" but
+does NOT clearly cover the SQL directive family or the javascript one. **The wording batch is
+undersized; widen it to this full ~15 before the graded sweep, because unlike the 14 this
+ships to clients today.**
