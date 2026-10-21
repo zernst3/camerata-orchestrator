@@ -28,6 +28,14 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-21 (Zach, W29 scope): ARCH-DEAD-CODE-1 ships FILE-level in v1; unused individual
+  exports become a separate future rule once the tooling is false-positive-safe.
+  ARCH-SHARED-CONSTANT-1 uses the narrow four-shape "domain literal" definition (dashed/colon
+  names, route templates, multi-word SCREAMING_SNAKE, decimals in arithmetic); widen one shape at
+  a time with its own safe twins. "Two homes, no bare copies" is NOT a finding in v1.
+- 2026-10-21: commit trailers from this session's Sonnet subagents read "Sonnet 4.6" but the
+  agents ran Sonnet 5.5 (a brief error). Pushed history is left as is (no force-push); trailers
+  are correct from 1f3c4f3's successor onward.
 - 2026-10-21: ARCH-ONE-IMPORT-PATH-1 flags a split between a symbol's origin file and an index
   barrel (Zach: "that is the rule working as intended"). Work order §7's "non-index modules"
   wording does not exempt index barrels from the one-home rule.
