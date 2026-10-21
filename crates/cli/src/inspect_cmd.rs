@@ -411,6 +411,21 @@ pub async fn build_product_export_bytes(
     let findings_json_bytes = serde_json::to_vec_pretty(&findings_export)
         .map_err(|e| format!("could not serialize findings.json: {e}"))?;
 
+    // The per-dataset machine-readable tables (csv/*, json/*): same partition_rows pass as the
+    // xlsx + findings.json, so the artifacts agree.
+    let csv_exports = camerata_server::xlsx_export::build_csv_exports(report, &dispositions, corpus, &options)
+        .map_err(|e| format!("could not build CSV exports: {e}"))?;
+    let json_exports = camerata_server::xlsx_export::build_json_exports(report, &dispositions, corpus, &options)
+        .map_err(|e| format!("could not build JSON exports: {e}"))?;
+    let mut extra_files: Vec<(String, Vec<u8>)> = csv_exports;
+    extra_files.extend(json_exports);
+
+    let provenance = camerata_server::ManifestProvenance {
+        repos: json.cover.repos.clone(),
+        generated_at: json.cover.generated_at.clone(),
+        ..Default::default()
+    };
+
     let stem = camerata_server::report_filename_stem(report);
     let readme = camerata_server::product_export_readme(&stem, &json);
     let zip_bytes = camerata_server::build_product_zip(
@@ -419,6 +434,8 @@ pub async fn build_product_export_bytes(
         &xlsx_bytes,
         &findings_json_bytes,
         &readme,
+        &extra_files,
+        &provenance,
     )
     .map_err(|e| format!("could not assemble the product export zip: {e}"))?;
 

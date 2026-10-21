@@ -15946,6 +15946,38 @@ async fn export_product(
         }
     };
 
+    // The per-dataset machine-readable tables (csv/*, json/*) — the SAME partition_rows pass as
+    // the xlsx and findings.json, so every artifact agrees. csv first, then json.
+    let mut extra_files: Vec<(String, Vec<u8>)> = Vec::new();
+    match crate::xlsx_export::build_csv_exports(&report, &req.dispositions, corpus.as_ref(), &req.options)
+        .and_then(|csv| {
+            crate::xlsx_export::build_json_exports(&report, &req.dispositions, corpus.as_ref(), &req.options)
+                .map(|json_files| (csv, json_files))
+        }) {
+        Ok((csv, json_files)) => {
+            extra_files.extend(csv);
+            extra_files.extend(json_files);
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "message": format!("could not build the machine-readable exports: {e}")
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // `rules_last_reviewed` is honestly None until the first confirmed corpus sweep populates
+    // CORPUS_FRESHNESS.toml; the manifest field is present either way.
+    let provenance = ManifestProvenance {
+        repos: json.cover.repos.clone(),
+        generated_at: json.cover.generated_at.clone(),
+        ..Default::default()
+    };
+
     let stem = report_filename_stem(&report);
     let readme = product_export_readme(&stem, &json);
 
@@ -15955,6 +15987,8 @@ async fn export_product(
         &xlsx_bytes,
         &findings_json_bytes,
         &readme,
+        &extra_files,
+        &provenance,
     ) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -16066,12 +16100,119 @@ fn zip_now() -> zip::DateTime {
 /// `camerata inspect --export` (headless CLI) call it directly over their own
 /// pdf/xlsx/findings.json/README bytes, so the two entry points can never produce
 /// different zip layouts. See `crates/cli/src/inspect_cmd.rs`.
+/// Provenance for the product ZIP's `manifest.json` `inspection` block (design:
+/// `docs/design/2026-10-20_machine-readable-exports.md`). The caller fills what it has; the hard
+/// fields are `Option` so the manifest's SHAPE is always complete even before every value is
+/// wired. `engine_version` is not here — the manifest fills it from the server crate's own
+/// `CARGO_PKG_VERSION`, so it can never drift from the binary that produced the package.
+#[derive(Debug, Clone, Default)]
+pub struct ManifestProvenance {
+    /// Repositories inspected (names), from the report cover.
+    pub repos: Vec<String>,
+    /// ISO/human generated-at, from the report cover.
+    pub generated_at: String,
+    /// The exact commit SHA scanned, when the caller recorded one.
+    pub commit: Option<String>,
+    /// A deterministic content digest of the rule corpus, when computed.
+    pub corpus_version: Option<String>,
+    /// The client-visible staleness date ("rules last reviewed on …"), from the corpus
+    /// freshness watermark. `None` until the first confirmed sweep — an honest absence, never a
+    /// fabricated date.
+    pub rules_last_reviewed: Option<String>,
+}
+
+/// The one-sentence purpose + per-contract `schema_version` for a file in the product ZIP, keyed
+/// by its archive path. `None` schema for formats with no data contract (PDF, xlsx, README).
+fn manifest_file_facts(path: &str) -> (String, Option<String>) {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    let purpose = if path.ends_with(".pdf") {
+        "Curated narrative report for a decision-maker."
+    } else if path.ends_with(".xlsx") {
+        "Complete working dataset across sheets, for engineers."
+    } else if path == "findings.json" {
+        "All-Findings rows wrapped with provenance and summary counts, for tooling."
+    } else if path == "README.txt" {
+        "Plain-text manifest of what each file is."
+    } else if path.starts_with("csv/") {
+        "One xlsx data table as RFC 4180 CSV, for tooling that does not read Excel."
+    } else if path.starts_with("json/") {
+        "One xlsx data table as a flat JSON array, for structured ingestion."
+    } else {
+        "Product-export artifact."
+    };
+    // A data-contract schema id for the machine files; versioned per dataset, bumped on a
+    // breaking column/key change.
+    let schema = if path.starts_with("csv/") || path.starts_with("json/") || path == "findings.json"
+    {
+        let dataset = base.trim_end_matches(".csv").trim_end_matches(".json");
+        Some(format!("{dataset}/1.0"))
+    } else {
+        None
+    };
+    (purpose.to_string(), schema)
+}
+
+/// Build `manifest.json`: the package index (every file's purpose + sha256 + schema version)
+/// plus the `inspection` provenance block. Built LAST, over the FINAL bytes of every other file,
+/// and never lists itself (a file cannot hash itself). Pure.
+pub fn build_manifest(
+    stem: &str,
+    pdf_bytes: &[u8],
+    xlsx_bytes: &[u8],
+    findings_json_bytes: &[u8],
+    readme: &str,
+    extra_files: &[(String, Vec<u8>)],
+    provenance: &ManifestProvenance,
+) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let sha = |bytes: &[u8]| -> String {
+        let digest = Sha256::digest(bytes);
+        digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+    let mut entry = |path: String, bytes: &[u8]| {
+        let (purpose, schema_version) = manifest_file_facts(&path);
+        serde_json::json!({
+            "path": path,
+            "purpose": purpose,
+            "sha256": sha(bytes),
+            "schema_version": schema_version,
+        })
+    };
+    let mut files = vec![
+        entry(format!("{stem}.pdf"), pdf_bytes),
+        entry(format!("{stem}-findings.xlsx"), xlsx_bytes),
+        entry("findings.json".to_string(), findings_json_bytes),
+        entry("README.txt".to_string(), readme.as_bytes()),
+    ];
+    for (path, bytes) in extra_files {
+        files.push(entry(path.clone(), bytes));
+    }
+
+    let manifest = serde_json::json!({
+        "manifest_schema_version": "1.0",
+        "generated_at": provenance.generated_at,
+        "inspection": {
+            "repos": provenance.repos,
+            "commit": provenance.commit,
+            "engine_version": format!("camerata {}", env!("CARGO_PKG_VERSION")),
+            "corpus_version": provenance.corpus_version,
+            "rules_last_reviewed": provenance.rules_last_reviewed,
+        },
+        "files": files,
+    });
+    let mut bytes = serde_json::to_vec_pretty(&manifest).unwrap_or_default();
+    bytes.push(b'\n');
+    bytes
+}
+
 pub fn build_product_zip(
     stem: &str,
     pdf_bytes: &[u8],
     xlsx_bytes: &[u8],
     findings_json_bytes: &[u8],
     readme: &str,
+    extra_files: &[(String, Vec<u8>)],
+    provenance: &ManifestProvenance,
 ) -> zip::result::ZipResult<Vec<u8>> {
     use std::io::Write;
 
@@ -16094,6 +16235,26 @@ pub fn build_product_zip(
 
     writer.start_file("README.txt", options)?;
     writer.write_all(readme.as_bytes())?;
+
+    // The per-dataset CSV/JSON tables (csv/*, json/*), written under their folders.
+    for (path, bytes) in extra_files {
+        writer.start_file(path.clone(), options)?;
+        writer.write_all(bytes)?;
+    }
+
+    // manifest.json LAST: it hashes every other file above, so it is built over their final
+    // bytes and never lists itself.
+    let manifest = build_manifest(
+        stem,
+        pdf_bytes,
+        xlsx_bytes,
+        findings_json_bytes,
+        readme,
+        extra_files,
+        provenance,
+    );
+    writer.start_file("manifest.json", options)?;
+    writer.write_all(&manifest)?;
 
     let cursor = writer.finish()?;
     Ok(cursor.into_inner())
@@ -24435,6 +24596,82 @@ mod tests {
     /// with `zip_now()` (the actual build time) instead. Exercises `build_product_zip`
     /// directly with dummy bytes — no `typst` dependency, so it always runs.
     #[test]
+    fn manifest_lists_and_hashes_every_file_except_itself() {
+        use sha2::{Digest, Sha256};
+        let extra = vec![
+            ("csv/all-findings.csv".to_string(), b"a,b\n1,2\n".to_vec()),
+            ("json/all-findings.json".to_string(), b"[]".to_vec()),
+        ];
+        let prov = ManifestProvenance {
+            repos: vec!["acme-portal".to_string()],
+            generated_at: "2026-10-21T00:00:00Z".to_string(),
+            ..Default::default()
+        };
+        let zip_bytes = build_product_zip(
+            "acme-audit",
+            b"%PDF-fake",
+            b"PK-fake-xlsx",
+            b"{}",
+            "readme text",
+            &extra,
+            &prov,
+        )
+        .expect("zip assembles");
+
+        // Pull manifest.json out of the archive.
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(zip_bytes.clone())).expect("valid zip");
+        let mut manifest_str = String::new();
+        {
+            use std::io::Read;
+            archive
+                .by_name("manifest.json")
+                .expect("manifest.json present")
+                .read_to_string(&mut manifest_str)
+                .unwrap();
+        }
+        let manifest: serde_json::Value = serde_json::from_str(&manifest_str).unwrap();
+
+        // Provenance block present and populated from the caller.
+        assert_eq!(manifest["inspection"]["repos"][0], "acme-portal");
+        assert!(manifest["inspection"]["engine_version"]
+            .as_str()
+            .unwrap()
+            .starts_with("camerata "));
+        // rules_last_reviewed is present (null until a confirmed sweep) — the field always exists.
+        assert!(manifest["inspection"].get("rules_last_reviewed").is_some());
+
+        let files = manifest["files"].as_array().unwrap();
+        let listed: Vec<&str> = files.iter().map(|f| f["path"].as_str().unwrap()).collect();
+        // Every non-manifest file is listed; manifest.json never lists itself.
+        for expected in [
+            "acme-audit.pdf",
+            "acme-audit-findings.xlsx",
+            "findings.json",
+            "README.txt",
+            "csv/all-findings.csv",
+            "json/all-findings.json",
+        ] {
+            assert!(listed.contains(&expected), "manifest missing {expected}: {listed:?}");
+        }
+        assert!(!listed.contains(&"manifest.json"), "manifest must not list itself");
+
+        // Each listed sha256 equals the actual hash of that entry in the zip.
+        for f in files {
+            let path = f["path"].as_str().unwrap();
+            let claimed = f["sha256"].as_str().unwrap();
+            let mut bytes = Vec::new();
+            {
+                use std::io::Read;
+                archive.by_name(path).unwrap().read_to_end(&mut bytes).unwrap();
+            }
+            let actual: String =
+                Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(claimed, actual, "sha256 mismatch for {path}");
+        }
+    }
+
+    #[test]
     fn product_zip_entries_carry_a_real_build_timestamp_not_the_1980_epoch() {
         let zip_bytes = build_product_zip(
             "acme-audit",
@@ -24442,6 +24679,8 @@ mod tests {
             b"PK-fake-xlsx",
             b"{}",
             "readme text",
+            &[],
+            &ManifestProvenance::default(),
         )
         .expect("zip assembles");
 
