@@ -394,9 +394,9 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
 - **ONE-IMPORT-PATH known false negative:** the union barrel exclusion hides intra-package splits
   in monorepos where every package has a root barrel. A per-chain exclusion that keeps the
   barrel-internal safe twin silent is an open design question.
-- **Owner confirmation wanted:** work order §7 says the rule looks at re-exports "in non-index
-  modules"; the checker also flags an origin-plus-index-barrel split (supported by the §7
-  directive "import from one home, the origin or a single barrel"). Confirm that reading.
+- ~~Owner confirmation wanted~~ CONFIRMED 2026-10-21 (Zach): an origin-plus-index-barrel split
+  IS flagged; "that is the rule working as intended." Two homes for one symbol is the defect
+  whether or not the second home is an index file.
 
 ## 3. Explicitly NOT doing
 

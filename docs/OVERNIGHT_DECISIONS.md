@@ -28,6 +28,9 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-21: ARCH-ONE-IMPORT-PATH-1 flags a split between a symbol's origin file and an index
+  barrel (Zach: "that is the rule working as intended"). Work order §7's "non-index modules"
+  wording does not exempt index barrels from the one-home rule.
 - 2026-10-21: **Zach's go for all nine W29 corpus rules** (work order §91 protected area). Each
   rule's TOML lands with its detector, registration, positive + safe-twin tests, homed per the
   design doc's "Domain home per rule" table.
