@@ -17,7 +17,7 @@
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
-use super::{FunctionSpan, Import, ImportKind, MethodCall};
+use super::{FunctionSpan, Import, ImportKind, Literal, MethodCall};
 
 /// Extract every `use` (and `extern crate`) declaration. See module docs for the
 /// specifier/names convention: `specifier` is the module-path PREFIX, `names` the LEAF
@@ -263,6 +263,13 @@ fn render_receiver(expr: &syn::Expr) -> String {
         syn::Expr::Paren(p) => render_receiver(&p.expr),
         _ => "<expr>".to_string(),
     }
+}
+
+// ─── literals ────────────────────────────────────────────────────────────────────────────
+
+pub fn literals(source: &str) -> Vec<Literal> {
+    let _ = source;
+    Vec::new()
 }
 
 #[cfg(test)]

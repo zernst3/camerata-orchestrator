@@ -18,7 +18,7 @@
 
 use tree_sitter::{Node, Tree};
 
-use super::{FunctionSpan, Import, ImportKind, MethodCall};
+use super::{FunctionSpan, Import, ImportKind, Literal, MethodCall};
 
 fn parse(source: &str) -> Option<Tree> {
     let mut parser = tree_sitter::Parser::new();
@@ -306,6 +306,13 @@ fn render_attribute_path(node: Node, source: &str) -> String {
         }
         _ => "<expr>".to_string(),
     }
+}
+
+// ─── literals ────────────────────────────────────────────────────────────────────────────
+
+pub fn literals(source: &str) -> Vec<Literal> {
+    let _ = source;
+    Vec::new()
 }
 
 #[cfg(test)]

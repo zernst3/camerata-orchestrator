@@ -22,7 +22,8 @@ use std::collections::HashMap;
 use tree_sitter::{Node, Tree};
 
 use super::{
-    ExportSurface, FunctionSpan, Import, ImportKind, MethodCall, NamedReExport, StarReExport,
+    ExportSurface, FunctionSpan, Import, ImportKind, Literal, MethodCall, NamedReExport,
+    StarReExport,
 };
 
 /// Which of the three v1 ECMAScript-family grammars to parse `source` with.
@@ -719,6 +720,13 @@ fn walk_calls(node: Node, source: &str, out: &mut Vec<MethodCall>) {
     for child in node.children(&mut cursor) {
         walk_calls(child, source, out);
     }
+}
+
+// ─── literals ────────────────────────────────────────────────────────────────────────────
+
+pub fn literals(dialect: EcmaDialect, source: &str) -> Vec<Literal> {
+    let _ = (dialect, source);
+    Vec::new()
 }
 
 #[cfg(test)]
