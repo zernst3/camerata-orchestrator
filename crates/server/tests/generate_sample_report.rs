@@ -528,37 +528,10 @@ async fn regenerate_sample_report() {
 
     // ═══ Zip PDF + xlsx + findings.json + README.txt — mirrors ═══
     // POST /api/projects/:id/product-export's assembly (that handler's own zip-building
-    // helpers are private to camerata-server, so this inlines the same four-entry Deflate
-    // zip directly over the REAL pdf/xlsx/json bytes built above; nothing here re-derives
-    // report content).
-    let readme = format!(
-        "Camerata Audit — Product Export (sample)\n\
-         =========================================\n\
-         \n\
-         This ZIP contains three artifacts derived from the SAME audit scan:\n\
-         \n\
-         camerata-sample-audit.pdf\n\
-         \x20 The curated NARRATIVE report — cover, executive summary, category scorecard,\n\
-         \x20 severity x effort matrix, curated findings with citations and recommended\n\
-         \x20 fixes, what's healthy, dependency snapshot, and methodology.\n\
-         \n\
-         camerata-sample-audit-findings.xlsx\n\
-         \x20 The COMPLETE working dataset — every finding as its own row, a per-category\n\
-         \x20 sheet, a Dependencies sheet, a Coverage sheet, and a False Positives sheet\n\
-         \x20 with the auditor's exclusion reasons.\n\
-         \n\
-         findings.json\n\
-         \x20 The MACHINE-READABLE version of the xlsx's \"All Findings\" data, wrapped with\n\
-         \x20 the report's provenance and summary counts.\n\
-         \n\
-         Repos audited: {}\n\
-         Generated: {}\n\
-         \n\
-         {}\n",
-        json.cover.repos.join(", "),
-        json.cover.generated_at,
-        report_export::AUDIT_REPORT_DISCLAIMER,
-    );
+    // helpers are private to camerata-server, so this builds the same package through the
+    // public `product_export_readme` + `build_product_zip` pair over the REAL pdf/xlsx/json
+    // bytes built above; nothing here re-derives report content, and the README text is the
+    // shipping one rather than a second copy that can drift).
     // Assemble the sample ZIP through the SAME build_product_zip the real product export uses,
     // so the fixture mirrors the deliverable exactly — now including csv/*, json/*, manifest.json.
     let sealed_for_zip = report.clone().seal();
@@ -569,11 +542,8 @@ async fn regenerate_sample_report() {
         xlsx_export::build_json_exports(&sealed_for_zip, &dispositions, Some(&corpus), &opts)
             .expect("sample json exports"),
     );
-    let provenance = camerata_server::ManifestProvenance {
-        repos: json.cover.repos.clone(),
-        generated_at: json.cover.generated_at.clone(),
-        ..Default::default()
-    };
+    let provenance = camerata_server::ManifestProvenance::from_cover(&json.cover);
+    let readme = camerata_server::product_export_readme("camerata-sample-audit", &provenance);
     let zip_bytes = camerata_server::build_product_zip(
         "camerata-sample-audit",
         &pdf,

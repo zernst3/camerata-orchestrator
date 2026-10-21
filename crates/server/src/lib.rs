@@ -16304,14 +16304,10 @@ async fn export_product(
 
     // `rules_last_reviewed` is honestly None until the first confirmed corpus sweep populates
     // CORPUS_FRESHNESS.toml; the manifest field is present either way.
-    let provenance = ManifestProvenance {
-        repos: json.cover.repos.clone(),
-        generated_at: json.cover.generated_at.clone(),
-        ..Default::default()
-    };
+    let provenance = ManifestProvenance::from_cover(&json.cover);
 
     let stem = report_filename_stem(&report);
-    let readme = product_export_readme(&stem, &json);
+    let readme = product_export_readme(&stem, &provenance);
 
     let zip_bytes = match build_product_zip(
         &stem,
@@ -16352,13 +16348,19 @@ async fn export_product(
 }
 
 /// The README.txt manifest bundled inside the product-export zip: what each file is, who
-/// it's for, the repo(s)/SHA/generated-at, and the advisory disclaimer (verbatim, reused
-/// from `report_export::AUDIT_REPORT_DISCLAIMER` — never a second, drifting copy of that
+/// it's for, the provenance lines, and the advisory disclaimer (verbatim, reused from
+/// `report_export::AUDIT_REPORT_DISCLAIMER` — never a second, drifting copy of that
 /// paragraph).
+///
+/// The provenance lines (repos, generated-at, commit, engine version, corpus version, rules
+/// last reviewed) come from [`ManifestProvenance::readme_lines`], the human rendering of the
+/// SAME struct `manifest.json`'s `inspection` block is rendered from
+/// ([`ManifestProvenance::inspection_json`]), so the two cannot drift. Pass the same value to
+/// [`build_product_zip`].
 ///
 /// `pub`: reused verbatim by `camerata inspect` (see [`report_filename_stem`]'s doc comment)
 /// so the headless export's README text can never diverge from the HTTP product-export's.
-pub fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJson) -> String {
+pub fn product_export_readme(stem: &str, provenance: &ManifestProvenance) -> String {
     format!(
         "Codebase Inspection - Product Export\n\
          =====================================\n\
@@ -16387,12 +16389,10 @@ pub fn product_export_readme(stem: &str, json: &crate::report_export::AuditRepor
          \x20 client's own tooling. Never disagrees with the xlsx, since both are built\n\
          \x20 from the same pass over the scan.\n\
          \n\
-         Repos inspected: {}\n\
-         Generated: {}\n\
+         {}\
          \n\
          {}\n",
-        json.cover.repos.join(", "),
-        json.cover.generated_at,
+        provenance.readme_lines(),
         crate::report_export::AUDIT_REPORT_DISCLAIMER,
     )
 }
@@ -16451,6 +16451,64 @@ pub struct ManifestProvenance {
     /// freshness watermark. `None` until the first confirmed sweep — an honest absence, never a
     /// fabricated date.
     pub rules_last_reviewed: Option<String>,
+}
+
+impl ManifestProvenance {
+    /// The report cover's repos and generated-at, with every other field absent. The one place
+    /// the two export entry points (`export_product`, `camerata inspect --export`) seed their
+    /// provenance, so they cannot seed it differently. Callers fill `commit`, `corpus_version`
+    /// and `rules_last_reviewed` on the result when they have them.
+    pub fn from_cover(cover: &crate::report_export::CoverJson) -> Self {
+        Self {
+            repos: cover.repos.clone(),
+            generated_at: cover.generated_at.clone(),
+            ..Self::default()
+        }
+    }
+
+    /// Camerata's own version as the manifest and README both state it, so a finding can always
+    /// be traced to the engine that produced it. Derived from this crate's `CARGO_PKG_VERSION`,
+    /// never supplied by a caller, so it cannot drift from the binary that built the package.
+    pub fn engine_version(&self) -> String {
+        format!("camerata {}", env!("CARGO_PKG_VERSION"))
+    }
+
+    /// The `manifest.json` `inspection` block. An absent optional value is an explicit JSON
+    /// `null` (the field always exists, so a consumer can tell "not recorded" from "not
+    /// supported"). Rendered from the same fields as [`Self::readme_lines`].
+    pub fn inspection_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "repos": self.repos,
+            "commit": self.commit,
+            "engine_version": self.engine_version(),
+            "corpus_version": self.corpus_version,
+            "rules_last_reviewed": self.rules_last_reviewed,
+        })
+    }
+
+    /// The README's provenance block: the human rendering of [`Self::inspection_json`] plus
+    /// `generated_at`. Every line ends with a newline. A value that is not recorded is OMITTED,
+    /// never printed as a placeholder: a fabricated review date or an empty commit is worse
+    /// than no line. Gate 7 (`tests/product_export_manifest_gates.rs`) holds this equal to the
+    /// manifest.
+    pub fn readme_lines(&self) -> String {
+        let mut out = format!(
+            "Repos inspected: {}\nGenerated: {}\n",
+            self.repos.join(", "),
+            self.generated_at
+        );
+        if let Some(commit) = &self.commit {
+            out.push_str(&format!("Commit: {commit}\n"));
+        }
+        out.push_str(&format!("Engine version: {}\n", self.engine_version()));
+        if let Some(corpus) = &self.corpus_version {
+            out.push_str(&format!("Corpus version: {corpus}\n"));
+        }
+        if let Some(reviewed) = &self.rules_last_reviewed {
+            out.push_str(&format!("Rules last reviewed on {reviewed}\n"));
+        }
+        out
+    }
 }
 
 /// The one-sentence purpose + per-contract `schema_version` for a file in the product ZIP, keyed
@@ -16526,13 +16584,7 @@ pub fn build_manifest(
     let manifest = serde_json::json!({
         "manifest_schema_version": "1.0",
         "generated_at": provenance.generated_at,
-        "inspection": {
-            "repos": provenance.repos,
-            "commit": provenance.commit,
-            "engine_version": format!("camerata {}", env!("CARGO_PKG_VERSION")),
-            "corpus_version": provenance.corpus_version,
-            "rules_last_reviewed": provenance.rules_last_reviewed,
-        },
+        "inspection": provenance.inspection_json(),
         "files": files,
     });
     let mut bytes = serde_json::to_vec_pretty(&manifest).unwrap_or_default();
@@ -25577,7 +25629,10 @@ mod tests {
             None,
             &crate::report_export::ReportOptions::default(),
         );
-        let readme = product_export_readme("acme-inspection", &json);
+        let readme = product_export_readme(
+            "acme-inspection",
+            &ManifestProvenance::from_cover(&json.cover),
+        );
         assert!(readme.contains("Codebase Inspection"), "{readme}");
         assert!(readme.contains("Repos inspected:"), "{readme}");
         assert!(readme.contains("acme-inspection.pdf"), "{readme}");
@@ -25587,12 +25642,10 @@ mod tests {
         );
     }
 
-    /// Regression for the zip-crate-default-timestamp bug: with `SimpleFileOptions::default()`
-    /// left alone, every entry's `last_modified()` reads 1980-01-01 00:00:00 (the DOS/zip
-    /// epoch `zip` falls back to when no timestamp is set, since this workspace doesn't enable
-    /// the crate's `time`/`chrono` cargo features). `build_product_zip` now stamps every entry
-    /// with `zip_now()` (the actual build time) instead. Exercises `build_product_zip`
-    /// directly with dummy bytes — no `typst` dependency, so it always runs.
+    /// Gate 6 (coverage clause) of `docs/design/2026-10-20_machine-readable-exports.md`: the
+    /// manifest lists every ZIP member except itself, and each listed sha256 equals the actual
+    /// hash of that member. The corruption clause (that a flipped byte is caught) lives in
+    /// `tests/product_export_manifest_gates.rs`.
     #[test]
     fn manifest_lists_and_hashes_every_file_except_itself() {
         use sha2::{Digest, Sha256};
@@ -25681,6 +25734,12 @@ mod tests {
         }
     }
 
+    /// Regression for the zip-crate-default-timestamp bug: with `SimpleFileOptions::default()`
+    /// left alone, every entry's `last_modified()` reads 1980-01-01 00:00:00 (the DOS/zip
+    /// epoch `zip` falls back to when no timestamp is set, since this workspace doesn't enable
+    /// the crate's `time`/`chrono` cargo features). `build_product_zip` now stamps every entry
+    /// with `zip_now()` (the actual build time) instead. Exercises `build_product_zip`
+    /// directly with dummy bytes — no `typst` dependency, so it always runs.
     #[test]
     fn product_zip_entries_carry_a_real_build_timestamp_not_the_1980_epoch() {
         let zip_bytes = build_product_zip(

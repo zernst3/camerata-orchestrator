@@ -169,14 +169,10 @@ async fn server_path_export(report: &ScanReport) -> (String, Vec<u8>) {
         xlsx_export::build_json_exports(&sealed, &dispositions, None, &options)
             .expect("json exports must build"),
     );
-    let provenance = camerata_server::ManifestProvenance {
-        repos: json.cover.repos.clone(),
-        generated_at: json.cover.generated_at.clone(),
-        ..Default::default()
-    };
+    let provenance = camerata_server::ManifestProvenance::from_cover(&json.cover);
 
     let stem = camerata_server::report_filename_stem(report);
-    let readme = camerata_server::product_export_readme(&stem, &json);
+    let readme = camerata_server::product_export_readme(&stem, &provenance);
     let zip_bytes = camerata_server::build_product_zip(
         &stem,
         &pdf_bytes,

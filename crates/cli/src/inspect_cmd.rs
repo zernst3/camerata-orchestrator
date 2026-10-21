@@ -422,14 +422,10 @@ pub async fn build_product_export_bytes(
     let mut extra_files: Vec<(String, Vec<u8>)> = csv_exports;
     extra_files.extend(json_exports);
 
-    let provenance = camerata_server::ManifestProvenance {
-        repos: json.cover.repos.clone(),
-        generated_at: json.cover.generated_at.clone(),
-        ..Default::default()
-    };
+    let provenance = camerata_server::ManifestProvenance::from_cover(&json.cover);
 
     let stem = camerata_server::report_filename_stem(report);
-    let readme = camerata_server::product_export_readme(&stem, &json);
+    let readme = camerata_server::product_export_readme(&stem, &provenance);
     let zip_bytes = camerata_server::build_product_zip(
         &stem,
         &pdf_bytes,
