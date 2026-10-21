@@ -107,9 +107,40 @@ pub fn reachable_from(graph: &[ResolvedImport], start: &str) -> HashSet<String> 
     visited
 }
 
+/// Multi-root sibling of [`reachable_from`]: every repo file reachable via zero or more import
+/// edges from ANY of `starts` (the starts themselves included). One BFS over an adjacency
+/// index, `O(V + E)`, cycle-safe through the visited set. [`reachable_from`] is left as it is.
+pub fn reachable_from_all<'s>(
+    graph: &[ResolvedImport],
+    starts: impl IntoIterator<Item = &'s str>,
+) -> HashSet<String> {
+    let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
+    for edge in graph {
+        adjacency
+            .entry(edge.from_file.as_str())
+            .or_default()
+            .push(edge.to_file.as_str());
+    }
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<&str> = VecDeque::new();
+    for start in starts {
+        if visited.insert(start.to_string()) {
+            queue.push_back(start);
+        }
+    }
+    while let Some(cur) = queue.pop_front() {
+        for &next in adjacency.get(cur).into_iter().flatten() {
+            if visited.insert(next.to_string()) {
+                queue.push_back(next);
+            }
+        }
+    }
+    visited
+}
+
 // ─── shared path helpers ────────────────────────────────────────────────────────────────
 
-fn directory_of(path: &str) -> &str {
+pub(crate) fn directory_of(path: &str) -> &str {
     match path.rfind('/') {
         Some(idx) => &path[..idx],
         None => "",
@@ -118,7 +149,7 @@ fn directory_of(path: &str) -> &str {
 
 /// Join `dir` and a relative path `rel` (which may contain `.`/`..` segments), normalizing the
 /// result. A leading `/` on `rel` is treated as repo-root-relative (ignores `dir` entirely).
-fn normalize_join(dir: &str, rel: &str) -> String {
+pub(crate) fn normalize_join(dir: &str, rel: &str) -> String {
     let mut segs: Vec<&str> = if let Some(stripped) = rel.strip_prefix('/') {
         let _ = stripped;
         Vec::new()
@@ -149,7 +180,7 @@ fn normalize_join(dir: &str, rel: &str) -> String {
 /// `"crates/checks/src/extract/mod.rs"` → `"crates/checks/src"`. Returns `None` for a Rust
 /// file that isn't under any `src/` directory (a build script at crate root, `xtask/main.rs`
 /// outside `src/`, ...) — out of scope for this resolver, dropped.
-fn rust_src_root(path: &str) -> Option<String> {
+pub(crate) fn rust_src_root(path: &str) -> Option<String> {
     let segs: Vec<&str> = path.split('/').collect();
     let idx = segs.iter().rposition(|&s| s == "src")?;
     Some(segs[..=idx].join("/"))
@@ -893,6 +924,59 @@ mod tests {
         let graph: Vec<ResolvedImport> = Vec::new();
         let reached = reachable_from(&graph, "src/nope.ts");
         assert_eq!(reached.len(), 1);
+    }
+
+    // ── reachable_from_all (multi-root) ─────────────────────────────────────────
+
+    fn chain_graph() -> Vec<ResolvedImport> {
+        build_import_graph(&files(vec![
+            ("src/a.ts", "import './b';\n"),
+            ("src/b.ts", "export const b = 1;\n"),
+            ("src/c.ts", "import './d';\n"),
+            ("src/d.ts", "export const d = 1;\n"),
+            ("src/e.ts", "export const e = 1;\n"),
+        ]))
+    }
+
+    #[test]
+    fn reachable_from_all_unions_the_reach_of_every_start() {
+        let graph = chain_graph();
+        let reached = reachable_from_all(&graph, ["src/a.ts", "src/c.ts"]);
+        let mut got: Vec<&str> = reached.iter().map(String::as_str).collect();
+        got.sort_unstable();
+        assert_eq!(got, ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"]);
+    }
+
+    #[test]
+    fn reachable_from_all_with_one_start_matches_reachable_from() {
+        let graph = chain_graph();
+        assert_eq!(
+            reachable_from_all(&graph, ["src/a.ts"]),
+            reachable_from(&graph, "src/a.ts")
+        );
+    }
+
+    #[test]
+    fn reachable_from_all_with_no_starts_reaches_nothing() {
+        let graph = chain_graph();
+        assert!(reachable_from_all(&graph, std::iter::empty::<&str>()).is_empty());
+    }
+
+    #[test]
+    fn reachable_from_all_counts_a_start_that_is_not_in_the_graph() {
+        let reached = reachable_from_all(&[], ["src/nope.ts"]);
+        assert_eq!(reached.len(), 1);
+        assert!(reached.contains("src/nope.ts"));
+    }
+
+    #[test]
+    fn reachable_from_all_terminates_on_a_cycle_with_two_starts() {
+        let graph = build_import_graph(&files(vec![
+            ("src/a.ts", "import './b';\n"),
+            ("src/b.ts", "import './a';\n"),
+        ]));
+        let reached = reachable_from_all(&graph, ["src/a.ts", "src/b.ts"]);
+        assert_eq!(reached.len(), 2);
     }
 
     // ── adversarial: empty file set, self-import, does not panic ───────────────
