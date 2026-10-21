@@ -1,4 +1,5 @@
 id = "RUST-DOMAIN-2"
+version = 1
 title = "How IDs are typed: per-type newtypes, bare Uuid, or a single phantom-parameterized generic"
 domain = "rust"
 layer = "language"

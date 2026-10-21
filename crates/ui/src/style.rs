@@ -4037,6 +4037,19 @@ html, body {
 }
 .app-update-dismiss:hover { color: var(--ink); }
 
+/* Corpus-freshness line of the update banner. The alert reuses .app-update-banner above; the
+   never-confirmed note is deliberately small and muted (it is the honest pre-first-sweep
+   state of every pack, and must not shout). */
+.corpus-freshness-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px;
+  font-size: 12px;
+  color: var(--ink-faint);
+  flex-shrink: 0;
+}
+
 /* Rule-drift notice (Feature 2) */
 .drift-notice {
   border: 1px solid #fcd34d;
@@ -4099,6 +4112,10 @@ html, body {
   font-size: 11px;
   color: var(--ink-faint);
   font-style: italic;
+}
+.drift-entry-version {
+  font-size: 11px;
+  color: var(--ink-faint);
 }
 .drift-update-btn {
   margin-left: auto;

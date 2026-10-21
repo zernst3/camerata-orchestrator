@@ -1,4 +1,5 @@
 id = "ORCH-TIERED-ESCALATION-1"
+version = 1
 title = "Tiered escalation — soft-flag by default, hard-pause only for guard areas"
 domain = "agentic"
 layer = "universal"

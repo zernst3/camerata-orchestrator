@@ -1,4 +1,5 @@
 id = "ORCH-NOVELTY-1"
+version = 1
 title = "Novelty downgrades authority"
 domain = "agentic"
 layer = "universal"

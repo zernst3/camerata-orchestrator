@@ -1,4 +1,5 @@
 id = "RUST-NO-UNWRAP-1"
+version = 1
 title = "unwrap() is forbidden in non-test code; propagate the error instead"
 domain = "rust"
 layer = "language"

@@ -1,4 +1,5 @@
 id = "JAVA-PACKAGE-BY-FEATURE-1"
+version = 1
 title = "Java package organization: by feature (domain), by layer, or a flat namespace"
 domain = "java"
 layer = "architecture"

@@ -1,4 +1,5 @@
 id = "GO-TESTING-MOCK-AT-INTERFACE-BOUNDARY-1"
+version = 1
 title = "Mocks implement the same interface as the dependency they replace; tests inject the mock through the production injection point"
 domain = "go:testing"
 layer = "testing"

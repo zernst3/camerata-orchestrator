@@ -1,4 +1,5 @@
 id = "PYTHON-SETTINGS-FROM-ENV-1"
+version = 1
 title = "Configuration and secrets come from the environment, never hardcoded"
 domain = "python"
 layer = "language"

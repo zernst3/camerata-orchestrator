@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-VUE-STORE-PINIA-SHARED-STATE-1"
+version = 1
 title = "Sharing state across Vue components: a Pinia store, or passing it through props"
 domain = "javascript:vue"
 layer = "framework"

@@ -1,4 +1,5 @@
 id = "RUBY-RAILS-EAGER-LOAD-1"
+version = 1
 title = "N+1 queries are eliminated with includes or eager_load at the query site"
 domain = "ruby:rails"
 layer = "framework"

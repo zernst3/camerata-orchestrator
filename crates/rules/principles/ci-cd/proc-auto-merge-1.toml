@@ -1,4 +1,5 @@
 id = "PROC-AUTO-MERGE-1"
+version = 1
 title = "Auto-merge tight, bot-authored PRs"
 domain = "ci-cd"
 layer = "universal"

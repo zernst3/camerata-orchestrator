@@ -1,4 +1,5 @@
 id = "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1"
+version = 1
 title = "A SECURITY DEFINER function that writes data and is granted EXECUTE to anon/public/authenticated must check caller identity/role/ownership before writing"
 domain = "supabase:database-functions"
 # General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that performs a write

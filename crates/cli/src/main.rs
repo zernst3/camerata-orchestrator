@@ -197,6 +197,10 @@ enum CorpusAction {
         /// The date it was confirmed current, YYYY-MM-DD.
         date: String,
     },
+    /// Regenerate crates/rules/CORPUS_LOCK.toml (each rule's `version` + content hash).
+    /// REFUSES, writing nothing, when a rule changed without a `version` bump. Edit the rule,
+    /// bump its `version`, run this, commit both.
+    Lock,
 }
 
 /// `--backend`'s `value_parser`: `ProjectBackend` lives in `camerata-api-types`, a foreign
@@ -304,6 +308,7 @@ async fn main() -> anyhow::Result<()> {
             CorpusAction::Confirm { domain, date } => {
                 camerata::corpus_cmd::run_corpus_confirm(domain, date).await
             }
+            CorpusAction::Lock => camerata::corpus_cmd::run_corpus_lock().await,
         },
     }
 }

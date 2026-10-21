@@ -1,4 +1,5 @@
 id = "RUBY-RAILS-NO-STRING-SQL-1"
+version = 1
 title = "ActiveRecord queries use placeholders or hash conditions; SQL is never built from interpolated strings"
 domain = "ruby:rails"
 layer = "framework"

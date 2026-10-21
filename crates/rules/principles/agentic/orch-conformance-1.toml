@@ -1,4 +1,5 @@
 id = "ORCH-CONFORMANCE-1"
+version = 1
 title = "Codified architectural commitments are enforced gates, not advisory documents"
 domain = "agentic"
 layer = "universal"

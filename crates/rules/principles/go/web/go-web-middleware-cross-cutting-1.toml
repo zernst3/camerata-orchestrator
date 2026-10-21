@@ -1,4 +1,5 @@
 id = "GO-WEB-MIDDLEWARE-CROSS-CUTTING-1"
+version = 1
 title = "Cross-cutting concerns (logging, auth, timeouts, recovery) are implemented as middleware, not duplicated in handlers"
 domain = "go:web"
 layer = "framework"

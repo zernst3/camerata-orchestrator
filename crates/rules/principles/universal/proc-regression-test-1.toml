@@ -1,4 +1,5 @@
 id = "PROC-REGRESSION-TEST-1"
+version = 1
 title = "Every bug fix ships with a regression test that fails before the fix and passes after"
 domain = "universal"
 layer = "universal"

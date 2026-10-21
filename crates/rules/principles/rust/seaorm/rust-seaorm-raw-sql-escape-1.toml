@@ -1,4 +1,5 @@
 id = "RUST-SEAORM-RAW-SQL-ESCAPE-1"
+version = 1
 title = "Raw-SQL queries are wrapped in a typed domain projection at the repository boundary"
 domain = "rust:seaorm"
 layer = "library"

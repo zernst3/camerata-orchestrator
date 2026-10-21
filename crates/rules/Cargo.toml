@@ -15,8 +15,11 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 toml = "0.8"
+# SHA-256 for `Rule::content_hash()` (the rule version lock and the applied-rule drift detector).
+sha2 = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
 tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+chrono = "0.4"

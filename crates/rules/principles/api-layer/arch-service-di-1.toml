@@ -1,4 +1,5 @@
 id = "ARCH-SERVICE-DI-1"
+version = 1
 title = "Services depend on repository abstractions injected at the composition root"
 domain = "api-layer"
 layer = "universal"

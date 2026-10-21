@@ -237,3 +237,42 @@ true` (re-baselined on next apply), never as a false "changed". Add `applied_ver
 - Operator-only. A gate asserts no freshness text reaches any client artifact (PDF, xlsx,
   CSV/JSON, README). The client-visible "rules last reviewed" date in the manifest is separate
   and unchanged.
+
+### Built 2026-10-21: implementation notes
+
+All four parts are built (rules schema + gates, content hash + lock + `camerata corpus lock`,
+the drift-hash fix, the due-soon warning). Where the amendment was wrong or underspecified, and
+what was chosen:
+
+- **The hash is the whole `Rule`, not the raw TOML.** `layer` and `[[emits]]` are parsed but not
+  carried onto `Rule`, so an edit to only those does not move the hash. `domain` (folder-derived)
+  and the derived `summary` are in it. Format: canonical JSON, sorted keys, omit-when-empty,
+  behind a `camerata-rule-hash/v1` tag. `Rule::canonical_form` destructures `Rule` with no `..`,
+  so a new field is a compile error until its hash treatment is decided.
+- **The lock gate has two cases the amendment did not list.** A `version` BELOW the locked one
+  (`VersionRegressed`) and two rules sharing an id (`DuplicateId`) both fail, and both block
+  `camerata corpus lock`. A bump with no content change still fails until the lock is
+  regenerated, as specified ("the lock never moves on its own").
+- **`camerata corpus lock` always uses the bundled corpus**, ignoring `CAMERATA_CORPUS_PATH`,
+  and loads it strictly: a rule file that fails to parse is an error, never a silent removal.
+- **The applied hash is NOT stored at apply time.** The amendment assumed it was. In fact
+  `RuleSelection.applied_hash` is written only by `accept_rule_drift` (the drift "Update this
+  rule" action); `save_armed_to_project` creates selections with no baseline and
+  `upsert_base_rules` replaces the whole list, so a re-apply also erases existing baselines.
+  Drift detection therefore covers only rules the architect has accepted through the drift
+  action. `applied_version` is stored beside the hash in that one place. Baselining at apply time
+  is a separate, behaviour-changing follow-up and was deliberately not done here.
+- **Legacy baselines are listed, not hidden.** A hash without `sha256:` appears in `rule_drift`
+  as `changed: null` + `legacy_baseline: true`; the cockpit drift notice words it as "older
+  baseline" (nothing is known to have changed) rather than as a corpus update.
+- **"One log line at server corpus load"**: the server has no single corpus load (it loads per
+  request), so the line is logged once at startup from `serve()`, off the critical path.
+- **`corpus_freshness` is `null` when freshness is unknown** (no corpus loaded, or the watermark
+  file is absent or unparseable), never an all-clear and never "every domain unconfirmed". A
+  packaged binary running away from its source tree has no watermark to read.
+- **`parse_ymd` is now strict** (4-2-2 digits, real calendar day), shared by the watermark file,
+  the per-rule `last_reviewed` gate and `corpus confirm`. It previously accepted `2026-02-30`.
+- **Lead override naming** mirrors the window override: `warn_lead_days_overrides`. The key
+  `warn_lead_days` must sit above the first `[table]` header in `CORPUS_FRESHNESS.toml` (a test
+  inspects the raw TOML, because the default of 14 would hide a misplacement).
+- **Package name:** the CLI crate is `camerata`, not `camerata-cli`.

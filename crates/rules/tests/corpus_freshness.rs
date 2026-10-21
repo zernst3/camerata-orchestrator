@@ -46,11 +46,37 @@ async fn every_watermarked_domain_is_a_real_corpus_domain() {
     let keys = freshness
         .confirmed
         .keys()
-        .chain(freshness.warn_after_days_overrides.keys());
+        .chain(freshness.warn_after_days_overrides.keys())
+        .chain(freshness.warn_lead_days_overrides.keys());
     let unknown: Vec<&String> = keys.filter(|d| !corpus_domains.contains(*d)).collect();
     assert!(
         unknown.is_empty(),
         "CORPUS_FRESHNESS.toml references domains not in the corpus: {unknown:?}\n\
          known domains: {corpus_domains:?}"
     );
+}
+
+/// `warn_lead_days` must sit at the TOP LEVEL of the file. A key written after a `[table]`
+/// header silently becomes a member of that table; because 14 is also the default, the parsed
+/// struct would look identical and the misplacement would never be noticed. So this inspects
+/// the raw TOML, not the deserialized struct.
+#[test]
+fn warn_lead_days_is_a_top_level_key_in_the_bundled_file() {
+    let text = std::fs::read_to_string(corpus_freshness_path()).expect("file exists");
+    let raw: toml::Value = text.parse().expect("valid TOML");
+    assert_eq!(
+        raw.get("warn_lead_days").and_then(toml::Value::as_integer),
+        Some(14),
+        "warn_lead_days must be a top-level integer (it must precede the first [table] header)"
+    );
+    assert!(
+        raw.get("warn_after_days_overrides")
+            .and_then(|t| t.get("warn_lead_days"))
+            .is_none(),
+        "warn_lead_days leaked into [warn_after_days_overrides]"
+    );
+    let loaded = CorpusFreshness::load(&corpus_freshness_path())
+        .expect("parse")
+        .expect("exists");
+    assert_eq!(loaded.warn_lead_days, 14);
 }

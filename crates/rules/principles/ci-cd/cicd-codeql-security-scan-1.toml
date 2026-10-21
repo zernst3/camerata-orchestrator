@@ -1,4 +1,5 @@
 id = "CICD-CODEQL-SECURITY-SCAN-1"
+version = 1
 title = "Run the CodeQL security suite in CI (layer-3 only)"
 domain = "ci-cd"
 layer = "universal"

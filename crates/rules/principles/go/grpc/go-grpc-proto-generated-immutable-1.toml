@@ -1,4 +1,5 @@
 id = "GO-GRPC-PROTO-GENERATED-IMMUTABLE-1"
+version = 1
 title = "Proto-generated code is not hand-edited; changes flow through .proto definitions and code generation, never direct edits to generated files"
 domain = "go:grpc"
 layer = "library"

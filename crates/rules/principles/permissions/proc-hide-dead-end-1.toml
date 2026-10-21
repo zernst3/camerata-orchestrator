@@ -1,4 +1,5 @@
 id = "PROC-HIDE-DEAD-END-1"
+version = 1
 title = "Hide dead-end affordances"
 domain = "permissions"
 layer = "universal"

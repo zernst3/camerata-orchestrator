@@ -1,4 +1,5 @@
 id = "SEC-NO-PRIVATE-KEY-1"
+version = 1
 title = "PEM private-key blocks are never committed to the repository; ephemeral keys are generated at test runtime"
 domain = "universal"
 layer = "universal"

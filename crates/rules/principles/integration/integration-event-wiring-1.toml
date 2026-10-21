@@ -1,4 +1,5 @@
 id = "INTEGRATION-EVENT-WIRING-1"
+version = 1
 title = "Every emitted event has a consumer and every subscription is emitted"
 domain = "integration"
 layer = "universal"

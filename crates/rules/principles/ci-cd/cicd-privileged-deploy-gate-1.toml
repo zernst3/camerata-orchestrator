@@ -1,4 +1,5 @@
 id = "CICD-PRIVILEGED-DEPLOY-GATE-1"
+version = 1
 title = "A production-impacting job (deploy, prod database migration, infra apply) requires a protected environment with required reviewers, never an unconditional push-triggered run"
 domain = "ci-cd"
 layer = "universal"

@@ -1,4 +1,5 @@
 id = "PYTHON-NO-BARE-EXCEPT-1"
+version = 1
 title = "Exception handlers catch specific types; bare except is forbidden"
 domain = "python"
 layer = "language"

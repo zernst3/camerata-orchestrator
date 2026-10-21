@@ -1,4 +1,5 @@
 id = "SUPABASE-RLS-PERMISSIVE-TRUE-1"
+version = 1
 title = "A policy with USING (true) / WITH CHECK (true) targeting anon or public is a hole shaped like a policy"
 domain = "supabase:rls"
 layer = "platform"

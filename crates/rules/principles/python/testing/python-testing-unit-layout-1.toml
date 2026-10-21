@@ -1,4 +1,5 @@
 id = "PYTHON-TESTING-UNIT-LAYOUT-1"
+version = 1
 title = "Unit tests live in a top-level tests/ directory mirroring the source tree"
 domain = "python:testing"
 layer = "language"

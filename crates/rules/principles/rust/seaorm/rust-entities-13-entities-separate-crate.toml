@@ -1,4 +1,5 @@
 id = "RUST-ENTITIES-13"
+version = 1
 title = "Where persistence entities live: their own crate, the infrastructure crate, or the mapper crate"
 domain = "rust:seaorm"
 layer = "library"

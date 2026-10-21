@@ -1,4 +1,5 @@
 id = "TESTING-AS-DOCUMENTATION-1"
+version = 1
 title = "Test names and structure communicate intent so tests serve as living documentation"
 domain = "testing"
 layer = "universal"

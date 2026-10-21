@@ -34,7 +34,7 @@ described in `docs/ARCHITECTURE.md` that does not exist yet.
 | `camerata-intake` | lib | PO-mode intake form schema + LeadEngineer (architect-abstracted second level). |
 | `camerata-gateway` | lib + bin (`camerata-gateway`) | Layer-1 real-time governance gate. A Rust MCP server; also usable in-process. |
 | `camerata-agent` | lib | Agent runtime: drives `claude -p` subprocesses, parses stream-json. Implements `AgentDriver`. |
-| `camerata-rules` | lib | Rule corpus loader, rule-subset selection, and the corpus-load build gates. Carries two independent classification axes: `EnforcementKind` (prose / structured / mechanical / architectural - what kind of conformance check the rule needs) and, since 2026-10-09, `RuleKind` (defect / decision / default_with_exceptions, plus `decision_with_floor` since 2026-10-13 - whether the rule can accuse a codebase of a fault at all). Also owns `inspectable` (W16: whether a scan may assess the rule at all, or it is emit-only), the authored severity bounds (`max_severity`, `min_severity`, `deviation_ceiling`) and the `Verification` provenance ladder. Field-by-field reference: `docs/RULES_REFERENCE.md`. |
+| `camerata-rules` | lib | Rule corpus loader, rule-subset selection, and the corpus-load build gates. Carries two independent classification axes: `EnforcementKind` (prose / structured / mechanical / architectural - what kind of conformance check the rule needs) and, since 2026-10-09, `RuleKind` (defect / decision / default_with_exceptions, plus `decision_with_floor` since 2026-10-13 - whether the rule can accuse a codebase of a fault at all). Also owns `inspectable` (W16: whether a scan may assess the rule at all, or it is emit-only), the authored severity bounds (`max_severity`, `min_severity`, `deviation_ceiling`) and the `Verification` provenance ladder. Also owns the per-rule `version` / `last_reviewed`, `Rule::content_hash()` and the `CORPUS_LOCK.toml` lock gate, and the corpus-freshness watermark with its overdue / due-soon / never-confirmed report (see §5). Field-by-field reference: `docs/RULES_REFERENCE.md`. |
 | `camerata-orchestrator-core` | lib | The confidence-dial engine: a pure effect-signature decision-CLASS classifier that never relies on a model's self-report. Named `-core` to avoid colliding with the repo and binary name `camerata-orchestrator`. |
 | `camerata-check` | lib + bin (`camerata-check`) | Layer-3 CI-parity: a standalone binary distributing the native architectural-checker registry (`camerata_checks::arch_checker`) so a CLIENT's own CI can run the same checks with no Camerata server or cockpit. Depends on `camerata-checks` + `camerata-rules` only, NEVER on `camerata-server`. See `crates/camerata-check/README.md`. |
 | `camerata-preview` | lib | Local-first `dx serve` live-preview adapter: status parser, process manager, and the edit-verify fallback. See `crates/preview/README.md`. |
@@ -45,7 +45,7 @@ described in `docs/ARCHITECTURE.md` that does not exist yet.
 | `camerata-server` | lib + bin | Axum HTTP/WS BFF the cockpit talks to. As of the 2026-07-08 adapter-ladder batch, `camerata-ui` reaches it by spawning it as a subprocess, not by embedding it in-process. Contains the onboarding scan pipeline, arm/emit, workspace/git controls, the WorkItem/UoW layer, all HTTP routes, and re-export shims for the DTOs/provider stack relocated to `api-types`/`llm`. |
 | `camerata-client` | lib | Typed async HTTP client over the BFF's `/api/*` routes (base URL from `CAMERATA_BFF_URL`, default `http://127.0.0.1:8787`). Shared plumbing under the MCP and CLI adapters. Depends only on `camerata-api-types` plus generic HTTP/serde crates. |
 | `camerata-mcp` | lib + bin (`camerata-mcp`) | First MCP adapter rung: an `rmcp` 1.7 stdio server exposing Camerata verbs (`list_stories`/`get_run`/`list_uows`/`assign_work_item`/`start_run`/`run_events`/`recent_events`) as MCP tools, each delegating to `camerata-client`. |
-| `camerata-cli` | bin (`camerata`) | CLI binary entry point, now FOUR families of subcommand: (1) the in-process demo/eval harness (`live-demo`, `po-demo`, …); (2) HTTP-adapter subcommands over `camerata-client` (`stories`/`run`/`uows`/`assign`/`start-run`/`events`/`recent-events`); (3) `inspect` - the headless Codebase Inspection product command, which runs the whole pipeline in-process with no BFF and no UI and writes the product-export ZIP (§6a); (4) `integrity-gate` - the pre-flight scan-integrity verdict with its own three-value exit contract (§6b). Still depends on `camerata-server` for `eval` and `inspect`. |
+| `camerata-cli` | bin (`camerata`) | CLI binary entry point, now FOUR families of subcommand: (1) the in-process demo/eval harness (`live-demo`, `po-demo`, …); (2) HTTP-adapter subcommands over `camerata-client` (`stories`/`run`/`uows`/`assign`/`start-run`/`events`/`recent-events`); (3) `inspect` - the headless Codebase Inspection product command, which runs the whole pipeline in-process with no BFF and no UI and writes the product-export ZIP (§6a); (4) `integrity-gate` - the pre-flight scan-integrity verdict with its own three-value exit contract (§6b); plus (5) `corpus check|confirm|lock` - the operator surface for the corpus freshness watermark and the rule version lock (§5). Still depends on `camerata-server` for `eval` and `inspect`. |
 | `camerata-ui` | bin (`camerata-ui`) | Dioxus desktop cockpit. SPAWNS `camerata-server` as a subprocess (runtime binary resolution, health-poll readiness, reuse-if-already-healthy, kill-on-exit watchdog) rather than embedding it; no crate dependency on `camerata-server`. Talks to the BFF over localhost HTTP/WS (currently via raw `reqwest`, not yet via `camerata-client`). |
 | `camerata-worktracker` | lib | `WorkItemProvider` port: canonical story shapes, sync policy, native provider, and adapters for GitHub Issues, GitHub Projects v2, Jira Cloud, Azure DevOps Boards. |
 | `camerata-maintenance` | lib | Tier-2 standing post-publish ops agent (dependency upgrades, security patches, secret rotation). |
@@ -1252,7 +1252,7 @@ sorted for deterministic order), parsing each into a `Rule`. The corpus lives at
 `crates/rules/principles/` by default (resolved from `CARGO_MANIFEST_DIR` so it
 is self-contained); override with the `CAMERATA_CORPUS_PATH` env var.
 
-Each corpus file has fields: `id`, `title`, `enforcement`, `domain`,
+Each corpus file has fields: `id`, `version`, `title`, `enforcement`, `domain`,
 `qualifies` (optional summary), `[decision]` (question + why + optional default), and
 `[[option]]` blocks. Unknown fields are silently ignored (no
 `deny_unknown_fields`) so future corpus fields don't break the loader.
@@ -1265,6 +1265,40 @@ architect chooses on the merits for their project rather than inheriting Camerat
 surgical split that neutralizes its error-org axis while keeping the type-erasure floor.) Rules with
 a genuine always-correct answer keep their default; only the genuinely context-dependent ones were
 neutralized.
+
+### Rule version, content hash, and the lock
+
+Every rule declares `version` (integer >= 1, required by a build gate) and may declare
+`last_reviewed` (`YYYY-MM-DD`, not in the future). `Rule::content_hash()`
+(`crates/rules/src/lock.rs`) is `sha256:<hex>` over a canonical serialization of the whole rule,
+excluding `version` and `last_reviewed`: canonical JSON with sorted keys, hand-written string
+escaping and omit-when-empty fields, behind a `camerata-rule-hash/v1` tag, so it is stable across
+builds and dependency upgrades (a Python-oracle golden test pins the bytes).
+`crates/rules/CORPUS_LOCK.toml` records `(version, hash)` per rule; the lock gate
+(`check_lock`, run as a rules-crate test) fails a rule whose content changed with no `version`
+bump, and any stale, missing or orphaned lock entry. `camerata corpus lock` is the only writer
+and refuses a rule changed without a bump. Field semantics: `docs/RULES_REFERENCE.md` 3.20 to
+3.23.
+
+The same hash is the baseline for **applied-rule drift** in `camerata-server`:
+`RuleSelection.applied_hash` (+ `applied_version`) is written by `accept_rule_drift`, and
+`GET /api/updates/check` / `GET /api/projects/:id/rule-drift` compare it to the corpus. A stored
+hash without the `sha256:` prefix is a legacy baseline and is reported as `changed: null` +
+`legacy_baseline: true` rather than as a false change.
+
+### Corpus freshness (operator-only)
+
+`CORPUS_FRESHNESS.toml` holds a per-domain `[confirmed]` watermark (advanced only by
+`camerata corpus confirm` after a reviewed sweep), `warn_after_days` (default 90) and
+`warn_lead_days` (default 14), each with per-domain overrides. `CorpusFreshness::report` yields
+three disjoint groups: OVERDUE (past the window), DUE SOON (inside the lead, with days remaining)
+and NEVER CONFIRMED. Surfaces, all non-fatal: `camerata corpus check` (the three groups), one
+`warn!` line at server startup, the `corpus_freshness` object in `/api/updates/check` (`null`
+when unknown), and a line in the cockpit's update banner (loud for overdue/due soon, a quiet
+count-only note for never-confirmed). It never blocks a scan or export, and a gate
+(`no_corpus_freshness_text_reaches_any_client_artifact` in `camerata-server`) asserts no
+freshness text reaches any client artifact. A rule's effective review date is the later of its
+own `last_reviewed` and its domain's watermark (`effective_review_date`).
 
 ### Two opt-in/tier schema flags (`opt_in_only`, `layer3_only`)
 

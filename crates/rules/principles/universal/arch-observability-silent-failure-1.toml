@@ -1,4 +1,5 @@
 id = "ARCH-OBSERVABILITY-SILENT-FAILURE-1"
+version = 1
 title = "A caught or inspected error is never discarded with zero action; it is logged, rethrown, transformed, or its silence is explicitly justified"
 domain = "universal"
 layer = "universal"

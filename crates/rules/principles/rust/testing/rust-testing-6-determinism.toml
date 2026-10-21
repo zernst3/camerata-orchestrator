@@ -1,4 +1,5 @@
 id = "RUST-TESTING-6"
+version = 1
 title = "Tests are deterministic: no global mutable state, no wall-clock time, no random without a fixed seed"
 domain = "rust:testing"
 layer = "language"

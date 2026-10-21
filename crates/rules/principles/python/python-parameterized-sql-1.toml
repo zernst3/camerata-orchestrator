@@ -1,4 +1,5 @@
 id = "PYTHON-PARAMETERIZED-SQL-1"
+version = 1
 title = "SQL is parameterized; query strings are never built from interpolated values"
 domain = "python"
 layer = "language"

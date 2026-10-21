@@ -1,4 +1,5 @@
 id = "RUBY-RAILS-SKINNY-CONTROLLERS-1"
+version = 1
 title = "Controllers are thin HTTP adapters; business logic lives in service objects or domain models"
 domain = "ruby:rails"
 layer = "framework"

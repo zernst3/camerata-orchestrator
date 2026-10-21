@@ -1,4 +1,5 @@
 id = "RUST-SQLX-MIGRATIONS-CHECKED-IN-1"
+version = 1
 title = "Check database migrations into version control; run migrations as part of application startup"
 domain = "rust:sqlx"
 layer = "framework"

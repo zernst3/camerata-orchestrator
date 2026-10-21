@@ -1,4 +1,5 @@
 id = "CSHARP-EFCORE-DBCONTEXT-SCOPED-1"
+version = 1
 title = "DbContext is registered as Scoped (per-request); never Singleton"
 domain = "csharp:efcore"
 layer = "library"

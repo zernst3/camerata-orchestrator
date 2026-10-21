@@ -1,4 +1,5 @@
 id = "GO-GRPC-STATUS-CODES-CORRECT-1"
+version = 1
 title = "gRPC status codes are used correctly: INTERNAL for unexpected errors, INVALID_ARGUMENT for validation failures, PERMISSION_DENIED for auth, NOT_FOUND for missing resources"
 domain = "go:grpc"
 layer = "framework"

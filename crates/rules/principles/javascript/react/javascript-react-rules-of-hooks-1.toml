@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-REACT-RULES-OF-HOOKS-1"
+version = 1
 title = "Hooks are called only at the top level of components or other hooks"
 domain = "javascript:react"
 layer = "framework"

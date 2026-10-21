@@ -1,4 +1,5 @@
 id = "PROCESS-ADO-LINK-1"
+version = 1
 title = "Commits and PRs reference a work-item / ticket id"
 domain = "process"
 layer = "universal"

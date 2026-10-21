@@ -1,4 +1,5 @@
 id = "CSHARP-NULLABLE-REFERENCE-TYPES-1"
+version = 1
 title = "Nullable Reference Types are enabled in all projects; null-unsafe patterns are enforced at compile time"
 domain = "csharp"
 layer = "language"

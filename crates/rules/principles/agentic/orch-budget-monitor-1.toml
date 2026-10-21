@@ -1,4 +1,5 @@
 id = "ORCH-BUDGET-MONITOR-1"
+version = 1
 title = "Budget self-monitoring"
 domain = "agentic"
 layer = "universal"

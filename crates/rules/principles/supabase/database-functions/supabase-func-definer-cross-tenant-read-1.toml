@@ -1,4 +1,5 @@
 id = "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1"
+version = 1
 title = "A SECURITY DEFINER function that returns rows filtered only by its own caller-supplied parameter, and is granted EXECUTE to anon/public/authenticated, must check that id against the caller's identity"
 domain = "supabase:database-functions"
 # General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that reads data

@@ -1,4 +1,5 @@
 id = "CSHARP-TESTING-XUNIT-CONSTRUCTOR-ISOLATION-1"
+version = 1
 title = "xUnit per-test isolation: use the constructor for per-test setup and IDisposable for teardown; use IClassFixture only for expensive shared resources"
 domain = "csharp:testing"
 layer = "language"

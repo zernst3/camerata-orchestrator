@@ -1,4 +1,5 @@
 id = "RUST-DOMAIN-7"
+version = 1
 title = "How transactional posture reaches the repository: explicit UnitOfWork param, generic Tx, ambient context, or concrete ORM type"
 domain = "rust"
 layer = "language"

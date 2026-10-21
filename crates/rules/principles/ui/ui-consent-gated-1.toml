@@ -1,4 +1,5 @@
 id = "UI-CONSENT-GATED-1"
+version = 1
 title = "No client-side storage or third-party trackers initialize without explicit consent"
 domain = "ui"
 layer = "universal"

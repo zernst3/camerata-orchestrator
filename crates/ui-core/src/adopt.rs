@@ -619,9 +619,10 @@ pub fn commit_gate(plan: &CommitPlan, typed: &str) -> CommitGate {
 /// `camerata-ui-core` must not depend on the server. The field-for-field part is load-bearing
 /// and not cosmetic — the commit is a READ-MODIFY-WRITE of the whole `selections` array, so a
 /// field this struct forgets is a field the commit SILENTLY ERASES from every selection it
-/// round-trips. `applied_hash` and `applied_directive` are the rule-drift baseline; dropping
-/// them would make every rule in the project report as never-baselined after one convention
-/// commit. `req_pass2_14_the_ruleset_round_trip_preserves_every_selection_field` pins it.
+/// round-trips. `applied_hash`, `applied_directive` and `applied_version` are the rule-drift
+/// baseline; dropping them would make every rule in the project report as never-baselined after
+/// one convention commit. `req_pass2_14_the_ruleset_round_trip_preserves_every_selection_field`
+/// pins it.
 #[derive(Clone, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct RuleSelectionView {
     /// The rule id.
@@ -638,6 +639,9 @@ pub struct RuleSelectionView {
     /// The resolved directive as of the last baseline. Passed through untouched.
     #[serde(default)]
     pub applied_directive: Option<String>,
+    /// The corpus rule's `version` as of the last baseline. Passed through untouched.
+    #[serde(default)]
+    pub applied_version: Option<u32>,
 }
 
 /// The project's base ruleset as the commit reads and rewrites it.
@@ -706,6 +710,7 @@ pub fn merge_adoptions(
                 repos: vec![destination_repo.to_string()],
                 applied_hash: None,
                 applied_directive: None,
+                applied_version: None,
             });
         }
     }
@@ -1334,6 +1339,7 @@ mod tests {
                 "repos": ["me/web"],
                 "applied_hash": "sha-abc",
                 "applied_directive": "the directive as baselined",
+                "applied_version": 3,
             }],
             "cross_repo": [],
             "process": [],
@@ -1380,6 +1386,11 @@ mod tests {
             sel.applied_directive.as_deref(),
             Some("the directive as baselined")
         );
+        assert_eq!(
+            sel.applied_version,
+            Some(3),
+            "THE BASELINE VERSION SURVIVES the round trip too"
+        );
 
         // And the POSTed body carries no `custom` key at all, so the server's `merge_custom`
         // sees an empty list and leaves the architect's custom rules exactly where they are.
@@ -1405,6 +1416,7 @@ mod tests {
                 repos: vec!["me/web".to_string()],
                 applied_hash: Some("h".to_string()),
                 applied_directive: None,
+                applied_version: None,
             }],
             ..Default::default()
         };
@@ -1555,6 +1567,7 @@ mod tests {
                 repos: vec!["me/api".to_string()],
                 applied_hash: Some("h".to_string()),
                 applied_directive: Some("d".to_string()),
+                applied_version: Some(2),
             }],
             ..Default::default()
         };

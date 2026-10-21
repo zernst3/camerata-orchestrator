@@ -1,4 +1,5 @@
 id = "CSHARP-EFCORE-MIGRATIONS-CHECKED-IN-1"
+version = 1
 title = "EF Core migrations are checked into source control and applied as part of the deployment process"
 domain = "csharp:efcore"
 layer = "library"

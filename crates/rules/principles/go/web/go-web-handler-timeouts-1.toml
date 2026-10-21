@@ -1,4 +1,5 @@
 id = "GO-WEB-HANDLER-TIMEOUTS-1"
+version = 1
 title = "Handlers have a per-route or per-group timeout; long-running operations move to background jobs or set explicit context deadlines"
 domain = "go:web"
 layer = "framework"

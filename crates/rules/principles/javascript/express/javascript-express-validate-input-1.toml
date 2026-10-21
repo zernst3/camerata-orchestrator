@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-EXPRESS-VALIDATE-INPUT-1"
+version = 1
 title = "Request input is validated at the boundary before use"
 domain = "javascript:express"
 layer = "framework"

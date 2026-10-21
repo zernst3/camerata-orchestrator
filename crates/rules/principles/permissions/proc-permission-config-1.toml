@@ -1,4 +1,5 @@
 id = "PROC-PERMISSION-CONFIG-1"
+version = 1
 title = "A missing grant is configuration; a missing permission is code"
 domain = "permissions"
 layer = "universal"

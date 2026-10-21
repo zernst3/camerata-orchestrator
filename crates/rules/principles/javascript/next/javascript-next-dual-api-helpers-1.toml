@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-NEXT-DUAL-API-1"
+version = 1
 title = "Client-side code goes through sanctioned API helpers; Server Components may fetch directly"
 domain = "javascript:next"
 layer = "framework"

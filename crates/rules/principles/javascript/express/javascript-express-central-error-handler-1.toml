@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-EXPRESS-CENTRAL-ERROR-HANDLER-1"
+version = 1
 title = "Errors flow to one central error-handling middleware; async handlers forward via next"
 domain = "javascript:express"
 layer = "framework"

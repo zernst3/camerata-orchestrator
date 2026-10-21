@@ -1,4 +1,5 @@
 id = "GO-GORM-PARAMETERIZED-QUERIES-1"
+version = 1
 title = "All SQL queries use parameterized arguments, never string interpolation or fmt.Sprintf; GORM query builder is preferred over raw SQL"
 domain = "go:gorm"
 layer = "library"

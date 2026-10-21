@@ -1,4 +1,5 @@
 id = "PYTHON-FLASK-SERVICE-LAYER-1"
+version = 1
 title = "Route handlers are thin; business logic lives in a service layer separate from the Flask HTTP layer"
 domain = "python:flask"
 layer = "framework"

@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-REDUX-TOOLKIT-DEFAULT-1"
+version = 1
 title = "State is built with Redux Toolkit, not hand-rolled action types and switch reducers"
 domain = "javascript:redux"
 layer = "library"

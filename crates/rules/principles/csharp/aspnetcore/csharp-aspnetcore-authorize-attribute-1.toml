@@ -1,4 +1,5 @@
 id = "CSHARP-ASPNETCORE-AUTHORIZE-ATTRIBUTE-1"
+version = 1
 title = "[Authorize] is applied at the controller or route-group level; protected endpoints never rely on the absence of [AllowAnonymous] for security"
 domain = "csharp:aspnetcore"
 layer = "framework"

@@ -52,10 +52,12 @@ enforcement = "prose" | "structured" | "mechanical" | "architectural"
 domain = "agentic"             # also derived from the folder; keep them agreed
 kind = "…"                     # REQUIRED since 2026-10-09; FOUR values; see docs/RULES_REFERENCE.md
 inspectable = true | false     # REQUIRED since 2026-10-12 (W16); see below
+version = 1                    # REQUIRED since 2026-10-21; integer >= 1, bump on ANY change to the rule
+last_reviewed = "2026-10-21"   # optional: this one rule individually confirmed current on that date
 cwe = ["CWE-89"]               # W32, security rules only: recognised vuln code(s); source from [[sources]]
 asvs = ["V5.3.4"]              # W32, optional: OWASP ASVS requirement id(s)
 superseded_since = "2021"      # W32, optional: year a pattern-level arch rule's default aged out
-current_recommendation = "…"   # W32, optional: pointer to the guidance that replaced it
+current_recommendation = "…"   # W32, optional, REQUIRED WITH superseded_since (and vice versa)
 ```
 
 - **`id` is forever.** It is referenced by selections, grounding, role subsets, code, and the user's
@@ -86,6 +88,29 @@ current_recommendation = "…"   # W32, optional: pointer to the guidance that r
   in a paid deliverable and guessing `false` would silently stop a real check from running. 26 of
   417 rules are currently `false`. If you are unsure, `true` is the reversible choice. Semantics
   and the full consumer list: `docs/RULES_REFERENCE.md` section 3.6a.
+- **`version` is mandatory, and you bump it whenever anything about the rule changes.** A new
+  rule starts at `1`. Any edit to the rule (a directive, an option, a source, a flag, the title,
+  the severity bounds) is a new revision: increment `version` in the same change. Pure formatting
+  or comment edits do not change the rule, so they need no bump. `rules_missing_version` and
+  `rules_with_invalid_version` fail the build on an absent or zero value. There is deliberately
+  no default, for the same reason there is none on `kind`.
+
+  **The bump is enforced, not trusted.** `crates/rules/CORPUS_LOCK.toml` records each rule's
+  `version` and a content hash (`Rule::content_hash()`: the whole rule, `version` and
+  `last_reviewed` excluded). The lock gate fails the build when a rule's content changed but its
+  `version` did not. The workflow for any edit to an existing rule is: edit it, bump `version`,
+  run `camerata corpus lock`, commit the rule and the lock together. `camerata corpus lock`
+  refuses (writing nothing) if a rule changed without a bump, so it cannot be used to make a
+  missed bump go away; never hand-edit the lock to silence the gate. A new rule needs
+  `version = 1` and a `camerata corpus lock` run to enter the lock.
+- **`last_reviewed` is optional and is NOT a change.** Set it when you personally confirm this one
+  rule is still current best practice between full domain sweeps. It must be a real `YYYY-MM-DD`
+  date that is not in the future (`rules_with_invalid_last_reviewed`). Setting or advancing it
+  never needs a `version` bump. A rule's effective review date is the later of this and its
+  domain's `[confirmed]` date in `CORPUS_FRESHNESS.toml`.
+- **`superseded_since` and `current_recommendation` travel together.** Set both or neither
+  (`rules_with_unpaired_supersession`). They are populated only by a CONFIRMED sweep finding,
+  never speculatively.
 - **Do not add a `tag` field.** It was deleted from all 417 rules and from the schema on
   2026-10-12, and the unknown-field gate now fails the build if it reappears. `layer` is still
   authored on every rule and is still read by nothing; keep it accurate for human readers and do
@@ -692,8 +717,9 @@ specifically "a human decides."
 
 ## The checklist for adding a rule
 
-1. **Id + title + domain + enforcement + `kind` + `inspectable`** filled, id is new + stable,
-   domain agrees with the folder. The build fails without either `kind` or `inspectable`; pick
+1. **Id + title + domain + enforcement + `kind` + `inspectable` + `version`** filled, id is new +
+   stable, `version = 1` for a new rule (or bumped by one when editing an existing rule), domain
+   agrees with the folder. The build fails without `kind`, `inspectable` or `version`; pick
    `kind` from the four values documented in `docs/RULES_REFERENCE.md`, and set `inspectable`
    honestly (can a scan of a repo assess this rule at all?).
 1b. **If the rule's prose names a severity, author it as a structured bound** rather than leaving it
@@ -722,11 +748,16 @@ specifically "a human decides."
 7. **Tests:** a gated rule needs a detector test; an escalation rule's option-scoping is covered by the
    generic `selected_escalation` test, but add a rule-specific one if it has a backstop.
 
+8. **Lock:** run `camerata corpus lock` and commit `crates/rules/CORPUS_LOCK.toml` with the
+   rule. Without it the lock gate fails (a new rule is not in the lock; an edited one has a
+   stale entry).
+
 ## Where the moving parts live (quick map)
 
 | Concern | Location |
 |---|---|
 | Rule TOML | `crates/rules/principles/<domain>/<id>.toml` |
+| Rule content hash, version lock, `camerata corpus lock` | `crates/rules/src/lock.rs`, `crates/rules/CORPUS_LOCK.toml`, `crates/cli/src/corpus_cmd.rs` |
 | Rule struct / loader / `selected_escalation` | `crates/rules/src/lib.rs` |
 | Layer-1 gate (deny) detectors | `crates/gateway/src/` |
 | Layer-2 checks | `crates/checks/` (`runner_for_worktree`) |

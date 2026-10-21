@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1"
+version = 1
 title = "The non-null assertion operator (!) is forbidden; narrow instead"
 domain = "javascript:typescript"
 layer = "language"

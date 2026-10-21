@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-REACTIVE-FORMS-1"
+version = 1
 title = "Angular form building: reactive forms (FormBuilder, FormGroup) or template-driven forms"
 domain = "javascript:angular"
 layer = "framework"

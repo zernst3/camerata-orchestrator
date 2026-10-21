@@ -1,4 +1,5 @@
 id = "RUST-TESTING-1"
+version = 1
 title = "Unit tests live in a #[cfg(test)] mod tests block in the same file as the code under test"
 domain = "rust:testing"
 layer = "language"

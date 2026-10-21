@@ -1,4 +1,5 @@
 id = "ORCH-AUTOCALLS-LEDGER-1"
+version = 1
 title = "Auto-calls ledger + periodic judgment review"
 domain = "agentic"
 layer = "universal"

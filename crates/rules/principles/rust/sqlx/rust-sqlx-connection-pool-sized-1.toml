@@ -1,4 +1,5 @@
 id = "RUST-SQLX-CONNECTION-POOL-SIZED-1"
+version = 1
 title = "Use a connection pool with explicit size configuration and reuse connections"
 domain = "rust:sqlx"
 layer = "framework"

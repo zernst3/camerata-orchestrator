@@ -1,4 +1,5 @@
 id = "ORCH-OUTPUT-DIGEST-1"
+version = 1
 title = "Output discipline — local-mostly + a single consolidated digest"
 domain = "agentic"
 layer = "universal"

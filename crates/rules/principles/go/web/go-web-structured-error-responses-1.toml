@@ -1,4 +1,5 @@
 id = "GO-WEB-STRUCTURED-ERROR-RESPONSES-1"
+version = 1
 title = "API errors are returned as a consistent structured format with status code, error code, and message; not as raw strings or status codes alone"
 domain = "go:web"
 layer = "framework"

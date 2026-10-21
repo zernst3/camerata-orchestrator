@@ -1,4 +1,5 @@
 id = "SUPABASE-RLS-INITPLAN-1"
+version = 1
 title = "RLS policy predicates should wrap auth.uid()/auth.jwt() in a scalar subselect so they evaluate once per query, not once per row"
 domain = "supabase:rls"
 layer = "platform"

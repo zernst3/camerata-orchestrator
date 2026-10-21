@@ -1,4 +1,5 @@
 id = "CSHARP-ASPNETCORE-THIN-CONTROLLERS-1"
+version = 1
 title = "Controllers contain no business logic; they translate HTTP to service calls and service results to HTTP"
 domain = "csharp:aspnetcore"
 layer = "framework"

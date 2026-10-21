@@ -1,4 +1,5 @@
 id = "RUST-DIOXUS-9"
+version = 1
 title = "Server-to-client calls: framework server functions or a REST API"
 domain = "rust:dioxus"
 layer = "framework"

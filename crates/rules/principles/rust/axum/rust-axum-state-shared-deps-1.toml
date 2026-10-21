@@ -1,4 +1,5 @@
 id = "RUST-AXUM-STATE-SHARED-DEPS-1"
+version = 1
 title = "Share application dependencies via Axum State, not global static variables"
 domain = "rust:axum"
 layer = "framework"

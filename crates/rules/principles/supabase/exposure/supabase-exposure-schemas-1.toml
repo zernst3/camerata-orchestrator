@@ -1,4 +1,5 @@
 id = "SUPABASE-EXPOSURE-SCHEMAS-1"
+version = 1
 title = "Extra PostgREST-exposed schemas widen the API surface to tables that may never have been RLS-reviewed"
 domain = "supabase:exposure"
 layer = "platform"

@@ -1,4 +1,5 @@
 id = "SPIRIT-DOC-DECISIONS-1"
+version = 1
 title = "Document decisions immediately"
 domain = "universal"
 layer = "universal"

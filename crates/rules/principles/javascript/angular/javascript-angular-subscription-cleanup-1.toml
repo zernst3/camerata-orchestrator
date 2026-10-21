@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-SUBSCRIPTION-CLEANUP-1"
+version = 1
 title = "Observable subscriptions are cleaned up using takeUntilDestroyed or the async pipe"
 domain = "javascript:angular"
 layer = "framework"

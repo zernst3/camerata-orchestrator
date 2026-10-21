@@ -1,4 +1,5 @@
 id = "SQL-INVARIANTS-CONSTRAINTS-1"
+version = 1
 title = "Domain invariants that matter (required fields, valid ranges/enums, uniqueness) are declared as NOT NULL/CHECK/UNIQUE constraints, not left to application code alone"
 domain = "sql"
 layer = "universal"

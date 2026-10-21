@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-VUE-SCOPED-STYLES-1"
+version = 1
 title = "Use scoped styles to encapsulate component styling and prevent CSS leaks"
 domain = "javascript:vue"
 layer = "framework"

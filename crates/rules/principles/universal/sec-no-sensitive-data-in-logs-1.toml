@@ -1,4 +1,5 @@
 id = "SEC-NO-SENSITIVE-DATA-IN-LOGS-1"
+version = 1
 title = "A secret, credential, or regulated PII value never reaches a logging sink unredacted"
 domain = "universal"
 layer = "universal"

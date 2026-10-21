@@ -1,4 +1,5 @@
 id = "GO-GORM-MIGRATIONS-MANAGED-1"
+version = 1
 title = "Schema changes are managed by migrations; direct SQL ALTER statements or manual schema edits are not used in production"
 domain = "go:gorm"
 layer = "library"

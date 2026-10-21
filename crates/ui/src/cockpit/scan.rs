@@ -15421,6 +15421,7 @@ mod convention_commit_tests {
                         "repos": ["me/web"],
                         "applied_hash": "sha-abc",
                         "applied_directive": "as baselined",
+                        "applied_version": 2,
                     }],
                     "cross_repo": [],
                     "process": [],
@@ -15442,6 +15443,7 @@ mod convention_commit_tests {
                         "repos": ["me/web"],
                         "applied_hash": "sha-abc",
                         "applied_directive": "as baselined",
+                        "applied_version": 2,
                     },
                     {
                         "rule_id": "API-VERSIONING-1",
@@ -15449,6 +15451,7 @@ mod convention_commit_tests {
                         "repos": ["me/api"],
                         "applied_hash": null,
                         "applied_directive": null,
+                        "applied_version": null,
                     }
                 ],
                 "cross_repo": [],

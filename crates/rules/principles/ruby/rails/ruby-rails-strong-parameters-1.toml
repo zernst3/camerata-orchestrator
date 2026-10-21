@@ -1,4 +1,5 @@
 id = "RUBY-RAILS-STRONG-PARAMS-1"
+version = 1
 title = "Controllers use strong parameters to guard mass assignment"
 domain = "ruby:rails"
 layer = "framework"

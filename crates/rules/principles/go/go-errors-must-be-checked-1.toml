@@ -1,4 +1,5 @@
 id = "GO-ERRORS-MUST-BE-CHECKED-1"
+version = 1
 title = "Errors are always checked; no naked return statements or silently ignored errors"
 domain = "go"
 layer = "language"

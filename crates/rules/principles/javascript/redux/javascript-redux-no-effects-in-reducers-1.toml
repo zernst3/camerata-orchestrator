@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-REDUX-NO-EFFECTS-IN-REDUCERS-1"
+version = 1
 title = "Reducers are pure; side effects live in thunks or middleware"
 domain = "javascript:redux"
 layer = "library"

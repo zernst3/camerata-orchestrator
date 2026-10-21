@@ -1,4 +1,5 @@
 id = "SUPABASE-AUTH-ANON-SIGNIN-1"
+version = 1
 title = "When anonymous sign-ins are enabled, every policy meant for permanent users must exclude anonymous sessions via is_anonymous"
 domain = "supabase:auth"
 layer = "platform"

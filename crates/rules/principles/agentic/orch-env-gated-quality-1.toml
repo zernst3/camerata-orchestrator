@@ -1,4 +1,5 @@
 id = "ORCH-ENV-GATED-QUALITY-1"
+version = 1
 title = "Environment-gated quality — nothing ships unverified"
 domain = "agentic"
 layer = "universal"

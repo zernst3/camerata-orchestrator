@@ -1,4 +1,5 @@
 id = "ARCH-BOUNDARY-VALIDATION-1"
+version = 1
 title = "Validate every request at the boundary; downstream code trusts only validated values"
 domain = "api-layer"
 layer = "universal"

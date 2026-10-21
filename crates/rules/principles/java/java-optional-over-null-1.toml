@@ -1,4 +1,5 @@
 id = "JAVA-OPTIONAL-OVER-NULL-1"
+version = 1
 title = "Methods return Optional<T> instead of null; null is used only for legacy compatibility or internal state"
 domain = "java"
 layer = "language"

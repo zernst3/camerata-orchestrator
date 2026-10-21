@@ -1,4 +1,5 @@
 id = "CSHARP-SQL-PARAMETERIZED-1"
+version = 1
 title = "SQL queries use parameterized queries via SqlParameter or Entity Framework parameters; string concatenation is forbidden"
 domain = "csharp"
 layer = "language"

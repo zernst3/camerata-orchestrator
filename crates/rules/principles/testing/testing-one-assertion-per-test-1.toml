@@ -1,4 +1,5 @@
 id = "TESTING-ONE-ASSERTION-PER-TEST-1"
+version = 1
 title = "One logical assertion per test (guideline): each test verifies a single behavior"
 domain = "testing"
 layer = "universal"

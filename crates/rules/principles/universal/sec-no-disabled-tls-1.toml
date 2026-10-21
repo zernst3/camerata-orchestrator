@@ -1,4 +1,5 @@
 id = "SEC-NO-DISABLED-TLS-1"
+version = 1
 title = "TLS certificate verification is never disabled in production code; tests that disable it use a suppression with a reason"
 domain = "universal"
 layer = "universal"

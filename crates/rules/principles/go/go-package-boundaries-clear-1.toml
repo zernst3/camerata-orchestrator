@@ -1,4 +1,5 @@
 id = "GO-PACKAGE-BOUNDARIES-CLEAR-1"
+version = 1
 title = "Package boundaries are clear; no circular imports; internal packages are used for internal APIs"
 domain = "go"
 layer = "architecture"

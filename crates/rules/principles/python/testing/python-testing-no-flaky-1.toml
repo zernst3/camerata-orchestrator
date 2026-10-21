@@ -1,4 +1,5 @@
 id = "PYTHON-TESTING-NO-FLAKY-1"
+version = 1
 title = "Tests are deterministic: no time, random, or external-state dependencies without explicit control"
 domain = "python:testing"
 layer = "language"

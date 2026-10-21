@@ -1,4 +1,5 @@
 id = "ORCH-REVIEWER-SPLIT-1"
+version = 1
 title = "The reviewer agent for any change is distinct from the author agent"
 domain = "agentic"
 layer = "universal"

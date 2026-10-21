@@ -1,4 +1,5 @@
 id = "CSHARP-TESTING-SEPARATE-UNIT-PROJECT-1"
+version = 1
 title = "Unit tests live in a dedicated .UnitTests project; integration tests live in a separate .IntegrationTests project"
 domain = "csharp:testing"
 layer = "language"

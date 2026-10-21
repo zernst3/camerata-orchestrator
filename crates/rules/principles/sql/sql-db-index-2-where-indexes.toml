@@ -1,4 +1,5 @@
 id = "SQL-DB-INDEX-2"
+version = 1
 title = "Index WHERE-clause columns based on query frequency, selectivity, and access pattern, not indiscriminately"
 domain = "sql"
 layer = "universal"

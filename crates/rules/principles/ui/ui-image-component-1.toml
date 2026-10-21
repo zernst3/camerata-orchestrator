@@ -1,4 +1,5 @@
 id = "UI-IMAGE-COMPONENT-1"
+version = 1
 title = "Images render through a single project-level component, not framework primitives directly"
 domain = "ui"
 layer = "universal"
