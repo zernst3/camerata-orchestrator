@@ -1664,6 +1664,10 @@ mod tests {
             decision_why: None,
             options: Vec::new(),
             default_option: None,
+            cwe: Vec::new(),
+            asvs: Vec::new(),
+            superseded_since: None,
+            current_recommendation: None,
             verification: Verification::Grounded,
             sources: linters
                 .iter()
