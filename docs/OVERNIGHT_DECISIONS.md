@@ -27,3 +27,13 @@ commit sits on the branch ready for review + push.
   §2-6). That needs your EYE on the rendered PDF, so I am NOT doing it blind overnight; I will do
   the testable/non-visual items first (staleness mechanism, W23/W24) and leave the visual template
   rewrite + the exports-that-depend-on-the-final-xlsx for a session where you can review layout.
+- 2026-10-20: Corpus staleness MECHANISM built + tested (commits on branch): freshness.rs data
+  layer (overdue/never_confirmed/unparseable, pure date math), confirm mutation (comment-preserving),
+  nag formatter, CORPUS_FRESHNESS.toml (empty confirmed, honest), typo-guard integration test.
+  189 rules tests pass. Remaining staleness: thin nag-wiring (print at corpus load / digest),
+  a confirm CLI command, and the LLM sweep agent (heavy) — consumer/integration layers.
+- 2026-10-20: Staleness feature now operator-complete end-to-end: `camerata corpus check`
+  (nag) + `camerata corpus confirm <domain> <date>` (advance watermark, validated). Smoke-tested.
+  The committed CORPUS_FRESHNESS.toml stays empty/honest (reverted the smoke-test write). Only
+  the LLM SWEEP AGENT remains (the finding generator) — deferred: it needs a live model run,
+  not suitable for unattended, and is its own focused build.
