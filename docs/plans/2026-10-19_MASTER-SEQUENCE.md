@@ -58,7 +58,17 @@ Ordering principle, unchanged from the original design: **restore what broke bef
 anything, and fix what the client sees before what only we see.** The corpus work is slotted
 in rather than parked, per the owner, but it is slotted where its dependencies allow.
 
+> ### STANDING STEP — every phase ends by updating the documentation (owner directive, 2026-10-21)
+> No phase is done until the docs reflect it. At minimum: refresh **`docs/OVERVIEW.md`** (the
+> high-level human map — keep its crate map / pipeline / concept axes current and bump its "last
+> refreshed" date) AND the relevant DEEP doc (`TECHNICAL.md` for code/crate changes,
+> `ARCHITECTURE.md` for layering, `RULE_AUTHORING.md`/`RULES_REFERENCE.md` for corpus-schema
+> changes). The rationale: the code is too large to understand by reading it, so the high-level
+> docs are the only human-scale view — a stale one is actively misleading. This step is listed
+> explicitly on each phase below; treat it as a gate on "phase complete," not an afterthought.
+
 ### PHASE 1 — finish Wave 1 (two gates)
+_Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before marking this phase done._
 
 1. **W19 gate.** Input invariants as the failing layer: no engine-authored bytes in the
    digest, file count sane, `audit_model` recorded. Semantic-tier output diffs advisory (D1).
@@ -71,6 +81,7 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
    nicety — the whole before/after comparison this week was confounded by an unrecorded model.
 
 ### PHASE 2 — Wave 2, the mid-layer (where the all-five-repo defects live)
+_Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before marking this phase done._
 
 4. **W22 kind integrity**, including **corpus Group 2** (7 layering rules declared `decision`,
    so their fat-controller option cannot be flagged; a repo that genuinely puts logic in
@@ -88,6 +99,7 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
    client-facing section (D5).
 
 ### PHASE 3 — Wave 3, the deliverable
+_Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before marking this phase done._
 
 10. **W25 client-facing text hygiene — rendered artifacts.** Pipeline vocabulary, retry
     narration, CI-state text, calibration notes, placeholder tokens.
@@ -166,6 +178,7 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
     `docs/design/2026-10-20_corpus-staleness-check.md`.
 
 ### PHASE 4 — W29, coverage expansion
+_Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before marking this phase done._
 
 > Turnkey build plan: `docs/plans/2026-10-21_w29-execution-plan.md` (per-rule detector+wiring+tests, build order; rule-8 eslint blocker CLEARED by the W30 fix).
 
@@ -180,6 +193,7 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
       / state-shape → needless-complexity.
 
 ### PHASE 5 — residuals, then measure
+_Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before marking this phase done._
 
 18. **W30 residuals.** PIN eslint versions in the tool manifest (primary) + ETARGET retry;
     §9.1 zero-finding rule surface so `RuleAlternativesPanel` can go; Conventions tab count;
