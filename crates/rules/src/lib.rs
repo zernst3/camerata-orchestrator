@@ -20,6 +20,9 @@ use camerata_core::RuleId;
 use serde::Deserialize;
 use thiserror::Error;
 
+mod freshness;
+pub use freshness::{corpus_freshness_path, days_from_civil, CorpusFreshness, OverdueDomain};
+
 // ────────────────────────────────────────────────────────────────────────────
 // Error type (RUST-DOMAIN-4 / RUST-DOMAIN-6)
 // ────────────────────────────────────────────────────────────────────────────
