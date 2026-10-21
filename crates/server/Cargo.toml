@@ -31,7 +31,10 @@ axum = { version = "0.7", features = ["ws"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "process", "io-util"] }
 tower = "0.5"
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `preserve_order` is load-bearing: the CSV exports derive their column order from the JSON rows'
+# key order (`xlsx_export::json_array_to_csv`), so without it columns come out alphabetical.
+# It was previously enabled only by accident, through feature unification with another crate.
+serde_json = { workspace = true, features = ["preserve_order"] }
 anyhow = { workspace = true }
 futures = { workspace = true }
 # Object-safe async trait for the escalation translation-driver seam (issue #43), so the

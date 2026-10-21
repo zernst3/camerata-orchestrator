@@ -1386,3 +1386,31 @@ fn gate2_detects_a_disagreement_in_each_format() {
     extra[0]["brand_new_field"] = Value::String("x".to_string());
     assert!(std::panic::catch_unwind(|| check_conventions(&a.xlsx, &extra)).is_err());
 }
+
+/// CSV column order follows the JSON row struct's field order (the order the rows are declared
+/// in), not alphabetical. That order comes from `serde_json`'s `preserve_order` feature, which
+/// this crate now requests explicitly; before that it was enabled only by feature unification
+/// with an unrelated crate, so removing that crate would have silently re-sorted every export's
+/// columns. `rules-applied` is the smallest dataset whose declaration order is not alphabetical.
+#[test]
+fn gate2_csv_columns_follow_the_row_declaration_order() {
+    let (report, dispositions) = fixture();
+    let a = build(&report, &dispositions, None);
+    let mut reader = csv::Reader::from_reader(a.csv["rules-applied"].as_slice());
+    let headers: Vec<String> = reader.headers().unwrap().iter().map(String::from).collect();
+    assert_eq!(
+        headers,
+        vec!["rule_id", "chosen", "evidence", "applicable"],
+        "an alphabetical header means serde_json lost preserve_order"
+    );
+    let json_keys: Vec<String> = rows_of(&a.json["rules-applied"])[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(
+        json_keys, headers,
+        "JSON key order and CSV column order agree"
+    );
+}
