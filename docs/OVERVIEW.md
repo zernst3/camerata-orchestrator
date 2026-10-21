@@ -30,6 +30,7 @@ CONTRACTS / CORE
 
 THE CORPUS + ITS ENFORCEMENT
   rules         the ~417-rule corpus loader + schema + corpus gates + the CORPUS_FRESHNESS watermark
+                + per-rule `version` and the content-hash lock (CORPUS_LOCK.toml)
   checks        the deterministic CHECKERS: arch/import/layering/RLS/weak-rand/… + the AST
                 extractors (extract::ecma|python|rust_syn, resolver) + integration gate
   linter-registry  stack→linter mapping
@@ -50,7 +51,7 @@ THE AGENT / GOVERNANCE SIDE
 
 THE UI + CLI
   ui, ui-core   the Dioxus "Enterprise Cockpit" desktop app + its framework-agnostic core
-  cli           `camerata` — headless inspect/export, demos, `corpus check/confirm`, integrity-gate
+  cli           `camerata` - headless inspect/export, demos, `corpus check/confirm/lock`, integrity-gate
 ```
 
 ## The inspection pipeline (end to end)
@@ -106,8 +107,15 @@ And two kinds of GATE guard quality:
 enforcement tier, kind, severity bounds, `inspectable`, authoritative `[[sources]]`, and one or
 more `[[option]]`s (the directive emitted to the client's `AGENTS.md`/`CONVENTIONS.md`, a
 client-facing remediation, and finding text). Rules are selected per detected stack by DOMAIN.
-Freshness is tracked per domain in `CORPUS_FRESHNESS.toml` (advanced only by a human-confirmed
-staleness sweep). Authoring standard: `RULE_AUTHORING.md`.
+Every rule carries a `version` (an integer, bumped on any change) that is enforced, not trusted:
+`CORPUS_LOCK.toml` records each rule's version plus a content hash of the whole rule, and a
+build gate fails a rule that changed without a bump (`camerata corpus lock` regenerates it and
+refuses a missed bump). The same hash is the baseline the applied-rule drift detector compares
+against. Freshness is tracked per domain in `CORPUS_FRESHNESS.toml` (advanced only by a
+human-confirmed staleness sweep); a rule may also carry its own `last_reviewed` date. A domain
+approaching its window shows as "due soon" (`camerata corpus check`, one startup log line, and
+the cockpit banner), strictly operator-only and never in a client artifact. Authoring standard:
+`RULE_AUTHORING.md`.
 
 ## Where to go deeper
 - **Code-level HOW:** `TECHNICAL.md` (the 4k-line reference).
