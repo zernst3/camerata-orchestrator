@@ -1,5 +1,12 @@
 {
   "permissions": {
+    "allow": [
+      "Edit(./**)",
+      "Write(./**)",
+      "Bash(cargo:*)",
+      "Bash(git:*)",
+      "Bash(gh:*)"
+    ],
     "deny": [
       "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/_keys/**)",
       "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/faktura-ANSWER-KEY.md)",

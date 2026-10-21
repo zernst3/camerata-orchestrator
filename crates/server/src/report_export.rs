@@ -13051,12 +13051,22 @@ mod tests {
     /// regenerate the sample PDF/PNGs) and must stay byte-identical to it — a drifted copy
     /// means the sample deliverable stops representing what the app actually ships. This
     /// caught real drift as of this pass (the sample copy predated the P2/P6 template edits).
+    ///
+    /// `sample-report/` is gitignored (local preview output), so the copy only exists on a
+    /// machine that has generated it. Read it at RUNTIME, not via `include_str!`: a
+    /// compile-time include made the whole server test target fail to build on any fresh
+    /// checkout (CI included). No copy means nothing can have drifted, so the check is moot.
     #[test]
     fn sample_report_template_copy_is_byte_identical_to_the_shipped_template() {
         let shipped = include_str!("../templates/audit_report.typ");
-        let sample = include_str!("../../../sample-report/audit_report.typ");
+        let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../sample-report/audit_report.typ");
+        let Ok(sample) = std::fs::read_to_string(&sample_path) else {
+            return;
+        };
         assert_eq!(
-            shipped, sample,
+            shipped,
+            sample.as_str(),
             "sample-report/audit_report.typ has drifted from the shipped template — copy the \
              shipped file over it"
         );
