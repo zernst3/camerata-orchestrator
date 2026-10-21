@@ -1190,7 +1190,6 @@ pub async fn scan_repos(
     report
 }
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub async fn audit_repos(
     sources: &[(String, std::path::PathBuf)],
     selected: &[SelectedRule],
@@ -1281,7 +1280,6 @@ pub async fn audit_repos(
         ai_blocked_reason = Some(message.clone());
         run_ai_review = false;
     }
-    let extra_notes = extra_notes;
     // The transport this run's `Llm` (below) is built with: EXACTLY the resolution's
     // Cli/Api choice, never re-derived from env. `Blocked` never reaches here with
     // `run_ai_review` still true (forced off above), so its transport value is moot; `Cli` is
@@ -2323,7 +2321,7 @@ mod tests {
     fn per_repo_semantic_set_is_union_of_project_level_and_repo_rules() {
         // Mirrors the per-repo filter inside `audit_repos`: each repo sees project-level
         // rules (empty `repos`) plus the rules bound to it, and nothing bound to a sibling.
-        let selected = vec![
+        let selected = [
             sel("ARCH-1", &[]),                 // project-level → both repos
             sel("RUST-DIOXUS-2", &["acme/ui"]), // ui only
             sel("SQL-1", &["acme/api"]),        // api only
@@ -5753,7 +5751,7 @@ mod tests {
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
         // The .env is NOT in .gitignore → must be scanned.
         assert!(
-            paths.iter().any(|p| *p == ".env"),
+            paths.contains(&".env"),
             "tracked .env must be scanned when not gitignored: {paths:?}"
         );
     }
@@ -5822,7 +5820,7 @@ mod tests {
         }];
         attach_secret_history_capture(&mut findings, root).await;
         assert!(
-            findings[0].captures.get("history-status").is_none(),
+            !findings[0].captures.contains_key("history-status"),
             "no git repo — must degrade gracefully, never fabricate a history status"
         );
     }
@@ -5843,7 +5841,7 @@ mod tests {
         }];
         attach_secret_history_capture(&mut findings, root).await;
         assert!(
-            findings[0].captures.get("history-status").is_none(),
+            !findings[0].captures.contains_key("history-status"),
             "a structural (non-secret-shaped) rule must never get a history-status capture"
         );
     }

@@ -97,6 +97,9 @@ impl LoadingGuard {
     /// [`LoadingGuard::from_count`] instead, with a [`LoadingCount`] captured in the component's
     /// render body (via `use_context::<LoadingCount>()`) BEFORE the `spawn`, and moved in. See
     /// `cockpit::scan::audit_job_start`'s spawn call site and `poll_job` for the pattern.
+    // new_without_default: constructing a guard INCREMENTS the in-flight count, so a `Default`
+    // impl would hide a side effect behind a trait that callers expect to be inert.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         // `try_consume_context` still requires an active runtime (it calls
         // `Runtime::with_current_scope`, which panics with no VirtualDom), so gate on

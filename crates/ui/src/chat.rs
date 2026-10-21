@@ -324,11 +324,7 @@ async fn fetch_project_context_sections() -> (
         match reqwest::get(format!("{}/api/projects/active/context", crate::bff_base()))
             .await
             .ok()
-            .and_then(|r| {
-                // reqwest::Response::json is async; block via a small sync parse.
-                // We're already inside an async context so we just await below.
-                Some(r)
-            }) {
+        {
             Some(r) => match r.json::<ProjectContextLite>().await {
                 Ok(v) => v,
                 Err(_) => return (None, None, None, None),
@@ -344,13 +340,6 @@ async fn fetch_project_context_sections() -> (
         ctx.selected_rules_section.filter(|s| !s.trim().is_empty()),
         ctx.ruleset_summary.filter(|s| !s.trim().is_empty()),
     )
-}
-
-/// Fetch only the scan-results section (Layer 3c). Kept for use in unit tests
-/// that predate the selected-rules section.
-#[cfg(test)]
-async fn fetch_project_scan_section() -> Option<String> {
-    fetch_project_context_sections().await.1
 }
 
 // ── Layer 4: focused finding ──────────────────────────────────────────────────
@@ -416,6 +405,9 @@ pub(crate) const UNIFIED_NOT_COVERED_PHRASE: &str =
 /// Anthropic's automatic system-prompt caching a large stable prefix.
 /// Layers 3, 3b, and 3c are appended after the stable prefix so they don't
 /// disturb the cached portion.
+// too_many_arguments: one optional context layer per parameter, assembled in a fixed order; a
+// struct of eight `Option<&str>` layers would just rename the same call-site arguments.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn unified_system_prompt(
     rules_catalog: &str,
     uow_section: &str,
@@ -490,7 +482,7 @@ pub(crate) fn unified_system_prompt(
         }
     }
     p.push_str(uow_section);
-    p.push_str("\n");
+    p.push('\n');
 
     // ── Layer 3b: pulled issue spine (optional) ───────────────────────────────
     // Present when the architect has pulled issues from GitHub this session.
@@ -503,7 +495,7 @@ pub(crate) fn unified_system_prompt(
                 "=== LAYER 3b: PULLED ISSUES (open GitHub issues pulled this session) ===\n",
             );
             p.push_str(sec);
-            p.push_str("\n");
+            p.push('\n');
         }
     }
 
@@ -523,7 +515,7 @@ pub(crate) fn unified_system_prompt(
              findings). Do NOT infer or invent any findings.\n",
         ),
     }
-    p.push_str("\n");
+    p.push('\n');
 
     // ── Layer 3d: selected rules & options (optional) ────────────────────────
     // Present as soon as the user has selected rules in the onboarding draft —
@@ -552,7 +544,7 @@ pub(crate) fn unified_system_prompt(
              rules are selected, state plainly that none are currently selected.\n",
         ),
     }
-    p.push_str("\n");
+    p.push('\n');
 
     // ── Layer 3e: project committed ruleset (optional) ───────────────────────
     // The project's APPLIED/governing ruleset (post-onboard), distinct from the
@@ -568,7 +560,7 @@ pub(crate) fn unified_system_prompt(
              rules applied). Do NOT infer the governing rules from the Layer 2 catalog.\n",
         ),
     }
-    p.push_str("\n");
+    p.push('\n');
 
     // ── Layer 4: focused finding (optional) ───────────────────────────────────
     if let Some(f) = finding {
@@ -1423,14 +1415,8 @@ mod tests {
     // `CAMERATA_BFF_URL` is a process-global env var. Every Tier-2 test below sets it (to a
     // mock-server URI) then removes it. `cargo test` runs tests on parallel threads, so two such
     // tests overlapping would clobber each other's override and point a helper at the wrong server.
-    // This mutex serializes the env-mutating tests against each other (the doc's "serial_test-style
-    // mutex"; we can't add the serial_test crate without touching Cargo.toml). Lock for the whole
-    // body; recover from poisoning so one failing test doesn't cascade-fail the rest.
-    static BFF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn bff_env_guard() -> std::sync::MutexGuard<'static, ()> {
-        BFF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
+    // Every such test carries `#[serial_test::serial(bff_env)]`, which serializes them crate-wide
+    // (and, unlike a std mutex guard, is safe to hold across the test's `.await`s).
 
     // ── Tier-2 UI test: a network helper against a MOCK BFF (wiremock) ──────────
     // Verifies add_chat_learning's request CONTRACT: it GETs the active project, then POSTs the
@@ -1443,7 +1429,6 @@ mod tests {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/active"))
@@ -1483,7 +1468,6 @@ mod tests {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/chat"))
@@ -1537,7 +1521,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/chat"))
@@ -1569,7 +1552,6 @@ mod tests {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/settings/chat-model"))
@@ -1594,7 +1576,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/settings/chat-model"))
@@ -1619,7 +1600,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/settings"))
@@ -1643,7 +1623,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/settings"))
@@ -1674,7 +1653,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/models/registry"))
@@ -1769,7 +1747,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/corpus-rules"))
@@ -1828,7 +1805,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/corpus-rules"))
@@ -1855,7 +1831,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/development/context"))
@@ -1886,7 +1861,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/development/context"))
@@ -1918,7 +1892,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/active/context"))
@@ -1949,7 +1922,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/active/context"))
@@ -1977,7 +1949,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/active/context"))

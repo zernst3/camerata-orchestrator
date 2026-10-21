@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! End-to-end, ZERO model calls: `camerata inspect` wired all the way from a bare repo path
 //! through `onboard::audit_repos` to a written export ZIP, over the tiny fixture repo at
 //! `crates/server/tests/fixtures/e2e_report_repo/` — the SAME fixture

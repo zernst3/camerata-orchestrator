@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! C3-3: proves `SUPABASE-FUNC-SEARCH-PATH-1` and `SUPABASE-RLS-DISABLED-NOT-RESTORED-1` are
 //! actually ARMED and actually FIRE for a plain-Postgres repo (no `supabase/` layout at all)
 //! through the REAL selection path — not a unit test that hand-constructs a `SelectedRule` or

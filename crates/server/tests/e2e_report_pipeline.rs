@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! END-TO-END: the deterministic-scan → PDF-report pipeline, driven through the REAL
 //! entry points a manual test would exercise — no stubbing of the scan, the finding
 //! classification, the report serializer, or (when available) the Typst compiler.

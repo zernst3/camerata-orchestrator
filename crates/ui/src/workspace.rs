@@ -752,14 +752,20 @@ pub fn WorkspaceView() -> Element {
                                                 }
                                             }
                                         }
-                                        RepoCard {
-                                            key: "{active_repo}",
-                                            repo: active_repo.clone(),
-                                            project_id,
-                                            status,
-                                            refresh: Some(refresh),
-                                            on_linked: move |_| { refresh += 1; },
-                                        }
+                                        // The `key` must sit on the FIRST node of its own rsx block to take
+                                        // effect (Dioxus ignores it on later siblings), so the card is built
+                                        // in a nested block: switching repos then remounts it and drops its
+                                        // local state.
+                                        {rsx! {
+                                            RepoCard {
+                                                key: "{active_repo}",
+                                                repo: active_repo.clone(),
+                                                project_id,
+                                                status,
+                                                refresh: Some(refresh),
+                                                on_linked: move |_| { refresh += 1; },
+                                            }
+                                        }}
                                     }
                                 }
                             }

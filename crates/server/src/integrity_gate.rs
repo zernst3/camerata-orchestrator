@@ -1200,7 +1200,7 @@ mod tests {
     fn req_w21_absolute_and_prose_paths_in_the_sealed_rows_fail_the_gate() {
         use crate::scan_ledger::PathHygiene;
 
-        let paths = vec![
+        let paths = [
             // Clean, and the majority — so a failure here cannot be the gate refusing
             // everything.
             "app/api/checkout/route.ts",

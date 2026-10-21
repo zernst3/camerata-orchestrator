@@ -286,17 +286,10 @@ impl JsCheckRunner {
         // In tests, we allow the program to be overridden to a fake binary.
         #[cfg(test)]
         let program = self.install_program_override.as_deref().unwrap_or(program);
-        #[cfg(not(test))]
-        let program = program;
 
-        let out = run_command(
-            worktree,
-            program,
-            &args.iter().map(|s| *s).collect::<Vec<_>>(),
-            self.on_progress.as_ref(),
-        )
-        .await
-        .with_context(|| format!("running `{program} {}`", args.join(" ")))?;
+        let out = run_command(worktree, program, &args.to_vec(), self.on_progress.as_ref())
+            .await
+            .with_context(|| format!("running `{program} {}`", args.join(" ")))?;
 
         if !out.success {
             anyhow::bail!(
@@ -491,7 +484,7 @@ impl PythonCheckRunner {
         let pip = self
             .pip_bin_override
             .as_deref()
-            .map(|s| std::borrow::Cow::Borrowed(s))
+            .map(std::borrow::Cow::Borrowed)
             .unwrap_or_else(|| std::borrow::Cow::Owned(venv_pip.to_string_lossy().into_owned()));
         #[cfg(not(test))]
         let pip = venv_pip.to_string_lossy().into_owned();
@@ -1550,12 +1543,12 @@ impl CheckRunner for CombinedCheckRunner {
 /// language present (recursively). This is the single injection point the fleet
 /// and the po-demo use in place of the old hardcoded `RustCheckRunner::new()`.
 ///
-/// - Zero languages detected -> a [`CombinedCheckRunner`] over [`NoopChecks`]
-///   + manifest runner + the native architectural-checker runner AND a logged
+/// - Zero languages detected -> a [`CombinedCheckRunner`] over [`NoopChecks`], the
+///   manifest runner and the native architectural-checker runner, AND a logged
 ///   warning: the loop degrades for language checks, but manifest checks and
 ///   armed architectural checks still run if present.
-/// - One or more -> a [`CombinedCheckRunner`] over a [`PolyglotCheckRunner`] +
-///   manifest runner + the native architectural-checker runner. A
+/// - One or more -> a [`CombinedCheckRunner`] over a [`PolyglotCheckRunner`], the
+///   manifest runner and the native architectural-checker runner. A
 ///   single-language repo has one polyglot entry.
 ///
 /// The architectural-checker tier ([`crate::arch_check_runner::NativeArchCheckRunner`])
@@ -1872,9 +1865,8 @@ mod tests {
             result.is_ok(),
             "ensure_deps_installed should succeed: {result:?}"
         );
-        assert_eq!(
-            result.unwrap(),
-            false,
+        assert!(
+            !result.unwrap(),
             "should report skipped (false = not installed)"
         );
 
@@ -1909,9 +1901,8 @@ mod tests {
 
         let result = runner.ensure_deps_installed(&dir).await;
         assert!(result.is_ok(), "install should succeed: {result:?}");
-        assert_eq!(
+        assert!(
             result.unwrap(),
-            true,
             "should report installed (true = ran install)"
         );
 

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! Hermetic end-to-end regression net for the FULL onboarding WALK.
 //!
 //! Where `onboarding_flow_e2e.rs` exercises the onboarding PIECES in isolation
@@ -30,15 +31,14 @@
 //! pass), we assert the STRUCTURE around it (the proposal set, the deterministic
 //! floor, the emitted gate config), never AI output.
 
-use std::sync::Mutex;
-
 use camerata_server::arm::{arm_files_for_repo, existing_governance_files, ArmRule, GateRule};
 use camerata_server::project::ProjectStore;
 use camerata_server::AppState;
 
 // `propose_corpus_rules` reads a process-global env var (`CAMERATA_CORPUS_PATH`). Serialize the
 // env-mutating tests so they never race a parallel test (same guard as onboarding_flow_e2e).
-static CORPUS_ENV_LOCK: Mutex<()> = Mutex::new(());
+// The env-mutating test carries `#[serial_test::serial(corpus_env)]`, so it never races a
+// parallel test and (unlike a std mutex guard) is safe to hold across its `.await`s.
 
 // ════════════════════════════════════════════════════════════════════════════════════
 // Shared fixtures
@@ -148,9 +148,8 @@ fn arm_rule(id: &str, enforcement: &str, repo: &str) -> ArmRule {
 // ════════════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+#[serial_test::serial(corpus_env)]
 async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
-    let _guard = CORPUS_ENV_LOCK.lock().unwrap();
-
     let repo_spec = "me/api".to_string();
 
     // ── connect/native provider: an in-process AppState + a fresh project covering the repo.
@@ -278,7 +277,9 @@ async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
     // ── MARK the repo onboarded on the project (the apply step's final act).
     state
         .projects()
-        .update(&project.id, |p| p.mark_onboarded(&[repo_spec.clone()]))
+        .update(&project.id, |p| {
+            p.mark_onboarded(std::slice::from_ref(&repo_spec))
+        })
         .expect("mark the repo onboarded");
 
     // ── The development gate now SEES the repo as onboarded: a re-onboard is blocked and the

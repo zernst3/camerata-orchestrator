@@ -83,7 +83,7 @@ pub fn short_updated(updated: &str) -> String {
         return String::new();
     }
     trimmed
-        .split(|c| c == ' ' || c == 'T')
+        .split([' ', 'T'])
         .next()
         .unwrap_or(trimmed)
         .to_string()

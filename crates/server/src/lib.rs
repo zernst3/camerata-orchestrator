@@ -483,14 +483,22 @@ impl AppState {
     /// cached, so a later call (after a token is configured) can still resolve it.
     pub async fn github_login(&self) -> Option<String> {
         // Fast path: already resolved.
-        if let Some(login) = self.github_login_cache.lock().unwrap().clone() {
+        if let Some(login) = self
+            .github_login_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
             return Some(login);
         }
         // Not cached, so resolve via the token. No token, no identity.
         let token = self.github_token()?;
         match crate::github_issues::get_authenticated_login(&token).await {
             Ok(login) if !login.is_empty() => {
-                *self.github_login_cache.lock().unwrap() = Some(login.clone());
+                *self
+                    .github_login_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(login.clone());
                 Some(login)
             }
             _ => None,
@@ -2124,7 +2132,7 @@ async fn spawn_brownfield_dev_run(
         } else {
             // Pre-parse per-artifact `camerata:allow INTEGRATION-* -- reason` waivers
             // from the in-scope repo worktrees (intentional-public endpoints etc.).
-            let waivers = collect_integration_waivers(&state).await;
+            let waivers = collect_integration_waivers(state).await;
             let gate_model = match &tier_map {
                 Some(map) => map.balanced_primary().to_string(),
                 None => impl_model.clone(),
@@ -5969,10 +5977,10 @@ pub(crate) fn is_test_coverage_class(rule_id: &str) -> bool {
 /// - `"path"`   — path traversal
 /// - `"shell"`  — subprocess with shell=True
 /// - `"deser"`  — unsafe deserialization (yaml.load w/o SafeLoader, pickle, unserialize,
-///                Marshal.load, BinaryFormatter, …). Replaces the old `"yaml"` category so
-///                the floor rule SEC-NO-UNSAFE-DESERIALIZATION-1 and the semgrep rule
-///                camerata.security.yaml-unsafe-load share one category and collapse
-///                correctly when they fire on the same (repo, path, line).
+///   Marshal.load, BinaryFormatter, …). Replaces the old `"yaml"` category so
+///   the floor rule SEC-NO-UNSAFE-DESERIALIZATION-1 and the semgrep rule
+///   camerata.security.yaml-unsafe-load share one category and collapse
+///   correctly when they fire on the same (repo, path, line).
 /// - `"tls"`    — disabled TLS / cert verification
 /// - `"xss"`    — cross-site scripting via a raw-HTML sink (W3)
 /// - `"redirect"` — open redirect via an unvalidated redirect target (W3)
@@ -6123,7 +6131,7 @@ fn finding_dedup_rank(f: &crate::onboard::Finding) -> u8 {
 ///
 /// Decision: docs/decisions/2026-06-23_stack_gating_and_crosstool_dedup.md
 pub(crate) fn dedup_scan_previews(
-    existing: &mut Vec<crate::onboard::Finding>,
+    existing: &mut [crate::onboard::Finding],
     previews: Vec<crate::onboard::Finding>,
 ) -> Vec<crate::onboard::Finding> {
     let mut out: Vec<crate::onboard::Finding> = Vec::with_capacity(previews.len());
@@ -6158,7 +6166,7 @@ pub(crate) fn dedup_scan_previews(
                 let mut new_canonical = preview;
                 new_canonical
                     .also_matches
-                    .extend(existing[idx].also_matches.drain(..));
+                    .append(&mut existing[idx].also_matches);
                 new_canonical.also_matches.push(old_rule_id);
                 existing[idx] = new_canonical;
                 // promoted to existing; don't push to out
@@ -6177,7 +6185,7 @@ pub(crate) fn dedup_scan_previews(
 /// continues to pass without modification. Delegates directly to `dedup_scan_previews`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn dedup_preview_against_floor(
-    existing: &mut Vec<crate::onboard::Finding>,
+    existing: &mut [crate::onboard::Finding],
     previews: Vec<crate::onboard::Finding>,
 ) -> Vec<crate::onboard::Finding> {
     dedup_scan_previews(existing, previews)
@@ -7305,12 +7313,8 @@ async fn onboard_apply(
     State(state): State<AppState>,
     Json(req): Json<ArmReq>,
 ) -> Json<serde_json::Value> {
-    if req.rules.is_empty() {
-        if req.custom.is_empty() {
-            return Json(
-                serde_json::json!({ "ok": false, "message": "No rules selected to apply." }),
-            );
-        }
+    if req.rules.is_empty() && req.custom.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "No rules selected to apply." }));
     }
     let token = state.github_token();
     let Some(token) = token else {
@@ -8809,7 +8813,7 @@ async fn onboard_greenfield(
         },
     };
     state.projects.update(&pid, |p| {
-        p.mark_onboarded(&[repo_label.clone()]);
+        p.mark_onboarded(std::slice::from_ref(&repo_label));
     });
 
     // Record the scaffolded dir as the repo's local path override so subsequent
@@ -14208,9 +14212,7 @@ pub(crate) fn render_selected_rules_for_chat(draft: &serde_json::Value) -> Optio
             .map(String::as_str)
             .filter(|k| !k.starts_with("__"))
             .collect();
-        let scope_note = if visible_repos.is_empty() {
-            "all repos".to_string()
-        } else if visible_repos.len() == repo_display_count {
+        let scope_note = if visible_repos.is_empty() || visible_repos.len() == repo_display_count {
             "all repos".to_string()
         } else {
             visible_repos.join(", ")
@@ -14293,12 +14295,12 @@ async fn active_project_context(State(state): State<AppState>) -> Json<ProjectCo
         };
         let (finding_count, findings_summary) = draft
             .as_ref()
-            .and_then(|d| extract_findings_from_draft(d))
+            .and_then(extract_findings_from_draft)
             .map(|(n, s)| (Some(n), Some(s)))
             .unwrap_or((None, None));
         let scan_results_section = draft
             .as_ref()
-            .and_then(|d| extract_scan_results_from_draft(d))
+            .and_then(extract_scan_results_from_draft)
             .or_else(|| {
                 state
                     .get_last_scan(&project.id)
@@ -14326,12 +14328,12 @@ async fn active_project_context(State(state): State<AppState>) -> Json<ProjectCo
         // as-is so the chat can help interpret the in-progress onboarding state.
         let (finding_count, findings_summary) = draft
             .as_ref()
-            .and_then(|d| extract_findings_from_draft(d))
+            .and_then(extract_findings_from_draft)
             .map(|(n, s)| (Some(n), Some(s)))
             .unwrap_or((None, None));
         let scan_results_section = draft
             .as_ref()
-            .and_then(|d| extract_scan_results_from_draft(d))
+            .and_then(extract_scan_results_from_draft)
             .or_else(|| {
                 state
                     .get_last_scan(&project.id)
@@ -18409,7 +18411,7 @@ mod tests {
             .projects
             .create("Acme", vec![])
             .expect("project created");
-        add_memory(
+        let added = add_memory(
             axum::extract::State(state.clone()),
             axum::extract::Path(p.id.clone()),
             axum::Json(AddMemoryReq {
@@ -18418,9 +18420,14 @@ mod tests {
             }),
         )
         .await;
+        assert_eq!(
+            added.0["ok"], true,
+            "add_memory reports success: {}",
+            added.0
+        );
         let eid = state.projects.active().unwrap().memory[0].id.clone();
         // Edit text + kind (what the modal Save does).
-        patch_memory(
+        let patched = patch_memory(
             axum::extract::State(state.clone()),
             axum::extract::Path((p.id.clone(), eid)),
             axum::Json(PatchMemoryReq {
@@ -18430,6 +18437,11 @@ mod tests {
             }),
         )
         .await;
+        assert_eq!(
+            patched.0["ok"], true,
+            "patch_memory reports success: {}",
+            patched.0
+        );
         let m = state.projects.active().unwrap().memory[0].clone();
         assert_eq!(m.text, "edited learning", "text edited + trimmed");
         assert_eq!(m.kind, crate::project::MemoryKind::Gotcha, "kind edited");
@@ -24244,6 +24256,8 @@ mod tests {
 
     // ── render_scan_results_for_chat ─────────────────────────────────────────
 
+    // too_many_arguments: a test fixture builder; positional fields keep call sites terse.
+    #[allow(clippy::too_many_arguments)]
     fn make_finding(
         severity: &str,
         rule_id: &str,
@@ -26392,7 +26406,7 @@ mod tests {
             empty.len() <= 1,
             "zero intake repos → single-repo path (repo_worktrees = [])"
         );
-        let single = vec![crate::uow::RepoScope {
+        let single = [crate::uow::RepoScope {
             repo: "acme/api".to_string(),
             branch: crate::uow::BranchMode::default(),
         }];
@@ -26400,7 +26414,7 @@ mod tests {
             single.len() <= 1,
             "one intake repo → single-repo path (repo_worktrees = [])"
         );
-        let multi = vec![
+        let multi = [
             crate::uow::RepoScope {
                 repo: "acme/api".to_string(),
                 branch: crate::uow::BranchMode::default(),
@@ -28382,7 +28396,7 @@ mod tests {
 
         // Pure sentinel → the project's single repo.
         assert_eq!(
-            normalize_repos(&[sentinel.clone()], &project_repos),
+            normalize_repos(std::slice::from_ref(&sentinel), &project_repos),
             vec!["me/api".to_string()]
         );
 
@@ -28395,7 +28409,7 @@ mod tests {
         // Multi-repo project: the sentinel expands to ALL of the project's repos.
         let multi = vec!["me/api".to_string(), "me/web".to_string()];
         assert_eq!(
-            normalize_repos(&[sentinel.clone()], &multi),
+            normalize_repos(std::slice::from_ref(&sentinel), &multi),
             vec!["me/api".to_string(), "me/web".to_string()]
         );
 

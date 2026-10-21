@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! END-TO-END: `SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1`'s intra-function DATAFLOW extension —
 //! the build-then-EXECUTE idiom (`v_sql := '...' || p; execute v_sql;`), wired into the
 //! brownfield SCAN, and proven to reach the CURATED finding set as CRITICAL (driven by a

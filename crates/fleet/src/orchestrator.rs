@@ -321,8 +321,10 @@ mod tests {
     fn delegate_models_json_omits_vision_when_disabled_even_if_configured() {
         // Gating is the toggle, not configuration: a populated vision chain with the
         // toggle OFF still emits NO vision key, so the band stays unreachable.
-        let mut m = TierMap::default();
-        m.vision = vec!["claude-vision-model".to_string()];
+        let m = TierMap {
+            vision: vec!["claude-vision-model".to_string()],
+            ..TierMap::default()
+        };
         let json = delegate_models_json(&m, false).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(
@@ -333,8 +335,10 @@ mod tests {
 
     #[test]
     fn delegate_models_json_includes_vision_when_enabled_and_configured() {
-        let mut m = TierMap::default();
-        m.vision = vec!["claude-vision-model".to_string()];
+        let m = TierMap {
+            vision: vec!["claude-vision-model".to_string()],
+            ..TierMap::default()
+        };
         let json = delegate_models_json(&m, true).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(
@@ -403,8 +407,10 @@ mod tests {
     fn orchestrator_mcp_config_includes_vision_model_when_enabled() {
         // With vision enabled + a configured vision model, the orchestrator's delegate
         // models env carries the vision key, making the Designer band reachable.
-        let mut m = TierMap::default();
-        m.vision = vec!["claude-vision-model".to_string()];
+        let m = TierMap {
+            vision: vec!["claude-vision-model".to_string()],
+            ..TierMap::default()
+        };
         let cfg = render_orchestrator_mcp_config(
             Path::new("/bin/camerata-gateway"),
             Path::new("/tmp/s/rules.json"),

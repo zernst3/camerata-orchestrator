@@ -11543,7 +11543,7 @@ mod tests {
     /// `FindingRefJson::bucket` (the matrix entry) and `CuratedSiteJson::bucket` (the SAME
     /// finding's held-for-review row) must read the SAME value — both come from exactly one
     /// `effective_bucket` call per finding now (previously two independent `is_informational`
-    /// + `matrix_bucket` call sites in this file, which happened to agree today but had no
+    /// and `matrix_bucket` call sites in this file, which happened to agree today but had no
     /// structural guarantee against drifting apart). A hedged (`needs-review`) finding is the
     /// sharpest case: it must read `"held"` (C5-4) in BOTH places, never an action bucket — and
     /// it still ships (over-tell, never dropped), just consistently re-bucketed.
@@ -13052,21 +13052,28 @@ mod tests {
     /// means the sample deliverable stops representing what the app actually ships. This
     /// caught real drift as of this pass (the sample copy predated the P2/P6 template edits).
     ///
-    /// `sample-report/` is gitignored (local preview output), so the copy only exists on a
-    /// machine that has generated it. Read it at RUNTIME, not via `include_str!`: a
-    /// compile-time include made the whole server test target fail to build on any fresh
-    /// checkout (CI included). No copy means nothing can have drifted, so the check is moot.
+    /// `sample-report/` is a LOCAL-ONLY, self-ignoring directory (its own `.gitignore` is `*`),
+    /// so it does not exist in a fresh clone or in CI. The copy is therefore read at RUNTIME and
+    /// the check is skipped when it is absent; an `include_str!` here made the whole lib-test
+    /// target fail to compile on any checkout without the preview directory.
     #[test]
     fn sample_report_template_copy_is_byte_identical_to_the_shipped_template() {
         let shipped = include_str!("../templates/audit_report.typ");
         let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../sample-report/audit_report.typ");
-        let Ok(sample) = std::fs::read_to_string(&sample_path) else {
-            return;
+        let sample = match std::fs::read_to_string(&sample_path) {
+            Ok(sample) => sample,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!(
+                    "skipping drift check: {} is absent (sample-report/ is local-only)",
+                    sample_path.display()
+                );
+                return;
+            }
+            Err(e) => panic!("read {}: {e}", sample_path.display()),
         };
         assert_eq!(
-            shipped,
-            sample.as_str(),
+            shipped, sample,
             "sample-report/audit_report.typ has drifted from the shipped template — copy the \
              shipped file over it"
         );

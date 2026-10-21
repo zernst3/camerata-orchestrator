@@ -184,16 +184,15 @@ pub fn is_git_state_mutation(cmd: &str) -> bool {
             return true;
         }
     }
-    if rest.starts_with("checkout") {
-        let after = rest["checkout".len()..].trim_start();
+    if let Some(after) = rest.strip_prefix("checkout") {
+        let after = after.trim_start();
         // `git checkout -- <paths>` or `git checkout .`
-        if after.starts_with("-- ") || after.starts_with(".") {
+        if after.starts_with("-- ") || after.starts_with('.') {
             return true;
         }
     }
-    if rest.starts_with("worktree") {
-        let after = rest["worktree".len()..].trim_start();
-        if after.starts_with("remove") {
+    if let Some(after) = rest.strip_prefix("worktree") {
+        if after.trim_start().starts_with("remove") {
             return true;
         }
     }
@@ -648,7 +647,6 @@ pub fn test_scope_line_ranges(path: &str, content: &str) -> Vec<(usize, usize)> 
         BlockComment,
         StringLit,
         RawString(usize), // number of leading hashes
-        CharLit,
     }
 
     let mut ranges = Vec::new();
@@ -713,17 +711,6 @@ pub fn test_scope_line_ranges(path: &str, content: &str) -> Vec<(usize, usize)> 
                     } else {
                         i += 1;
                     }
-                } else {
-                    i += 1;
-                }
-                continue;
-            }
-            State::CharLit => {
-                if ch == '\\' {
-                    i += 2;
-                } else if ch == '\'' {
-                    state = State::Normal;
-                    i += 1;
                 } else {
                     i += 1;
                 }

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! END-TO-END: Pass 4b-2's `ImportBoundaryChecker`, driven through the REAL deterministic
 //! scan entry point (`onboard::audit_repos`) exactly like `group_a_architectural_checkers_e2e.rs`
 //! proves the Pass 4a checkers. See `docs/design/2026-07-27_ast-extractor-layer.md` §4 Group C

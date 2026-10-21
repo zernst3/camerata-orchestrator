@@ -237,9 +237,9 @@ pub async fn run_fan_out(
 /// `DuplicateRepo` is rejected at `run_fan_out` validation time, so by
 /// construction no two workers share a repo key — this map is always
 /// conflict-free.
-pub fn assemble_by_repo<'a>(
-    results: &'a [WorkerResult],
-) -> std::collections::BTreeMap<String, &'a WorkerResult> {
+pub fn assemble_by_repo(
+    results: &[WorkerResult],
+) -> std::collections::BTreeMap<String, &WorkerResult> {
     let mut map = std::collections::BTreeMap::new();
     for result in results {
         map.insert(result.repo.clone(), result);

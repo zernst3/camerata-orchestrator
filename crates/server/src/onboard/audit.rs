@@ -792,7 +792,7 @@ mod p4_context_tests {
             .iter()
             .find(|f| f.rule_id == "ARCH-NO-SECRETS-IN-URL-1")
             .expect("ARCH-NO-SECRETS-IN-URL-1 must fire");
-        assert!(f.captures.get("secret-kind").is_none());
-        assert!(f.captures.get("gitignore-status").is_none());
+        assert!(!f.captures.contains_key("secret-kind"));
+        assert!(!f.captures.contains_key("gitignore-status"));
     }
 }

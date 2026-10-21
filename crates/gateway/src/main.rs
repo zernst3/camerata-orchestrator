@@ -925,7 +925,6 @@ impl Gateway {
 
         let result = delegate::run_delegated(config, (*self.rule_subset).clone(), &subtask, &tier)
             .await
-            .map(|output| output)
             .unwrap_or_else(|e| e.to_string());
 
         // Observability: record the return. A child that could not finish above its
@@ -1168,12 +1167,13 @@ mod gate_sink_tests {
     // `pub(super)` (not private) so other env-mutating test modules in this file
     // (e.g. `mcp_gated_write_boundary_tests`) can share the SAME lock rather than
     // adding a second, uncoordinated mutex that would race this one over the shared
-    // `CAMERATA_*` env vars.
-    pub(super) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // `CAMERATA_*` env vars. A tokio mutex (not std) because the async tests hold it across
+    // `.await`; sync tests take it with `blocking_lock()`.
+    pub(super) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn sink_path_prefers_explicit_env_then_derives_from_rules_dir() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.blocking_lock();
         // Explicit override wins.
         std::env::set_var(super::GATE_EVENTS_FILE_ENV, "/tmp/explicit-sink.jsonl");
         assert_eq!(
@@ -1193,7 +1193,7 @@ mod gate_sink_tests {
 
     #[test]
     fn rules_file_load_failure_fails_closed_onto_the_full_floor() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.blocking_lock();
         let floor = enforced_gate_rules();
         // Sanity: the full floor is more than the synthetic GOV-1 fixture, and
         // includes the SEC-* content rules that a fail-OPEN [GOV-1] would shed.
@@ -1233,11 +1233,11 @@ mod clarify_tool_tests {
     use rmcp::handler::server::wrapper::Parameters;
 
     // Serialize env-mutating clarify tests so they're order-independent in the binary.
-    static CLARIFY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static CLARIFY_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn clarify_sink_path_prefers_explicit_then_derives_from_rules_dir() {
-        let _guard = CLARIFY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CLARIFY_ENV_LOCK.blocking_lock();
         std::env::set_var(CLARIFY_REQUESTS_FILE_ENV, "/tmp/explicit-clarify.jsonl");
         assert_eq!(
             clarify_requests_sink_path(),
@@ -1257,7 +1257,7 @@ mod clarify_tool_tests {
 
     #[tokio::test]
     async fn ask_clarification_records_a_structured_question_to_the_sink() {
-        let _guard = CLARIFY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CLARIFY_ENV_LOCK.lock().await;
         let dir = std::env::temp_dir().join(format!(
             "cam-clarify-tool-{}-{}",
             std::process::id(),
@@ -1655,7 +1655,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 1. GOV-1: forbidden path ───────────────────────────────────────────────────────
     #[tokio::test]
     async fn forbidden_path_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("gov1");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -1676,7 +1676,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 2. JAIL: absolute path outside the jail ────────────────────────────────────────
     #[tokio::test]
     async fn absolute_path_outside_jail_is_denied_by_jail_not_by_a_rule() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("jail-abs");
         let outside = make_jail("jail-abs-outside");
         let mut env = EnvGuard::default();
@@ -1702,7 +1702,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 3. JAIL: `..` traversal climbing entirely above the jail root ─────────────────
     #[tokio::test]
     async fn dotdot_traversal_escaping_the_jail_root_is_denied() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("jail-dotdot");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -1727,7 +1727,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 4. SEC-NO-HARDCODED-SECRETS-1 ──────────────────────────────────────────────────
     #[tokio::test]
     async fn hardcoded_secret_in_content_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("secrets");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -1750,7 +1750,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 5. SEC-NO-RAW-SQL-CONCAT-1 ─────────────────────────────────────────────────────
     #[tokio::test]
     async fn raw_sql_concat_in_content_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("sql-concat");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -1773,7 +1773,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 6. ARCH-NO-SECRETS-IN-URL-1 ────────────────────────────────────────────────────
     #[tokio::test]
     async fn secret_in_url_content_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("url-secret");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -1796,7 +1796,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 7. SEC-NO-PATH-ESCAPE-1 via a `..` path SEGMENT (jail-legal, rule-forbidden) ──
     #[tokio::test]
     async fn dotdot_segment_that_stays_in_jail_is_denied_by_the_path_escape_rule() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("path-escape-dotdot");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -1818,7 +1818,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 8. SEC-NO-PATH-ESCAPE-1 via a `.git` path segment ──────────────────────────────
     #[tokio::test]
     async fn git_directory_segment_is_denied_by_the_path_escape_rule() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("path-escape-git");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -1836,7 +1836,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 9. SEC-NO-SECRET-FILES-1: a real `.env` ────────────────────────────────────────
     #[tokio::test]
     async fn real_dotenv_file_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("dotenv");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -1854,7 +1854,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 10. SEC-NO-PRIVATE-KEY-1 (ISOLATED subset — see the masking note above) ───────
     #[tokio::test]
     async fn pem_private_key_block_is_denied_in_isolation_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("private-key");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -1882,7 +1882,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 11. SEC-NO-VENDOR-TOKEN-1 ──────────────────────────────────────────────────────
     #[tokio::test]
     async fn vendor_credential_token_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("vendor-token");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -1905,7 +1905,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 12. SEC-NO-SECRET-FILE-1 (ISOLATED subset — see the masking note above) ───────
     #[tokio::test]
     async fn secret_bearing_file_extension_is_denied_in_isolation_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("secret-file-type");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -1926,7 +1926,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 13. SEC-NO-DISABLED-TLS-1 ──────────────────────────────────────────────────────
     #[tokio::test]
     async fn disabled_tls_verification_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("disabled-tls");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -1944,7 +1944,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 14. SEC-NO-UNSAFE-DESERIALIZATION-1 ────────────────────────────────────────────
     #[tokio::test]
     async fn unsafe_deserialization_call_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("unsafe-deser");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -1965,7 +1965,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 15. SEC-NO-CAMERATA-CONFIG-1 ───────────────────────────────────────────────────
     #[tokio::test]
     async fn camerata_config_write_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("camerata-config");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -1984,7 +1984,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 16. SEC-NO-GIT-STATE-MUTATION-1 ────────────────────────────────────────────────
     #[tokio::test]
     async fn git_state_mutating_command_in_content_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("git-mutation");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -2002,7 +2002,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 17. Allow control: a clean, in-jail, rule-compliant write ─────────────────────
     #[tokio::test]
     async fn clean_write_is_allowed_and_lands_on_disk_with_exact_content() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("allow-control");
         let mut env = EnvGuard::default();
         env.set(WORKTREE_ROOT_ENV, &jail);
@@ -2030,7 +2030,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 18. Sink assertion: one deny + one allow, faithfully recorded ─────────────────
     #[tokio::test]
     async fn sink_faithfully_records_a_deny_and_an_allow_verdict() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("sink");
         let sink_dir = std::env::temp_dir().join(format!(
             "cam-gw-mcp-sink-{}-{}",
@@ -2087,7 +2087,7 @@ mod mcp_gated_write_boundary_tests {
     // ── 19. Ordering: jail escape AND rule-forbidden — JAIL must win ──────────────────
     #[tokio::test]
     async fn jail_escape_takes_precedence_over_a_rule_denial() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let jail = make_jail("ordering");
         let outside = make_jail("ordering-outside");
         let mut env = EnvGuard::default();

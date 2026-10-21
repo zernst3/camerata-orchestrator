@@ -107,8 +107,7 @@ impl CheckpointStore {
             .lock()
             .ok()?
             .iter()
-            .filter(|c| c.story_id == story_id && c.resumed.is_none())
-            .last()
+            .rfind(|c| c.story_id == story_id && c.resumed.is_none())
             .cloned()
     }
 

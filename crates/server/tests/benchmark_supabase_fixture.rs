@@ -47,6 +47,7 @@
 //!       matching the decision already recorded in
 //!       `crates/rules/principles/supabase/secrets/supabase-key-service-role-client-1.toml`)
 //!       is a separate, later port; see the full-grade test's D3 comment.
+//!
 //!   D2, D4, D5, D6 and the I3 decoy have NO deterministic path today (no native checker
 //!   answers RLS-permissive-USING(true), public storage buckets, edge-function JWT bypass, or
 //!   `getSession()` trust — see the full-grade test's own comments for exactly why each is

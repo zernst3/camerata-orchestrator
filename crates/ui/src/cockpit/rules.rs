@@ -2548,9 +2548,9 @@ pub(super) fn StepModelRow(
                         saving.set(true);
                         spawn(async move {
                             if set_project_step_model(&pid, step_key, &model).await {
-                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, &format!("{label} model saved."));
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{label} model saved."));
                             } else {
-                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, &format!("Could not save {label} model."));
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Could not save {label} model."));
                             }
                             saving.set(false);
                         });
@@ -3509,9 +3509,8 @@ pub(super) fn RuleCount(label: String, n: usize) -> Element {
 // verif_badge + all rules view-model items now live in the framework-agnostic core
 // (RUST-HEADLESS-CORE-1); re-exported here so all call sites are unchanged.
 pub(super) use camerata_ui_core::rules::{
-    bucket_of, csv_field, default_draft, project_level_insert, rules_csv,
-    rules_needing_option_chosen, split_needs_review, verif_badge, ProposedRuleView, RuleOptionView,
-    RuleSourceView, SelectionBucket,
+    bucket_of, project_level_insert, rules_csv, rules_needing_option_chosen, split_needs_review,
+    verif_badge, ProposedRuleView, RuleOptionView, RuleSourceView, SelectionBucket,
 };
 
 /// Build a human-readable tooltip string from a list of sources.
@@ -5061,6 +5060,12 @@ pub(super) fn RuleDriftNotice(project_id: String) -> Element {
 /// The scope at which a single-rule edit applies. Rules cascade: repo overrides
 /// project which overrides the corpus default. The editor lets the architect pick
 /// which level to write to.
+// dead_code: `SingleRuleEditor` (the only constructor) was unmounted from the Rules page when
+// row -> modal editing replaced the inline editor (ddfc61d), but the repo-scoped override
+// (`POST /api/projects/:id/repos/:repo/rules/:rule_id`) has no other UI entry point yet, so
+// the scope model is kept for re-homing into the rule modal. See
+// docs/decisions/2026-06-21_cockpit_pw_wave.md.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum RuleEditScope {
     /// Edit the project-level rule selection (applies to all repos in the project).
@@ -5101,6 +5106,8 @@ pub(super) async fn fetch_single_rule(
 /// Both handlers read `{ "chosen_option": "opt-id" }` from the body; the scope is
 /// carried by the URL, not a body field. Routing repo edits through the repo path
 /// is what makes the override land at repo level instead of silently at project level.
+// dead_code: see `RuleEditScope` (its only caller, `SingleRuleEditor`, is unmounted).
+#[allow(dead_code)]
 pub(super) async fn save_single_rule_edit(
     project_id: &str,
     rule_id: &str,
@@ -5305,10 +5312,9 @@ pub(super) fn SingleRuleEditor(
 mod tests {
     use super::{
         applied_rule_columns, apply_repos_to_ruleset, corpus_columns, custom_columns,
-        default_draft, domain_from_rule_id, is_inline_only_rule_id, resolve_selection_repos,
-        rule_columns, selection_key, AppliedRuleRow, CellValue, ColumnId, CustomRuleView,
-        ProposedRuleView, RuleOptionView, RuleSelectionView, SelectionBucket,
-        SINGLE_REPO_SELECTION_KEY,
+        domain_from_rule_id, is_inline_only_rule_id, resolve_selection_repos, rule_columns,
+        selection_key, AppliedRuleRow, CellValue, ColumnId, CustomRuleView, ProposedRuleView,
+        RuleOptionView, RuleSelectionView, SelectionBucket, SINGLE_REPO_SELECTION_KEY,
     };
 
     /// Find a column by its `ColumnId` string and run its `accessor` against `row`,
@@ -5346,7 +5352,7 @@ mod tests {
 
         // Sentinel → the one real repo.
         assert_eq!(
-            resolve_selection_repos(&[sentinel.clone()], &all_repos),
+            resolve_selection_repos(std::slice::from_ref(&sentinel), &all_repos),
             vec!["me/api".to_string()]
         );
 
@@ -5357,7 +5363,7 @@ mod tests {
         );
 
         // Empty all_repos → the sentinel is DROPPED, never persisted.
-        assert!(resolve_selection_repos(&[sentinel.clone()], &[]).is_empty());
+        assert!(resolve_selection_repos(std::slice::from_ref(&sentinel), &[]).is_empty());
 
         // A real repo alongside the sentinel dedups against the sentinel's expansion.
         assert_eq!(

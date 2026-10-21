@@ -454,7 +454,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                         r#type: "checkbox",
                         checked: cfg.commit_doc.enabled,
                         onchange: {
-                            let mut config = config.clone();
+                            let mut config = config;
                             move |e: Event<FormData>| {
                                 let checked = e.value() == "true" || e.checked();
                                 if let Some(c) = config.write().as_mut() {
@@ -475,7 +475,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                                 min: "0",
                                 value: cfg.commit_doc.min_body_chars.to_string(),
                                 oninput: {
-                                    let mut config = config.clone();
+                                    let mut config = config;
                                     move |e: Event<FormData>| {
                                         if let Ok(n) = e.value().parse::<usize>() {
                                             if let Some(c) = config.write().as_mut() {
@@ -491,7 +491,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                                 r#type: "checkbox",
                                 checked: cfg.commit_doc.require_story_id,
                                 onchange: {
-                                    let mut config = config.clone();
+                                    let mut config = config;
                                     move |e: Event<FormData>| {
                                         let checked = e.value() == "true" || e.checked();
                                         if let Some(c) = config.write().as_mut() {
@@ -519,7 +519,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                                         placeholder: "e.g. AB or PROJ (empty = bare #42)",
                                         value: cfg.commit_doc.story_id_format.prefix.clone(),
                                         oninput: {
-                                            let mut config = config.clone();
+                                            let mut config = config;
                                             move |e: Event<FormData>| {
                                                 if let Some(c) = config.write().as_mut() {
                                                     c.commit_doc.story_id_format.prefix = e.value().clone();
@@ -533,7 +533,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                                     select {
                                         class: "vcs-settings-select",
                                         onchange: {
-                                            let mut config = config.clone();
+                                            let mut config = config;
                                             move |e: Event<FormData>| {
                                                 let sep = if e.value() == "-" { '-' } else { '#' };
                                                 if let Some(c) = config.write().as_mut() {
@@ -577,7 +577,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                         r#type: "checkbox",
                         checked: cfg.conventional_commit.enabled,
                         onchange: {
-                            let mut config = config.clone();
+                            let mut config = config;
                             move |e: Event<FormData>| {
                                 let checked = e.value() == "true" || e.checked();
                                 if let Some(c) = config.write().as_mut() {
@@ -597,7 +597,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                                 r#type: "text",
                                 value: cfg.conventional_commit.types.join(", "),
                                 oninput: {
-                                    let mut config = config.clone();
+                                    let mut config = config;
                                     move |e: Event<FormData>| {
                                         let types: Vec<String> = e.value()
                                             .split(',')
@@ -634,7 +634,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                         r#type: "checkbox",
                         checked: cfg.branch_naming.enabled,
                         onchange: {
-                            let mut config = config.clone();
+                            let mut config = config;
                             move |e: Event<FormData>| {
                                 let checked = e.value() == "true" || e.checked();
                                 if let Some(c) = config.write().as_mut() {
@@ -654,7 +654,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                                 r#type: "text",
                                 value: cfg.branch_naming.prefixes.join(", "),
                                 oninput: {
-                                    let mut config = config.clone();
+                                    let mut config = config;
                                     move |e: Event<FormData>| {
                                         let prefixes: Vec<String> = e.value()
                                             .split(',')
@@ -692,7 +692,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                         r#type: "checkbox",
                         checked: cfg.ado_link.enabled,
                         onchange: {
-                            let mut config = config.clone();
+                            let mut config = config;
                             move |e: Event<FormData>| {
                                 let checked = e.value() == "true" || e.checked();
                                 if let Some(c) = config.write().as_mut() {
@@ -713,7 +713,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                                 placeholder: "e.g. AB",
                                 value: cfg.ado_link.prefix.clone(),
                                 oninput: {
-                                    let mut config = config.clone();
+                                    let mut config = config;
                                     move |e: Event<FormData>| {
                                         if let Some(c) = config.write().as_mut() {
                                             c.ado_link.prefix = e.value().clone();
@@ -748,7 +748,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                         r#type: "checkbox",
                         checked: cfg.pr.apply_body_rule,
                         onchange: {
-                            let mut config = config.clone();
+                            let mut config = config;
                             move |e: Event<FormData>| {
                                 let checked = e.value() == "true" || e.checked();
                                 if let Some(c) = config.write().as_mut() {
@@ -764,7 +764,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                         r#type: "checkbox",
                         checked: cfg.pr.apply_id_rule,
                         onchange: {
-                            let mut config = config.clone();
+                            let mut config = config;
                             move |e: Event<FormData>| {
                                 let checked = e.value() == "true" || e.checked();
                                 if let Some(c) = config.write().as_mut() {

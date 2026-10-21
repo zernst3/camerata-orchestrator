@@ -817,7 +817,7 @@ const ZONE_B_ALWAYS_SKIP: &[&str] = &[".git"];
 pub fn scan_zone_b(root: &Path, extra_dirs: &[String]) -> Vec<ZoneBCandidate> {
     let mut out = Vec::new();
     scan_zone_b_walk(root, root, extra_dirs, &mut out);
-    out.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    out.sort_by_key(|c| std::cmp::Reverse(c.bytes));
     out
 }
 

@@ -867,7 +867,7 @@ mod tests {
     // non-deterministic AI-advisory tier, and must never inherit an unrelated (or merely
     // co-located) rule's severity.
 
-    fn restored_findings<'a>(vs: &'a [ArchViolation]) -> Vec<&'a ArchViolation> {
+    fn restored_findings(vs: &[ArchViolation]) -> Vec<&ArchViolation> {
         vs.iter()
             .filter(|v| v.rule_id == RULE_RLS_DISABLED_NOT_RESTORED)
             .collect()

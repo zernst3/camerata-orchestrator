@@ -294,7 +294,7 @@ pub async fn execute_live_run(
         model.as_deref(),
         max_iterations,
         skip_layer2,
-        &move |event| record_build_event(&store_cb, &rid_cb, &*seq, event),
+        &move |event| record_build_event(&store_cb, &rid_cb, &seq, event),
         Some(on_activity),
         Some(sink_path.as_path()),
     )
@@ -461,7 +461,7 @@ pub async fn execute_live_run_tiered(
         &tier_map,
         max_iterations,
         skip_layer2,
-        &move |event| record_build_event(&store_cb, &rid_cb, &*seq, event),
+        &move |event| record_build_event(&store_cb, &rid_cb, &seq, event),
         Some(on_activity),
         vision_enabled,
         orch_factory,

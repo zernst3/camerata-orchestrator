@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! END-TO-END: the deterministic `SEC-NO-QUERY-GRAMMAR-INJECTION-1` checker
 //! (`QueryGrammarInjectionChecker`), wired into the brownfield SCAN, and proven to reach the
 //! CURATED finding set — AND proven NOT to be hedged/downgraded by a co-present, CLEAN Row

@@ -161,19 +161,14 @@ impl WritePolicy {
 /// default). `Ids` names an explicit subset of `RuleId`s; the resolution fn
 /// still UNIONS the enforced gate rules in (the gate's floor is never lowered by
 /// a routine's scope), so this only ever ADDS domain rules on top.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleSubsetRef {
     /// Every enforced gate rule (the default: the full governed blend).
+    #[default]
     All,
     /// The enforced gate rules PLUS these explicit domain rule ids.
     Ids(Vec<RuleId>),
-}
-
-impl Default for RuleSubsetRef {
-    fn default() -> Self {
-        RuleSubsetRef::All
-    }
 }
 
 /// The write-jail path a routine's writes are confined to, when it writes at

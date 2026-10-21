@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! END-TO-END: Pass 4a "Group A" architectural checkers (python test-file naming,
 //! UI-UTC-DATES-1) plus the PRODUCTION `ARCH-HANDLER-NO-DB-1` AST checker (Pass 4c,
 //! `camerata_checks::handler_no_db_checker::HandlerNoDbChecker`), driven through the REAL

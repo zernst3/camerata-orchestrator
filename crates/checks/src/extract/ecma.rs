@@ -87,7 +87,7 @@ fn string_literal_text<'s>(node: Node, source: &'s str) -> Option<&'s str> {
 /// its named siblings (TS/JS decorators attach as PRECEDING SIBLINGS of the class member or
 /// declaration they annotate, not as a child of it) — e.g. `@Get('/x')` before a
 /// `method_definition`. Returned in source order (earliest first).
-fn preceding_decorators<'s>(node: Node, source: &'s str) -> Vec<String> {
+fn preceding_decorators(node: Node, source: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = node.prev_named_sibling();
     while let Some(n) = cur {
@@ -711,7 +711,7 @@ mod tests {
         for _ in 0..200 {
             src.push_str("{ a: ");
         }
-        src.push_str("1");
+        src.push('1');
         for _ in 0..200 {
             src.push('}');
         }

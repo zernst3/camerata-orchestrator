@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! END-TO-END: the W1 pipeline-integrity ledger (`camerata_server::scan_ledger::ScanLedger`),
 //! driven through the REAL production entry points (`onboard::audit_repos` ->
 //! `report_export::build_report_json`), mirroring the existing `*_executor_e2e.rs` two-suite

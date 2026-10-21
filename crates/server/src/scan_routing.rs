@@ -100,7 +100,7 @@ const LANGUAGE_PREFIXES: &[(&str, &str)] = &[
 /// process, or unknown) is [`Scope::All`] so it audits every file.
 pub fn rule_scope(rule_id: &str) -> Scope {
     let head = rule_id
-        .split(|c: char| c == '-' || c == '_' || c == ':')
+        .split(['-', '_', ':'])
         .next()
         .unwrap_or("")
         .to_ascii_uppercase();

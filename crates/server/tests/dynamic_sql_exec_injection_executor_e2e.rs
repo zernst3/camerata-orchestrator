@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! END-TO-END: the deterministic `SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1` checker
 //! (`DynamicSqlExecInjectionChecker`), wired into the brownfield SCAN, and proven to reach the
 //! CURATED finding set as CRITICAL (driven by a co-present `GRANT EXECUTE ... TO anon`) — not

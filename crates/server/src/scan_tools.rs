@@ -426,8 +426,8 @@ pub fn languages_from_files(files: &[(String, String)]) -> HashSet<String> {
 /// - `Ruff`    → Python present
 /// - `Eslint`  → JavaScript OR TypeScript present
 /// - `Semgrep` → any semgrep-supported language present (Python, JS, TS, Go,
-///               Java, Ruby, Rust, C#, PHP, C, C++); passes if present_languages
-///               is empty (unknown / can't derive → run conservatively).
+///   Java, Ruby, Rust, C#, PHP, C, C++); passes if present_languages
+///   is empty (unknown / can't derive → run conservatively).
 ///
 /// When `present_languages` is `None`, all tools pass (backward-compat: callers
 /// that haven't threaded language info through yet don't regress).

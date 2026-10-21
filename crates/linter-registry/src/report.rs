@@ -65,7 +65,7 @@ impl ReportRow {
             return "unsourced";
         }
         // If any citation resolves, treat the row as resolving.
-        if self.statuses.iter().any(|s| *s == CitationStatus::Resolves) {
+        if self.statuses.contains(&CitationStatus::Resolves) {
             return "resolves";
         }
         "not-found"
@@ -291,7 +291,7 @@ fn extract_ruff_codes(text: &str, out: &mut Vec<ExtractedCitation>) {
             }
             let digit_len = i - digit_start;
 
-            if digit_len >= 3 && digit_len <= 4 {
+            if (3..=4).contains(&digit_len) {
                 // Must NOT be followed by another letter or digit (avoid matching
                 // CA1031 as a Ruff code — CA rules are handled separately).
                 let followed_by_alnum =
