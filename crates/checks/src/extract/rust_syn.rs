@@ -222,6 +222,84 @@ impl<'s, 'ast> Visit<'ast> for FnVisitor<'s> {
     }
 }
 
+// ─── mod declarations ────────────────────────────────────────────────────────────────────
+
+/// One out-of-line module declaration: `mod foo;` (no body), which tells `rustc` to load the
+/// module's source from another file. See [`mod_decls`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModDecl {
+    /// `mod foo;` gives `"foo"`.
+    pub name: String,
+    /// The verbatim value of a `#[path = "x.rs"]` attribute on the declaration, if any.
+    pub path_attr: Option<String>,
+    /// Names of the enclosing inline `mod a { .. }` blocks, outermost first. They shift the
+    /// directory `rustc` searches for the file (`mod a { mod b; }` in `lib.rs` loads
+    /// `a/b.rs`).
+    pub inline_parents: Vec<String>,
+    pub line: usize,
+}
+
+/// Extract every module declaration WITHOUT a body (`mod foo;`), anywhere in the file,
+/// including inside inline `mod a { .. }` blocks. An inline block is not a file and is not
+/// emitted itself. `cfg` gating is ignored on purpose: `#[cfg(test)] mod tests;` still
+/// declares the file, and "declared" is the whole criterion for the dead-code checker.
+/// Never panics: a parse failure yields an empty vec.
+pub fn mod_decls(source: &str) -> Vec<ModDecl> {
+    let Ok(file) = syn::parse_file(source) else {
+        return Vec::new();
+    };
+    let mut visitor = ModVisitor {
+        parents: Vec::new(),
+        out: Vec::new(),
+    };
+    visitor.visit_file(&file);
+    visitor.out
+}
+
+struct ModVisitor {
+    /// Enclosing inline `mod a { .. }` names, outermost first.
+    parents: Vec<String>,
+    out: Vec<ModDecl>,
+}
+
+impl<'ast> Visit<'ast> for ModVisitor {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        use syn::ext::IdentExt;
+        let name = node.ident.unraw().to_string();
+        if node.content.is_none() {
+            self.out.push(ModDecl {
+                name,
+                path_attr: path_attribute(&node.attrs),
+                inline_parents: self.parents.clone(),
+                line: node.ident.span().start().line,
+            });
+            return;
+        }
+        self.parents.push(name);
+        syn::visit::visit_item_mod(self, node);
+        self.parents.pop();
+    }
+}
+
+/// The string value of a `#[path = "..."]` attribute, if the item carries one.
+fn path_attribute(attrs: &[syn::Attribute]) -> Option<String> {
+    attrs.iter().find_map(|attr| {
+        let syn::Meta::NameValue(nv) = &attr.meta else {
+            return None;
+        };
+        if !nv.path.is_ident("path") {
+            return None;
+        }
+        match &nv.value {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) => Some(s.value()),
+            _ => None,
+        }
+    })
+}
+
 // ─── method calls ────────────────────────────────────────────────────────────────────────
 
 struct CallVisitor {
@@ -413,6 +491,100 @@ mod tests {
         assert!(cs
             .iter()
             .any(|c| c.method == "execute" && c.receiver == "<expr>"));
+    }
+
+    // ── mod declarations ──────────────────────────────────────────────────────
+
+    fn decl(name: &str, path_attr: Option<&str>, parents: &[&str], line: usize) -> ModDecl {
+        ModDecl {
+            name: name.to_string(),
+            path_attr: path_attr.map(str::to_string),
+            inline_parents: parents.iter().map(|s| s.to_string()).collect(),
+            line,
+        }
+    }
+
+    #[test]
+    fn plain_mod_declaration_is_extracted_with_its_line() {
+        let ds = mod_decls(
+            "use x::y;
+mod foo;
+",
+        );
+        assert_eq!(ds, vec![decl("foo", None, &[], 2)]);
+    }
+
+    #[test]
+    fn visibility_does_not_change_the_declaration() {
+        let ds = mod_decls(
+            "pub mod a;
+pub(crate) mod b;
+pub(super) mod c;
+",
+        );
+        let names: Vec<&str> = ds.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn inline_mod_block_is_not_a_declaration_but_its_children_are() {
+        let ds = mod_decls(
+            "mod a {
+    mod b;
+    pub fn f() {}
+}
+",
+        );
+        assert_eq!(ds, vec![decl("b", None, &["a"], 2)]);
+    }
+
+    #[test]
+    fn nested_inline_blocks_list_parents_outermost_first() {
+        let ds = mod_decls(
+            "mod a { mod b { mod c; } }
+",
+        );
+        assert_eq!(ds, vec![decl("c", None, &["a", "b"], 1)]);
+    }
+
+    #[test]
+    fn path_attribute_value_is_kept_verbatim() {
+        let ds = mod_decls("#[path = \"impl/real.rs\"]\nmod real;\n");
+        assert_eq!(ds, vec![decl("real", Some("impl/real.rs"), &[], 2)]);
+    }
+
+    #[test]
+    fn path_attribute_inside_an_inline_block_keeps_the_parent() {
+        let ds = mod_decls("mod a {\n    #[path = \"x.rs\"]\n    mod b;\n}\n");
+        assert_eq!(ds, vec![decl("b", Some("x.rs"), &["a"], 3)]);
+    }
+
+    #[test]
+    fn cfg_gated_declarations_still_declare() {
+        let ds = mod_decls("#[cfg(test)]\nmod tests;\n#[cfg(feature = \"x\")]\nmod x;\n");
+        let names: Vec<&str> = ds.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["tests", "x"]);
+        assert!(ds.iter().all(|d| d.path_attr.is_none()));
+    }
+
+    #[test]
+    fn unrelated_attributes_are_not_a_path_attribute() {
+        let ds = mod_decls("#[doc = \"hello\"]\n#[macro_use]\nmod m;\n");
+        assert_eq!(ds, vec![decl("m", None, &[], 3)]);
+    }
+
+    #[test]
+    fn raw_identifier_module_name_loses_its_prefix() {
+        let ds = mod_decls("mod r#type;\n");
+        assert_eq!(ds[0].name, "type");
+    }
+
+    #[test]
+    fn mod_decls_never_panics_on_bad_input() {
+        assert!(mod_decls("").is_empty());
+        assert!(mod_decls("mod ").is_empty());
+        assert!(mod_decls("\u{0}\u{1}\u{FFFD} not rust").is_empty());
+        assert!(mod_decls("fn f() { let x = ; ").is_empty());
     }
 
     // ── adversarial: malformed / truncated input must never panic ────────────
