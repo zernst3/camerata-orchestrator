@@ -289,9 +289,23 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
       over-application, not a fault
     - `proc-permission-config-1` — `inspectable = false` with `kind = "defect"` and two
       `violates` options is dead machinery; one of the two declarations is wrong
-20. **ONE graded sweep, all five repos** (D12). **Hearth MUST be re-graded** — its 30/46 is
-    invalid, it measured a run whose prompt was 63% engine JSON. All five answer keys exist.
-    Expect roughly $63 and most of a day.
+19e. **Fold in Track 2 BEFORE the sweep (Zach, 2026-10-20).** The graded sweep does not run until
+    the client-readiness items are in the product: machine-readable exports + `manifest.json`
+    (`16b`), corpus staleness check (`16c`), and the W23/W24 latent remainders. Rationale: the
+    sweep must grade the ACTUAL shipped product, and the product is now bigger than scan+PDF.
+
+19f. **Revise the grader for the new product type BEFORE the sweep (Zach, 2026-10-20).** The
+    grader will "likely need to be more thorough and more strict based on the new product type."
+    The product is no longer just a scan + narrative PDF; it is a package (PDF + xlsx + per-set
+    CSV/JSON + manifest + provenance + client-visible staleness date). The grader must assess
+    those surfaces too - manifest integrity/accuracy, cross-artifact agreement, provenance
+    correctness, the exports' completeness - not only finding recall/precision. Keep the grader
+    MODEL fixed across the before/after (per the refinement-loop rule); it is the RUBRIC that
+    gets stricter, not the judge. Scope this as its own step before item 20.
+
+20. **ONE graded sweep, all five repos** (D12), AFTER 19e + 19f. **Hearth MUST be re-graded** —
+    its 30/46 is invalid, it measured a run whose prompt was 63% engine JSON. All five answer
+    keys exist. Expect roughly $63 and most of a day.
 
 ---
 

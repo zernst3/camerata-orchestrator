@@ -15,3 +15,7 @@ commit sits on the branch ready for review + push.
   client-visible `rules_last_reviewed` from the staleness watermark). README confirmed to carry
   only PARTIAL metadata today (purposes/repos/generated); will mirror the new provenance lines.
   Design committed; BUILD sequenced after W27.
+- 2026-10-20: Zach sequencing ruling — Track 2 (exports+manifest, staleness, W23/W24) folds in
+  BEFORE the next graded sweep, and the GRADER gets a thoroughness/strictness revision for the
+  new product type (package, not just scan+PDF) before the sweep. Grader MODEL stays fixed; the
+  RUBRIC gets stricter. Recorded as plan items 19e + 19f, gating item 20 (the sweep).
