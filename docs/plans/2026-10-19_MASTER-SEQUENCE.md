@@ -1,10 +1,44 @@
 # Master sequence — everything pending before the next graded sweep
 
-**This is the resume document.** Written 2026-10-19 at the owner's request: *"I just want to be
+**This is the item ledger** (what is pending, what is done). The single "where to resume" pointer is
+the RESUME HERE banner at the top of `docs/OVERNIGHT_DECISIONS.md`; this doc is what it points into.
+Written 2026-10-19 at the owner's request: *"I just want to be
 sure all the necessary work that is pending is KNOWN about. We will just work through
 everything in sequence until we are ready to start the cycle again."*
 
-Nothing is in progress. Nothing below has been started unless marked DONE.
+> ### Reconciliation against the commit log (2026-10-21, after the Fable audit)
+> The original line here said "nothing below has been started unless marked DONE"; by 10-21 much
+> had landed without being marked. Status per item, verified against `git log`:
+>
+> | item | status | commits |
+> |---|---|---|
+> | 1 W19 gate | DONE | `f785cad` |
+> | 2 W21 artifact gate | DONE | `b632df7` |
+> | 3 model pinning | DONE | `36d5799` |
+> | 4 W22 kind integrity | DONE | `436a5a3` |
+> | 5 Corpus Group 3 (A5.7 roster) | PARTIAL: 2 of 4 | `84e8f4f`; the two needing option rewrites remain |
+> | 6 W23 | PARTIAL | `d88872f`; cross-tier remainder recorded as latent in OVERNIGHT_DECISIONS |
+> | 7 W24 | PARTIAL, then REFRAMED | `14fc75e`, `ac7359f`, `89ea732`; platform-owned remainder became W33 (approved + built, `69d40e1`..`dff2ae9`) |
+> | 8 W28 | DONE | `c9ca239` |
+> | 9 W31 | DONE | `865e66e` |
+> | 10 W25 rendered artifacts | DONE (camerata:allow + product name) | `fa88f36`, `7ee10a6` |
+> | 11 corpus wording batches | PARTIAL | supabase `12e8f69`; non-supabase directives `2a2d1e9`; process/integration `b45258a`; source titles `39f6f9a`. Not yet: slogan labels, hard-newline directives, ~54 template questions, upside-first `why`s, api-layer payment directives (verify each before starting) |
+> | 12 Corpus Group 1 | OPEN | |
+> | 13 Group 4 | DONE | `383ea21` |
+> | 14 W26 | corpus half DONE | `155cab1`, `7bee157`; runtime half rides with W27 |
+> | 15 W27 PDF rebuild | Phase-A unblocked (`f6df35d`); template rewrite OPEN (needs Zach's eye) | |
+> | 16 W32 | (a) DONE `05d94df`; (b) dropped, see note | |
+> | 16b exports + manifest | BUILT (`524a29b`, `54ac30f`, `9209482`, `b2d8524`, `4177244`); 3 of 7 design gates still missing, see 21 | |
+> | 16c corpus staleness | BUILT incl. CLI; LLM sweep agent + load/digest nag OPEN | `41fcb1d` et al. |
+> | 17 W29 | NEXT. Design corrected 2026-10-21 (`2f45aae`) | |
+> | 18 W30 residuals | eslint pin DONE `f52fb48`; other residuals OPEN | |
+> | 19 engine/doc items | `Rejected:` strip DONE `a140459`; `resolve_fix` comment DONE (correction note in place); rest OPEN | |
+> | 19a env-var flake | OPEN (40 env mutations, 3 `#[serial]`) | |
+> | 19b eslint residual | DONE: real cause was version drift + macOS symlink canonicalization | `f52fb48`, `b8941a9`, `b76e8b1` |
+> | 19c supabase option rewrite | DONE | `910697d` |
+> | 19d per-branch severity | OPEN (schema question) | |
+> | 19e / 19f / 20 | OPEN, in order | |
+> | 21 audit follow-ups (new) | OPEN, see section 2b | |
 
 Source documents, none superseded:
 - `2026-10-16_comprehensive-remediation-design.md` — W19-W32 definitions, the three waves
@@ -166,7 +200,8 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
     over the SAME row structs the xlsx builds from (never a new data source). Closes the
     asymmetry where `findings.json` mirrored only All Findings. `findings.json` stays at root as
     the provenance-wrapped headline view. Design: `docs/design/2026-10-20_machine-readable-exports.md`.
-    **Sequence after W27's xlsx worksheet changes** so the set tracks the final sheet layout.
+    **Built before W27** (the design's Sequencing escape hatch). It ships EIGHT datasets, not the
+    six listed above. When W27 reshapes worksheets, re-check the set and the per-sheet gates.
 
 16c. **Corpus staleness check** (Zach, 2026-10-20). A `crates/rules/CORPUS_FRESHNESS.toml`
     watermark (per-domain last-CONFIRMED-current date), a non-fatal nag when a domain is past
@@ -182,7 +217,7 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
 
 > Turnkey build plan: `docs/plans/2026-10-21_w29-execution-plan.md` (per-rule detector+wiring+tests, build order; rule-8 eslint blocker CLEARED by the W30 fix).
 
-> **W24 reframed (2026-10-21):** the platform-owned-table item is the first instance of a NEW FINDING CLASS — real but not client-fixable. Design (pending Zach sign-off): a structured `ownership` axis + its own PDF section + budget exclusion, which SUPERSEDES the original severity-anchor idea (do not fake-cap severity; route by ownership). See `docs/design/2026-10-21_unfixable-findings-class.md`. (per-rule detector+wiring+tests, build order; rule-8 eslint blocker CLEARED by the W30 fix).
+> **W24 reframed (2026-10-21):** the platform-owned-table item is the first instance of a NEW FINDING CLASS — real but not client-fixable. Design (Zach signed off 2026-10-21; built as W33): a structured `ownership` axis + its own PDF section + budget exclusion, which SUPERSEDES the original severity-anchor idea (do not fake-cap severity; route by ownership). See `docs/design/2026-10-21_unfixable-findings-class.md`. (per-rule detector+wiring+tests, build order; rule-8 eslint blocker CLEARED by the W30 fix).
 
 17. **The nine consistency rules + clone detector + 18 safe-twin tests.** TWO hard
     dependencies, both now satisfiable: W19's gate must exist first, and the convention
@@ -246,7 +281,12 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
     all, and a relative severity ordering that survives only as prose in `[decision].why`. It
     is the one place in the pack where a severity claim has no structured home.
 
-19b. **The eslint residual, narrowed 2026-10-20 — it is NOT provisioning.**
+19b. **[DONE 2026-10-21; the narrative below is SUPERSEDED.]** The real root cause had two factors:
+    eslint plugin version drift (fixed by pinning, `f52fb48`) and macOS symlink canonicalization in
+    the repo-scope check (`b8941a9`). The "selector-to-package mapping" suspicion below was wrong.
+    Kept for the record of disproved theories.
+
+    **The eslint residual, narrowed 2026-10-20 — it is NOT provisioning.**
 
     `live_eslint_detects_a_real_exhaustive_deps_violation` has been the single failing test
     all session. Established by direct experiment:
@@ -326,6 +366,24 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
     keys exist. Expect roughly $63 and most of a day.
 
 ---
+
+### 2b. Item 21: follow-ups from the 2026-10-21 Fable audit (nothing dropped)
+
+- **CI gate.** HEAD failed fmt (220 files), clippy (11 `unwrap_used` denials + ~64 warnings), and
+  `test --locked` (lockfile, fixed `4eb3276`). CI never ran on feature branches. Being fixed:
+  rustfmt config + one format commit, all clippy diagnostics, feature-branch push trigger.
+- **Export gates 2, 6 (corrupted-byte clause), 7** from `2026-10-20_machine-readable-exports.md`
+  §Testing are unbuilt. Also update that design's Status line and dataset count (8).
+- **Staleness nag** at corpus load and in the digest (only `camerata corpus check` exists).
+- **`is_in_repo_scope` symlink fix** has no direct unit test with a real symlinked root.
+- **Ownership:** `Generated`/`Vendored` have no producer; `PlatformManaged` dormant by design.
+- **C5-6** is tracked only in an `#[ignore]` reason (`report_export.rs`); give it a ledger line.
+- **W29 corpus rules need Zach's go** (work order §91, protected area).
+- **`domain_to_glob("ui")` excludes `.jsx`**; fix with the first `ui` W29 rule.
+- **Memory location:** Camerata memory lives under the agora-mono project dir, so a session
+  started in this repo does not auto-load it.
+- **`stash@{0}`** (09-28 dead-P1 partial): checked 2026-10-21, fully superseded (every function
+  and test it adds exists at HEAD; the rest is clippy --fix churn). Safe to drop on Zach's OK.
 
 ## 3. Explicitly NOT doing
 

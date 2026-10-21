@@ -1,14 +1,16 @@
 # Overnight autonomous run — decisions needed + progress log
 
-> ## ▶ RESUME HERE (2026-10-21)
-> Branch `feat/audit-report-export` is 100% green (5,864/0) and fully pushed. Docs are current
-> (`docs/OVERVIEW.md` is the new human map). **Next work, paramount: W29 detector verticals.**
-> Build `ARCH-ONE-IMPORT-PATH-1` FIRST (safe, uses the existing `resolver::build_import_graph`,
-> output is a verifiable fact). READ FIRST: `docs/design/2026-10-21_w29-detector-implementation.md`
-> — especially the "False-positive traps" section (the dead-code reachability-inversion trap, the
-> one-import-path relative-position guard). Build rule + detector + positive + safe-twin together,
-> each green-committed. Zach's standing directive: keep developing the next thing; nothing is ever
-> dropped; any defect found MUST be fixed; sequencing matters least.
+> ## ▶ RESUME HERE (updated 2026-10-21, after the Fable 5.1 audit)
+> A Fable audit of the older-model stretch found no lost work and no faked tests (5,864 / 0 / 6
+> ignored verified), but HEAD failed its own CI gate and the W29 design had two errors. Fixed so
+> far: lockfile + recent lints (`4eb3276`), W29 design corrected (`2f45aae`), master sequence
+> reconciled against the commit log. Full follow-up ledger: `docs/plans/2026-10-19_MASTER-SEQUENCE.md`
+> section 2b (item 21). **Next work: W29 detector verticals, `ARCH-ONE-IMPORT-PATH-1` first**, using
+> the CORRECTED algorithm in `docs/design/2026-10-21_w29-detector-implementation.md` (canonical
+> symbol through re-export edges; barrel-internal + test-file + aliased-re-export guards). Detector
+> code + tests can be built now; **corpus TOMLs wait for Zach's recorded go** (work order §91).
+> Zach's standing directive: keep developing the next thing; nothing is ever dropped; any defect
+> found MUST be fixed; sequencing matters least.
 
 
 Started 2026-10-20 (Zach logged off; autonomous continuation of the master sequence).
@@ -20,6 +22,15 @@ commit sits on the branch ready for review + push.
 (none yet)
 
 ## PROGRESS (newest first)
+
+- 2026-10-21: Fable 5.1 audit of the Opus 4.8 stretch. Verdict: no lost work, test claim true,
+  assertion edits legitimate, every "Zach ruled X" traced to a real message. Real gaps: lockfile
+  not committed (CI `--locked` red), CI red for months on fmt/clippy and never ran on branches, W29
+  design keyed ONE-IMPORT-PATH on `to_file` (would never fire) and named nonexistent `arch`/`style`
+  domains, 3 export gates unbuilt and unrecorded, master sequence stale, Camerata memory filed under
+  the agora-mono project dir, an unrecorded 09-28 stash (checked: superseded). All recorded in
+  MASTER-SEQUENCE item 21; lockfile, recent lints, W29 design, reconciliation done. One open
+  confirmation for Zach: the W32(b) "dropped" ruling was inferred from his request for more context.
 
 - 2026-10-20: Design docs extended per Zach's mid-session asks: machine-readable exports now
   include a root `manifest.json` (index + sha256 + schema versions + provenance incl.
