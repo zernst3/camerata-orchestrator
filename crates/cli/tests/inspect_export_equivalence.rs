@@ -162,6 +162,19 @@ async fn server_path_export(report: &ScanReport) -> (String, Vec<u8>) {
     let findings_json_bytes =
         serde_json::to_vec_pretty(&findings_export).expect("findings.json must serialize");
 
+    let mut extra_files: Vec<(String, Vec<u8>)> =
+        xlsx_export::build_csv_exports(&sealed, &dispositions, None, &options)
+            .expect("csv exports must build");
+    extra_files.extend(
+        xlsx_export::build_json_exports(&sealed, &dispositions, None, &options)
+            .expect("json exports must build"),
+    );
+    let provenance = camerata_server::ManifestProvenance {
+        repos: json.cover.repos.clone(),
+        generated_at: json.cover.generated_at.clone(),
+        ..Default::default()
+    };
+
     let stem = camerata_server::report_filename_stem(report);
     let readme = camerata_server::product_export_readme(&stem, &json);
     let zip_bytes = camerata_server::build_product_zip(
@@ -170,6 +183,8 @@ async fn server_path_export(report: &ScanReport) -> (String, Vec<u8>) {
         &xlsx_bytes,
         &findings_json_bytes,
         &readme,
+        &extra_files,
+        &provenance,
     )
     .expect("build_product_zip must succeed");
 
