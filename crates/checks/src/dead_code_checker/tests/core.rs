@@ -649,3 +649,89 @@ fn registers_its_rule_id_and_source_plus_context_globs() {
         assert!(globs.contains(&needle), "{needle} missing from {globs:?}");
     }
 }
+
+// ── G22, G25: workers, URLs and registries are literal mentions ────────────────
+
+#[test]
+fn twin_worker_urls_and_import_scripts_are_mentions() {
+    let f = files(vec![
+        (
+            "src/main.ts",
+            "import './shell';\nconst w = new Worker(new URL('./crunch-worker.ts', import.meta.url));\n",
+        ),
+        ("src/crunch-worker.ts", "self.onmessage = () => {};\n"),
+        ("src/shell.js", "importScripts('sw-helpers.js');\n"),
+        ("src/sw-helpers.js", "self.x = 1;\n"),
+    ]);
+    assert_silent(&f);
+}
+
+#[test]
+fn twin_plugin_registry_that_lists_the_files_keeps_them_live() {
+    let f = files(vec![
+        (
+            "src/registry.ts",
+            "export const all = ['./billing.plugin', './shipping.plugin'];\n",
+        ),
+        ("src/plugins/billing.plugin.ts", "export default 1;\n"),
+        ("src/plugins/shipping.plugin.ts", "export default 1;\n"),
+    ]);
+    // `registry.ts` itself is unreferenced, so the whole group is dead together: the listing
+    // only helps when the registry is reachable. Add the entry point that loads it.
+    let vs = run(&f);
+    assert_eq!(vs.len(), 1, "{vs:#?}");
+    assert!(
+        vs[0].message.contains("src/registry.ts"),
+        "{}",
+        vs[0].message
+    );
+    let mut live = f.clone();
+    live.push(("src/app.ts".into(), "import './registry';\n".into()));
+    assert_silent(&live);
+}
+
+#[test]
+fn a_plugin_file_that_nothing_lists_is_the_accepted_residual_risk_and_names_the_marker() {
+    let f = files(vec![
+        ("src/app.ts", "export {};\n"),
+        ("src/plugins/billing.plugin.ts", "export default 1;\n"),
+    ]);
+    let vs = run(&f);
+    assert_eq!(vs.len(), 1, "{vs:#?}");
+    assert!(vs[0].message.contains("keep-file:"), "{}", vs[0].message);
+}
+
+// ── scale ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_large_repository_is_analysed_without_blowing_up() {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    // A 2,000-module chain from one entry point, 300 stranded modules and 300 context files.
+    pairs.push(("src/app.ts".into(), "import './chain/m0';\n".into()));
+    for i in 0..2000 {
+        let next = if i + 1 < 2000 {
+            format!("import './m{}';\n", i + 1)
+        } else {
+            String::new()
+        };
+        pairs.push((
+            format!("src/chain/m{i}.ts"),
+            format!("{next}export const v{i} = {i};\n"),
+        ));
+    }
+    for i in 0..300 {
+        pairs.push((
+            format!("src/stranded/s{i}x.ts"),
+            format!("export const s{i} = {i};\n"),
+        ));
+        pairs.push((format!("docs/note{i}.md"), "# notes\n".repeat(20)));
+    }
+    let vs = run(&pairs);
+    assert_eq!(
+        vs.len(),
+        1,
+        "300 stranded files roll up to one folder: {}",
+        vs.len()
+    );
+    assert_eq!(vs[0].object.as_deref(), Some("src/stranded/"));
+}
