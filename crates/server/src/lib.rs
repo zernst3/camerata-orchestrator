@@ -35,7 +35,7 @@ pub mod ai_audit;
 pub mod api_agent_driver;
 pub mod arm;
 pub mod auto_fire;
-pub mod dep_audit;
+pub mod checkpoint;
 pub mod clarify;
 pub mod clarify_resume;
 pub mod connections;
@@ -44,32 +44,32 @@ pub mod connections;
 /// resulting Camerata project. See the module doc comment for the full flow.
 pub mod create_app;
 pub mod decompose;
+pub mod dep_audit;
 pub mod draft;
 pub mod enforcement_ledger;
-pub mod checkpoint;
 pub mod escalation;
 pub mod eval;
 pub mod evidence;
 pub mod feature_flags;
 pub mod fix;
-pub mod grounding;
 pub mod github_issues;
+pub mod grounding;
 pub mod investigation_run;
 pub mod jobs;
 // `lifecycle` (UowStage state machine + transitions) is now the framework-agnostic
 // `camerata_app_core::lifecycle` (RUST-HEADLESS-CORE-1); re-exported so `crate::lifecycle::*` call
 // sites (uow, lib) are unchanged.
 pub use camerata_app_core::lifecycle;
+pub mod dev_implement_run;
 pub mod live_fleet;
 pub mod llm;
 pub mod notify;
 pub mod onboard;
-pub mod ownership;
 /// `POST /api/orchestrator/message` — the architect-orchestrator's first
 /// functional turn (real LLM + real governed execution seam). See the module doc.
 pub mod orchestrator_message;
+pub mod ownership;
 pub mod pr;
-pub mod dev_implement_run;
 pub mod pr_resolve_run;
 pub mod project;
 pub mod provider;
@@ -81,50 +81,23 @@ pub mod report_export;
 pub mod review_agent;
 pub mod routine;
 pub mod run;
+pub mod scan_cache;
+pub mod scan_routing;
+pub mod scan_tools;
+pub mod scope_registration;
+pub mod stall_sweep;
 /// Excel workbook export (product-export, Pass C): `build_workbook`, the Excel sibling of
 /// `report_export::build_report_json`. See the module doc comment and
 /// `docs/design/2026-07-27_product-export.md`.
 pub mod xlsx_export;
-pub mod scope_registration;
-pub mod scan_cache;
-pub mod scan_routing;
-pub mod scan_tools;
-pub mod stall_sweep;
 // `schedule` (routine string parsing + is_due/next_fire) is now the framework-agnostic
 // `camerata_app_core::schedule` (RUST-HEADLESS-CORE-1); re-exported so `crate::schedule::*` call
 // sites (auto_fire, lib) are unchanged.
 pub use camerata_app_core::schedule;
-pub mod tool_provisioning;
-pub mod model_tier;
-pub mod settings;
-pub mod story_docs_gate;
-pub mod suppression;
-/// GAP-2: the shared commit / PR / branch chokepoint gate. Every server-side VCS action
-/// funnels through `vcs_choke` so a project's configured process rules are actually enforced
-/// (HARD-BLOCK on violation), not merely configurable via the bypass endpoint.
-pub mod vcs_choke;
-pub mod terminal;
-pub mod test_tamper;
 /// Layer-3 CI workflow generator — produces `.github/workflows/camerata-gates.yml`
 /// from the built-in language gate commands + manifest checks. See
 /// `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
 pub mod credentials;
-pub mod model_registry;
-pub mod provider_policy;
-pub mod model_profile_cascade;
-pub mod rate_limit;
-pub mod workflow_gen;
-pub mod transcript;
-pub mod uow;
-pub mod usage_ledger;
-pub mod update_branch_run;
-pub mod workitems;
-pub mod workspace;
-/// W1: the pipeline-integrity ledger — per-rule "did it actually run" tracking and
-/// per-stage row-accounting, so a rule that never ran can never be reported as
-/// "verified clean" and a row that vanishes between pipeline stages can never go
-/// unnoticed. See the module doc comment and `docs/plans/` for the defects this closes.
-pub mod scan_ledger;
 /// W6 / I2: the PRE-FLIGHT INTEGRITY GATE — turns the `scan_ledger` summary a human used to
 /// eyeball into a verdict with an exit code, so a silently degraded scan is caught before a
 /// graded run is paid for rather than after. See the module doc comment.
@@ -132,6 +105,33 @@ pub mod integrity_gate;
 /// W1 item 4: corpus-level build gate — every rule declaring `enforcement = "mechanical"`
 /// must resolve to a real wired detector. See the module doc comment.
 mod mechanical_gate;
+pub mod model_profile_cascade;
+pub mod model_registry;
+pub mod model_tier;
+pub mod provider_policy;
+pub mod rate_limit;
+/// W1: the pipeline-integrity ledger — per-rule "did it actually run" tracking and
+/// per-stage row-accounting, so a rule that never ran can never be reported as
+/// "verified clean" and a row that vanishes between pipeline stages can never go
+/// unnoticed. See the module doc comment and `docs/plans/` for the defects this closes.
+pub mod scan_ledger;
+pub mod settings;
+pub mod story_docs_gate;
+pub mod suppression;
+pub mod terminal;
+pub mod test_tamper;
+pub mod tool_provisioning;
+pub mod transcript;
+pub mod uow;
+pub mod update_branch_run;
+pub mod usage_ledger;
+/// GAP-2: the shared commit / PR / branch chokepoint gate. Every server-side VCS action
+/// funnels through `vcs_choke` so a project's configured process rules are actually enforced
+/// (HARD-BLOCK on violation), not merely configurable via the bypass endpoint.
+pub mod vcs_choke;
+pub mod workflow_gen;
+pub mod workitems;
+pub mod workspace;
 
 use std::sync::Arc;
 
@@ -190,7 +190,9 @@ pub struct AppState {
     /// `active_project_context` as the authoritative source for grounding, with the
     /// UI-round-tripped draft as a first-priority fallback. In-memory only (v1); does not
     /// survive a process restart (a v2 concern).
-    last_scan: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, crate::onboard::ScanReport>>>,
+    last_scan: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, crate::onboard::ScanReport>>,
+    >,
     /// Project-agnostic fallback: the single most-recently completed scan, regardless of which
     /// project was active at scan time.  Mirrors `last_scan` but keyed only on recency.
     ///
@@ -407,7 +409,11 @@ impl AppState {
                 // human-gated before they execute (the dial can never override this —
                 // see the plan doc), so one showing up here at all is notable; every
                 // other class is routine.
-                let severity = if decision.class == "irreversible" { "warn" } else { "info" };
+                let severity = if decision.class == "irreversible" {
+                    "warn"
+                } else {
+                    "info"
+                };
                 let detail = serde_json::to_string(&decision).unwrap_or_default();
                 self.record_governance(
                     camerata_persistence::GovernanceEvent::new(
@@ -604,7 +610,11 @@ impl AppState {
             }
             soft.push('\n');
         }
-        let soft = if soft.trim().is_empty() { None } else { Some(soft) };
+        let soft = if soft.trim().is_empty() {
+            None
+        } else {
+            Some(soft)
+        };
 
         let base = crate::grounding::assemble(rule_section, &repo_digests, &unresolved);
         match (soft, base) {
@@ -694,16 +704,10 @@ impl AppState {
     /// Also updates [`Self::recent_scan`] so the project-agnostic fallback always reflects
     /// the most recently completed scan, regardless of which project was active.
     pub(crate) fn set_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
-        let mut guard = self
-            .last_scan
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(project_id, report.clone());
         drop(guard); // release per-project lock before acquiring recent_scan lock
-        let mut recent = self
-            .recent_scan
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut recent = self.recent_scan.lock().unwrap_or_else(|e| e.into_inner());
         *recent = Some(report);
     }
 
@@ -711,10 +715,7 @@ impl AppState {
     /// Returns a clone so callers do not hold the lock across await points.
     /// Fail-soft on lock poisoning: returns `None` rather than panicking.
     pub(crate) fn get_last_scan(&self, project_id: &str) -> Option<crate::onboard::ScanReport> {
-        let guard = self
-            .last_scan
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let guard = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
         guard.get(project_id).cloned()
     }
 
@@ -729,10 +730,7 @@ impl AppState {
     /// Fail-soft on lock poisoning: returns `None` rather than panicking.
     #[allow(dead_code)]
     pub(crate) fn get_recent_scan(&self) -> Option<crate::onboard::ScanReport> {
-        let guard = self
-            .recent_scan
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let guard = self.recent_scan.lock().unwrap_or_else(|e| e.into_inner());
         guard.clone()
     }
 
@@ -806,9 +804,9 @@ impl AppState {
                 // if it can't open, a no-op ledger is used and runs/scans are unaffected.
                 let ledger_path = dir.join("enforcement_catches.db");
                 state.enforcement_ledger = tokio::task::block_in_place(|| {
-                    handle.block_on(
-                        crate::enforcement_ledger::EnforcementLedger::open(&ledger_path),
-                    )
+                    handle.block_on(crate::enforcement_ledger::EnforcementLedger::open(
+                        &ledger_path,
+                    ))
                 });
 
                 // Governance-event audit trail (Phase H1 foundation): a READABLE SQLite
@@ -920,8 +918,7 @@ impl AppState {
         // Production path: use the OS keychain (macOS Keychain, Windows Credential
         // Manager, Secret Service on Linux) so credentials survive restarts without
         // living in any file on disk.
-        state.credential_store =
-            Arc::new(crate::credentials::KeyringCredentialStore);
+        state.credential_store = Arc::new(crate::credentials::KeyringCredentialStore);
         // Hydrate the Anthropic API key from the keychain into the `ANTHROPIC_API_KEY`
         // env var so the existing env-driven selection sites (the agent driver's
         // `anthropic_api_backend_key`) honor a keychain-stored key. The keychain wins
@@ -1023,12 +1020,21 @@ pub fn router(state: AppState) -> Router {
         // Per-project backend (docs/design/2026-09-22_per-project-backend.md): Cli | Api.
         .route("/api/projects/:id/backend", post(set_backend_handler))
         // Stall-detection thresholds: per-project idle timeout config.
-        .route("/api/projects/:id/stall-thresholds", post(set_stall_thresholds_handler))
+        .route(
+            "/api/projects/:id/stall-thresholds",
+            post(set_stall_thresholds_handler),
+        )
         // Audit-integrated alternative recommendation (docs/design/2026-09-22_audit-
         // integrated-alternatives.md): batched targeted rescan of operator-overridden
         // multi-option rules, and persisting the current per-rule selection.
-        .route("/api/projects/:id/rescan-alternatives", post(rescan_alternatives_handler))
-        .route("/api/projects/:id/accept-alternatives", post(accept_alternatives_handler))
+        .route(
+            "/api/projects/:id/rescan-alternatives",
+            post(rescan_alternatives_handler),
+        )
+        .route(
+            "/api/projects/:id/accept-alternatives",
+            post(accept_alternatives_handler),
+        )
         // L3 agentic code-review gate: per-project opt-in (R7).
         .route("/api/projects/:id/l3-review", post(set_l3_review_handler))
         // Work hierarchy schema (design-page work-type graph): read (GET) + replace (POST).
@@ -1037,17 +1043,17 @@ pub fn router(state: AppState) -> Router {
             get(get_hierarchy_handler).post(set_hierarchy_handler),
         )
         // Model Efficiency Profile: preview (GET) and apply (POST).
-        .route("/api/projects/:id/model-profile/preview", get(preview_model_profile))
+        .route(
+            "/api/projects/:id/model-profile/preview",
+            get(preview_model_profile),
+        )
         .route("/api/projects/:id/model-profile", post(apply_model_profile))
         // VCS-gate process-rule configuration + auditable bypass (issue #65).
         .route(
             "/api/projects/:id/process-rule-config",
             get(get_process_rule_config).post(set_process_rule_config_handler),
         )
-        .route(
-            "/api/projects/:id/vcs-gate/bypass",
-            post(vcs_gate_bypass),
-        )
+        .route("/api/projects/:id/vcs-gate/bypass", post(vcs_gate_bypass))
         .route("/api/provider", get(provider_info))
         .route("/api/connections", get(connections_status))
         .route("/api/notifications", get(notifications_feed))
@@ -1060,10 +1066,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/audit/start", post(onboard_audit_start))
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
-        .route(
-            "/api/onboard/finding-context",
-            get(onboard_finding_context),
-        )
+        .route("/api/onboard/finding-context", get(onboard_finding_context))
         .route("/api/onboard/finding-fix", get(onboard_finding_fix))
         .route("/api/git/detect-repo", post(detect_repo))
         .route("/api/gate-probe", post(gate_probe))
@@ -1100,7 +1103,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stories/:id/children", get(list_children))
         .route("/api/routines", get(list_routines).post(create_routine))
         .route("/api/routines/templates", get(list_routine_templates))
-        .route("/api/routines/templates/:id/instantiate", post(instantiate_routine_from_template))
+        .route(
+            "/api/routines/templates/:id/instantiate",
+            post(instantiate_routine_from_template),
+        )
         .route("/api/routines/draft-prompt", post(draft_routine_prompt))
         .route(
             "/api/routines/:id",
@@ -1144,7 +1150,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/settings/chat-model", post(set_chat_model))
         .route("/api/settings/chat-backend", post(set_chat_backend_handler))
         // Pass 2 (provider-safety UI): the settings-panel "Data safety" toggle + pin.
-        .route("/api/settings/provider-policy", post(set_provider_policy_handler))
+        .route(
+            "/api/settings/provider-policy",
+            post(set_provider_policy_handler),
+        )
         .route(
             "/api/projects/:id/checkout",
             get(checkout_status).post(checkout_project),
@@ -1152,10 +1161,7 @@ pub fn router(state: AppState) -> Router {
         // Derived readiness gate + "link existing local clone" (readiness-gate ADR).
         .route("/api/projects/:id/readiness", get(project_readiness))
         .route("/api/projects/:id/repos/:repo/link", post(link_repo))
-        .route(
-            "/api/projects/:id/reset-onboarding",
-            post(reset_onboarding),
-        )
+        .route("/api/projects/:id/reset-onboarding", post(reset_onboarding))
         .route("/api/projects/:id/branch", post(checkout_branch))
         .route("/api/projects/:id/ship", post(ship_repo))
         // ── Local git controls (issue #37) ───────────────────────────────────
@@ -1179,7 +1185,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/workitems/comments", post(workitems_comments))
         .route("/api/workitems/assignees", post(workitems_assignees))
         .route("/api/workitems/assign", post(workitems_assign))
-        .route("/api/workitems/updated-check", post(workitems_updated_check))
+        .route(
+            "/api/workitems/updated-check",
+            post(workitems_updated_check),
+        )
         .route("/api/workitems/set-parent", post(workitems_set_parent))
         .route("/api/me", get(me))
         .route("/api/uows", get(uows_list))
@@ -1188,23 +1197,37 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/blank", post(uow_blank))
         .route("/api/uow/:story_id/author", post(uow_author))
         // ── UoW file attachments (2026-07-01) ─────────────────────────────────
-        .route("/api/uow/:story_id/attachments", get(uow_list_attachments).post(uow_add_attachment))
-        .route("/api/uow/:story_id/attachments/:name", get(uow_get_attachment).delete(uow_remove_attachment))
+        .route(
+            "/api/uow/:story_id/attachments",
+            get(uow_list_attachments).post(uow_add_attachment),
+        )
+        .route(
+            "/api/uow/:story_id/attachments/:name",
+            get(uow_get_attachment).delete(uow_remove_attachment),
+        )
         // ── UoW Mermaid diagram (2026-07-01) ──────────────────────────────────
-        .route("/api/uow/:story_id/diagram", get(uow_get_diagram).post(uow_generate_diagram).delete(uow_clear_diagram))
+        .route(
+            "/api/uow/:story_id/diagram",
+            get(uow_get_diagram)
+                .post(uow_generate_diagram)
+                .delete(uow_clear_diagram),
+        )
         // ── UoW mockup window (2026-07-01) ────────────────────────────────────
         .route("/api/uow/:story_id/mockup", post(uow_generate_mockup))
         // ── Design draft-tree (2026-07-01) ────────────────────────────────────
         .route("/api/designs/blank", post(design_blank))
         .route("/api/designs/:id/author", post(design_author))
-        .route("/api/designs/:id/nodes", get(design_list_nodes).post(design_materialize_nodes))
-        .route("/api/designs/:id/nodes/:node_id", axum::routing::delete(design_delete_node))
+        .route(
+            "/api/designs/:id/nodes",
+            get(design_list_nodes).post(design_materialize_nodes),
+        )
+        .route(
+            "/api/designs/:id/nodes/:node_id",
+            axum::routing::delete(design_delete_node),
+        )
         .route("/api/designs/:id/publish", post(design_publish))
         .route("/api/designs/:id/status", post(design_set_status))
-        .route(
-            "/api/designs/:id",
-            axum::routing::delete(design_delete),
-        )
+        .route("/api/designs/:id", axum::routing::delete(design_delete))
         .route("/api/projects/:id/designs", get(list_project_designs))
         .route(
             "/api/uow/:story_id/set-draft-parent",
@@ -1215,11 +1238,20 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/:story_id", get(uow_get).delete(uow_delete))
         .route("/api/uow/:story_id/status", post(uow_set_status))
         .route("/api/uow/:story_id/branch", post(uow_set_branch))
-        .route("/api/uow/:story_id/publish-repos", post(uow_set_publish_repos))
+        .route(
+            "/api/uow/:story_id/publish-repos",
+            post(uow_set_publish_repos),
+        )
         .route("/api/uow/:story_id/history", post(uow_append_history))
         // ── 3-phase cockpit state (#104 / #105) ───────────────────────────────
-        .route("/api/uow/:story_id/intake/context", post(uow_set_intake_context))
-        .route("/api/uow/:story_id/intake/repos", post(uow_set_intake_repos))
+        .route(
+            "/api/uow/:story_id/intake/context",
+            post(uow_set_intake_context),
+        )
+        .route(
+            "/api/uow/:story_id/intake/repos",
+            post(uow_set_intake_repos),
+        )
         // Per-repo Ship (R3.f / R6): push + open PR for each in-scope repo's story branch.
         // This is the multi-repo generalisation of `POST /api/uow/:story_id/pr/open`.
         .route("/api/uow/:story_id/intake/ship", post(uow_intake_ship))
@@ -1332,7 +1364,9 @@ fn spawn_startup_openrouter_refresh(state: &AppState) {
     let model_registry = state.model_registry.clone();
     let credential_store = state.credential_store.clone();
     tokio::spawn(async move {
-        model_registry.try_refresh_from_store(credential_store.as_ref()).await;
+        model_registry
+            .try_refresh_from_store(credential_store.as_ref())
+            .await;
     });
 }
 
@@ -1360,7 +1394,9 @@ fn trigger_openrouter_refresh_if_needed(
     }
     let registry = model_registry.clone();
     tokio::spawn(async move {
-        registry.try_refresh_from_store(credential_store.as_ref()).await;
+        registry
+            .try_refresh_from_store(credential_store.as_ref())
+            .await;
     });
     true
 }
@@ -1500,11 +1536,8 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
             // no project repos to sweep. This is a REPO-ONLY sweep (not a single active
             // project's view): use `list_for_repos`, NOT `list_for_project`. Blank drafts
             // have no worktree and no resolvable repo, so they must be excluded here.
-            let project_repos: Vec<String> = projects
-                .list()
-                .into_iter()
-                .flat_map(|p| p.repos)
-                .collect();
+            let project_repos: Vec<String> =
+                projects.list().into_iter().flat_map(|p| p.repos).collect();
             let scoped_uows = if project_repos.is_empty() {
                 Vec::new()
             } else {
@@ -1561,7 +1594,9 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
                         if mode != camerata_checks::janitor::JanitorMode::Off {
                             let dry_run = mode == camerata_checks::janitor::JanitorMode::DryRun;
                             let worktrees_root = clone.join(".camerata-worktrees");
-                            for orphan in camerata_checks::janitor::list_orphan_worktree_dirs(&clone) {
+                            for orphan in
+                                camerata_checks::janitor::list_orphan_worktree_dirs(&clone)
+                            {
                                 let outcome = camerata_checks::janitor::reclaim_dir(
                                     &orphan,
                                     &worktrees_root,
@@ -1577,8 +1612,10 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
                                         );
                                     },
                                 );
-                                if let camerata_checks::janitor::ReclaimOutcome::Skipped { reason, .. } =
-                                    outcome
+                                if let camerata_checks::janitor::ReclaimOutcome::Skipped {
+                                    reason,
+                                    ..
+                                } = outcome
                                 {
                                     tracing::debug!(
                                         path = %orphan.display(),
@@ -1658,7 +1695,9 @@ async fn stories(State(state): State<AppState>) -> Result<Json<Vec<CanonicalStor
         return Ok(Json(Vec::new()));
     };
     let in_scope = |s: &CanonicalStory| -> bool {
-        s.targets.iter().any(|t| p.repos.iter().any(|r| r == &t.repo))
+        s.targets
+            .iter()
+            .any(|t| p.repos.iter().any(|r| r == &t.repo))
             || s.external_ref
                 .as_ref()
                 .and_then(|e| e.container.as_ref())
@@ -1787,8 +1826,8 @@ async fn start_run(
 /// underway. The forward drive is best-effort: a UoW already past these stages is left
 /// as-is, never moved backward.
 pub fn ensure_development_gate(state: &AppState, story_id: &str) -> Result<(), String> {
-    use camerata_worktracker::investigation::decisions_approved_for_development;
     use crate::lifecycle::UowStage;
+    use camerata_worktracker::investigation::decisions_approved_for_development;
 
     let uow = state.uow.get_or_create(story_id);
 
@@ -1920,7 +1959,9 @@ async fn resume_governed_run(
         Ok(Some(s)) => (s.title, s.description),
         _ => (story_id.clone(), String::new()),
     };
-    let run_id = state.runs.create(&story_id, mode, crate::run::RunKind::Watched);
+    let run_id = state
+        .runs
+        .create(&story_id, mode, crate::run::RunKind::Watched);
     state
         .record_governance(
             camerata_persistence::GovernanceEvent::info(run_id.clone(), "run_started", "system")
@@ -2232,7 +2273,9 @@ async fn spawn_brownfield_dev_run(
         .await;
         runs_for_clear.clear_abort(&rid_for_clear);
     });
-    state.runs.register_abort(&rid_for_clear2, handle.abort_handle());
+    state
+        .runs
+        .register_abort(&rid_for_clear2, handle.abort_handle());
 }
 
 /// path has no layer-2 bounce, so the flag is a no-op there.
@@ -2255,7 +2298,9 @@ async fn start_governed_run(
         .record_governance(
             camerata_persistence::GovernanceEvent::info(run_id.clone(), "run_started", "system")
                 .with_story_id(story_id.to_string())
-                .with_reason(format!("governed run started (mode={mode}, kind={kind_label})")),
+                .with_reason(format!(
+                    "governed run started (mode={mode}, kind={kind_label})"
+                )),
         )
         .await;
     let store = state.runs.clone();
@@ -2272,8 +2317,8 @@ async fn start_governed_run(
         // Resolve the effective tier map for this run: caller-supplied map takes
         // precedence (explicit per-run override); fall back to the project's
         // persisted tier map so the project settings panel is authoritative.
-        let tier_map: Option<crate::model_tier::TierMap> = tier_map
-            .or_else(|| state.projects.active().map(|p| p.tier_map));
+        let tier_map: Option<crate::model_tier::TierMap> =
+            tier_map.or_else(|| state.projects.active().map(|p| p.tier_map));
 
         // The active project's Designer (vision) band toggle. Gates whether the
         // orchestrator's delegate-models map carries a `"vision"` tier at all; when
@@ -2319,27 +2364,25 @@ async fn start_governed_run(
 
         // Try to resolve the UoW's worktree from the active project's settings.
         // We require an active project to have a resolvable workspace root / repo override.
-        let worktree = if let (Some(branch), Some(_proj)) = (
-            uow_branch.as_deref(),
-            state.projects.active(),
-        ) {
-            // Derive repo from story_id (owner/repo#num → owner/repo).
-            let repo_from_story = story_id
-                .rsplit_once('#')
-                .map(|(r, _)| r)
-                .unwrap_or(story_id);
-            let override_path = state.settings.repo_path(repo_from_story);
-            let workspace_root = state.settings.workspace_root();
-            crate::workspace::resolve_uow_worktree(
-                override_path.as_deref(),
-                workspace_root.as_deref(),
-                repo_from_story,
-                branch,
-            )
-            .await
-        } else {
-            None
-        };
+        let worktree =
+            if let (Some(branch), Some(_proj)) = (uow_branch.as_deref(), state.projects.active()) {
+                // Derive repo from story_id (owner/repo#num → owner/repo).
+                let repo_from_story = story_id
+                    .rsplit_once('#')
+                    .map(|(r, _)| r)
+                    .unwrap_or(story_id);
+                let override_path = state.settings.repo_path(repo_from_story);
+                let workspace_root = state.settings.workspace_root();
+                crate::workspace::resolve_uow_worktree(
+                    override_path.as_deref(),
+                    workspace_root.as_deref(),
+                    repo_from_story,
+                    branch,
+                )
+                .await
+            } else {
+                None
+            };
 
         if crate::dev_implement_run::is_brownfield(worktree.as_deref()) {
             // Brownfield: implement in-place in the UoW's worktree.
@@ -2390,8 +2433,11 @@ async fn start_governed_run(
                     // The compliance-safety gate: the active project's backend setting,
                     // threaded into the lead/child driver factory. No active project floors
                     // to `ProjectBackend::Cli` (the same zero-setup default a fresh project gets).
-                    let live_backend =
-                        state.projects.active().map(|p| p.backend).unwrap_or_default();
+                    let live_backend = state
+                        .projects
+                        .active()
+                        .map(|p| p.backend)
+                        .unwrap_or_default();
                     // LIFECYCLE-1: register the abort handle so a Stop reaps the greenfield
                     // fleet's live agent subprocesses (kill_on_drop). Cleared on finish.
                     let runs_for_clear = state.runs.clone();
@@ -2416,7 +2462,9 @@ async fn start_governed_run(
                         .await;
                         runs_for_clear.clear_abort(&rid_for_clear);
                     });
-                    state.runs.register_abort(&rid_register, handle.abort_handle());
+                    state
+                        .runs
+                        .register_abort(&rid_register, handle.abort_handle());
                 }
                 // Single-model path (back-compat): one operator-wide model for every agent.
                 None => {
@@ -2437,7 +2485,9 @@ async fn start_governed_run(
                         .await;
                         runs_for_clear.clear_abort(&rid_for_clear);
                     });
-                    state.runs.register_abort(&rid_register, handle.abort_handle());
+                    state
+                        .runs
+                        .register_abort(&rid_register, handle.abort_handle());
                 }
             }
         }
@@ -2621,17 +2671,22 @@ fn assemble_evidence_for_run(
     prov: &crate::run::RunProvenance,
     story_id: &str,
 ) -> crate::evidence::UowEvidenceRecord {
-    use crate::evidence::{GateDecision, UowEvidenceRecord, scoped_audit};
+    use crate::evidence::{scoped_audit, GateDecision, UowEvidenceRecord};
 
     let now = chrono::Utc::now().to_rfc3339();
     let mut record = UowEvidenceRecord::new(story_id, &run.id, &now);
 
     // ── Governance event history ─────────────────────────────────────────────
     // Run started.
-    record.add_event(&now, "governed-fleet", "run", format!(
-        "Governed run {} completed (mode: {}, {} allowed, {} denied).",
-        run.id, run.mode, prov.allow_count, prov.deny_count,
-    ));
+    record.add_event(
+        &now,
+        "governed-fleet",
+        "run",
+        format!(
+            "Governed run {} completed (mode: {}, {} allowed, {} denied).",
+            run.id, run.mode, prov.allow_count, prov.deny_count,
+        ),
+    );
 
     // Gate events → evidence history + gate decisions.
     for event in &run.events {
@@ -2642,7 +2697,10 @@ fn assemble_evidence_for_run(
                 ts,
                 "gate-layer-1",
                 "gate_deny",
-                format!("Gate denied write to `{}`: rule {} fired — {}", event.detail, rule_id, event.detail),
+                format!(
+                    "Gate denied write to `{}`: rule {} fired — {}",
+                    event.detail, rule_id, event.detail
+                ),
             );
             record.record_gate_decision(GateDecision::deny(ts, &event.detail, rule_id));
         } else if event.verdict == "allow" {
@@ -2683,31 +2741,58 @@ fn assemble_evidence_for_run(
     // workspace root (not available in this pure-ish context). The empty-body approach is
     // correct for the scripted path and conservative (fewer false positives) for live runs.
     // TODO(live-scan): for the live path, resolve the workspace root and read actual content.
-    let allowed_paths: Vec<String> = run.events.iter()
+    let allowed_paths: Vec<String> = run
+        .events
+        .iter()
         .filter(|e| e.verdict == "allow")
         .map(|e| e.detail.clone())
         .collect();
     // Build a synthetic file list: allowed paths with empty content.
-    let all_files: Vec<(String, String)> = allowed_paths.iter()
+    let all_files: Vec<(String, String)> = allowed_paths
+        .iter()
         .map(|p| (p.clone(), String::new()))
         .collect();
-    let scan_result = scoped_audit(&format!("{story_id}/run/{}", run.id), &all_files, &allowed_paths);
+    let scan_result = scoped_audit(
+        &format!("{story_id}/run/{}", run.id),
+        &all_files,
+        &allowed_paths,
+    );
     // Add a critical_finding event to the history for each critical finding.
-    for finding in scan_result.summary.findings.iter().filter(|f| f.severity == "critical") {
+    for finding in scan_result
+        .summary
+        .findings
+        .iter()
+        .filter(|f| f.severity == "critical")
+    {
         record.add_event(
             &now,
             "scoped-audit",
             "critical_finding",
-            format!("CRITICAL: {} in {} (line {}): {}", finding.rule_id, finding.path, finding.line, finding.detail),
+            format!(
+                "CRITICAL: {} in {} (line {}): {}",
+                finding.rule_id, finding.path, finding.line, finding.detail
+            ),
         );
     }
     // Add security_finding events for non-critical findings.
-    for finding in scan_result.summary.findings.iter().filter(|f| f.severity != "critical") {
+    for finding in scan_result
+        .summary
+        .findings
+        .iter()
+        .filter(|f| f.severity != "critical")
+    {
         record.add_event(
             &now,
             "scoped-audit",
             "security_finding",
-            format!("{}: {} in {} (line {}): {}", finding.severity.to_uppercase(), finding.rule_id, finding.path, finding.line, finding.detail),
+            format!(
+                "{}: {} in {} (line {}): {}",
+                finding.severity.to_uppercase(),
+                finding.rule_id,
+                finding.path,
+                finding.line,
+                finding.detail
+            ),
         );
     }
     record.set_scoped_scan(scan_result.summary);
@@ -2764,9 +2849,8 @@ async fn get_run(
     // LIFECYCLE-7: a `done` run (success/failed/cancelled) or a PARKED run
     // (AwaitingReview / AwaitingClarification, waiting on a human) is NEVER stalled — it is
     // intentionally idle, not wedged. Only a live, in-flight run can stall.
-    let stalled = !run.done
-        && !run.status.is_parked()
-        && crate::run::is_stalled(idle, threshold_ms);
+    let stalled =
+        !run.done && !run.status.is_parked() && crate::run::is_stalled(idle, threshold_ms);
     let stall_policy = run.stall_policy.clone();
     let failure_reason = run.failure_reason.clone();
     Ok(Json(RunStatusResponse {
@@ -2781,10 +2865,7 @@ async fn get_run(
 
 /// `POST /api/runs/:id/cancel` — cancel a run immediately. Idempotent; a run that is
 /// already done or cancelled is unaffected. Always returns 204.
-async fn cancel_run(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     state.runs.cancel(&id);
     StatusCode::NO_CONTENT
 }
@@ -2825,10 +2906,7 @@ async fn get_run_events(
     let Some(log) = state.governance_log.as_ref() else {
         return Ok(Json(Vec::new()));
     };
-    let events = log
-        .by_run(&id)
-        .await
-        .map_err(|e| AppError(e.into()))?;
+    let events = log.by_run(&id).await.map_err(|e| AppError(e.into()))?;
     Ok(Json(events))
 }
 
@@ -2930,7 +3008,8 @@ async fn submit_feedback(
     // is either a URL path or a UI selector, not a place a raw secret realistically
     // lands, so only `console`/`stack` are scrubbed.
     if let Some(console) = report.context.console.take() {
-        report.context.console = Some(camerata_orchestrator_core::secrets::scrub(&console).scrubbed);
+        report.context.console =
+            Some(camerata_orchestrator_core::secrets::scrub(&console).scrubbed);
     }
     if let Some(stack) = report.context.stack.take() {
         report.context.stack = Some(camerata_orchestrator_core::secrets::scrub(&stack).scrubbed);
@@ -2949,7 +3028,10 @@ async fn submit_feedback(
         }));
     };
 
-    match store.bump_fingerprint(&report.project_id, &fingerprint).await {
+    match store
+        .bump_fingerprint(&report.project_id, &fingerprint)
+        .await
+    {
         Ok(Some(existing_id)) => {
             return Json(serde_json::json!({
                 "ok": true,
@@ -3015,7 +3097,10 @@ async fn project_feedback(
     let Some(store) = state.feedback_store.as_ref() else {
         return Ok(Json(Vec::new()));
     };
-    let reports = store.by_project(&id).await.map_err(|e| AppError(e.into()))?;
+    let reports = store
+        .by_project(&id)
+        .await
+        .map_err(|e| AppError(e.into()))?;
     Ok(Json(reports))
 }
 
@@ -3161,10 +3246,7 @@ async fn sign_off_run(
 
     // Build the effective note, folding in the waiver reason when present.
     let effective_note = {
-        let waive = req
-            .waive_reason
-            .as_deref()
-            .filter(|r| !r.trim().is_empty());
+        let waive = req.waive_reason.as_deref().filter(|r| !r.trim().is_empty());
         match (req.note.as_deref(), waive) {
             (Some(note), Some(reason)) => Some(format!("{note} [WAIVER: {reason}]")),
             (None, Some(reason)) => Some(format!("[WAIVER] {reason}")),
@@ -3211,15 +3293,10 @@ async fn sign_off_run(
 
         if let Some((owner, repo_name)) = pr_repo.split_once('/') {
             let token = state.github_token().unwrap_or_default();
-            let comment_url = crate::arm::post_pr_comment(
-                owner,
-                repo_name,
-                pr_number,
-                &markdown,
-                &token,
-            )
-            .await
-            .unwrap_or_default(); // graceful degradation: None on any failure
+            let comment_url =
+                crate::arm::post_pr_comment(owner, repo_name, pr_number, &markdown, &token)
+                    .await
+                    .unwrap_or_default(); // graceful degradation: None on any failure
 
             if let Some(url) = comment_url {
                 // Record the PR comment link in the UoW history (best-effort update).
@@ -3599,7 +3676,10 @@ struct ImportedRoutine {
     /// as a STRUCTURED object, while older exports carry a plain string; the
     /// shared [`camerata_app_core::routine::deserialize_scope`] accepts BOTH so a
     /// project export from either era imports with no data loss.
-    #[serde(default, deserialize_with = "camerata_app_core::routine::deserialize_scope")]
+    #[serde(
+        default,
+        deserialize_with = "camerata_app_core::routine::deserialize_scope"
+    )]
     scope: crate::routine::RoutineScope,
     /// The routine's model travels with it; blank/absent falls back to the server default.
     #[serde(default)]
@@ -3777,7 +3857,10 @@ async fn add_custom_rule(
         domain: if req.repos.is_empty() {
             "*".to_string()
         } else if req.domain.trim().is_empty() {
-            req.repos.first().cloned().unwrap_or_else(|| "*".to_string())
+            req.repos
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "*".to_string())
         } else {
             req.domain.trim().to_string()
         },
@@ -4109,7 +4192,12 @@ struct SetStepModelReq {
 /// separators (e.g. `research-chat`). Returns `None` for an unknown key.
 fn parse_step_kind(s: &str) -> Option<crate::project::StepKind> {
     use crate::project::StepKind;
-    match s.trim().to_ascii_lowercase().replace([' ', '-'], "_").as_str() {
+    match s
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-'], "_")
+        .as_str()
+    {
         "audit" => Some(StepKind::Audit),
         "calibration" => Some(StepKind::Calibration),
         "research_chat" => Some(StepKind::ResearchChat),
@@ -4279,8 +4367,10 @@ async fn rescan_alternatives_handler(
     // real multi-option semantic rule, or an option id that isn't real on that rule, is
     // reported and excluded — the remaining valid overrides still run.
     let chosen_options = project_chosen_options(&project);
-    let mut alternatives_by_rule: std::collections::HashMap<String, crate::ai_audit::RuleAlternatives> =
-        std::collections::HashMap::new();
+    let mut alternatives_by_rule: std::collections::HashMap<
+        String,
+        crate::ai_audit::RuleAlternatives,
+    > = std::collections::HashMap::new();
     let mut invalid: Vec<String> = Vec::new();
     for (rid, opt_id) in &forced {
         match corpus.get_by_id(rid) {
@@ -4348,7 +4438,8 @@ async fn rescan_alternatives_handler(
         .map(|m| format!("skipped invalid override — {m}"))
         .collect();
 
-    let llm = crate::llm::Llm::from_env_with_backend_and_ledger(llm_backend, state.usage_ledger.clone());
+    let llm =
+        crate::llm::Llm::from_env_with_backend_and_ledger(llm_backend, state.usage_ledger.clone());
     let (sources, source_notes) = resolve_local_sources(&state, &project.repos);
     run_notes.extend(source_notes);
 
@@ -4362,15 +4453,19 @@ async fn rescan_alternatives_handler(
     // Which rule ids apply to a given repo, per the project's own per-rule `repos` binding
     // (empty `repos` on a `RuleSelection` = project-level = applies to every repo).
     let applies_to_repo = |rid: &str, repo: &str| -> bool {
-        [&project.ruleset.selections, &project.ruleset.cross_repo, &project.ruleset.process]
-            .iter()
-            .flat_map(|list| list.iter())
-            .find(|s| s.rule_id.trim().to_ascii_uppercase() == *rid)
-            .map(|s| s.repos.is_empty() || s.repos.iter().any(|r| r == repo))
-            // A rule not found in the ruleset at all (shouldn't happen — it was already
-            // audited once to have surfaced as an override candidate) defaults to
-            // project-level so a rescan is never silently dropped.
-            .unwrap_or(true)
+        [
+            &project.ruleset.selections,
+            &project.ruleset.cross_repo,
+            &project.ruleset.process,
+        ]
+        .iter()
+        .flat_map(|list| list.iter())
+        .find(|s| s.rule_id.trim().to_ascii_uppercase() == *rid)
+        .map(|s| s.repos.is_empty() || s.repos.iter().any(|r| r == repo))
+        // A rule not found in the ruleset at all (shouldn't happen — it was already
+        // audited once to have surfaced as an override candidate) defaults to
+        // project-level so a rescan is never silently dropped.
+        .unwrap_or(true)
     };
 
     let mut all_findings: Vec<crate::onboard::Finding> = Vec::new();
@@ -4389,21 +4484,20 @@ async fn rescan_alternatives_handler(
             continue;
         }
         let dir = dir.clone();
-        let files = match tokio::task::spawn_blocking(move || {
-            crate::onboard::read_local_repo_files(&dir)
-        })
-        .await
-        {
-            Ok(Ok(extracted)) => extracted.files,
-            Ok(Err(e)) => {
-                run_notes.push(format!("{spec}: {e}"));
-                continue;
-            }
-            Err(e) => {
-                run_notes.push(format!("{spec}: rescan task failed ({e})"));
-                continue;
-            }
-        };
+        let files =
+            match tokio::task::spawn_blocking(move || crate::onboard::read_local_repo_files(&dir))
+                .await
+            {
+                Ok(Ok(extracted)) => extracted.files,
+                Ok(Err(e)) => {
+                    run_notes.push(format!("{spec}: {e}"));
+                    continue;
+                }
+                Err(e) => {
+                    run_notes.push(format!("{spec}: rescan task failed ({e})"));
+                    continue;
+                }
+            };
         let alt_slice: Vec<crate::ai_audit::RuleAlternatives> = applicable_ids
             .iter()
             .filter_map(|rid| alternatives_by_rule.get(rid).cloned())
@@ -4509,8 +4603,13 @@ async fn accept_alternatives_handler(
             "message": "No scan results available for this project. Run an audit first."
         }));
     };
-    let target_ids: Option<std::collections::HashSet<String>> = (!req.rule_ids.is_empty())
-        .then(|| req.rule_ids.iter().map(|s| s.trim().to_ascii_uppercase()).collect());
+    let target_ids: Option<std::collections::HashSet<String>> =
+        (!req.rule_ids.is_empty()).then(|| {
+            req.rule_ids
+                .iter()
+                .map(|s| s.trim().to_ascii_uppercase())
+                .collect()
+        });
 
     let mut accepted = 0usize;
     let mut skipped: Vec<String> = Vec::new();
@@ -4520,7 +4619,10 @@ async fn accept_alternatives_handler(
                 continue;
             }
         }
-        match state.projects.set_rule_chosen_option(&id, rid, &rec.recommended_option_id) {
+        match state
+            .projects
+            .set_rule_chosen_option(&id, rid, &rec.recommended_option_id)
+        {
             Some(true) => accepted += 1,
             Some(false) => skipped.push(rid.clone()),
             None => {
@@ -4639,7 +4741,8 @@ async fn preview_model_profile(
     if state.projects.get(&id).is_none() {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     }
-    let assignments = crate::model_profile_cascade::compute_profile_cascade(profile, &state.model_registry);
+    let assignments =
+        crate::model_profile_cascade::compute_profile_cascade(profile, &state.model_registry);
     match assignments {
         None => Json(serde_json::json!({
             "ok": true,
@@ -4683,7 +4786,8 @@ async fn apply_model_profile(
         _ => return Json(serde_json::json!({ "ok": false, "message": "unknown profile" })),
     };
 
-    let assignments = crate::model_profile_cascade::compute_profile_cascade(profile, &state.model_registry);
+    let assignments =
+        crate::model_profile_cascade::compute_profile_cascade(profile, &state.model_registry);
 
     let updated = state.projects.update(&id, |p| {
         p.model_profile = profile;
@@ -4764,9 +4868,11 @@ async fn vcs_gate_bypass(
     Path(id): Path<String>,
     Json(req): Json<VcsGateBypassReq>,
 ) -> Response {
-    use camerata_checks::vcs_action::{build_rules, gate_or_bypass, BypassRequest, GateOrBypassResult, VcsAction};
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+    use camerata_checks::vcs_action::{
+        build_rules, gate_or_bypass, BypassRequest, GateOrBypassResult, VcsAction,
+    };
 
     // Reason-less bypass is rejected immediately (mirrors the suppression-waiver
     // invariant; a bypass must be auditable or it is not a bypass at all).
@@ -5501,8 +5607,7 @@ async fn onboard_audit(
         // Gated on the deterministic selection — deselecting deterministic scans skips it too.
         // (No job here, so no live deterministic progress on the synchronous path.)
         if run_deterministic {
-            merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref(), None)
-                .await;
+            merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref(), None).await;
         }
 
         // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────────
@@ -6051,7 +6156,9 @@ pub(crate) fn dedup_scan_previews(
                 // Preview has higher precedence: promote it to canonical, demote existing.
                 let old_rule_id = existing[idx].rule_id.clone();
                 let mut new_canonical = preview;
-                new_canonical.also_matches.extend(existing[idx].also_matches.drain(..));
+                new_canonical
+                    .also_matches
+                    .extend(existing[idx].also_matches.drain(..));
                 new_canonical.also_matches.push(old_rule_id);
                 existing[idx] = new_canonical;
                 // promoted to existing; don't push to out
@@ -6558,18 +6665,26 @@ async fn onboard_audit_start(
                 let mut union_languages = std::collections::HashSet::<String>::new();
                 for (_, dir) in &sources {
                     let dir_clone = dir.clone();
-                    if let Ok(Ok(extracted)) =
-                        tokio::task::spawn_blocking(move || crate::onboard::files::read_local_repo_files(&dir_clone)).await
+                    if let Ok(Ok(extracted)) = tokio::task::spawn_blocking(move || {
+                        crate::onboard::files::read_local_repo_files(&dir_clone)
+                    })
+                    .await
                     {
-                        union_languages.extend(
-                            crate::scan_tools::languages_from_files(&extracted.files)
-                        );
+                        union_languages
+                            .extend(crate::scan_tools::languages_from_files(&extracted.files));
                     }
                 }
-                let lang_gate = if union_languages.is_empty() { None } else { Some(&union_languages) };
+                let lang_gate = if union_languages.is_empty() {
+                    None
+                } else {
+                    Some(&union_languages)
+                };
                 let mut tool_ids: Vec<String> = vec!["floor".to_string()];
-                let preview_ids =
-                    crate::scan_tools::preview_tool_ids_for_rules(&preview_rules, &lookup, lang_gate);
+                let preview_ids = crate::scan_tools::preview_tool_ids_for_rules(
+                    &preview_rules,
+                    &lookup,
+                    lang_gate,
+                );
                 tool_ids.extend(preview_ids);
                 let dep_audit_disabled = std::env::var(crate::dep_audit::DISABLE_ENV_VAR)
                     .map(|v| !v.is_empty())
@@ -6731,7 +6846,12 @@ async fn onboard_audit_job(
         Some(job) => {
             let idle_ms = state.jobs.idle_ms(&id, now_ms);
             let cancel_requested = state.jobs.is_cancel_requested(&id);
-            Json(Some(JobStatusResponse { job, idle_ms, cancel_requested })).into_response()
+            Json(Some(JobStatusResponse {
+                job,
+                idle_ms,
+                cancel_requested,
+            }))
+            .into_response()
         }
         None => Json::<Option<JobStatusResponse>>(None).into_response(),
     }
@@ -6866,13 +6986,15 @@ async fn gate_probe() -> Json<serde_json::Value> {
             let checks: Vec<serde_json::Value> = r
                 .layer1
                 .iter()
-                .map(|c| serde_json::json!({
-                    "rule": c.rule,
-                    "label": c.label,
-                    "denied": c.denied,
-                    "isolated_denied": c.isolated_denied,
-                    "detail": c.detail,
-                }))
+                .map(|c| {
+                    serde_json::json!({
+                        "rule": c.rule,
+                        "label": c.label,
+                        "denied": c.denied,
+                        "isolated_denied": c.isolated_denied,
+                        "detail": c.detail,
+                    })
+                })
                 .collect();
             Json(serde_json::json!({
                 "ok": true,
@@ -7062,10 +7184,8 @@ fn apply_files_per_repo(
             .copied()
             .filter(|r| r.repos.iter().any(|x| x == repo))
             .collect();
-        let repo_custom: Vec<&crate::project::CustomRule> = custom
-            .iter()
-            .filter(|c| c.applies_to_repo(repo))
-            .collect();
+        let repo_custom: Vec<&crate::project::CustomRule> =
+            custom.iter().filter(|c| c.applies_to_repo(repo)).collect();
         if repo_rules.is_empty() && repo_custom.is_empty() {
             continue;
         }
@@ -7148,11 +7268,7 @@ async fn onboard_arm(
     // leaked single-repo sentinel out of the incoming rules' repos (mapping it to the active
     // project's real repos) BEFORE the clone loop — shared helper, so no drift with
     // `resolve_project_arm_rules` / `onboard_apply`.
-    let project_repos = state
-        .projects
-        .active()
-        .map(|p| p.repos)
-        .unwrap_or_default();
+    let project_repos = state.projects.active().map(|p| p.repos).unwrap_or_default();
     let repo_local: Vec<crate::arm::ArmRule> = req
         .rules
         .iter()
@@ -7215,11 +7331,7 @@ async fn onboard_apply(
     // repos (the UI can POST it directly) BEFORE any clone loop, mapping it to the active
     // project's real repos. Uses the same helper as `resolve_project_arm_rules` so the two
     // paths can't drift.
-    let project_repos = state
-        .projects
-        .active()
-        .map(|p| p.repos)
-        .unwrap_or_default();
+    let project_repos = state.projects.active().map(|p| p.repos).unwrap_or_default();
     let repo_local: Vec<crate::arm::ArmRule> = req
         .rules
         .iter()
@@ -7260,10 +7372,8 @@ async fn onboard_apply(
             .iter()
             .filter(|r| r.repos.iter().any(|x| x == repo))
             .collect();
-        let repo_custom: Vec<&crate::project::CustomRule> = custom
-            .iter()
-            .filter(|c| c.applies_to_repo(repo))
-            .collect();
+        let repo_custom: Vec<&crate::project::CustomRule> =
+            custom.iter().filter(|c| c.applies_to_repo(repo)).collect();
         if repo_rules.is_empty() && repo_custom.is_empty() {
             continue;
         }
@@ -7643,7 +7753,9 @@ async fn onboard_open_pr(
     ) {
         Ok(_) => {}
         Err(e) => {
-            return Json(serde_json::json!({ "ok": false, "blocked": true, "message": format!("{e}") }));
+            return Json(
+                serde_json::json!({ "ok": false, "blocked": true, "message": format!("{e}") }),
+            );
         }
     }
     let mut results = Vec::new();
@@ -8041,9 +8153,8 @@ fn ci_story_body_mechanical(repo: &str, rules: &[CiStoryRule]) -> String {
     // to choose and implement a cadence (weekly cron, per-PR, in-loop, or manual).
     // Camerata does NOT build a scheduling engine — the cadence is a project decision
     // carried here as concrete implementation guidance.
-    let dep_audit_cadence_section =
-        if rules.iter().any(|r| r.id == "CICD-DEPENDENCY-AUDIT-1") {
-            "\n---\n\n\
+    let dep_audit_cadence_section = if rules.iter().any(|r| r.id == "CICD-DEPENDENCY-AUDIT-1") {
+        "\n---\n\n\
              ## Dependency vulnerability scanning — cadence (CICD-DEPENDENCY-AUDIT-1)\n\n\
              **Camerata does not build a scheduling engine.** The cadence for dependency \
              scanning is a project decision you make on the rule, and the developer \
@@ -8122,9 +8233,9 @@ fn ci_story_body_mechanical(repo: &str, rules: &[CiStoryRule]) -> String {
              - [ ] Regenerate `.github/workflows/camerata-gates.yml` via Camerata.\n\
              - [ ] Verify the scan fires at the chosen cadence and fails on a known \
              vulnerable lockfile (e.g. introduce a known-CVE package, confirm exit non-zero).\n"
-        } else {
-            ""
-        };
+    } else {
+        ""
+    };
 
     let preamble = ci_story_ssot_preamble();
     format!(
@@ -8483,7 +8594,10 @@ async fn onboard_ci_rules(
 
     let (title, body) = match req.tier.as_str() {
         "mechanical" => {
-            let t = format!("Wire mechanical (off-the-shelf linter) rules into CI — {}", req.repo);
+            let t = format!(
+                "Wire mechanical (off-the-shelf linter) rules into CI — {}",
+                req.repo
+            );
             let b = ci_story_body_mechanical(repo, &req.rules);
             (t, b)
         }
@@ -8536,9 +8650,7 @@ struct GenerateCiWorkflowReq {
 ///
 /// A missing manifest is NOT an error — it generates a workflow with only the
 /// built-in language steps. The caller can store the YAML in the repo.
-async fn generate_ci_workflow(
-    Json(req): Json<GenerateCiWorkflowReq>,
-) -> Json<serde_json::Value> {
+async fn generate_ci_workflow(Json(req): Json<GenerateCiWorkflowReq>) -> Json<serde_json::Value> {
     use crate::workflow_gen::generate_gates_workflow;
     use camerata_checks::manifest::load_manifest;
     use std::path::Path;
@@ -8639,7 +8751,9 @@ async fn onboard_greenfield(
     }
     let path_str = req.path.trim().to_string();
     if path_str.is_empty() {
-        return Json(serde_json::json!({ "ok": false, "message": "Choose a directory for the new repo." }));
+        return Json(
+            serde_json::json!({ "ok": false, "message": "Choose a directory for the new repo." }),
+        );
     }
     let dest = std::path::PathBuf::from(&path_str);
 
@@ -8669,7 +8783,9 @@ async fn onboard_greenfield(
             return Json(serde_json::json!({ "ok": false, "message": format!("{e}") }));
         }
         Err(e) => {
-            return Json(serde_json::json!({ "ok": false, "message": format!("scaffold task: {e}") }));
+            return Json(
+                serde_json::json!({ "ok": false, "message": format!("scaffold task: {e}") }),
+            );
         }
     };
 
@@ -8809,10 +8925,8 @@ async fn emit_to_repos(
             .iter()
             .filter(|r| r.repos.iter().any(|x| x == repo))
             .collect();
-        let repo_custom: Vec<&crate::project::CustomRule> = custom
-            .iter()
-            .filter(|c| c.applies_to_repo(repo))
-            .collect();
+        let repo_custom: Vec<&crate::project::CustomRule> =
+            custom.iter().filter(|c| c.applies_to_repo(repo)).collect();
         if repo_rules.is_empty() && repo_custom.is_empty() {
             continue;
         }
@@ -9012,7 +9126,9 @@ async fn emit_project_local(
     };
     let token = state.github_token().unwrap_or_default();
     if want_push && token.is_empty() {
-        return Json(serde_json::json!({ "ok": false, "message": "A GitHub token is required to push or open a PR (set CAMERATA_GITHUB_TOKEN). Emit locally without push, or connect GitHub." }));
+        return Json(
+            serde_json::json!({ "ok": false, "message": "A GitHub token is required to push or open a PR (set CAMERATA_GITHUB_TOKEN). Emit locally without push, or connect GitHub." }),
+        );
     }
 
     let rules = resolve_project_arm_rules(&project).await;
@@ -9051,10 +9167,8 @@ async fn emit_project_local(
             .iter()
             .filter(|r| r.repos.iter().any(|x| x == repo))
             .collect();
-        let repo_custom: Vec<&crate::project::CustomRule> = custom
-            .iter()
-            .filter(|c| c.applies_to_repo(repo))
-            .collect();
+        let repo_custom: Vec<&crate::project::CustomRule> =
+            custom.iter().filter(|c| c.applies_to_repo(repo)).collect();
         if repo_rules.is_empty() && repo_custom.is_empty() {
             continue;
         }
@@ -9110,8 +9224,7 @@ async fn emit_project_local(
                     // GAP-2 chokepoint: gate the governance PR's metadata (auditable bypass —
                     // machine-generated title/body). A HARD-BLOCK here would strand the
                     // already-emitted + pushed branch, so we record a bypass rather than block.
-                    let vcs_config =
-                        process_rule_config_for(&state, &active_project_id(&state));
+                    let vcs_config = process_rule_config_for(&state, &active_project_id(&state));
                     if let Ok(Some(record)) = crate::vcs_choke::gated_pr_or_bypass(
                         &vcs_config,
                         &title,
@@ -9645,7 +9758,9 @@ async fn raise_escalation(
         .into_iter()
         .find(|r| r.id == req.routine_id)
         .map(|r| r.name)
-        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("routine not found: {}", req.routine_id)))?;
+        .ok_or_else(|| {
+            AppError::not_found(anyhow::anyhow!("routine not found: {}", req.routine_id))
+        })?;
     Ok(Json(state.escalations.raise_deduped(req, &name)))
 }
 
@@ -9832,7 +9947,9 @@ async fn answer_escalation(
                             Err(reason) => {
                                 return Err(AppError::with_status(
                                     StatusCode::CONFLICT,
-                                    anyhow::anyhow!("could not resume run from checkpoint: {reason}"),
+                                    anyhow::anyhow!(
+                                        "could not resume run from checkpoint: {reason}"
+                                    ),
                                 ));
                             }
                         }
@@ -9872,7 +9989,9 @@ async fn delete_routine(
     if state.routines.delete(&id) {
         Ok(Json(serde_json::json!({ "deleted": id })))
     } else {
-        Err(AppError::not_found(anyhow::anyhow!("routine not found: {id}")))
+        Err(AppError::not_found(anyhow::anyhow!(
+            "routine not found: {id}"
+        )))
     }
 }
 
@@ -10079,10 +10198,13 @@ async fn set_provider_policy_handler(
     Json(req): Json<ProviderPolicyReq>,
 ) -> Json<ProviderPolicyResp> {
     let pinned_provider = req.pinned_provider.filter(|p| !p.trim().is_empty());
-    let updated = state.settings.set_provider_policy(camerata_llm::provider_policy::ProviderPolicy {
-        safe_mode: req.safe_mode,
-        pinned_provider,
-    });
+    let updated =
+        state
+            .settings
+            .set_provider_policy(camerata_llm::provider_policy::ProviderPolicy {
+                safe_mode: req.safe_mode,
+                pinned_provider,
+            });
     Json(ProviderPolicyResp {
         safe_mode: updated.provider_policy.safe_mode,
         pinned_provider: updated.provider_policy.pinned_provider,
@@ -10175,7 +10297,11 @@ pub(crate) fn render_chat_prompt(history: &[ChatTurn], prompt: &str) -> String {
 /// cleared selector or a cleared setting falls through to the next tier. Pure (no I/O) so the
 /// precedence is unit-testable.
 pub fn resolve_chat_model(req_model: Option<&str>, app_chat_model: Option<&str>) -> String {
-    let pick = |m: Option<&str>| m.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let pick = |m: Option<&str>| {
+        m.map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
     pick(req_model)
         .or_else(|| pick(app_chat_model))
         .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string())
@@ -10478,12 +10604,20 @@ async fn set_credential(
     // OpenRouter refresh trigger 2 of 3 (see the block above `serve()`): a freshly-saved
     // OpenRouter key should populate the model picker immediately, not after a restart or
     // a manual refresh-endpoint POST. No-op for every other credential name.
-    trigger_openrouter_refresh_if_needed(&name, &state.model_registry, state.credential_store.clone());
+    trigger_openrouter_refresh_if_needed(
+        &name,
+        &state.model_registry,
+        state.credential_store.clone(),
+    );
     // Live Anthropic model-registry refresh (Feature A), trigger 2 of 3 (credential-save):
     // a freshly-saved Anthropic key should populate the LIVE `/v1/models` picker list
     // immediately, not after a restart or a manual refresh-endpoint POST. No-op for every
     // other credential name.
-    trigger_anthropic_refresh_if_needed(&name, &state.model_registry, state.credential_store.clone());
+    trigger_anthropic_refresh_if_needed(
+        &name,
+        &state.model_registry,
+        state.credential_store.clone(),
+    );
     // ROUTES-9: this handler used to `std::env::set_var("ANTHROPIC_API_KEY", ...)` so a
     // freshly-saved key took effect for the `api` backend without a restart. That mutated
     // process-global env from a request-handler thread while worker threads read the same var
@@ -11046,7 +11180,8 @@ async fn workitems_pull(State(state): State<AppState>) -> Json<serde_json::Value
         // issues-list response omits (root cause of every issue showing "(no parent)").
         // FALL BACK to the parent-less REST list on any GraphQL failure (auth scope, API
         // error, network) so the pull still works — just without parent grouping.
-        let fetched = match crate::github_issues::list_open_issues_with_parents(repo, &token).await {
+        let fetched = match crate::github_issues::list_open_issues_with_parents(repo, &token).await
+        {
             Ok(issues) => Ok(issues),
             Err(_) => crate::github_issues::list_open_issues(repo, &token).await,
         };
@@ -11093,9 +11228,11 @@ async fn workitems_refresh(
     State(state): State<AppState>,
     Json(req): Json<WorkItemRefreshReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let token = state
-        .github_token()
-        .ok_or_else(|| AppError(anyhow::anyhow!("no GitHub token — set CAMERATA_GITHUB_TOKEN")))?;
+    let token = state.github_token().ok_or_else(|| {
+        AppError(anyhow::anyhow!(
+            "no GitHub token — set CAMERATA_GITHUB_TOKEN"
+        ))
+    })?;
     let (repo, number) = parse_github_work_item_id(&req.work_item_id)?;
     let detail = crate::github_issues::get_issue_detail(&repo, number, &token)
         .await
@@ -11117,11 +11254,15 @@ async fn workitems_comment(
     State(state): State<AppState>,
     Json(req): Json<WorkItemCommentReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let token = state
-        .github_token()
-        .ok_or_else(|| AppError(anyhow::anyhow!("no GitHub token — set CAMERATA_GITHUB_TOKEN")))?;
+    let token = state.github_token().ok_or_else(|| {
+        AppError(anyhow::anyhow!(
+            "no GitHub token — set CAMERATA_GITHUB_TOKEN"
+        ))
+    })?;
     if req.body.trim().is_empty() {
-        return Err(AppError::bad_request(anyhow::anyhow!("comment body must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "comment body must not be empty"
+        )));
     }
     let (repo, number) = parse_github_work_item_id(&req.work_item_id)?;
     let url = crate::github_issues::comment_on_issue(&repo, number, &req.body, &token)
@@ -11207,9 +11348,11 @@ async fn workitems_assign(
     State(state): State<AppState>,
     Json(req): Json<WorkItemAssignReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let token = state
-        .github_token()
-        .ok_or_else(|| AppError(anyhow::anyhow!("no GitHub token — set CAMERATA_GITHUB_TOKEN")))?;
+    let token = state.github_token().ok_or_else(|| {
+        AppError(anyhow::anyhow!(
+            "no GitHub token — set CAMERATA_GITHUB_TOKEN"
+        ))
+    })?;
     if req.assignee.trim().is_empty() {
         return Err(AppError(anyhow::anyhow!("assignee must not be empty")));
     }
@@ -11438,9 +11581,9 @@ fn parse_github_work_item_id(work_item_id: &str) -> Result<(String, u64), AppErr
             "work_item_id repo is not `owner/repo`: `{repo}`"
         )));
     }
-    let number: u64 = num
-        .parse()
-        .map_err(|_| AppError::bad_request(anyhow::anyhow!("work_item_id number is not a u64: `{num}`")))?;
+    let number: u64 = num.parse().map_err(|_| {
+        AppError::bad_request(anyhow::anyhow!("work_item_id number is not a u64: `{num}`"))
+    })?;
     Ok((repo.to_string(), number))
 }
 
@@ -11661,7 +11804,9 @@ fences.";
 /// for a JSON object; if it deviates (e.g. wraps in fences or returns prose), we degrade
 /// gracefully: strip a fenced block if present, else treat the whole text as the reply and
 /// leave the draft unchanged signals (empty strings).
-fn parse_author_response(raw: &str) -> (String, String, String, Vec<crate::clarify::ClarifyOption>) {
+fn parse_author_response(
+    raw: &str,
+) -> (String, String, String, Vec<crate::clarify::ClarifyOption>) {
     let trimmed = raw.trim();
     // Strip a leading/trailing ```json … ``` fence if the model added one.
     let inner = trimmed
@@ -11672,8 +11817,16 @@ fn parse_author_response(raw: &str) -> (String, String, String, Vec<crate::clari
         .map(|s| s.trim())
         .unwrap_or(trimmed);
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(inner) {
-        let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let body = v.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let title = v
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let body = v
+            .get("body")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         let reply = v
             .get("reply")
             .and_then(|x| x.as_str())
@@ -11705,7 +11858,12 @@ fn parse_author_response(raw: &str) -> (String, String, String, Vec<crate::clari
         return (title, body, reply, options);
     }
     // Not JSON: keep the raw text as the conversational reply; leave the draft untouched.
-    (String::new(), String::new(), trimmed.to_string(), Vec::new())
+    (
+        String::new(),
+        String::new(),
+        trimmed.to_string(),
+        Vec::new(),
+    )
 }
 
 /// Build the user prompt for the authoring LLM from the prior chat plus the new message.
@@ -11717,7 +11875,11 @@ fn build_author_prompt(chat: &[crate::uow::AuthorChatMessage], new_message: &str
     } else {
         p.push_str("Conversation so far:\n");
         for m in chat {
-            let who = if m.role == "ai" { "Assistant" } else { "Author" };
+            let who = if m.role == "ai" {
+                "Assistant"
+            } else {
+                "Author"
+            };
             p.push_str(&format!("{who}: {}\n", m.text));
         }
         p.push_str("\nNew message from the author:\n");
@@ -11742,7 +11904,9 @@ async fn uow_author(
 ) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
     let message = req.message.trim().to_string();
     if message.is_empty() {
-        return Err(AppError::bad_request(anyhow::anyhow!("message must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "message must not be empty"
+        )));
     }
     // Snapshot the prior chat + draft so we can preserve the draft if the LLM is off/fails.
     let before = state.uow.get_or_create(&story_id);
@@ -11787,8 +11951,16 @@ async fn uow_author(
         Ok(resp) => {
             let (t, b, r, opts) = parse_author_response(&resp.text);
             // Keep the existing draft when the model returned no usable title/body.
-            let title = if t.is_empty() { prior.draft_title.clone() } else { t };
-            let body = if b.is_empty() { prior.draft_body.clone() } else { b };
+            let title = if t.is_empty() {
+                prior.draft_title.clone()
+            } else {
+                t
+            };
+            let body = if b.is_empty() {
+                prior.draft_body.clone()
+            } else {
+                b
+            };
             let reply = if r.is_empty() {
                 "Updated the draft.".to_string()
             } else {
@@ -11820,14 +11992,9 @@ async fn uow_author(
     // chat reply only (back-compat), posting nothing structured. Story authoring is an
     // LLM text-generation assist (no gate involved).
     if !options.is_empty() {
-        state.clarifications.post_structured(
-            &story_id,
-            &reply,
-            "you",
-            options,
-            false,
-            true,
-        );
+        state
+            .clarifications
+            .post_structured(&story_id, &reply, "you", options, false, true);
     }
 
     let updated = state
@@ -11917,9 +12084,7 @@ async fn uow_publish(
 
     // Link the draft UoW to the work item WITHOUT re-keying it (the work-item ref carries
     // the real owner/repo#num).
-    state
-        .uow
-        .link_work_item(&story_id, &work_item_story_id);
+    state.uow.link_work_item(&story_id, &work_item_story_id);
 
     // ── Optional: create a native GitHub sub-issue link (FAIL SOFT) ───────────────
     //
@@ -12017,7 +12182,9 @@ async fn uow_add_attachment(
     Json(req): Json<AddAttachmentReq>,
 ) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
     if req.name.trim().is_empty() {
-        return Err(AppError::bad_request(anyhow::anyhow!("attachment name must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "attachment name must not be empty"
+        )));
     }
     let attachment = crate::uow::UowAttachment {
         name: req.name.trim().to_string(),
@@ -12041,7 +12208,9 @@ async fn uow_get_attachment(
         Some(a) => Json(serde_json::json!({
             "attachment": { "name": a.name, "mime": a.mime, "content": a.content }
         })),
-        None => Json(serde_json::json!({ "ok": false, "error": format!("attachment `{name}` not found") })),
+        None => Json(
+            serde_json::json!({ "ok": false, "error": format!("attachment `{name}` not found") }),
+        ),
     }
 }
 
@@ -12174,12 +12343,7 @@ async fn uow_generate_diagram(
         .with_model(model)
         .with_system(system);
 
-    let diagram_text = state
-        .llm()
-        .complete(request)
-        .await
-        .map_err(AppError)?
-        .text;
+    let diagram_text = state.llm().complete(request).await.map_err(AppError)?.text;
 
     // Strip any accidental fences the model may have added despite instructions.
     let stripped = strip_mermaid_fence(&diagram_text);
@@ -12267,10 +12431,16 @@ fn build_mockup_prompt(
         }
     }
     if !authoring.draft_title.trim().is_empty() {
-        p.push_str(&format!("Work item title: {}\n\n", authoring.draft_title.trim()));
+        p.push_str(&format!(
+            "Work item title: {}\n\n",
+            authoring.draft_title.trim()
+        ));
     }
     if !authoring.draft_body.trim().is_empty() {
-        p.push_str(&format!("Work item body:\n{}\n\n", authoring.draft_body.trim()));
+        p.push_str(&format!(
+            "Work item body:\n{}\n\n",
+            authoring.draft_body.trim()
+        ));
     }
     if !authoring.requirements_prompt.trim().is_empty() {
         p.push_str(&format!(
@@ -12407,17 +12577,32 @@ fn parse_design_author_response(
         .map(|s| s.trim())
         .unwrap_or(trimmed);
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(inner) {
-        let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let body = v.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let reply = v.get("reply").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let title = v
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let body = v
+            .get("body")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let reply = v
+            .get("reply")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         let children = v
             .get("proposed_children")
             .and_then(|x| x.as_array())
             .map(|arr| {
                 arr.iter()
                     .filter_map(|o| {
-                        let node_type =
-                            o.get("node_type").and_then(|x| x.as_str())?.trim().to_string();
+                        let node_type = o
+                            .get("node_type")
+                            .and_then(|x| x.as_str())?
+                            .trim()
+                            .to_string();
                         if node_type.is_empty() {
                             return None;
                         }
@@ -12440,7 +12625,12 @@ fn parse_design_author_response(
             .unwrap_or_default();
         return (title, body, reply, children);
     }
-    (String::new(), String::new(), trimmed.to_string(), Vec::new())
+    (
+        String::new(),
+        String::new(),
+        trimmed.to_string(),
+        Vec::new(),
+    )
 }
 
 /// Validate that `child_type` is an allowed child of `parent_type` in `schema`.
@@ -12496,7 +12686,9 @@ async fn design_blank(
         .map(|Json(r)| (r.root_type, r.draft_parent_id))
         .unwrap_or((None, None));
     let project_id = state.projects.active().map(|p| p.id);
-    let root = state.uow.create_blank_design(root_type, draft_parent_id, project_id);
+    let root = state
+        .uow
+        .create_blank_design(root_type, draft_parent_id, project_id);
     Ok(Json(serde_json::json!({ "design_id": root.story_id })))
 }
 
@@ -12530,7 +12722,9 @@ async fn design_author(
 ) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
     let message = req.message.trim().to_string();
     if message.is_empty() {
-        return Err(AppError::bad_request(anyhow::anyhow!("message must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "message must not be empty"
+        )));
     }
     let before = state.uow.get_or_create(&id);
     let prior = before.authoring.clone().unwrap_or_default();
@@ -12580,9 +12774,21 @@ async fn design_author(
     let (title, body, reply, mut proposed) = match state.llm().complete(request).await {
         Ok(resp) => {
             let (t, b, r, children) = parse_design_author_response(&resp.text);
-            let title = if t.is_empty() { prior.draft_title.clone() } else { t };
-            let body = if b.is_empty() { prior.draft_body.clone() } else { b };
-            let reply = if r.is_empty() { "Updated the draft.".to_string() } else { r };
+            let title = if t.is_empty() {
+                prior.draft_title.clone()
+            } else {
+                t
+            };
+            let body = if b.is_empty() {
+                prior.draft_body.clone()
+            } else {
+                b
+            };
+            let reply = if r.is_empty() {
+                "Updated the draft.".to_string()
+            } else {
+                r
+            };
             (title, body, reply, children)
         }
         Err(e) => {
@@ -12591,7 +12797,12 @@ async fn design_author(
                  configure a model (CLI or ANTHROPIC_API_KEY) and try again.",
                 e
             );
-            (prior.draft_title.clone(), prior.draft_body.clone(), note, Vec::new())
+            (
+                prior.draft_title.clone(),
+                prior.draft_body.clone(),
+                note,
+                Vec::new(),
+            )
         }
     };
 
@@ -12610,7 +12821,9 @@ async fn design_author(
         dropped
     };
 
-    state.uow.append_authoring_turn(&id, &message, &reply, &title, &body);
+    state
+        .uow
+        .append_authoring_turn(&id, &message, &reply, &title, &body);
     let updated = state
         .uow
         .set_proposed_and_dropped_children(&id, proposed, dropped);
@@ -12683,7 +12896,9 @@ async fn design_materialize_nodes(
     }
 
     // Clear the proposed_children on the parent after materialization.
-    state.uow.set_proposed_children(&req.parent_draft_id, vec![]);
+    state
+        .uow
+        .set_proposed_children(&req.parent_draft_id, vec![]);
 
     Ok(Json(serde_json::json!({ "node_ids": node_ids })))
 }
@@ -12972,7 +13187,9 @@ async fn design_publish(
             ));
         } else if linked.insert(node.story_id.clone()) {
             // Link the work item onto the UoW once (first successful action for this node).
-            state.uow.link_work_item(&node.story_id, &work_item_story_id);
+            state
+                .uow
+                .link_work_item(&node.story_id, &work_item_story_id);
         }
 
         published.insert((action.repo.clone(), node.story_id.clone()), number);
@@ -13032,8 +13249,7 @@ async fn list_project_designs(
     let mut roots = state.uow.list_design_roots_for_project(&project_id);
     // Newest-first by the root's `updated` timestamp (RFC 3339 strings sort chronologically).
     roots.sort_by(|a, b| b.updated.cmp(&a.updated));
-    let designs: Vec<serde_json::Value> =
-        roots.iter().map(|r| design_summary(&state, r)).collect();
+    let designs: Vec<serde_json::Value> = roots.iter().map(|r| design_summary(&state, r)).collect();
     Json(serde_json::json!({ "designs": designs }))
 }
 
@@ -13080,10 +13296,7 @@ async fn design_set_status(
 /// `DELETE /api/designs/:id` -- delete an ENTIRE design (root + all descendants).
 /// 404 when `:id` is not a design root (a child node is deleted via the
 /// `DELETE /api/designs/:id/nodes/:node_id` route instead). Returns `{ "ok": true }`.
-async fn design_delete(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn design_delete(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     if state.uow.get_design_root(&id).is_none() {
         return (
             StatusCode::NOT_FOUND,
@@ -13256,14 +13469,20 @@ async fn uow_intake_ship(
     req: Option<Json<UowIntakeShipReq>>,
 ) -> Response {
     let bad = |msg: String| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response()
     };
 
     let Some(token) = state.github_token() else {
         return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to open a PR".to_string());
     };
 
-    let base_branch = req.and_then(|Json(r)| r.base_branch).filter(|b| !b.trim().is_empty());
+    let base_branch = req
+        .and_then(|Json(r)| r.base_branch)
+        .filter(|b| !b.trim().is_empty());
     let uow = state.uow.get_or_create(&story_id);
     let workspace_root = state.settings.workspace_root();
 
@@ -13308,7 +13527,9 @@ async fn uow_intake_ship(
             };
 
             // Push the branch from its worktree.
-            if let Err(e) = crate::workspace::push_branch(&dir, &scope.repo, &scope_branch, &token).await {
+            if let Err(e) =
+                crate::workspace::push_branch(&dir, &scope.repo, &scope_branch, &token).await
+            {
                 results.push(RepoShipResult {
                     repo: scope.repo.clone(),
                     branch: scope_branch.clone(),
@@ -13324,7 +13545,10 @@ async fn uow_intake_ship(
             let (title, body) = crate::vcs_choke::compliant_machine_pr(
                 &vcs_config,
                 &format!("Camerata: {story_id} ({})", scope.repo),
-                &format!("Opened by Camerata for story `{story_id}` in repo `{}`.", scope.repo),
+                &format!(
+                    "Opened by Camerata for story `{story_id}` in repo `{}`.",
+                    scope.repo
+                ),
                 &numeric_id,
             );
             if let Err(e) = crate::vcs_choke::gated_pr(&vcs_config, &title, &body) {
@@ -13380,7 +13604,11 @@ async fn uow_intake_ship(
         }
 
         let all_ok = results.iter().all(|r| r.ok);
-        return Json(UowIntakeShipResponse { repos: results, all_ok }).into_response();
+        return Json(UowIntakeShipResponse {
+            repos: results,
+            all_ok,
+        })
+        .into_response();
     }
 
     // ── Single-repo fallback: no intake.repos — use the UoW's primary branch ──
@@ -13393,7 +13621,9 @@ async fn uow_intake_ship(
         );
     };
     let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!("could not derive owner/repo from story id `{story_id}`"));
+        return bad(format!(
+            "could not derive owner/repo from story id `{story_id}`"
+        ));
     };
     let override_path = state.settings.repo_path(&repo);
     let Some(dir) = crate::workspace::resolve_uow_worktree(
@@ -13423,13 +13653,27 @@ async fn uow_intake_ship(
     if let Err(e) = crate::vcs_choke::gated_pr(&vcs_config, &title, &body) {
         return bad(format!("VCS-action gate blocked the machine PR: {e}"));
     }
-    match crate::workspace::open_pr_with_base(&repo, &branch, base_branch.as_deref(), &title, &body, &token).await {
+    match crate::workspace::open_pr_with_base(
+        &repo,
+        &branch,
+        base_branch.as_deref(),
+        &title,
+        &body,
+        &token,
+    )
+    .await
+    {
         Ok(opened) => {
-            state.uow.set_pr(&story_id, Some(opened.number), Some(opened.url.clone()));
+            state
+                .uow
+                .set_pr(&story_id, Some(opened.number), Some(opened.url.clone()));
             state.uow.append_history(
                 &story_id,
                 "intake_ship",
-                &format!("Opened PR #{} for `{branch}`: {}", opened.number, opened.url),
+                &format!(
+                    "Opened PR #{} for `{branch}`: {}",
+                    opened.number, opened.url
+                ),
             );
             let results = vec![RepoShipResult {
                 repo: repo.clone(),
@@ -13439,7 +13683,11 @@ async fn uow_intake_ship(
                 pr_number: Some(opened.number),
                 error: None,
             }];
-            Json(UowIntakeShipResponse { repos: results, all_ok: true }).into_response()
+            Json(UowIntakeShipResponse {
+                repos: results,
+                all_ok: true,
+            })
+            .into_response()
         }
         Err(e) => bad(format!("could not open the PR: {e}")),
     }
@@ -13693,9 +13941,7 @@ pub(crate) fn render_scan_results_for_chat(
     let mut preview_count: usize = 0;
 
     for f in findings {
-        *by_severity
-            .entry(f.severity.as_str())
-            .or_insert(0) += 1;
+        *by_severity.entry(f.severity.as_str()).or_insert(0) += 1;
         if f.status == "active" {
             active_count += 1;
         } else if f.status.starts_with("suppressed") {
@@ -13830,9 +14076,7 @@ fn extract_scan_results_from_draft(draft: &serde_json::Value) -> Option<String> 
 /// Extract a compact findings summary from a draft JSON blob (the UI-owned onboarding draft).
 /// Looks for the `findings` array inside the audit section; returns a one-line-per-finding
 /// compact listing, capped at 50 findings to keep the prompt manageable.
-fn extract_findings_from_draft(
-    draft: &serde_json::Value,
-) -> Option<(usize, String)> {
+fn extract_findings_from_draft(draft: &serde_json::Value) -> Option<(usize, String)> {
     // The draft shape is UI-owned; we look for `audit.findings` or `scan.findings`
     // (the audit section, which contains the Phase-2 AI audit findings).
     let findings = draft
@@ -13899,7 +14143,10 @@ pub(crate) fn render_selected_rules_for_chat(draft: &serde_json::Value) -> Optio
         std::collections::BTreeMap::new();
     for (repo_key, rule_ids) in &repo_selection {
         for rid in rule_ids {
-            by_rule.entry(rid.clone()).or_default().push(repo_key.clone());
+            by_rule
+                .entry(rid.clone())
+                .or_default()
+                .push(repo_key.clone());
         }
     }
 
@@ -13948,9 +14195,8 @@ pub(crate) fn render_selected_rules_for_chat(draft: &serde_json::Value) -> Optio
     let repo_display_count = distinct_repos.len().max(1);
 
     let total = by_rule.len();
-    let mut out = format!(
-        "Total selected: {total} rule(s) across {repo_display_count} repo(s)\nRules:\n"
-    );
+    let mut out =
+        format!("Total selected: {total} rule(s) across {repo_display_count} repo(s)\nRules:\n");
 
     for (rule_id, mut repos) in by_rule {
         repos.sort();
@@ -14015,9 +14261,7 @@ pub(crate) fn render_selected_rules_for_chat(draft: &serde_json::Value) -> Optio
 ///
 /// The UI injects the returned fields into the system prompt it sends to `POST /api/chat`.
 /// This keeps the AI call on the existing chat handler and this endpoint purely informational.
-async fn active_project_context(
-    State(state): State<AppState>,
-) -> Json<ProjectContextResponse> {
+async fn active_project_context(State(state): State<AppState>) -> Json<ProjectContextResponse> {
     let Some(project) = state.projects.active() else {
         return Json(ProjectContextResponse {
             ok: false,
@@ -14032,9 +14276,7 @@ async fn active_project_context(
             scan_results_section: None,
             selected_rules_section: None,
             draft_json: None,
-            message: Some(
-                "No active project — create one to use project-aware chat.".to_string(),
-            ),
+            message: Some("No active project — create one to use project-aware chat.".to_string()),
         });
     };
 
@@ -14331,7 +14573,9 @@ async fn spawn_investigation_agent_run(
     let read_dirs = state.active_repo_dirs();
 
     // Create a run the UI can poll, then kick the single gated investigation agent.
-    let run_id = state.runs.create(story_id, "investigation", crate::run::RunKind::Watched);
+    let run_id = state
+        .runs
+        .create(story_id, "investigation", crate::run::RunKind::Watched);
     {
         let runs = state.runs.clone();
         let uow = state.uow.clone();
@@ -14432,15 +14676,18 @@ async fn uow_rerun_investigation(
         Some(uow)
             if !matches!(
                 uow.stage,
-                crate::lifecycle::UowStage::Investigating | crate::lifecycle::UowStage::DecisionsApproved
+                crate::lifecycle::UowStage::Investigating
+                    | crate::lifecycle::UowStage::DecisionsApproved
             ) =>
         {
             let reason = match uow.stage {
                 crate::lifecycle::UowStage::Intake => {
                     "Investigation has not started yet — use \"Begin investigation\" instead."
                 }
-                _ => "Investigation can only be re-run while the UoW is in the Investigation & \
-                      Refinement phase.",
+                _ => {
+                    "Investigation can only be re-run while the UoW is in the Investigation & \
+                      Refinement phase."
+                }
             };
             let body = Json(serde_json::json!({
                 "error": "lifecycle transition blocked",
@@ -14497,9 +14744,7 @@ pub(crate) fn repo_from_story_id(story_id: &str) -> Option<String> {
 /// Best-effort: unreadable files are skipped. A reason-less waiver is carried through
 /// with `reason = None` so the gate treats it as invalid (does not suppress), mirroring
 /// the per-agent invariant.
-async fn collect_integration_waivers(
-    state: &AppState,
-) -> Vec<camerata_checks::GateWaiver> {
+async fn collect_integration_waivers(state: &AppState) -> Vec<camerata_checks::GateWaiver> {
     let dirs = state.active_repo_dirs();
     tokio::task::spawn_blocking(move || {
         let mut out: Vec<camerata_checks::GateWaiver> = Vec::new();
@@ -14542,8 +14787,15 @@ async fn collect_integration_waivers(
 /// vendored/build dirs). Small, dependency-free mirror used only for waiver parsing.
 fn walk_source_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     const PRUNE: &[&str] = &[
-        "node_modules", "target", ".git", ".camerata-venv", "vendor", "dist", "build",
-        "__pycache__", ".next",
+        "node_modules",
+        "target",
+        ".git",
+        ".camerata-venv",
+        "vendor",
+        "dist",
+        "build",
+        "__pycache__",
+        ".next",
     ];
     const EXTS: &[&str] = &[
         "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "rb", "java", "cs",
@@ -14650,8 +14902,12 @@ async fn uow_update_branch(
             .into_response()
     };
 
-    let Some(source_kind) = crate::update_branch_run::MergeSourceKind::from_wire(&req.source) else {
-        return bad(format!("`source` must be `local` or `origin`, got `{}`", req.source));
+    let Some(source_kind) = crate::update_branch_run::MergeSourceKind::from_wire(&req.source)
+    else {
+        return bad(format!(
+            "`source` must be `local` or `origin`, got `{}`",
+            req.source
+        ));
     };
     if req.source_branch.trim().is_empty() {
         return bad("`source_branch` must not be empty".to_string());
@@ -14706,7 +14962,9 @@ async fn uow_update_branch(
                 .unwrap_or_else(crate::model_tier::default_strongest_model)
         });
 
-    let run_id = state.runs.create(&story_id, "update-branch", crate::run::RunKind::Watched);
+    let run_id = state
+        .runs
+        .create(&story_id, "update-branch", crate::run::RunKind::Watched);
     {
         let runs = state.runs.clone();
         let uow_store = state.uow.clone();
@@ -14778,7 +15036,11 @@ async fn uow_pr_open(
     Json(req): Json<PrOpenReq>,
 ) -> Response {
     let bad = |msg: String| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response()
     };
     let Some(token) = state.github_token() else {
         return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to open a PR".to_string());
@@ -14791,7 +15053,9 @@ async fn uow_pr_open(
         );
     };
     let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!("could not derive owner/repo from story id `{story_id}`"));
+        return bad(format!(
+            "could not derive owner/repo from story id `{story_id}`"
+        ));
     };
     let override_path = state.settings.repo_path(&repo);
     let workspace_root = state.settings.workspace_root();
@@ -14838,11 +15102,16 @@ async fn uow_pr_open(
     let base = req.base_branch.as_deref();
     match crate::workspace::open_pr_with_base(&repo, &branch, base, &title, &body, &token).await {
         Ok(opened) => {
-            state.uow.set_pr(&story_id, Some(opened.number), Some(opened.url.clone()));
+            state
+                .uow
+                .set_pr(&story_id, Some(opened.number), Some(opened.url.clone()));
             state.uow.append_history(
                 &story_id,
                 "pr_open",
-                &format!("Opened PR #{} for `{branch}`: {}", opened.number, opened.url),
+                &format!(
+                    "Opened PR #{} for `{branch}`: {}",
+                    opened.number, opened.url
+                ),
             );
             Json(serde_json::json!({
                 "ok": true,
@@ -14866,11 +15135,11 @@ async fn uow_pr_get(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
 ) -> Json<serde_json::Value> {
-    let empty = |msg: &str| {
-        serde_json::json!({ "ok": false, "pr": null, "comments": [], "checks": null, "message": msg })
-    };
+    let empty = |msg: &str| serde_json::json!({ "ok": false, "pr": null, "comments": [], "checks": null, "message": msg });
     let Some(token) = state.github_token() else {
-        return Json(empty("Connect GitHub (set CAMERATA_GITHUB_TOKEN) to pull PR info."));
+        return Json(empty(
+            "Connect GitHub (set CAMERATA_GITHUB_TOKEN) to pull PR info.",
+        ));
     };
     let Some(repo) = repo_from_story_id(&story_id) else {
         return Json(empty("Could not derive owner/repo from the story id."));
@@ -14878,7 +15147,8 @@ async fn uow_pr_get(
     // ROUTES-8: READ — must not create. An unknown id resolves to a default UoW (no PR ref),
     // so the "No PR" path fires without persisting a junk UoW.
     let uow = state.uow.get_or_default(&story_id);
-    let Some(info) = crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
+    let Some(info) =
+        crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
     else {
         return Json(empty("No PR for this UoW yet."));
     };
@@ -14911,7 +15181,11 @@ async fn uow_pr_comment(
     Json(req): Json<PrCommentReq>,
 ) -> Response {
     let bad = |msg: String| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response()
     };
     let Some(token) = state.github_token() else {
         return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to comment".to_string());
@@ -14920,10 +15194,13 @@ async fn uow_pr_comment(
         return bad("comment body must not be empty".to_string());
     }
     let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!("could not derive owner/repo from story id `{story_id}`"));
+        return bad(format!(
+            "could not derive owner/repo from story id `{story_id}`"
+        ));
     };
     let uow = state.uow.get_or_create(&story_id);
-    let Some(info) = crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
+    let Some(info) =
+        crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
     else {
         return bad("no PR for this UoW yet — open one first".to_string());
     };
@@ -14953,20 +15230,29 @@ async fn uow_pr_resolve(
     Json(req): Json<PrResolveReq>,
 ) -> Response {
     let bad = |msg: String| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response()
     };
     let Some(token) = state.github_token() else {
-        return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to resolve PR feedback".to_string());
+        return bad(
+            "no GitHub token — set CAMERATA_GITHUB_TOKEN to resolve PR feedback".to_string(),
+        );
     };
     let uow = state.uow.get_or_create(&story_id);
     let Some(target_branch) = uow.branch.clone().filter(|b| !b.trim().is_empty()) else {
         return bad("this UoW has no branch yet — nothing to resolve".to_string());
     };
     let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!("could not derive owner/repo from story id `{story_id}`"));
+        return bad(format!(
+            "could not derive owner/repo from story id `{story_id}`"
+        ));
     };
     // Resolve the PR (stored → else head-search + store) so we have the feedback to feed.
-    let Some(info) = crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
+    let Some(info) =
+        crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
     else {
         return bad("no PR for this UoW yet — open one first".to_string());
     };
@@ -15000,15 +15286,20 @@ async fn uow_pr_resolve(
         );
     };
 
-    let model = req.model.filter(|m| !m.trim().is_empty()).unwrap_or_else(|| {
-        state
-            .projects
-            .active()
-            .map(|p| p.tier_map.strongest)
-            .unwrap_or_else(crate::model_tier::default_strongest_model)
-    });
+    let model = req
+        .model
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| {
+            state
+                .projects
+                .active()
+                .map(|p| p.tier_map.strongest)
+                .unwrap_or_else(crate::model_tier::default_strongest_model)
+        });
 
-    let run_id = state.runs.create(&story_id, "pr-resolve", crate::run::RunKind::Watched);
+    let run_id = state
+        .runs
+        .create(&story_id, "pr-resolve", crate::run::RunKind::Watched);
     {
         let runs = state.runs.clone();
         let uow_store = state.uow.clone();
@@ -15168,7 +15459,8 @@ async fn development_context(State(state): State<AppState>) -> Json<serde_json::
                     crate::uow::DevStatus::New => "new",
                     crate::uow::DevStatus::InProgress => "in_progress",
                     crate::uow::DevStatus::Done => "done",
-                }.to_string(),
+                }
+                .to_string(),
                 branch: uow.branch.clone(),
                 decisions_approved,
                 decision_count: uow.decisions.len(),
@@ -15500,7 +15792,12 @@ async fn set_rule_override(
 ) -> Json<serde_json::Value> {
     let updated = state.projects.update(&id, |p| {
         // Find or create the selection for this rule.
-        if let Some(sel) = p.ruleset.selections.iter_mut().find(|s| s.rule_id == rule_id) {
+        if let Some(sel) = p
+            .ruleset
+            .selections
+            .iter_mut()
+            .find(|s| s.rule_id == rule_id)
+        {
             if let Some(opt) = req.chosen_option.filter(|s| !s.trim().is_empty()) {
                 sel.chosen_option = Some(opt);
             }
@@ -15546,9 +15843,11 @@ async fn get_repo_rule_override(
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
     // Repo-level override: a selection scoped to this repo only.
-    let selection = project.ruleset.selections.iter().find(|s| {
-        s.rule_id == rule_id && s.repos.iter().any(|r| r == &repo)
-    });
+    let selection = project
+        .ruleset
+        .selections
+        .iter()
+        .find(|s| s.rule_id == rule_id && s.repos.iter().any(|r| r == &repo));
     Json(serde_json::json!({
         "ok": true,
         "rule_id": rule_id,
@@ -15567,9 +15866,12 @@ async fn set_repo_rule_override(
 ) -> Json<serde_json::Value> {
     let updated = state.projects.update(&id, |p| {
         // Find or create a REPO-SCOPED selection for this rule.
-        if let Some(sel) = p.ruleset.selections.iter_mut().find(|s| {
-            s.rule_id == rule_id && s.repos.iter().any(|r| r == &repo)
-        }) {
+        if let Some(sel) = p
+            .ruleset
+            .selections
+            .iter_mut()
+            .find(|s| s.rule_id == rule_id && s.repos.iter().any(|r| r == &repo))
+        {
             if let Some(opt) = req.chosen_option.filter(|s| !s.trim().is_empty()) {
                 sel.chosen_option = Some(opt);
             }
@@ -15610,10 +15912,7 @@ const DEEP_REPORT_ADVISORY: &str =
 /// This endpoint reads the last deep report from the job store (the most recent
 /// async audit job that ran with `deep=true`). When no deep report is available
 /// yet, returns a 404 JSON error.
-async fn export_deep_report(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn export_deep_report(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
@@ -15950,11 +16249,21 @@ async fn export_product(
     // The per-dataset machine-readable tables (csv/*, json/*) — the SAME partition_rows pass as
     // the xlsx and findings.json, so every artifact agrees. csv first, then json.
     let mut extra_files: Vec<(String, Vec<u8>)> = Vec::new();
-    match crate::xlsx_export::build_csv_exports(&report, &req.dispositions, corpus.as_ref(), &req.options)
-        .and_then(|csv| {
-            crate::xlsx_export::build_json_exports(&report, &req.dispositions, corpus.as_ref(), &req.options)
-                .map(|json_files| (csv, json_files))
-        }) {
+    match crate::xlsx_export::build_csv_exports(
+        &report,
+        &req.dispositions,
+        corpus.as_ref(),
+        &req.options,
+    )
+    .and_then(|csv| {
+        crate::xlsx_export::build_json_exports(
+            &report,
+            &req.dispositions,
+            corpus.as_ref(),
+            &req.options,
+        )
+        .map(|json_files| (csv, json_files))
+    }) {
         Ok((csv, json_files)) => {
             extra_files.extend(csv);
             extra_files.extend(json_files);
@@ -16168,7 +16477,10 @@ pub fn build_manifest(
     use sha2::{Digest, Sha256};
     let sha = |bytes: &[u8]| -> String {
         let digest = Sha256::digest(bytes);
-        digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     };
     let entry = |path: String, bytes: &[u8]| {
         let (purpose, schema_version) = manifest_file_facts(&path);
@@ -16296,13 +16608,19 @@ impl AppError {
 
     /// ROUTES-7: a 404 for a missing resource (the message becomes the `{error}` body).
     fn not_found(err: anyhow::Error) -> Self {
-        AppError { status: StatusCode::NOT_FOUND, err }
+        AppError {
+            status: StatusCode::NOT_FOUND,
+            err,
+        }
     }
 
     /// ROUTES-7: a 400 for invalid input / a request the server understood but can't act on
     /// as posed (the message becomes the `{error}` body).
     fn bad_request(err: anyhow::Error) -> Self {
-        AppError { status: StatusCode::BAD_REQUEST, err }
+        AppError {
+            status: StatusCode::BAD_REQUEST,
+            err,
+        }
     }
 }
 
@@ -16344,20 +16662,14 @@ mod tests {
             "req-model"
         );
         // 2. No (or blank) request model -> app-level chat model.
-        assert_eq!(
-            resolve_chat_model(None, Some("app-model")),
-            "app-model"
-        );
+        assert_eq!(resolve_chat_model(None, Some("app-model")), "app-model");
         assert_eq!(
             resolve_chat_model(Some("   "), Some("app-model")),
             "app-model",
             "blank request model is ignored"
         );
         // 3. Neither set -> DEFAULT_MODEL floor.
-        assert_eq!(
-            resolve_chat_model(None, None),
-            crate::llm::DEFAULT_MODEL
-        );
+        assert_eq!(resolve_chat_model(None, None), crate::llm::DEFAULT_MODEL);
         assert_eq!(
             resolve_chat_model(Some("  "), Some("   ")),
             crate::llm::DEFAULT_MODEL,
@@ -16413,7 +16725,9 @@ mod tests {
     #[tokio::test]
     async fn get_settings_includes_chat_backend_and_api_key_present() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        state.settings.set_chat_backend(crate::llm::ProjectBackend::Api);
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
         let app = router(state);
 
         let resp = app
@@ -16427,7 +16741,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["chat_backend"], "api", "stored chat backend surfaces verbatim");
+        assert_eq!(
+            json["chat_backend"], "api",
+            "stored chat backend surfaces verbatim"
+        );
         assert!(
             json["api_key_present"].is_boolean(),
             "api_key_present is present and boolean"
@@ -16457,7 +16774,10 @@ mod tests {
         assert_eq!(json["backend"], "api");
         assert!(json["api_key_present"].is_boolean());
         // Persisted on the settings store.
-        assert_eq!(state.settings.chat_backend(), crate::llm::ProjectBackend::Api);
+        assert_eq!(
+            state.settings.chat_backend(),
+            crate::llm::ProjectBackend::Api
+        );
     }
 
     /// `POST /api/settings/chat-backend` persists to the settings store WITHOUT touching
@@ -16483,7 +16803,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // The setting is persisted to the store...
-        assert_eq!(state.settings.chat_backend(), crate::llm::ProjectBackend::Api);
+        assert_eq!(
+            state.settings.chat_backend(),
+            crate::llm::ProjectBackend::Api
+        );
         // ...but the process env was left exactly as it was (no per-request set_var).
         assert_eq!(
             std::env::var("CAMERATA_LLM_BACKEND").as_deref(),
@@ -16645,7 +16968,9 @@ mod tests {
     #[test]
     fn effective_workspace_root_prefers_explicit_setting() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        state.settings.set_workspace_root(Some("/explicit/root".to_string()));
+        state
+            .settings
+            .set_workspace_root(Some("/explicit/root".to_string()));
         state
             .settings
             .set_repo_path("me/api", Some("/other/place/me-api".to_string()));
@@ -16726,7 +17051,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         // The store was left untouched (still the Cli default).
-        assert_eq!(state.settings.chat_backend(), crate::llm::ProjectBackend::Cli);
+        assert_eq!(
+            state.settings.chat_backend(),
+            crate::llm::ProjectBackend::Cli
+        );
     }
 
     /// `POST /api/projects/:id/backend` — the per-project backend setting
@@ -16737,7 +17065,11 @@ mod tests {
     async fn post_project_backend_persists_valid_value() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let p = state.projects.create("Compliance", vec![]).unwrap();
-        assert_eq!(p.backend, crate::project::ProjectBackend::Cli, "fresh project defaults to Cli");
+        assert_eq!(
+            p.backend,
+            crate::project::ProjectBackend::Cli,
+            "fresh project defaults to Cli"
+        );
         let app = router(state.clone());
 
         let resp = app
@@ -16757,7 +17089,10 @@ mod tests {
         assert_eq!(json["ok"], true);
         assert_eq!(json["project"]["backend"], "api");
         // Persisted on the store.
-        assert_eq!(state.projects.get(&p.id).unwrap().backend, crate::project::ProjectBackend::Api);
+        assert_eq!(
+            state.projects.get(&p.id).unwrap().backend,
+            crate::project::ProjectBackend::Api
+        );
 
         // Switching it back to cli round-trips too.
         let resp2 = app
@@ -16799,7 +17134,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["ok"], false);
-        assert_eq!(state.projects.get(&p.id).unwrap().backend, crate::project::ProjectBackend::Cli);
+        assert_eq!(
+            state.projects.get(&p.id).unwrap().backend,
+            crate::project::ProjectBackend::Cli
+        );
     }
 
     /// `POST /api/projects/:id/backend` against an unknown project id: no HTTP-status
@@ -16824,7 +17162,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["ok"], false);
-        assert!(json["message"].as_str().is_some(), "message field present for the UI");
+        assert!(
+            json["message"].as_str().is_some(),
+            "message field present for the UI"
+        );
     }
 
     // ── Audit-integrated alternative recommendation endpoints ─────────────────────────
@@ -16839,7 +17180,10 @@ mod tests {
     #[tokio::test]
     async fn rescan_alternatives_rejects_invalid_overrides_before_any_model_call() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec!["me/api".to_string()]).unwrap();
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
         let app = router(state);
 
         let resp = app
@@ -16862,7 +17206,10 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["ok"], false);
         let message = json["message"].as_str().unwrap_or_default();
-        assert!(message.contains("NO-SUCH-RULE-EVER-1"), "message: {message}");
+        assert!(
+            message.contains("NO-SUCH-RULE-EVER-1"),
+            "message: {message}"
+        );
         assert!(message.contains("RUST-DOMAIN-7"), "message: {message}");
     }
 
@@ -16877,9 +17224,18 @@ mod tests {
         // `resolve_backend_for_project_gathers_the_three_inputs_correctly`'s doc comment).
         std::env::remove_var("ANTHROPIC_API_KEY");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec!["me/api".to_string()]).unwrap();
-        assert_eq!(p.backend, crate::project::ProjectBackend::Cli, "fresh project defaults to Cli");
-        state.projects.set_backend(&p.id, crate::project::ProjectBackend::Api);
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
+        assert_eq!(
+            p.backend,
+            crate::project::ProjectBackend::Cli,
+            "fresh project defaults to Cli"
+        );
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Api);
         let app = router(state);
 
         let resp = app
@@ -16899,7 +17255,10 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["ok"], false);
         assert!(
-            json["message"].as_str().unwrap_or_default().contains("Anthropic API"),
+            json["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Anthropic API"),
             "message: {:?}",
             json["message"]
         );
@@ -16914,7 +17273,10 @@ mod tests {
     async fn rescan_alternatives_proceeds_on_cli_backend_project() {
         std::env::remove_var("ANTHROPIC_API_KEY");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec!["me/api".to_string()]).unwrap();
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
         assert_eq!(p.backend, crate::project::ProjectBackend::Cli);
         let app = router(state);
 
@@ -16934,7 +17296,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         // Not Blocked: the request proceeds (ok: true) rather than being refused outright.
-        assert_eq!(json["ok"], true, "a Cli-backend project must never be blocked: {json:?}");
+        assert_eq!(
+            json["ok"], true,
+            "a Cli-backend project must never be blocked: {json:?}"
+        );
     }
 
     /// `rescan-alternatives` against an unknown project id reports the same `{ ok: false,
@@ -16992,7 +17357,10 @@ mod tests {
     #[tokio::test]
     async fn accept_alternatives_reports_error_without_a_scan() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec!["me/api".to_string()]).unwrap();
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
         let app = router(state);
         let resp = app
             .oneshot(
@@ -17016,7 +17384,10 @@ mod tests {
     #[tokio::test]
     async fn accept_alternatives_persists_every_recommendation_by_default() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec!["me/api".to_string()]).unwrap();
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
         state.projects.update(&p.id, |proj| {
             proj.ruleset.selections.push(crate::project::RuleSelection {
                 rule_id: "TESTING-PYRAMID-1".to_string(),
@@ -17032,8 +17403,14 @@ mod tests {
             seeded_scan_report_with_recommendations(
                 "me/api",
                 vec![
-                    ("TESTING-PYRAMID-1", "pyramid-many-unit-fewer-integration-few-e2e"),
-                    ("RUST-DOMAIN-7", "explicit-unitofwork-parameter-on-transactional-repository-methods"),
+                    (
+                        "TESTING-PYRAMID-1",
+                        "pyramid-many-unit-fewer-integration-few-e2e",
+                    ),
+                    (
+                        "RUST-DOMAIN-7",
+                        "explicit-unitofwork-parameter-on-transactional-repository-methods",
+                    ),
                 ],
             ),
         );
@@ -17081,7 +17458,10 @@ mod tests {
     #[tokio::test]
     async fn accept_alternatives_scopes_to_the_requested_rule_ids() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec!["me/api".to_string()]).unwrap();
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
         state.projects.update(&p.id, |proj| {
             proj.ruleset.selections.push(crate::project::RuleSelection {
                 rule_id: "TESTING-PYRAMID-1".to_string(),
@@ -17097,8 +17477,14 @@ mod tests {
             seeded_scan_report_with_recommendations(
                 "me/api",
                 vec![
-                    ("TESTING-PYRAMID-1", "pyramid-many-unit-fewer-integration-few-e2e"),
-                    ("RUST-DOMAIN-7", "explicit-unitofwork-parameter-on-transactional-repository-methods"),
+                    (
+                        "TESTING-PYRAMID-1",
+                        "pyramid-many-unit-fewer-integration-few-e2e",
+                    ),
+                    (
+                        "RUST-DOMAIN-7",
+                        "explicit-unitofwork-parameter-on-transactional-repository-methods",
+                    ),
                 ],
             ),
         );
@@ -17135,7 +17521,11 @@ mod tests {
             sel("TESTING-PYRAMID-1"),
             Some("pyramid-many-unit-fewer-integration-few-e2e".to_string())
         );
-        assert_eq!(sel("RUST-DOMAIN-7"), None, "un-requested rule must be left untouched");
+        assert_eq!(
+            sel("RUST-DOMAIN-7"),
+            None,
+            "un-requested rule must be left untouched"
+        );
     }
 
     /// GAP-2: the git-commit chokepoint HARD-BLOCKS a commit whose message violates the
@@ -17144,7 +17534,10 @@ mod tests {
     #[tokio::test]
     async fn git_commit_chokepoint_blocks_a_message_violating_process_rules() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Gate", vec!["me/api".to_string()]).unwrap();
+        let p = state
+            .projects
+            .create("Gate", vec!["me/api".to_string()])
+            .unwrap();
         let app = router(state);
 
         // "just some junk" is not a conventional-commit subject and has no doc body/story-id.
@@ -17154,16 +17547,27 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/projects/{}/git/commit", p.id))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"repo":"me/api","message":"just some junk"}"#))
+                    .body(Body::from(
+                        r#"{"repo":"me/api","message":"just some junk"}"#,
+                    ))
                     .unwrap(),
             )
             .await
             .unwrap();
         let json = body_json(resp).await;
-        assert_eq!(json["ok"], false, "violating commit must be refused: {json}");
-        assert_eq!(json["blocked"], true, "the response must mark it as gate-blocked: {json}");
+        assert_eq!(
+            json["ok"], false,
+            "violating commit must be refused: {json}"
+        );
+        assert_eq!(
+            json["blocked"], true,
+            "the response must mark it as gate-blocked: {json}"
+        );
         assert!(
-            json["message"].as_str().unwrap_or_default().contains("VCS-action gate"),
+            json["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("VCS-action gate"),
             "the block message must name the VCS-action gate: {json}"
         );
     }
@@ -17198,7 +17602,10 @@ mod tests {
         let active = state.runs.create("CAM-live", "live", RunKind::Watched);
         state.runs.set_status(&active, RunStatus::Executing, false);
         state.runs.touch_activity(&active, None);
-        assert!(!stalled_flag(&state, &active).await, "fresh active run not stalled");
+        assert!(
+            !stalled_flag(&state, &active).await,
+            "fresh active run not stalled"
+        );
 
         // A DONE run is never stalled (even though it will sit idle forever).
         let done = state.runs.create("CAM-done", "live", RunKind::Watched);
@@ -17207,8 +17614,13 @@ mod tests {
 
         // A run PARKED on human review is never stalled.
         let parked = state.runs.create("CAM-parked", "live", RunKind::Watched);
-        state.runs.set_status(&parked, RunStatus::AwaitingReview, false);
-        assert!(!stalled_flag(&state, &parked).await, "parked run never stalled");
+        state
+            .runs
+            .set_status(&parked, RunStatus::AwaitingReview, false);
+        assert!(
+            !stalled_flag(&state, &parked).await,
+            "parked run never stalled"
+        );
     }
 
     #[test]
@@ -17277,10 +17689,19 @@ mod tests {
     fn parse_step_kind_accepts_known_keys_and_separators() {
         use crate::project::StepKind;
         assert_eq!(parse_step_kind("audit"), Some(StepKind::Audit));
-        assert_eq!(parse_step_kind("research_chat"), Some(StepKind::ResearchChat));
+        assert_eq!(
+            parse_step_kind("research_chat"),
+            Some(StepKind::ResearchChat)
+        );
         // Tolerant of dashes/spaces/case.
-        assert_eq!(parse_step_kind("Research-Chat"), Some(StepKind::ResearchChat));
-        assert_eq!(parse_step_kind("story authoring"), Some(StepKind::StoryAuthoring));
+        assert_eq!(
+            parse_step_kind("Research-Chat"),
+            Some(StepKind::ResearchChat)
+        );
+        assert_eq!(
+            parse_step_kind("story authoring"),
+            Some(StepKind::StoryAuthoring)
+        );
         assert_eq!(parse_step_kind("nope"), None);
     }
 
@@ -17399,7 +17820,10 @@ mod tests {
     #[tokio::test]
     async fn project_grounding_includes_brief_and_enabled_principles() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         state.projects.update(&p.id, |pr| {
             pr.product_brief = "Acme builds X for Y; never ship without tests.".to_string();
             pr.operating_principles = vec![
@@ -17418,7 +17842,10 @@ mod tests {
         let g = state.project_grounding().await.expect("grounding present");
         assert!(g.contains("## Product context"), "brief heading present");
         assert!(g.contains("Acme builds X for Y"), "brief body present");
-        assert!(g.contains("## How to work here"), "principles heading present");
+        assert!(
+            g.contains("## How to work here"),
+            "principles heading present"
+        );
         assert!(g.contains("Be explicit."), "enabled principle present");
         assert!(
             !g.contains("SECRET-DISABLED-PRINCIPLE"),
@@ -17429,7 +17856,10 @@ mod tests {
     #[tokio::test]
     async fn project_grounding_includes_approved_memory_only() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         state.projects.update(&p.id, |pr| {
             pr.memory = vec![
                 crate::project::MemoryEntry {
@@ -17463,7 +17893,10 @@ mod tests {
     #[tokio::test]
     async fn memory_add_patch_delete_curation_flow() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         // Human add → an Approved entry with a fresh id.
         let r = add_memory(
             axum::extract::State(state.clone()),
@@ -17478,8 +17911,14 @@ mod tests {
         assert_eq!(r["ok"], true);
         let proj = state.projects.active().unwrap();
         assert_eq!(proj.memory.len(), 1);
-        assert_eq!(proj.memory[0].status, crate::project::MemoryStatus::Approved);
-        assert_eq!(proj.memory[0].text, "Use the repository pattern for data access.");
+        assert_eq!(
+            proj.memory[0].status,
+            crate::project::MemoryStatus::Approved
+        );
+        assert_eq!(
+            proj.memory[0].text,
+            "Use the repository pattern for data access."
+        );
         let eid = proj.memory[0].id.clone();
         // Patch → archive it.
         let _ = patch_memory(
@@ -17528,7 +17967,9 @@ mod tests {
                 }]);
             })
             .expect("project updated");
-        state.draft.save(&p.id, serde_json::json!({"scan": "in-progress"}));
+        state
+            .draft
+            .save(&p.id, serde_json::json!({"scan": "in-progress"}));
         assert!(!state.projects.get(&p.id).unwrap().onboarded.is_empty());
         assert!(state.draft.load(&p.id).is_some());
 
@@ -17588,7 +18029,10 @@ mod tests {
     #[tokio::test]
     async fn hierarchy_get_default_then_post_replaces() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
 
         // GET → the seeded default ladder (includes Epic).
         let got = get_hierarchy_handler(
@@ -17639,7 +18083,10 @@ mod tests {
     #[tokio::test]
     async fn chat_add_to_learnings_server_path_resolves_active_then_adds() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         let app = router(state.clone());
 
         // GET active -> the active project's id (what the chat resolves first).
@@ -17695,13 +18142,14 @@ mod tests {
     #[tokio::test]
     async fn development_context_emits_client_expected_field_names() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
 
         // A UoW scoped to the active project (project_id match), with a recorded gate
         // provenance and a sign-off so all three client-expected fields are populated.
-        let uow = state
-            .uow
-            .create_blank_with_parent(None, Some(p.id.clone()));
+        let uow = state.uow.create_blank_with_parent(None, Some(p.id.clone()));
         let story_id = uow.story_id.clone();
         state.uow.record_gate_provenance(
             &story_id,
@@ -17732,7 +18180,9 @@ mod tests {
         let body = body_json(resp).await;
 
         assert_eq!(body["ok"], true);
-        let items = body["units_of_work"].as_array().expect("units_of_work array");
+        let items = body["units_of_work"]
+            .as_array()
+            .expect("units_of_work array");
         let item = items
             .iter()
             .find(|u| u["story_id"] == serde_json::json!(story_id))
@@ -17782,7 +18232,10 @@ mod tests {
     #[tokio::test]
     async fn hierarchy_schema_http_round_trip_and_export() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         let app = router(state.clone());
         let id = p.id.clone();
 
@@ -17806,7 +18259,10 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert!(names.contains(&"Epic"), "seeded default includes Epic; got {names:?}");
+        assert!(
+            names.contains(&"Epic"),
+            "seeded default includes Epic; got {names:?}"
+        );
 
         // POST → replace with a custom graph.
         let post = app
@@ -17868,14 +18324,15 @@ mod tests {
     /// proposal, and made materialize reject every child.
     #[test]
     fn effective_hierarchy_schema_falls_back_to_default_ladder() {
-        let allowed_children = |schema: &crate::project::HierarchySchema, parent: &str| -> Vec<String> {
-            schema
-                .relations
-                .iter()
-                .filter(|r| r.parent == parent)
-                .map(|r| r.child.clone())
-                .collect::<Vec<_>>()
-        };
+        let allowed_children =
+            |schema: &crate::project::HierarchySchema, parent: &str| -> Vec<String> {
+                schema
+                    .relations
+                    .iter()
+                    .filter(|r| r.parent == parent)
+                    .map(|r| r.child.clone())
+                    .collect::<Vec<_>>()
+            };
 
         // (a) No active project → default ladder.
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
@@ -17889,13 +18346,22 @@ mod tests {
         );
 
         // (b) Active project with an EMPTY stored schema (bare-import shape) → default ladder.
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         state
             .projects
             .set_hierarchy_schema(&p.id, crate::project::HierarchySchema::default())
             .expect("schema set");
         assert!(
-            state.projects.active().unwrap().hierarchy_schema.types.is_empty(),
+            state
+                .projects
+                .active()
+                .unwrap()
+                .hierarchy_schema
+                .types
+                .is_empty(),
             "stored schema is empty",
         );
         let schema = state.effective_hierarchy_schema();
@@ -17939,7 +18405,10 @@ mod tests {
     #[tokio::test]
     async fn memory_edit_modal_patches_text_and_kind() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         add_memory(
             axum::extract::State(state.clone()),
             axum::extract::Path(p.id.clone()),
@@ -18068,7 +18537,11 @@ mod tests {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let (esc_id, ckpt_id) = seed_paused_uow_run(&state, "me/api#7");
         // The UoW review is discoverable in the NEEDS YOU surface before resolution.
-        assert_eq!(state.escalations.list_open_uow().len(), 1, "open UoW review -> NEEDS YOU");
+        assert_eq!(
+            state.escalations.list_open_uow().len(),
+            1,
+            "open UoW review -> NEEDS YOU"
+        );
 
         let resolved = answer_escalation(
             axum::extract::State(state.clone()),
@@ -18084,7 +18557,9 @@ mod tests {
         assert_eq!(resolved["status"], "resolved");
         // A successful resume surfaces the NEW run id so the client can follow it.
         assert!(
-            resolved["resume_run_id"].as_str().is_some_and(|s| !s.is_empty()),
+            resolved["resume_run_id"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
             "approve returns the resumed run id: {resolved}"
         );
         // Approve RESUMES: the checkpoint is consumed (enforcing once-only resume) and no longer
@@ -18093,13 +18568,19 @@ mod tests {
             state.checkpoints.get(&ckpt_id).unwrap().resumed.is_some(),
             "approve resumes -> checkpoint consumed"
         );
-        assert_eq!(state.escalations.list_open_uow().len(), 0, "resolved -> off NEEDS YOU");
+        assert_eq!(
+            state.escalations.list_open_uow().len(),
+            0,
+            "resolved -> off NEEDS YOU"
+        );
         // The decision is recorded on the UoW's durable history. Without a live agent the resume
         // REFUSES honestly (it never fabricates a continued cycle), so the trail records the
         // refusal rather than a fake success.
         let uow = state.uow.get_or_create("me/api#7");
         assert!(
-            uow.history.iter().any(|h| h.text.contains("Resume refused")),
+            uow.history
+                .iter()
+                .any(|h| h.text.contains("Resume refused")),
             "approve records the honest resume refusal on the UoW trail"
         );
     }
@@ -18116,8 +18597,9 @@ mod tests {
             axum::extract::State(state.clone()),
             axum::extract::Path(esc_id.clone()),
             axum::Json(crate::escalation::AnswerEscalationReq {
-                answer: "Reject: the agent weakened a real assertion to make it pass. Fix the code."
-                    .to_string(),
+                answer:
+                    "Reject: the agent weakened a real assertion to make it pass. Fix the code."
+                        .to_string(),
                 action: crate::escalation::EscalationAction::Reject,
             }),
         )
@@ -18188,17 +18670,30 @@ mod tests {
         let stamped = with_resume_run_ids(&resume, clars);
 
         assert_eq!(
-            stamped.iter().find(|c| c.id == "clar-1").unwrap().run_id.as_deref(),
+            stamped
+                .iter()
+                .find(|c| c.id == "clar-1")
+                .unwrap()
+                .run_id
+                .as_deref(),
             Some("run-9"),
             "the clarification with a parked resume context gets its run_id"
         );
         assert!(
-            stamped.iter().find(|c| c.id == "clar-2").unwrap().run_id.is_none(),
+            stamped
+                .iter()
+                .find(|c| c.id == "clar-2")
+                .unwrap()
+                .run_id
+                .is_none(),
             "a free-standing clarification (no parked run) stays None"
         );
         // Non-destructive: a SECOND stamp still finds it (list endpoints must never consume the
         // pause point — only actually answering does, via `ClarifyResumeStore::take`).
-        assert!(resume.get("clar-1").is_some(), "with_resume_run_ids used .get, not .take");
+        assert!(
+            resume.get("clar-1").is_some(),
+            "with_resume_run_ids used .get, not .take"
+        );
     }
 
     #[tokio::test]
@@ -18544,7 +19039,10 @@ mod tests {
         assert_eq!(uow.development.chat.len(), 1);
         assert_eq!(uow.meta.viewed_phase, crate::uow::PhaseTab::Development);
         assert!(uow.meta.intake_finished);
-        assert!(!uow.meta.investigation_finished, "unpatched field unchanged");
+        assert!(
+            !uow.meta.investigation_finished,
+            "unpatched field unchanged"
+        );
     }
 
     #[tokio::test]
@@ -18600,7 +19098,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 2, "only the active project's stories, got: {json:?}");
+        assert_eq!(
+            arr.len(),
+            2,
+            "only the active project's stories, got: {json:?}"
+        );
         let ids: Vec<&str> = arr.iter().map(|s| s["id"].as_str().unwrap()).collect();
         assert!(ids.contains(&"CAM-1") && ids.contains(&"CAM-2"));
         assert!(
@@ -18688,7 +19190,9 @@ mod tests {
     /// unchanged `{error}` body shape the UI parses.
     #[tokio::test]
     async fn get_run_missing_returns_404_not_500() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -18709,7 +19213,9 @@ mod tests {
     /// (see `AppState::record_governance`) must extend to the read path.
     #[tokio::test]
     async fn get_run_events_returns_empty_array_when_no_governance_log() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -18729,7 +19235,9 @@ mod tests {
     /// governance log open, same fail-soft contract as the per-run route.
     #[tokio::test]
     async fn recent_governance_events_returns_empty_array_when_no_governance_log() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -18816,7 +19324,9 @@ mod tests {
     /// an error, when no feedback store is open this session.
     #[tokio::test]
     async fn project_feedback_returns_empty_array_when_no_feedback_store() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -18836,7 +19346,9 @@ mod tests {
     /// feedback store open, same contract as the per-project route.
     #[tokio::test]
     async fn recent_feedback_returns_empty_array_when_no_feedback_store() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -18856,7 +19368,9 @@ mod tests {
     /// 500) when no feedback store is open this session.
     #[tokio::test]
     async fn submit_feedback_reports_ok_false_when_no_feedback_store() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -18949,8 +19463,14 @@ mod tests {
         assert_eq!(json[0]["id"], id);
         let console = json[0]["context"]["console"].as_str().unwrap();
         let stack = json[0]["context"]["stack"].as_str().unwrap();
-        assert!(!console.contains(leaked_key), "console still carries the raw key: {console}");
-        assert!(!stack.contains(leaked_key), "stack still carries the raw key: {stack}");
+        assert!(
+            !console.contains(leaked_key),
+            "console still carries the raw key: {console}"
+        );
+        assert!(
+            !stack.contains(leaked_key),
+            "stack still carries the raw key: {stack}"
+        );
         assert!(console.contains("{{SECRET:stripe_key_1}}"));
         assert!(stack.contains("{{SECRET:stripe_key_1}}"));
         // Untouched context fields (route) still come through unscrubbed.
@@ -18973,7 +19493,10 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 1);
         let detail = json[0]["detail"].as_str().expect("detail must be a string");
-        assert!(!detail.contains(leaked_key), "governance detail still carries the raw key: {detail}");
+        assert!(
+            !detail.contains(leaked_key),
+            "governance detail still carries the raw key: {detail}"
+        );
         assert!(detail.contains("{{SECRET:stripe_key_1}}"));
     }
 
@@ -19072,7 +19595,10 @@ mod tests {
         assert_eq!(json.as_array().unwrap().len(), 1);
         assert_eq!(json[0]["id"], id);
         assert_eq!(json[0]["title"], "TypeError: x is undefined");
-        assert_eq!(json[0]["status"], "open", "server stamps status Open regardless of client input");
+        assert_eq!(
+            json[0]["status"], "open",
+            "server stamps status Open regardless of client input"
+        );
         assert_eq!(json[0]["context"]["route"], "/dashboard");
 
         // Cross-project recent: both reports, newest (proj-b) first.
@@ -19237,7 +19763,11 @@ mod tests {
             .unwrap();
         let json = body_json(resp).await;
         let reports = json.as_array().unwrap();
-        assert_eq!(reports.len(), 1, "the second occurrence must NOT insert a new row");
+        assert_eq!(
+            reports.len(),
+            1,
+            "the second occurrence must NOT insert a new row"
+        );
         assert_eq!(reports[0]["id"], id);
         assert_eq!(reports[0]["count"], 2);
 
@@ -19366,7 +19896,11 @@ mod tests {
             .unwrap();
         let json = body_json(resp).await;
         let reports = json.as_array().unwrap();
-        assert_eq!(reports.len(), 1, "client-provided fingerprint must dedupe too");
+        assert_eq!(
+            reports.len(),
+            1,
+            "client-provided fingerprint must dedupe too"
+        );
         assert_eq!(reports[0]["fingerprint"], "client-computed-fp");
         assert_eq!(reports[0]["count"], 2);
     }
@@ -19476,8 +20010,12 @@ mod tests {
         let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         state.governance_log = Some(std::sync::Arc::new(governance));
 
-        let decision =
-            camerata_persistence::OrchestratorDecision::new("run-3", "preview_reversible", "high", "x");
+        let decision = camerata_persistence::OrchestratorDecision::new(
+            "run-3",
+            "preview_reversible",
+            "high",
+            "x",
+        );
         let result = state.record_orchestrator_decision(decision).await;
         assert!(result.is_none());
 
@@ -19495,7 +20033,9 @@ mod tests {
     /// (200, never a 500) when no feedback store is open this session.
     #[tokio::test]
     async fn update_feedback_status_reports_ok_false_when_no_feedback_store() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -19521,9 +20061,18 @@ mod tests {
     async fn app_error_status_codes_map_correctly() {
         use axum::response::IntoResponse;
         let cases = [
-            (AppError(anyhow::anyhow!("boom")), StatusCode::INTERNAL_SERVER_ERROR),
-            (AppError::not_found(anyhow::anyhow!("gone")), StatusCode::NOT_FOUND),
-            (AppError::bad_request(anyhow::anyhow!("nope")), StatusCode::BAD_REQUEST),
+            (
+                AppError(anyhow::anyhow!("boom")),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                AppError::not_found(anyhow::anyhow!("gone")),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::bad_request(anyhow::anyhow!("nope")),
+                StatusCode::BAD_REQUEST,
+            ),
         ];
         for (err, expected) in cases {
             let resp = err.into_response();
@@ -19595,7 +20144,10 @@ mod tests {
         assert!(json["reason"].as_str().unwrap().contains("No decisions"));
 
         // The UoW stage did NOT advance (still Intake — no code was let through).
-        assert_eq!(state.uow.get_or_create(story).stage, lifecycle::UowStage::Intake);
+        assert_eq!(
+            state.uow.get_or_create(story).stage,
+            lifecycle::UowStage::Intake
+        );
     }
 
     #[tokio::test]
@@ -19720,7 +20272,9 @@ mod tests {
         seed_approved_decision(&state, story);
         // Seed an ACTIVE (Planned, not done) run on the story — simulating a run already
         // in flight.
-        let active = state.runs.create(story, "scripted", crate::run::RunKind::Watched);
+        let active = state
+            .runs
+            .create(story, "scripted", crate::run::RunKind::Watched);
 
         let app = router(state.clone());
         let resp = app
@@ -19740,10 +20294,7 @@ mod tests {
         );
         let json = body_json(resp).await;
         assert_eq!(json["active_run_id"], active);
-        assert!(json["reason"]
-            .as_str()
-            .unwrap()
-            .contains("Only one"));
+        assert!(json["reason"].as_str().unwrap().contains("Only one"));
     }
 
     /// Once the active run is done, a fresh start proceeds (the guard only blocks LIVE runs).
@@ -19753,7 +20304,9 @@ mod tests {
         let story = "SF-2";
         seed_approved_decision(&state, story);
         // A prior run that has completed (done) must NOT block a new start.
-        let prior = state.runs.create(story, "scripted", crate::run::RunKind::Watched);
+        let prior = state
+            .runs
+            .create(story, "scripted", crate::run::RunKind::Watched);
         state.runs.mark_done(&prior);
 
         let app = router(state.clone());
@@ -19782,9 +20335,13 @@ mod tests {
         let state = AppState::seeded();
         let story = "SF-3";
         // A UoW branch so the teardown path would otherwise be reached.
-        state.uow.set_branch(story, Some("camerata/sf-3".to_string()));
+        state
+            .uow
+            .set_branch(story, Some("camerata/sf-3".to_string()));
         // A LIVE run (Planned, not done).
-        let run_id = state.runs.create(story, "live", crate::run::RunKind::Watched);
+        let run_id = state
+            .runs
+            .create(story, "live", crate::run::RunKind::Watched);
 
         let app = router(state.clone());
         let resp = app
@@ -19798,7 +20355,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "sign-off itself still succeeds");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "sign-off itself still succeeds"
+        );
 
         // A deferral history entry was recorded (teardown withheld while live).
         let uow = state.uow.get_or_create(story);
@@ -19815,8 +20376,12 @@ mod tests {
     async fn lifecycle9_signoff_tears_down_when_run_is_done() {
         let state = AppState::seeded();
         let story = "SF-4";
-        state.uow.set_branch(story, Some("camerata/sf-4".to_string()));
-        let run_id = state.runs.create(story, "live", crate::run::RunKind::Watched);
+        state
+            .uow
+            .set_branch(story, Some("camerata/sf-4".to_string()));
+        let run_id = state
+            .runs
+            .create(story, "live", crate::run::RunKind::Watched);
         state
             .runs
             .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
@@ -19922,8 +20487,14 @@ mod tests {
             "the per-iteration snapshot commits must be gone after Reject: {log}"
         );
         // The agent's committed file and untracked file are both gone.
-        assert!(!dir.join("work.rs").exists(), "committed work file must be reverted");
-        assert!(!dir.join("untracked.rs").exists(), "untracked file must be cleaned");
+        assert!(
+            !dir.join("work.rs").exists(),
+            "committed work file must be reverted"
+        );
+        assert!(
+            !dir.join("untracked.rs").exists(),
+            "untracked file must be cleaned"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -19956,8 +20527,14 @@ mod tests {
             head_with_commit,
             "without a base_commit, committed work is not reset (documented fallback)"
         );
-        assert!(dir.join("committed.rs").exists(), "committed file survives the fallback");
-        assert!(!dir.join("dirty.rs").exists(), "uncommitted file is cleaned");
+        assert!(
+            dir.join("committed.rs").exists(),
+            "committed file survives the fallback"
+        );
+        assert!(
+            !dir.join("dirty.rs").exists(),
+            "uncommitted file is cleaned"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -19993,7 +20570,10 @@ mod tests {
         // Set crosses_boundary=true with an EMPTY contract.
         state.uow.set_contract(story, "", true);
         let result = ensure_development_gate(&state, story);
-        assert!(result.is_err(), "gate must refuse when crosses_boundary=true and contract is empty");
+        assert!(
+            result.is_err(),
+            "gate must refuse when crosses_boundary=true and contract is empty"
+        );
         let reason = result.unwrap_err();
         assert!(
             reason.contains("crosses a contract boundary"),
@@ -20012,7 +20592,9 @@ mod tests {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         let story = "R3G-2";
         seed_approved_decision(&state, story);
-        state.uow.set_contract(story, "GET /api/users returns [{id, name}]", true);
+        state
+            .uow
+            .set_contract(story, "GET /api/users returns [{id, name}]", true);
         let result = ensure_development_gate(&state, story);
         assert!(
             result.is_ok(),
@@ -20654,11 +21236,16 @@ mod tests {
         // Stage advanced.
         assert_eq!(stamped.stage, lifecycle::UowStage::AwaitingQa);
         // Provenance frozen with the honest tallies.
-        let prov = stamped.gate_provenance.expect("provenance frozen on success");
+        let prov = stamped
+            .gate_provenance
+            .expect("provenance frozen on success");
         assert_eq!(prov.deny_count, 2);
         assert_eq!(prov.allow_count, 1);
         // QA evidence attached.
-        assert!(stamped.evidence.is_some(), "QA evidence attached on success");
+        assert!(
+            stamped.evidence.is_some(),
+            "QA evidence attached on success"
+        );
     }
 
     /// LIFECYCLE-2 (failure): a FAILED run (e.g. gateway binary missing) does NOT advance
@@ -20735,7 +21322,10 @@ mod tests {
 
         let stamped = uow.get_or_create(story);
         assert_eq!(stamped.stage, lifecycle::UowStage::Development);
-        assert!(stamped.gate_provenance.is_none(), "cancel freezes no provenance");
+        assert!(
+            stamped.gate_provenance.is_none(),
+            "cancel freezes no provenance"
+        );
         assert!(stamped.evidence.is_none(), "cancel attaches no evidence");
     }
 
@@ -20859,7 +21449,10 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert!(frozen, "LIFECYCLE-4: resumed run's watcher froze provenance");
+        assert!(
+            frozen,
+            "LIFECYCLE-4: resumed run's watcher froze provenance"
+        );
         // Honesty: the stage did NOT advance — the work never continued.
         assert_eq!(
             state.uow.get_or_create(story).stage,
@@ -20887,27 +21480,50 @@ mod tests {
         assert_eq!(record.run_id, run_id);
 
         // History: at least one "run" event and one per gate event.
-        assert!(record.history.iter().any(|e| e.kind == "run"),
-            "evidence must have a 'run' event");
-        assert!(record.history.iter().any(|e| e.kind == "gate_deny"),
-            "evidence must have gate_deny events");
-        assert!(record.history.iter().any(|e| e.kind == "gate_allow"),
-            "evidence must have gate_allow events");
+        assert!(
+            record.history.iter().any(|e| e.kind == "run"),
+            "evidence must have a 'run' event"
+        );
+        assert!(
+            record.history.iter().any(|e| e.kind == "gate_deny"),
+            "evidence must have gate_deny events"
+        );
+        assert!(
+            record.history.iter().any(|e| e.kind == "gate_allow"),
+            "evidence must have gate_allow events"
+        );
 
         // Gate decisions recorded.
-        let allows: usize = record.gate_decisions.iter().filter(|d| d.verdict == "allow").count();
-        let denies: usize = record.gate_decisions.iter().filter(|d| d.verdict == "deny").count();
+        let allows: usize = record
+            .gate_decisions
+            .iter()
+            .filter(|d| d.verdict == "allow")
+            .count();
+        let denies: usize = record
+            .gate_decisions
+            .iter()
+            .filter(|d| d.verdict == "deny")
+            .count();
         assert_eq!(allows, 1, "one allow gate decision");
         assert_eq!(denies, 2, "two deny gate decisions");
 
         // Rules enforced from the enforced set.
-        assert!(!record.rules_enforced.is_empty(), "rules_enforced must be populated");
+        assert!(
+            !record.rules_enforced.is_empty(),
+            "rules_enforced must be populated"
+        );
 
         // Scoped scan populated.
-        assert!(record.scoped_scan.is_some(), "scoped_scan must be populated");
+        assert!(
+            record.scoped_scan.is_some(),
+            "scoped_scan must be populated"
+        );
 
         // Content hash is set.
-        assert!(!record.content_hash.is_empty(), "content_hash must be computed");
+        assert!(
+            !record.content_hash.is_empty(),
+            "content_hash must be computed"
+        );
         assert!(record.verify_hash(), "hash must verify after assembly");
     }
 
@@ -20923,19 +21539,27 @@ mod tests {
 
         // A run with no real-file writes (fictional clean paths) must not trigger
         // the critical-finding blocker.
-        assert!(!record.is_sign_off_blocked(),
-            "clean scripted run must not block sign-off");
+        assert!(
+            !record.is_sign_off_blocked(),
+            "clean scripted run must not block sign-off"
+        );
     }
 
     #[test]
     fn assemble_evidence_info_events_recorded_as_notes() {
         let run_store = RunStore::new();
         let id = run_store.create("CAM-ev-3", "live", crate::run::RunKind::Watched);
-        run_store.push_event(&id, crate::run::GateEvent {
-            seq: 1, layer: "fleet".to_string(), verdict: "info".to_string(),
-            rule: None, detail: "Scaffolding the worktree.".to_string(),
-            content_hash: None,
-        });
+        run_store.push_event(
+            &id,
+            crate::run::GateEvent {
+                seq: 1,
+                layer: "fleet".to_string(),
+                verdict: "info".to_string(),
+                rule: None,
+                detail: "Scaffolding the worktree.".to_string(),
+                content_hash: None,
+            },
+        );
         run_store.set_status(&id, crate::run::RunStatus::AwaitingQa, true);
         let run = run_store.get(&id).unwrap();
         let rules = camerata_gateway::enforced_gate_rules();
@@ -20943,8 +21567,10 @@ mod tests {
 
         let record = assemble_evidence_for_run(&run, &prov, "CAM-ev-3");
         // Info events are recorded as "note" in the history.
-        assert!(record.history.iter().any(|e| e.kind == "note"),
-            "info fleet events must be recorded as 'note'");
+        assert!(
+            record.history.iter().any(|e| e.kind == "note"),
+            "info fleet events must be recorded as 'note'"
+        );
     }
 
     // ── Sign-off gate: critical-finding block (issue #53) ─────────────────────
@@ -20953,13 +21579,21 @@ mod tests {
     async fn sign_off_blocked_by_critical_finding_without_waiver() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // Seed a run at AwaitingQa.
-        let run_id = state.runs.create("S-gate-1", "scripted", crate::run::RunKind::Watched);
-        state.runs.set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
+        let run_id = state
+            .runs
+            .create("S-gate-1", "scripted", crate::run::RunKind::Watched);
+        state
+            .runs
+            .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
 
         // Attach an evidence record with a critical finding.
-        let mut ev = crate::evidence::UowEvidenceRecord::new("S-gate-1", &run_id, "2026-06-20T00:00:00Z");
+        let mut ev =
+            crate::evidence::UowEvidenceRecord::new("S-gate-1", &run_id, "2026-06-20T00:00:00Z");
         ev.set_scoped_scan(crate::evidence::ScopedScanSummary {
-            files_scanned: 1, total_findings: 1, has_critical: true, findings: Vec::new(),
+            files_scanned: 1,
+            total_findings: 1,
+            has_critical: true,
+            findings: Vec::new(),
         });
         ev.compute_hash();
         state.uow.attach_evidence("S-gate-1", ev);
@@ -20978,8 +21612,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::CONFLICT,
-            "critical finding without waiver must return 409");
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "critical finding without waiver must return 409"
+        );
         let json = body_json(resp).await;
         assert_eq!(json["blocked"], true);
     }
@@ -20987,13 +21624,21 @@ mod tests {
     #[tokio::test]
     async fn sign_off_unblocked_by_waive_with_reason() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let run_id = state.runs.create("S-gate-2", "scripted", crate::run::RunKind::Watched);
-        state.runs.set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
+        let run_id = state
+            .runs
+            .create("S-gate-2", "scripted", crate::run::RunKind::Watched);
+        state
+            .runs
+            .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
 
         // Attach critical evidence.
-        let mut ev = crate::evidence::UowEvidenceRecord::new("S-gate-2", &run_id, "2026-06-20T00:00:00Z");
+        let mut ev =
+            crate::evidence::UowEvidenceRecord::new("S-gate-2", &run_id, "2026-06-20T00:00:00Z");
         ev.set_scoped_scan(crate::evidence::ScopedScanSummary {
-            files_scanned: 1, total_findings: 1, has_critical: true, findings: Vec::new(),
+            files_scanned: 1,
+            total_findings: 1,
+            has_critical: true,
+            findings: Vec::new(),
         });
         ev.compute_hash();
         state.uow.attach_evidence("S-gate-2", ev);
@@ -21016,21 +21661,34 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK,
-            "waived critical finding must return 200");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "waived critical finding must return 200"
+        );
         let json = body_json(resp).await;
         // The sign-off is recorded on the UoW.
-        assert!(json["sign_off"].is_object(), "sign_off field must be present");
+        assert!(
+            json["sign_off"].is_object(),
+            "sign_off field must be present"
+        );
         // The waiver reason is folded into the note.
         let note = json["sign_off"]["note"].as_str().unwrap_or("");
-        assert!(note.contains("WAIVER"), "waiver reason must appear in the sign-off note");
+        assert!(
+            note.contains("WAIVER"),
+            "waiver reason must appear in the sign-off note"
+        );
     }
 
     #[tokio::test]
     async fn sign_off_not_blocked_when_no_evidence_attached() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let run_id = state.runs.create("S-gate-3", "scripted", crate::run::RunKind::Watched);
-        state.runs.set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
+        let run_id = state
+            .runs
+            .create("S-gate-3", "scripted", crate::run::RunKind::Watched);
+        state
+            .runs
+            .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
         // No evidence attached: sign-off must succeed without a waiver.
 
         let app = router(state);
@@ -21046,20 +21704,31 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK,
-            "no evidence: sign-off must not be blocked");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "no evidence: sign-off must not be blocked"
+        );
     }
 
     #[tokio::test]
     async fn sign_off_non_critical_evidence_not_blocked() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let run_id = state.runs.create("S-gate-4", "scripted", crate::run::RunKind::Watched);
-        state.runs.set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
+        let run_id = state
+            .runs
+            .create("S-gate-4", "scripted", crate::run::RunKind::Watched);
+        state
+            .runs
+            .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
 
         // Attach evidence WITHOUT a critical finding.
-        let mut ev = crate::evidence::UowEvidenceRecord::new("S-gate-4", &run_id, "2026-06-20T00:00:00Z");
+        let mut ev =
+            crate::evidence::UowEvidenceRecord::new("S-gate-4", &run_id, "2026-06-20T00:00:00Z");
         ev.set_scoped_scan(crate::evidence::ScopedScanSummary {
-            files_scanned: 1, total_findings: 1, has_critical: false, findings: Vec::new(),
+            files_scanned: 1,
+            total_findings: 1,
+            has_critical: false,
+            findings: Vec::new(),
         });
         ev.compute_hash();
         state.uow.attach_evidence("S-gate-4", ev);
@@ -21077,8 +21746,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK,
-            "non-critical evidence must not block sign-off");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "non-critical evidence must not block sign-off"
+        );
     }
 
     // ── PR comment posting: post_pr_comment (issue #53) ──────────────────────
@@ -21088,12 +21760,12 @@ mod tests {
     #[tokio::test]
     async fn post_pr_comment_gracefully_degrades_without_token() {
         // An empty token must not panic or return Err — it returns Ok(None).
-        let result = crate::arm::post_pr_comment(
-            "owner", "repo", 42, "# Test\nno token", "",
-        )
-        .await;
+        let result = crate::arm::post_pr_comment("owner", "repo", 42, "# Test\nno token", "").await;
         assert!(result.is_ok(), "must not error without a token");
-        assert!(result.unwrap().is_none(), "must return None without a token");
+        assert!(
+            result.unwrap().is_none(),
+            "must return None without a token"
+        );
     }
 
     // ── WorkItem + UoW layer (governed-dev surface) ──────────────────────────
@@ -21103,7 +21775,9 @@ mod tests {
     #[tokio::test]
     async fn workitems_pull_no_token_returns_empty_with_message() {
         std::env::remove_var("CAMERATA_GITHUB_TOKEN");
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -21126,7 +21800,9 @@ mod tests {
     #[tokio::test]
     async fn workitems_comments_no_token_returns_empty() {
         std::env::remove_var("CAMERATA_GITHUB_TOKEN");
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let body = serde_json::json!({ "work_item_id": "github:o/r#20" }).to_string();
         let resp = app
             .oneshot(
@@ -21149,7 +21825,9 @@ mod tests {
     #[tokio::test]
     async fn workitems_assignees_no_token_returns_empty() {
         std::env::remove_var("CAMERATA_GITHUB_TOKEN");
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let body = serde_json::json!({ "work_item_id": "github:o/r#20" }).to_string();
         let resp = app
             .oneshot(
@@ -21171,7 +21849,9 @@ mod tests {
     #[tokio::test]
     async fn me_no_token_returns_null_login() {
         std::env::remove_var("CAMERATA_GITHUB_TOKEN");
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -21184,7 +21864,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert!(json.get("login").is_some(), "the `login` key is always present");
+        assert!(
+            json.get("login").is_some(),
+            "the `login` key is always present"
+        );
         assert!(json["login"].is_null(), "no token → login is null");
     }
 
@@ -21193,7 +21876,9 @@ mod tests {
     #[tokio::test]
     async fn workitems_assign_requires_token_and_nonempty_assignee() {
         std::env::remove_var("CAMERATA_GITHUB_TOKEN");
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         // No token → error status (not a silent success).
         let body = serde_json::json!({ "work_item_id": "github:o/r#20", "assignee": "octocat" })
             .to_string();
@@ -21221,7 +21906,9 @@ mod tests {
     #[tokio::test]
     async fn workitems_updated_check_no_token_returns_empty() {
         std::env::remove_var("CAMERATA_GITHUB_TOKEN");
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let body = serde_json::json!({
             "items": [{ "work_item_id": "github:o/r#20", "repo": "o/r", "number": 20 }]
         })
@@ -21324,7 +22011,10 @@ mod tests {
         assert_eq!(uows[0]["id"], "o/r#20");
         assert_eq!(uows[0]["stage"], "intake");
         assert_eq!(uows[0]["work_item"]["id"], "github:o/r#20");
-        assert_eq!(uows[0]["work_item"]["repo"], "o/r", "repo set on the work item");
+        assert_eq!(
+            uows[0]["work_item"]["repo"], "o/r",
+            "repo set on the work item"
+        );
         assert_eq!(uows[0]["work_item"]["number"], 20);
     }
 
@@ -21338,8 +22028,12 @@ mod tests {
         // `cargo test --workspace` (a shared-process-env flake). Per-instance store =
         // deterministic regardless of what any concurrent test does to the env.
         let creds = crate::credentials::MemoryCredentialStore::new();
-        crate::credentials::CredentialStore::set(&creds, crate::credentials::GITHUB_TOKEN, "ghp_test")
-            .unwrap();
+        crate::credentials::CredentialStore::set(
+            &creds,
+            crate::credentials::GITHUB_TOKEN,
+            "ghp_test",
+        )
+        .unwrap();
         let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         state.credential_store = std::sync::Arc::new(creds);
         let app = router(state);
@@ -21367,12 +22061,11 @@ mod tests {
     /// addressing (repo + number) the GitHub comment call uses.
     #[test]
     fn parse_github_work_item_id_extracts_repo_and_number() {
-        let (repo, number) = match parse_github_work_item_id(
-            "github:zernst3/camerata-orchestrator#42",
-        ) {
-            Ok(v) => v,
-            Err(e) => panic!("valid id should parse: {}", e.err),
-        };
+        let (repo, number) =
+            match parse_github_work_item_id("github:zernst3/camerata-orchestrator#42") {
+                Ok(v) => v,
+                Err(e) => panic!("valid id should parse: {}", e.err),
+            };
         assert_eq!(repo, "zernst3/camerata-orchestrator");
         assert_eq!(number, 42);
 
@@ -21439,10 +22132,7 @@ mod tests {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // P is created (and made active). Q exists too, for the isolation check.
         let proj_p = state.projects.create("P", vec!["o/r".to_string()]).unwrap();
-        state
-            .projects
-            .create("Q", vec!["x/y".to_string()])
-            .unwrap();
+        state.projects.create("Q", vec!["x/y".to_string()]).unwrap();
         // Make P the active project again (create made Q active last).
         state.projects.set_active(&proj_p.id);
         let app = router(state.clone());
@@ -21480,7 +22170,9 @@ mod tests {
         let found = uows
             .iter()
             .find(|u| u["id"] == serde_json::json!(uow_id))
-            .unwrap_or_else(|| panic!("draft must appear in its own project's /api/uows, got: {json:?}"));
+            .unwrap_or_else(|| {
+                panic!("draft must appear in its own project's /api/uows, got: {json:?}")
+            });
         assert_eq!(
             found["authoring"],
             serde_json::json!(true),
@@ -21535,7 +22227,9 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/uow/{}/author", id))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"message":"Add a CSV export to the report"}"#))
+                    .body(Body::from(
+                        r#"{"message":"Add a CSV export to the report"}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -21598,7 +22292,10 @@ mod tests {
         // ISOLATION: /api/uows is project-scoped and resolves a LINKED draft's repo from its
         // work_item (`me/api#7`). Activate a project covering `me/api` so the linked draft is
         // visible (an UNLINKED draft would remain excluded — no resolvable repo).
-        state.projects.create("P", vec!["me/api".to_string()]).unwrap();
+        state
+            .projects
+            .create("P", vec!["me/api".to_string()])
+            .unwrap();
         let uow_store = state.uow.clone();
         let stories = state.stories.clone();
         let app = router(state);
@@ -21609,8 +22306,7 @@ mod tests {
 
         // Simulate create_issue having returned issue #7 in me/api: upsert the spine story
         // and link the draft (the two writes uow_publish performs after the HTTP call).
-        let story =
-            crate::github_issues::issue_to_story("me/api", 7, "Authored title", "Body");
+        let story = crate::github_issues::issue_to_story("me/api", 7, "Authored title", "Body");
         let wi_story_id = story.id.clone();
         stories.upsert(story).await.unwrap();
         let linked = uow_store.link_work_item(&draft_id, &wi_story_id);
@@ -21636,7 +22332,10 @@ mod tests {
             .iter()
             .find(|u| u["id"] == draft_id)
             .expect("linked draft still listed under its draft id");
-        assert_eq!(entry["authoring"], false, "linked draft is no longer authoring");
+        assert_eq!(
+            entry["authoring"], false,
+            "linked draft is no longer authoring"
+        );
         assert_eq!(entry["work_item"]["number"], 7);
         assert_eq!(entry["work_item"]["repo"], "me/api");
     }
@@ -21670,7 +22369,10 @@ mod tests {
     #[test]
     fn render_chat_prompt_empty_history_empty_prompt_returns_empty() {
         let result = render_chat_prompt(&[], "");
-        assert_eq!(result, "", "empty history + empty prompt returns empty string");
+        assert_eq!(
+            result, "",
+            "empty history + empty prompt returns empty string"
+        );
     }
 
     /// (a) History present: rendered prompt contains the prior user turn.
@@ -21746,8 +22448,14 @@ mod tests {
             make_turn("assistant", "a-content"),
         ];
         let result = render_chat_prompt(&history, "new");
-        assert!(result.contains("User: u-content"), "user role must render as 'User'");
-        assert!(result.contains("Assistant: a-content"), "assistant role must render as 'Assistant'");
+        assert!(
+            result.contains("User: u-content"),
+            "user role must render as 'User'"
+        );
+        assert!(
+            result.contains("Assistant: a-content"),
+            "assistant role must render as 'Assistant'"
+        );
     }
 
     /// (d) Any non-"user" role (including "assistant") maps to "Assistant".
@@ -21791,7 +22499,10 @@ mod tests {
             "turn {first_kept} should survive the cap"
         );
         // The new prompt is still present.
-        assert!(result.contains("new-prompt"), "new prompt must appear after capped history");
+        assert!(
+            result.contains("new-prompt"),
+            "new prompt must appear after capped history"
+        );
     }
 
     /// (c) Cap: when history is exactly at the cap limit, no turns are dropped.
@@ -21887,7 +22598,10 @@ mod tests {
         // The floor finding is still there and now carries the semgrep rule in also_matches.
         assert_eq!(existing.len(), 1);
         let floor = &existing[0];
-        assert_eq!(floor.rule_id, "SEC-NO-HARDCODED-SECRETS-1", "floor rule_id is canonical");
+        assert_eq!(
+            floor.rule_id, "SEC-NO-HARDCODED-SECRETS-1",
+            "floor rule_id is canonical"
+        );
         assert_eq!(
             floor.also_matches,
             vec!["camerata.security.hardcoded-secret"],
@@ -21914,7 +22628,10 @@ mod tests {
 
         let out = dedup_preview_against_floor(&mut existing, previews);
 
-        assert!(out.is_empty(), "SQL-concat python semgrep finding must be deduped: {out:?}");
+        assert!(
+            out.is_empty(),
+            "SQL-concat python semgrep finding must be deduped: {out:?}"
+        );
         assert_eq!(
             existing[0].also_matches,
             vec!["camerata.security.sql-string-concat-python"],
@@ -21939,7 +22656,10 @@ mod tests {
 
         let out = dedup_preview_against_floor(&mut existing, previews);
 
-        assert!(out.is_empty(), "SQL-concat JS semgrep finding must be deduped: {out:?}");
+        assert!(
+            out.is_empty(),
+            "SQL-concat JS semgrep finding must be deduped: {out:?}"
+        );
         assert_eq!(
             existing[0].also_matches,
             vec!["camerata.security.sql-string-concat-js"],
@@ -21966,11 +22686,18 @@ mod tests {
 
         let out = dedup_preview_against_floor(&mut existing, previews);
 
-        assert_eq!(out.len(), 1, "net-new semgrep finding (different line) must be kept");
+        assert_eq!(
+            out.len(),
+            1,
+            "net-new semgrep finding (different line) must be kept"
+        );
         assert_eq!(out[0].line, 12);
         assert_eq!(out[0].rule_id, "camerata.security.hardcoded-secret");
         // The existing floor finding must NOT have been mutated.
-        assert!(existing[0].also_matches.is_empty(), "floor finding must not be touched");
+        assert!(
+            existing[0].also_matches.is_empty(),
+            "floor finding must not be touched"
+        );
     }
 
     /// (c) The non-overlapping semgrep rules (exec-injection, weak-hash, path-traversal,
@@ -21992,7 +22719,12 @@ mod tests {
 
         for rule_id in non_overlapping {
             // Put a floor finding at the same coordinate just to prove it doesn't cross-dedup.
-            let mut existing = vec![floor_finding("me/api", "src/app.py", 5, "SEC-NO-HARDCODED-SECRETS-1")];
+            let mut existing = vec![floor_finding(
+                "me/api",
+                "src/app.py",
+                5,
+                "SEC-NO-HARDCODED-SECRETS-1",
+            )];
             let previews = vec![semgrep_finding("me/api", "src/app.py", 5, rule_id)];
 
             let out = dedup_preview_against_floor(&mut existing, previews);
@@ -22064,15 +22796,42 @@ mod tests {
     fn semgrep_floor_category_returns_correct_mapping() {
         // Overlapping rules: must return the floor rule id they duplicate.
         let overlapping: &[(&str, &str)] = &[
-            ("camerata.security.hardcoded-secret", "SEC-NO-HARDCODED-SECRETS-1"),
-            ("camerata.security.hardcoded-secret-dquote", "SEC-NO-HARDCODED-SECRETS-1"),
-            ("camerata.security.sql-string-concat-python", "SEC-NO-RAW-SQL-CONCAT-1"),
-            ("camerata.security.sql-string-concat-js", "SEC-NO-RAW-SQL-CONCAT-1"),
-            ("camerata.security.sql-string-concat-rust", "SEC-NO-RAW-SQL-CONCAT-1"),
-            ("camerata.security.sql-string-concat-csharp", "SEC-NO-RAW-SQL-CONCAT-1"),
-            ("camerata.security.disabled-tls-rust", "SEC-NO-DISABLED-TLS-1"),
-            ("camerata.security.disabled-tls-csharp", "SEC-NO-DISABLED-TLS-1"),
-            ("camerata.security.yaml-unsafe-load", "SEC-NO-UNSAFE-DESERIALIZATION-1"),
+            (
+                "camerata.security.hardcoded-secret",
+                "SEC-NO-HARDCODED-SECRETS-1",
+            ),
+            (
+                "camerata.security.hardcoded-secret-dquote",
+                "SEC-NO-HARDCODED-SECRETS-1",
+            ),
+            (
+                "camerata.security.sql-string-concat-python",
+                "SEC-NO-RAW-SQL-CONCAT-1",
+            ),
+            (
+                "camerata.security.sql-string-concat-js",
+                "SEC-NO-RAW-SQL-CONCAT-1",
+            ),
+            (
+                "camerata.security.sql-string-concat-rust",
+                "SEC-NO-RAW-SQL-CONCAT-1",
+            ),
+            (
+                "camerata.security.sql-string-concat-csharp",
+                "SEC-NO-RAW-SQL-CONCAT-1",
+            ),
+            (
+                "camerata.security.disabled-tls-rust",
+                "SEC-NO-DISABLED-TLS-1",
+            ),
+            (
+                "camerata.security.disabled-tls-csharp",
+                "SEC-NO-DISABLED-TLS-1",
+            ),
+            (
+                "camerata.security.yaml-unsafe-load",
+                "SEC-NO-UNSAFE-DESERIALIZATION-1",
+            ),
         ];
         for (rule, expected_floor) in overlapping {
             assert_eq!(
@@ -22265,12 +23024,7 @@ mod tests {
     }
 
     /// Build a ruff preview finding.
-    fn ruff_finding(
-        repo: &str,
-        path: &str,
-        line: usize,
-        rule_id: &str,
-    ) -> crate::onboard::Finding {
+    fn ruff_finding(repo: &str, path: &str, line: usize, rule_id: &str) -> crate::onboard::Finding {
         crate::onboard::Finding {
             repo: repo.to_string(),
             path: path.to_string(),
@@ -22310,35 +23064,104 @@ mod tests {
     #[test]
     fn finding_security_category_maps_correctly() {
         // Floor rules
-        assert_eq!(finding_security_category("SEC-NO-HARDCODED-SECRETS-1"), Some("secret"));
-        assert_eq!(finding_security_category("SEC-NO-PRIVATE-KEY-1"), Some("secret"));
-        assert_eq!(finding_security_category("SEC-NO-VENDOR-TOKEN-1"), Some("secret"));
-        assert_eq!(finding_security_category("SEC-NO-RAW-SQL-CONCAT-1"), Some("sql"));
-        assert_eq!(finding_security_category("SEC-NO-DISABLED-TLS-1"), Some("tls"));
+        assert_eq!(
+            finding_security_category("SEC-NO-HARDCODED-SECRETS-1"),
+            Some("secret")
+        );
+        assert_eq!(
+            finding_security_category("SEC-NO-PRIVATE-KEY-1"),
+            Some("secret")
+        );
+        assert_eq!(
+            finding_security_category("SEC-NO-VENDOR-TOKEN-1"),
+            Some("secret")
+        );
+        assert_eq!(
+            finding_security_category("SEC-NO-RAW-SQL-CONCAT-1"),
+            Some("sql")
+        );
+        assert_eq!(
+            finding_security_category("SEC-NO-DISABLED-TLS-1"),
+            Some("tls")
+        );
         // Semgrep rules
-        assert_eq!(finding_security_category("camerata.security.hardcoded-secret"), Some("secret"));
-        assert_eq!(finding_security_category("camerata.security.sql-string-concat-python"), Some("sql"));
-        assert_eq!(finding_security_category("camerata.security.sql-string-concat-js"), Some("sql"));
-        assert_eq!(finding_security_category("camerata.security.exec-injection"), Some("exec"));
-        assert_eq!(finding_security_category("camerata.security.exec-injection-js"), Some("exec"));
-        assert_eq!(finding_security_category("camerata.security.weak-hash-python"), Some("hash"));
-        assert_eq!(finding_security_category("camerata.security.weak-hash-js"), Some("hash"));
+        assert_eq!(
+            finding_security_category("camerata.security.hardcoded-secret"),
+            Some("secret")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.sql-string-concat-python"),
+            Some("sql")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.sql-string-concat-js"),
+            Some("sql")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.exec-injection"),
+            Some("exec")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.exec-injection-js"),
+            Some("exec")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.weak-hash-python"),
+            Some("hash")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.weak-hash-js"),
+            Some("hash")
+        );
         // Rust + C# semgrep ids (the 2026-06-23 dedup-gap fix): must be categorized so they
         // can collapse against an overlapping floor finding at the same (repo, path, line).
-        assert_eq!(finding_security_category("camerata.security.hardcoded-secret-dquote"), Some("secret"));
-        assert_eq!(finding_security_category("camerata.security.sql-string-concat-rust"), Some("sql"));
-        assert_eq!(finding_security_category("camerata.security.sql-string-concat-csharp"), Some("sql"));
-        assert_eq!(finding_security_category("camerata.security.weak-hash-rust"), Some("hash"));
-        assert_eq!(finding_security_category("camerata.security.weak-hash-csharp"), Some("hash"));
-        assert_eq!(finding_security_category("camerata.security.disabled-tls-rust"), Some("tls"));
-        assert_eq!(finding_security_category("camerata.security.disabled-tls-csharp"), Some("tls"));
-        assert_eq!(finding_security_category("camerata.security.path-traversal-python"), Some("path"));
-        assert_eq!(finding_security_category("camerata.security.subprocess-shell-true"), Some("shell"));
+        assert_eq!(
+            finding_security_category("camerata.security.hardcoded-secret-dquote"),
+            Some("secret")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.sql-string-concat-rust"),
+            Some("sql")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.sql-string-concat-csharp"),
+            Some("sql")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.weak-hash-rust"),
+            Some("hash")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.weak-hash-csharp"),
+            Some("hash")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.disabled-tls-rust"),
+            Some("tls")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.disabled-tls-csharp"),
+            Some("tls")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.path-traversal-python"),
+            Some("path")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.subprocess-shell-true"),
+            Some("shell")
+        );
         // yaml-unsafe-load now maps to "deser" (not "yaml") so it collapses with the
         // floor rule SEC-NO-UNSAFE-DESERIALIZATION-1 at the same (repo, path, line).
-        assert_eq!(finding_security_category("camerata.security.yaml-unsafe-load"), Some("deser"));
+        assert_eq!(
+            finding_security_category("camerata.security.yaml-unsafe-load"),
+            Some("deser")
+        );
         // New floor rule (Step 3 of unsafe-deser port): same "deser" category.
-        assert_eq!(finding_security_category("SEC-NO-UNSAFE-DESERIALIZATION-1"), Some("deser"));
+        assert_eq!(
+            finding_security_category("SEC-NO-UNSAFE-DESERIALIZATION-1"),
+            Some("deser")
+        );
         // Ruff bandit code
         assert_eq!(finding_security_category("S608"), Some("sql"));
         // Unknown rule: no category (pass-through, no dedup)
@@ -22429,7 +23252,12 @@ mod tests {
     /// not double-report. Before the fix, the -rust id had no category so it skipped dedup.
     #[test]
     fn crosstool_dedup_floor_and_semgrep_rust_sql_same_location_collapses() {
-        let mut existing = vec![floor_finding("me/svc", "src/db.rs", 1444, "SEC-NO-RAW-SQL-CONCAT-1")];
+        let mut existing = vec![floor_finding(
+            "me/svc",
+            "src/db.rs",
+            1444,
+            "SEC-NO-RAW-SQL-CONCAT-1",
+        )];
         let previews = vec![semgrep_finding(
             "me/svc",
             "src/db.rs",
@@ -22438,9 +23266,15 @@ mod tests {
         )];
         let leftover = dedup_scan_previews(&mut existing, previews);
         // Semgrep finding folded in, not surfaced as its own row.
-        assert!(leftover.is_empty(), "semgrep-rust SQL should collapse into the floor row");
+        assert!(
+            leftover.is_empty(),
+            "semgrep-rust SQL should collapse into the floor row"
+        );
         assert_eq!(existing.len(), 1);
-        assert_eq!(existing[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1", "floor stays canonical");
+        assert_eq!(
+            existing[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1",
+            "floor stays canonical"
+        );
         assert!(existing[0]
             .also_matches
             .iter()
@@ -22546,8 +23380,7 @@ mod tests {
         );
         assert_eq!(existing.len(), 1);
         assert_eq!(
-            existing[0].rule_id,
-            "SEC-NO-UNSAFE-DESERIALIZATION-1",
+            existing[0].rule_id, "SEC-NO-UNSAFE-DESERIALIZATION-1",
             "floor rule_id must remain canonical"
         );
         assert!(
@@ -22585,9 +23418,15 @@ mod tests {
         );
         // The ruff finding is kept canonical and records the semgrep rule.
         assert_eq!(existing.len(), 1);
-        assert_eq!(existing[0].preview_tool.as_deref(), Some("ruff"), "ruff is canonical");
+        assert_eq!(
+            existing[0].preview_tool.as_deref(),
+            Some("ruff"),
+            "ruff is canonical"
+        );
         assert!(
-            existing[0].also_matches.contains(&"camerata.security.sql-string-concat-python".to_string()),
+            existing[0]
+                .also_matches
+                .contains(&"camerata.security.sql-string-concat-python".to_string()),
             "semgrep rule must be in also_matches: {:?}",
             existing[0].also_matches
         );
@@ -22608,7 +23447,10 @@ mod tests {
             out.is_empty(),
             "ruff duplicate of floor must be collapsed: {out:?}"
         );
-        assert_eq!(existing[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1", "floor rule_id is canonical");
+        assert_eq!(
+            existing[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1",
+            "floor rule_id is canonical"
+        );
         assert!(
             existing[0].also_matches.contains(&"S608".to_string()),
             "ruff rule must be in also_matches: {:?}",
@@ -22641,7 +23483,10 @@ mod tests {
         );
         assert_eq!(out[0].rule_id, "camerata.security.exec-injection-js");
         // The eslint finding must not have been mutated.
-        assert!(existing[0].also_matches.is_empty(), "eslint must not be touched");
+        assert!(
+            existing[0].also_matches.is_empty(),
+            "eslint must not be touched"
+        );
     }
 
     /// FIX 2 (d): floor↔semgrep dedup still works as before (backward-compat regression test).
@@ -22676,12 +23521,21 @@ mod tests {
         let clip = clippy_finding("me/api", "src/lib.rs", 3, "clippy::unknown-lint");
         let mut existing = vec![clip];
         // An eslint rule with no recognized category on the same line.
-        let previews = vec![eslint_finding("me/api", "src/lib.rs", 3, "some-custom-eslint-rule")];
+        let previews = vec![eslint_finding(
+            "me/api",
+            "src/lib.rs",
+            3,
+            "some-custom-eslint-rule",
+        )];
 
         let out = dedup_scan_previews(&mut existing, previews);
 
         // Both must be kept since neither has a recognized security category.
-        assert_eq!(out.len(), 1, "unrecognized-category findings must not be collapsed");
+        assert_eq!(
+            out.len(),
+            1,
+            "unrecognized-category findings must not be collapsed"
+        );
         assert!(existing[0].also_matches.is_empty());
     }
 
@@ -23320,7 +24174,11 @@ mod tests {
         assert_eq!(normalize_parent_number(""), None, "empty -> None");
         assert_eq!(normalize_parent_number("#"), None, "bare # -> None");
         assert_eq!(normalize_parent_number("abc"), None, "non-numeric -> None");
-        assert_eq!(normalize_parent_number("#abc"), None, "non-numeric after # -> None");
+        assert_eq!(
+            normalize_parent_number("#abc"),
+            None,
+            "non-numeric after # -> None"
+        );
     }
 
     /// When the draft has a `parent_id` but the GitHub sub-issue link call would fail
@@ -23425,15 +24283,35 @@ mod tests {
     #[test]
     fn render_scan_results_counts_by_severity() {
         let findings = vec![
-            make_finding("critical", "SEC-1", "o/r", "a.rs", 1, "active", false, "", ""),
-            make_finding("critical", "SEC-1", "o/r", "b.rs", 2, "active", false, "", ""),
+            make_finding(
+                "critical", "SEC-1", "o/r", "a.rs", 1, "active", false, "", "",
+            ),
+            make_finding(
+                "critical", "SEC-1", "o/r", "b.rs", 2, "active", false, "", "",
+            ),
             make_finding("high", "ARCH-1", "o/r", "c.rs", 3, "active", false, "", ""),
-            make_finding("medium", "ARCH-2", "o/r", "d.rs", 4, "suppressed-baseline", false, "", ""),
+            make_finding(
+                "medium",
+                "ARCH-2",
+                "o/r",
+                "d.rs",
+                4,
+                "suppressed-baseline",
+                false,
+                "",
+                "",
+            ),
             make_finding("low", "STYLE-1", "o/r", "e.rs", 5, "active", false, "", ""),
         ];
         let out = render_scan_results_for_chat(&findings, &[]);
-        assert!(out.contains("Total findings: 5"), "must report total, got: {out}");
-        assert!(out.contains("critical: 2"), "must count critical, got: {out}");
+        assert!(
+            out.contains("Total findings: 5"),
+            "must report total, got: {out}"
+        );
+        assert!(
+            out.contains("critical: 2"),
+            "must count critical, got: {out}"
+        );
         assert!(out.contains("high: 1"), "must count high, got: {out}");
         assert!(out.contains("medium: 1"), "must count medium, got: {out}");
         assert!(out.contains("low: 1"), "must count low, got: {out}");
@@ -23445,12 +24323,35 @@ mod tests {
         let findings = vec![
             make_finding("high", "R1", "o/r", "f1.rs", 1, "active", false, "", ""),
             make_finding("high", "R1", "o/r", "f2.rs", 2, "active", false, "", ""),
-            make_finding("medium", "R2", "o/r", "f3.rs", 3, "suppressed-baseline", false, "", ""),
-            make_finding("low", "R3", "o/r", "f4.rs", 4, "suppressed-inline", false, "", ""),
+            make_finding(
+                "medium",
+                "R2",
+                "o/r",
+                "f3.rs",
+                3,
+                "suppressed-baseline",
+                false,
+                "",
+                "",
+            ),
+            make_finding(
+                "low",
+                "R3",
+                "o/r",
+                "f4.rs",
+                4,
+                "suppressed-inline",
+                false,
+                "",
+                "",
+            ),
         ];
         let out = render_scan_results_for_chat(&findings, &[]);
         assert!(out.contains("2 active"), "must report 2 active, got: {out}");
-        assert!(out.contains("2 suppressed"), "must report 2 suppressed, got: {out}");
+        assert!(
+            out.contains("2 suppressed"),
+            "must report 2 suppressed, got: {out}"
+        );
     }
 
     /// Preview vs floor counts appear.
@@ -23478,20 +24379,40 @@ mod tests {
         let findings = vec![
             make_finding("high", "RULE-A", "o/r", "a.rs", 1, "active", false, "", ""),
             make_finding("high", "RULE-A", "o/r", "b.rs", 2, "active", false, "", ""),
-            make_finding("medium", "RULE-A", "o/r", "c.rs", 3, "active", false, "", ""),
+            make_finding(
+                "medium", "RULE-A", "o/r", "c.rs", 3, "active", false, "", "",
+            ),
             make_finding("low", "RULE-B", "o/r", "d.rs", 4, "active", false, "", ""),
         ];
         let out = render_scan_results_for_chat(&findings, &[]);
         // RULE-A should appear with count 3 (highest); RULE-B with 1.
-        assert!(out.contains("RULE-A: 3"), "must show RULE-A count 3, got: {out}");
-        assert!(out.contains("RULE-B: 1"), "must show RULE-B count 1, got: {out}");
+        assert!(
+            out.contains("RULE-A: 3"),
+            "must show RULE-A count 3, got: {out}"
+        );
+        assert!(
+            out.contains("RULE-B: 1"),
+            "must show RULE-B count 1, got: {out}"
+        );
     }
 
     /// The top-N finding list is capped at 40 (CAP).
     #[test]
     fn render_scan_results_capped_at_40() {
         let findings: Vec<_> = (0..60)
-            .map(|i| make_finding("high", "R1", "o/r", &format!("f{i}.rs"), i, "active", false, "", ""))
+            .map(|i| {
+                make_finding(
+                    "high",
+                    "R1",
+                    "o/r",
+                    &format!("f{i}.rs"),
+                    i,
+                    "active",
+                    false,
+                    "",
+                    "",
+                )
+            })
             .collect();
         let out = render_scan_results_for_chat(&findings, &[]);
         // Must say "Top 40 of 60"
@@ -23516,7 +24437,7 @@ mod tests {
             42,
             "active",
             false,
-            fake_secret,   // snippet — must NOT appear in output
+            fake_secret,             // snippet — must NOT appear in output
             "hardcoded token found", // detail — may appear
         )];
         let out = render_scan_results_for_chat(&findings, &[]);
@@ -23541,12 +24462,10 @@ mod tests {
     /// Coverage notes appear in the output.
     #[test]
     fn render_scan_results_includes_coverage_notes() {
-        let notes = vec![
-            crate::onboard::CoverageNote {
-                tool: "ruff".to_string(),
-                message: "ruff not installed; Python rules skipped".to_string(),
-            },
-        ];
+        let notes = vec![crate::onboard::CoverageNote {
+            tool: "ruff".to_string(),
+            message: "ruff not installed; Python rules skipped".to_string(),
+        }];
         let out = render_scan_results_for_chat(&[], &notes);
         // Even with empty findings, coverage notes are surfaced.
         assert!(
@@ -23637,8 +24556,14 @@ mod tests {
         let result = extract_scan_results_from_draft(&draft);
         assert!(result.is_some(), "audit.findings fallback must work");
         let out = result.unwrap();
-        assert!(out.contains("DI-1"), "must contain rule_id from audit section");
-        assert!(!out.contains("secret-value-here"), "snippet must not leak via audit path");
+        assert!(
+            out.contains("DI-1"),
+            "must contain rule_id from audit section"
+        );
+        assert!(
+            !out.contains("secret-value-here"),
+            "snippet must not leak via audit path"
+        );
     }
 
     // ── last_scan store tests ─────────────────────────────────────────────────────────
@@ -24392,8 +25317,7 @@ mod tests {
         let got = got.unwrap();
         assert_eq!(got.findings.len(), 1, "findings must be preserved");
         assert_eq!(
-            got.findings[0].rule_id,
-            "SEC-NO-HARDCODED-SECRETS-1",
+            got.findings[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1",
             "rule_id must round-trip"
         );
     }
@@ -24444,7 +25368,10 @@ mod tests {
     #[tokio::test]
     async fn product_export_404s_when_no_scan_available() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let project = state.projects.create("Acme", vec![]).expect("project created");
+        let project = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         let resp = export_product(
             axum::extract::State(state),
             axum::extract::Path(project.id),
@@ -24479,7 +25406,10 @@ mod tests {
             .projects
             .create("Acme", vec!["owner/repo".to_string()])
             .expect("project created");
-        state.set_last_scan(project.id.clone(), make_scan_report("SEC-NO-HARDCODED-SECRETS-1"));
+        state.set_last_scan(
+            project.id.clone(),
+            make_scan_report("SEC-NO-HARDCODED-SECRETS-1"),
+        );
 
         let resp = export_product(
             axum::extract::State(state),
@@ -24492,7 +25422,9 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
-            resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
             "application/zip"
         );
         let content_disposition = resp
@@ -24502,10 +25434,17 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-        assert!(content_disposition.contains(".zip"), "{content_disposition}");
+        assert!(
+            content_disposition.contains(".zip"),
+            "{content_disposition}"
+        );
 
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&bytes[0..2], b"PK", "the product export itself must be a valid zip");
+        assert_eq!(
+            &bytes[0..2],
+            b"PK",
+            "the product export itself must be a valid zip"
+        );
 
         use std::io::Read;
         let mut archive =
@@ -24515,18 +25454,32 @@ mod tests {
             .collect();
         names.sort();
         assert!(names.iter().any(|n| n.ends_with(".pdf")), "{names:?}");
-        assert!(names.iter().any(|n| n.ends_with("-findings.xlsx")), "{names:?}");
+        assert!(
+            names.iter().any(|n| n.ends_with("-findings.xlsx")),
+            "{names:?}"
+        );
         assert!(names.contains(&"findings.json".to_string()), "{names:?}");
         assert!(names.contains(&"README.txt".to_string()), "{names:?}");
 
         let pdf_name = names.iter().find(|n| n.ends_with(".pdf")).unwrap().clone();
         let mut pdf_bytes = Vec::new();
-        archive.by_name(&pdf_name).unwrap().read_to_end(&mut pdf_bytes).unwrap();
-        assert!(pdf_bytes.starts_with(b"%PDF"), "the zipped PDF must carry the PDF magic bytes");
+        archive
+            .by_name(&pdf_name)
+            .unwrap()
+            .read_to_end(&mut pdf_bytes)
+            .unwrap();
+        assert!(
+            pdf_bytes.starts_with(b"%PDF"),
+            "the zipped PDF must carry the PDF magic bytes"
+        );
 
         let xlsx_name = names.iter().find(|n| n.ends_with(".xlsx")).unwrap().clone();
         let mut xlsx_bytes = Vec::new();
-        archive.by_name(&xlsx_name).unwrap().read_to_end(&mut xlsx_bytes).unwrap();
+        archive
+            .by_name(&xlsx_name)
+            .unwrap()
+            .read_to_end(&mut xlsx_bytes)
+            .unwrap();
         assert_eq!(
             &xlsx_bytes[0..2],
             b"PK",
@@ -24541,8 +25494,14 @@ mod tests {
             .unwrap();
         let findings_json: serde_json::Value =
             serde_json::from_str(&findings_json_str).expect("findings.json must be valid JSON");
-        assert!(findings_json.get("provenance").is_some(), "{findings_json_str}");
-        assert!(findings_json.get("summary").is_some(), "{findings_json_str}");
+        assert!(
+            findings_json.get("provenance").is_some(),
+            "{findings_json_str}"
+        );
+        assert!(
+            findings_json.get("summary").is_some(),
+            "{findings_json_str}"
+        );
         let findings_arr = findings_json
             .get("findings")
             .and_then(|f| f.as_array())
@@ -24554,7 +25513,11 @@ mod tests {
         );
 
         let mut readme = String::new();
-        archive.by_name("README.txt").unwrap().read_to_string(&mut readme).unwrap();
+        archive
+            .by_name("README.txt")
+            .unwrap()
+            .read_to_string(&mut readme)
+            .unwrap();
         assert!(readme.contains(&pdf_name), "{readme}");
         assert!(readme.contains(&xlsx_name), "{readme}");
         assert!(readme.contains("findings.json"), "{readme}");
@@ -24653,9 +25616,15 @@ mod tests {
             "csv/all-findings.csv",
             "json/all-findings.json",
         ] {
-            assert!(listed.contains(&expected), "manifest missing {expected}: {listed:?}");
+            assert!(
+                listed.contains(&expected),
+                "manifest missing {expected}: {listed:?}"
+            );
         }
-        assert!(!listed.contains(&"manifest.json"), "manifest must not list itself");
+        assert!(
+            !listed.contains(&"manifest.json"),
+            "manifest must not list itself"
+        );
 
         // Each listed sha256 equals the actual hash of that entry in the zip.
         for f in files {
@@ -24664,10 +25633,16 @@ mod tests {
             let mut bytes = Vec::new();
             {
                 use std::io::Read;
-                archive.by_name(path).unwrap().read_to_end(&mut bytes).unwrap();
+                archive
+                    .by_name(path)
+                    .unwrap()
+                    .read_to_end(&mut bytes)
+                    .unwrap();
             }
-            let actual: String =
-                Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+            let actual: String = Sha256::digest(&bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
             assert_eq!(claimed, actual, "sha256 mismatch for {path}");
         }
     }
@@ -24685,12 +25660,16 @@ mod tests {
         )
         .expect("zip assembles");
 
-        let mut archive =
-            zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).expect("valid zip");
-        assert!(archive.len() >= 4, "expects pdf + xlsx + json + readme entries");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).expect("valid zip");
+        assert!(
+            archive.len() >= 4,
+            "expects pdf + xlsx + json + readme entries"
+        );
         for i in 0..archive.len() {
             let entry = archive.by_index(i).unwrap();
-            let mtime = entry.last_modified().expect("a timestamp was set on every entry");
+            let mtime = entry
+                .last_modified()
+                .expect("a timestamp was set on every entry");
             assert_ne!(
                 (mtime.year(), mtime.month(), mtime.day()),
                 (1980, 1, 1),
@@ -24709,7 +25688,11 @@ mod tests {
         use chrono::Datelike;
         let now = zip_now();
         let current_year = chrono::Utc::now().year() as u16;
-        assert_eq!(now.year(), current_year, "zip_now must not fall back to the 1980 default");
+        assert_eq!(
+            now.year(),
+            current_year,
+            "zip_now must not fall back to the 1980 default"
+        );
     }
 
     /// active_project_context returns scan_results_section from last_scan when no draft.
@@ -24717,7 +25700,10 @@ mod tests {
     async fn active_project_context_uses_last_scan_when_no_draft() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // Create a project (automatically becomes active).
-        let project = state.projects.create("TestProj", vec!["owner/repo".to_string()]).unwrap();
+        let project = state
+            .projects
+            .create("TestProj", vec!["owner/repo".to_string()])
+            .unwrap();
 
         // No draft has been saved, but we store a completed scan report.
         let report = make_scan_report("SEC-NO-HARDCODED-SECRETS-1");
@@ -24748,7 +25734,10 @@ mod tests {
     #[tokio::test]
     async fn active_project_context_draft_takes_precedence_over_last_scan() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let project = state.projects.create("TestProj", vec!["owner/repo".to_string()]).unwrap();
+        let project = state
+            .projects
+            .create("TestProj", vec!["owner/repo".to_string()])
+            .unwrap();
 
         // Store a last_scan report with one rule id.
         let report = make_scan_report("LAST-SCAN-RULE");
@@ -24812,7 +25801,10 @@ mod tests {
         state.set_last_scan("proj-1".to_string(), make_scan_report("RULE-X"));
 
         let recent = state.get_recent_scan();
-        assert!(recent.is_some(), "get_recent_scan must be Some after set_last_scan");
+        assert!(
+            recent.is_some(),
+            "get_recent_scan must be Some after set_last_scan"
+        );
         assert_eq!(
             recent.unwrap().findings[0].rule_id,
             "RULE-X",
@@ -24829,8 +25821,7 @@ mod tests {
 
         let recent = state.get_recent_scan().unwrap();
         assert_eq!(
-            recent.findings[0].rule_id,
-            "RULE-SECOND",
+            recent.findings[0].rule_id, "RULE-SECOND",
             "recent_scan must track the most recent set_last_scan call"
         );
 
@@ -24850,11 +25841,17 @@ mod tests {
         // a different project's id must NEVER surface in the active project's chat grounding.
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // Create and activate a project.
-        let project = state.projects.create("ActiveProj", vec!["owner/repo".to_string()]).unwrap();
+        let project = state
+            .projects
+            .create("ActiveProj", vec!["owner/repo".to_string()])
+            .unwrap();
 
         // Simulate a scan stored under a DIFFERENT project id (the project that was active at
         // scan submission time) — NOT under `project.id`. This also populates recent_scan.
-        state.set_last_scan("other-project-id".to_string(), make_scan_report("RECENT-RULE"));
+        state.set_last_scan(
+            "other-project-id".to_string(),
+            make_scan_report("RECENT-RULE"),
+        );
 
         // Confirm: per-project lookup for the ACTIVE project is empty.
         assert!(
@@ -24892,10 +25889,16 @@ mod tests {
     #[tokio::test]
     async fn per_project_last_scan_wins_over_recent_scan() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let project = state.projects.create("ActiveProj", vec!["owner/repo".to_string()]).unwrap();
+        let project = state
+            .projects
+            .create("ActiveProj", vec!["owner/repo".to_string()])
+            .unwrap();
 
         // Store a recent_scan for a DIFFERENT project (written second, so it is "more recent").
-        state.set_last_scan("other-project-id".to_string(), make_scan_report("RECENT-RULE"));
+        state.set_last_scan(
+            "other-project-id".to_string(),
+            make_scan_report("RECENT-RULE"),
+        );
 
         // Now store a per-project entry for the ACTIVE project.  Even though recent_scan
         // was written after this, the per-project entry must win.
@@ -24961,8 +25964,8 @@ mod tests {
             "chosen": {},
             "scan": { "proposed_rules": [] }
         });
-        let out = render_selected_rules_for_chat(&draft)
-            .expect("non-empty selection must return Some");
+        let out =
+            render_selected_rules_for_chat(&draft).expect("non-empty selection must return Some");
         assert!(
             out.contains("SEC-1"),
             "SEC-1 must appear in selected rules output"
@@ -25006,8 +26009,8 @@ mod tests {
                 ]
             }
         });
-        let out = render_selected_rules_for_chat(&draft)
-            .expect("must return Some when rules selected");
+        let out =
+            render_selected_rules_for_chat(&draft).expect("must return Some when rules selected");
         assert!(
             out.contains("chosen: Strict mode"),
             "chosen option label must appear in output, got: {out}"
@@ -25039,8 +26042,8 @@ mod tests {
                 ]
             }
         });
-        let out = render_selected_rules_for_chat(&draft)
-            .expect("must return Some when rules selected");
+        let out =
+            render_selected_rules_for_chat(&draft).expect("must return Some when rules selected");
         assert!(
             out.contains("[default option]"),
             "default option must be annotated when no override chosen, got: {out}"
@@ -25135,8 +26138,7 @@ mod tests {
         let body = body_json(resp).await;
         // selected_rules_section must be absent (None / null) when nothing is selected.
         let section = body.get("selected_rules_section");
-        let is_absent = section.is_none()
-            || section == Some(&serde_json::Value::Null);
+        let is_absent = section.is_none() || section == Some(&serde_json::Value::Null);
         assert!(
             is_absent,
             "selected_rules_section must be absent when repo_selection is empty, got: {body:?}"
@@ -25151,7 +26153,10 @@ mod tests {
         let mode = crate::uow::BranchMode::Existing {
             branch_name: "feature/my-branch".to_string(),
         };
-        assert_eq!(derive_scope_branch(&mode, "acme/api#42"), "feature/my-branch");
+        assert_eq!(
+            derive_scope_branch(&mode, "acme/api#42"),
+            "feature/my-branch"
+        );
     }
 
     /// `BranchMode::Existing { branch_name: "" }` (empty) → fallback to `camerata/<story_id>`.
@@ -25287,10 +26292,16 @@ mod tests {
             .method("POST")
             .uri("/api/apps")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::json!({ "name": "Trip Planner", "description": "" }).to_string()))
+            .body(Body::from(
+                serde_json::json!({ "name": "Trip Planner", "description": "" }).to_string(),
+            ))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK, "fail-soft: never a 500");
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::OK,
+            "fail-soft: never a 500"
+        );
         let body = body_json(resp).await;
         assert_eq!(body["ok"], false);
         assert!(
@@ -25314,14 +26325,23 @@ mod tests {
             .method("POST")
             .uri("/api/apps")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::json!({ "name": "Trip Planner", "description": "" }).to_string()))
+            .body(Body::from(
+                serde_json::json!({ "name": "Trip Planner", "description": "" }).to_string(),
+            ))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK, "fail-soft: never a 500");
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::OK,
+            "fail-soft: never a 500"
+        );
         let body = body_json(resp).await;
         assert_eq!(body["ok"], false);
         assert!(
-            body["message"].as_str().unwrap_or("").contains("GitHub token"),
+            body["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("GitHub token"),
             "message must name the missing GitHub token, got: {body:?}"
         );
     }
@@ -25420,10 +26440,22 @@ mod tests {
         let json = body_json(resp).await;
         let arr = json.as_array().expect("must be an array");
         // Both known credentials must be present.
-        let github = arr.iter().find(|c| c["name"] == "github_token").expect("must include github_token");
-        let or_key = arr.iter().find(|c| c["name"] == "openrouter_api_key").expect("must include openrouter_api_key");
-        assert!(!github["is_set"].as_bool().unwrap_or(true), "initially not set");
-        assert!(!or_key["is_set"].as_bool().unwrap_or(true), "initially not set");
+        let github = arr
+            .iter()
+            .find(|c| c["name"] == "github_token")
+            .expect("must include github_token");
+        let or_key = arr
+            .iter()
+            .find(|c| c["name"] == "openrouter_api_key")
+            .expect("must include openrouter_api_key");
+        assert!(
+            !github["is_set"].as_bool().unwrap_or(true),
+            "initially not set"
+        );
+        assert!(
+            !or_key["is_set"].as_bool().unwrap_or(true),
+            "initially not set"
+        );
 
         // Store a GitHub token.
         state
@@ -25444,13 +26476,25 @@ mod tests {
             .unwrap();
         let json2 = body_json(resp2).await;
         let arr2 = json2.as_array().expect("must be an array");
-        let github2 = arr2.iter().find(|c| c["name"] == "github_token").expect("github_token present");
-        assert!(github2["is_set"].as_bool().unwrap_or(false), "now is_set=true");
+        let github2 = arr2
+            .iter()
+            .find(|c| c["name"] == "github_token")
+            .expect("github_token present");
+        assert!(
+            github2["is_set"].as_bool().unwrap_or(false),
+            "now is_set=true"
+        );
         let masked = github2["masked"].as_str().expect("masked must be present");
         // Masked value must not contain the full token.
-        assert!(!masked.contains("ghp_test_value"), "masked must not reveal full token");
+        assert!(
+            !masked.contains("ghp_test_value"),
+            "masked must not reveal full token"
+        );
         // Must start with the first 4 chars.
-        assert!(masked.starts_with("ghp_"), "masked must start with first 4 chars");
+        assert!(
+            masked.starts_with("ghp_"),
+            "masked must start with first 4 chars"
+        );
     }
 
     /// POST /api/credentials/:name rejects unknown credential names.
@@ -25513,14 +26557,19 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["ok"], true);
-        let masked = json["masked"].as_str().expect("masked field must be present");
+        let masked = json["masked"]
+            .as_str()
+            .expect("masked field must be present");
         // Full token must NEVER appear in the response.
         assert!(
             !masked.contains("ghp_supersecrettoken"),
             "response must never contain the full token: {masked}"
         );
         // The prefix appears.
-        assert!(masked.starts_with("ghp_"), "masked starts with first 4 chars");
+        assert!(
+            masked.starts_with("ghp_"),
+            "masked starts with first 4 chars"
+        );
     }
 
     // ── OpenRouter registry-refresh triggers ────────────────────────────────────
@@ -25535,7 +26584,9 @@ mod tests {
     /// Pure name-matching predicate: only the OpenRouter credential name matches.
     #[test]
     fn is_openrouter_credential_matches_only_the_openrouter_key_name() {
-        assert!(is_openrouter_credential(crate::credentials::OPENROUTER_API_KEY));
+        assert!(is_openrouter_credential(
+            crate::credentials::OPENROUTER_API_KEY
+        ));
         assert!(!is_openrouter_credential(crate::credentials::GITHUB_TOKEN));
         assert!(!is_openrouter_credential("anthropic_api_key"));
         assert!(!is_openrouter_credential(""));
@@ -25555,7 +26606,10 @@ mod tests {
             &model_registry,
             credential_store,
         );
-        assert!(scheduled, "saving the OpenRouter key must schedule a refresh");
+        assert!(
+            scheduled,
+            "saving the OpenRouter key must schedule a refresh"
+        );
     }
 
     /// Saving any OTHER credential must NOT schedule a refresh.
@@ -25569,7 +26623,10 @@ mod tests {
             &model_registry,
             credential_store,
         );
-        assert!(!scheduled, "saving a non-OpenRouter credential must not schedule a refresh");
+        assert!(
+            !scheduled,
+            "saving a non-OpenRouter credential must not schedule a refresh"
+        );
     }
 
     /// End-to-end through the real HTTP handler: saving a DIFFERENT credential (github_token)
@@ -25610,9 +26667,13 @@ mod tests {
     /// Pure name-matching predicate: only the Anthropic credential name matches.
     #[test]
     fn is_anthropic_credential_matches_only_the_anthropic_key_name() {
-        assert!(is_anthropic_credential(crate::credentials::ANTHROPIC_API_KEY));
+        assert!(is_anthropic_credential(
+            crate::credentials::ANTHROPIC_API_KEY
+        ));
         assert!(!is_anthropic_credential(crate::credentials::GITHUB_TOKEN));
-        assert!(!is_anthropic_credential(crate::credentials::OPENROUTER_API_KEY));
+        assert!(!is_anthropic_credential(
+            crate::credentials::OPENROUTER_API_KEY
+        ));
         assert!(!is_anthropic_credential(""));
     }
 
@@ -25632,7 +26693,10 @@ mod tests {
             &model_registry,
             credential_store,
         );
-        assert!(scheduled, "saving the Anthropic key must schedule a refresh");
+        assert!(
+            scheduled,
+            "saving the Anthropic key must schedule a refresh"
+        );
     }
 
     /// Saving any OTHER credential must NOT schedule a refresh.
@@ -25646,7 +26710,10 @@ mod tests {
             &model_registry,
             credential_store,
         );
-        assert!(!scheduled, "saving a non-Anthropic credential must not schedule a refresh");
+        assert!(
+            !scheduled,
+            "saving a non-Anthropic credential must not schedule a refresh"
+        );
     }
 
     /// End-to-end through the real HTTP handler: saving a DIFFERENT credential
@@ -25698,19 +26765,32 @@ mod tests {
     fn use_live_anthropic_models_requires_both_api_backend_and_key() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         // API backend selected, but no key yet.
-        state.settings.set_chat_backend(crate::llm::ProjectBackend::Api);
-        assert!(!use_live_anthropic_models(&state), "api backend alone, no key, must stay false");
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        assert!(
+            !use_live_anthropic_models(&state),
+            "api backend alone, no key, must stay false"
+        );
 
         // Key present, but backend still `api` — now both hold.
         state
             .credential_store
             .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test-key")
             .unwrap();
-        assert!(use_live_anthropic_models(&state), "api backend + key present must be true");
+        assert!(
+            use_live_anthropic_models(&state),
+            "api backend + key present must be true"
+        );
 
         // Flip back to CLI: even with the key present, must be false.
-        state.settings.set_chat_backend(crate::llm::ProjectBackend::Cli);
-        assert!(!use_live_anthropic_models(&state), "cli backend must stay false even with a key");
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Cli);
+        assert!(
+            !use_live_anthropic_models(&state),
+            "cli backend must stay false even with a key"
+        );
     }
 
     /// `GET /api/models/registry` on the CLI backend (the default) serves the hardcoded
@@ -25720,21 +26800,23 @@ mod tests {
     #[tokio::test]
     async fn get_model_registry_serves_hardcoded_claude_on_cli_backend() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
-        state.model_registry.seed_anthropic_entries(vec![crate::model_registry::RegistryEntry {
-            provider: "claude".to_string(),
-            display: "Live-Only Model".to_string(),
-            id: "claude-live-only".to_string(),
-            free: false,
-            tool_use: true,
-            context: 0,
-            coding: 1.0,
-            price_in: 0.0,
-            price_out: 0.0,
-            weight: 0,
-            caching: true,
-            vision: true,
-            price_known: false,
-        }]);
+        state
+            .model_registry
+            .seed_anthropic_entries(vec![crate::model_registry::RegistryEntry {
+                provider: "claude".to_string(),
+                display: "Live-Only Model".to_string(),
+                id: "claude-live-only".to_string(),
+                free: false,
+                tool_use: true,
+                context: 0,
+                coding: 1.0,
+                price_in: 0.0,
+                price_out: 0.0,
+                weight: 0,
+                caching: true,
+                vision: true,
+                price_known: false,
+            }]);
         let app = router(state);
         let resp = app
             .oneshot(
@@ -25766,26 +26848,30 @@ mod tests {
     #[tokio::test]
     async fn get_model_registry_serves_live_list_on_api_backend_with_key_and_cache() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
-        state.settings.set_chat_backend(crate::llm::ProjectBackend::Api);
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
         state
             .credential_store
             .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test-key")
             .unwrap();
-        state.model_registry.seed_anthropic_entries(vec![crate::model_registry::RegistryEntry {
-            provider: "claude".to_string(),
-            display: "Live-Only Model".to_string(),
-            id: "claude-live-only".to_string(),
-            free: false,
-            tool_use: true,
-            context: 0,
-            coding: 1.0,
-            price_in: 0.0,
-            price_out: 0.0,
-            weight: 0,
-            caching: true,
-            vision: true,
-            price_known: false,
-        }]);
+        state
+            .model_registry
+            .seed_anthropic_entries(vec![crate::model_registry::RegistryEntry {
+                provider: "claude".to_string(),
+                display: "Live-Only Model".to_string(),
+                id: "claude-live-only".to_string(),
+                free: false,
+                tool_use: true,
+                context: 0,
+                coding: 1.0,
+                price_in: 0.0,
+                price_out: 0.0,
+                weight: 0,
+                caching: true,
+                vision: true,
+                price_known: false,
+            }]);
         let app = router(state);
         let resp = app
             .oneshot(
@@ -25817,7 +26903,9 @@ mod tests {
     #[tokio::test]
     async fn get_model_registry_falls_back_to_hardcoded_when_api_backend_but_no_live_cache() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
-        state.settings.set_chat_backend(crate::llm::ProjectBackend::Api);
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
         state
             .credential_store
             .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test-key")
@@ -25996,11 +27084,18 @@ mod tests {
         // known env-var race noted on
         // `credentials::tests::resolve_falls_back_to_env_when_store_empty`).
         std::env::remove_var("ANTHROPIC_API_KEY");
-        assert_eq!(resolve_backend_for_project(&state, None), crate::llm::BackendResolution::Cli);
+        assert_eq!(
+            resolve_backend_for_project(&state, None),
+            crate::llm::BackendResolution::Cli
+        );
 
         // A project explicitly switched to `Api`, no key anywhere -> Blocked.
         let api_project = state.projects.create("ApiOnly", vec![]).unwrap();
-        assert_eq!(api_project.backend, crate::project::ProjectBackend::Cli, "fresh project defaults to Cli");
+        assert_eq!(
+            api_project.backend,
+            crate::project::ProjectBackend::Cli,
+            "fresh project defaults to Cli"
+        );
         let api_project = state
             .projects
             .set_backend(&api_project.id, crate::project::ProjectBackend::Api)
@@ -26065,7 +27160,10 @@ mod tests {
             content: "graph LR; A-->B".to_string(),
         };
         let result = embed_attachments("Body", &[att]);
-        assert!(result.contains("```mermaid"), "mermaid fence for .mmd extension");
+        assert!(
+            result.contains("```mermaid"),
+            "mermaid fence for .mmd extension"
+        );
     }
 
     /// End-to-end router test for UoW file attachments: add, list, get, remove.
@@ -26131,7 +27229,10 @@ mod tests {
         let attachments = list_body["attachments"].as_array().unwrap();
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0]["name"].as_str().unwrap(), "mockup.html");
-        assert!(attachments[0].get("content").is_none(), "content omitted from list");
+        assert!(
+            attachments[0].get("content").is_none(),
+            "content omitted from list"
+        );
 
         // GET /api/uow/:id/attachments/:name -- fetch content.
         let get_resp = app
@@ -26214,7 +27315,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
-        assert_eq!(body["story_id"], "draft-does-not-exist", "returns a UoW-shaped body");
+        assert_eq!(
+            body["story_id"], "draft-does-not-exist",
+            "returns a UoW-shaped body"
+        );
 
         // The store must not have materialized it — neither the direct getter nor the raw
         // list sees any record after a read of an unknown id.
@@ -26313,10 +27417,7 @@ mod tests {
             .await
             .unwrap();
         let get2_body = body_json(get2).await;
-        assert_eq!(
-            get2_body["diagram"].as_str().unwrap(),
-            "graph TD\n  A-->B"
-        );
+        assert_eq!(get2_body["diagram"].as_str().unwrap(), "graph TD\n  A-->B");
 
         // DELETE -- clears it.
         let del = app
@@ -26386,7 +27487,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = body_json(resp).await;
         assert!(
-            body["error"].as_str().unwrap_or("").contains("must not be empty"),
+            body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("must not be empty"),
             "error message explains why an empty message with no context is rejected"
         );
     }
@@ -26406,9 +27510,15 @@ mod tests {
             draft_body: "Email + password fields, submit button.".to_string(),
         };
         let prompt = build_mockup_prompt(&authoring, Some("Story"), None, "");
-        assert!(prompt.contains("Work item title: Login screen"), "node title present");
+        assert!(
+            prompt.contains("Work item title: Login screen"),
+            "node title present"
+        );
         assert!(prompt.contains("Email + password"), "node body present");
-        assert!(prompt.contains("Work item type: Story"), "node type present");
+        assert!(
+            prompt.contains("Work item type: Story"),
+            "node type present"
+        );
         assert!(
             prompt.contains("best represents this work item"),
             "empty message -> synthesized instruction, not a rejection"
@@ -26436,15 +27546,23 @@ mod tests {
             draft_title: "Payment step".to_string(),
             draft_body: "Card entry form.".to_string(),
         };
-        let prompt =
-            build_mockup_prompt(&child_authoring, Some("Story"), Some(&parent), "");
+        let prompt = build_mockup_prompt(&child_authoring, Some("Story"), Some(&parent), "");
 
         // Parent context is present and comes BEFORE the node's own title.
-        assert!(prompt.contains("Parent Epic: Checkout revamp"), "parent title present");
-        assert!(prompt.contains("Overhaul the checkout flow"), "parent body present");
+        assert!(
+            prompt.contains("Parent Epic: Checkout revamp"),
+            "parent title present"
+        );
+        assert!(
+            prompt.contains("Overhaul the checkout flow"),
+            "parent body present"
+        );
         let parent_idx = prompt.find("Parent Epic").expect("parent header");
         let node_idx = prompt.find("Work item title:").expect("node title header");
-        assert!(parent_idx < node_idx, "parent context precedes node context");
+        assert!(
+            parent_idx < node_idx,
+            "parent context precedes node context"
+        );
 
         // The original requirements prompt is also folded in.
         assert!(
@@ -26461,8 +27579,7 @@ mod tests {
             draft_title: "Dashboard".to_string(),
             ..Default::default()
         };
-        let prompt =
-            build_mockup_prompt(&authoring, None, None, "make it a dark grid of cards");
+        let prompt = build_mockup_prompt(&authoring, None, None, "make it a dark grid of cards");
         assert!(
             prompt.contains("Instruction: make it a dark grid of cards"),
             "user instruction preserved verbatim"
@@ -26488,9 +27605,7 @@ mod tests {
 
     /// The effective-repos closure the handler uses: the node's own `publish_repos`, or
     /// the given project fallback when the node's list is empty.
-    fn eff_with_fallback(
-        fallback: Vec<String>,
-    ) -> impl Fn(&crate::uow::UnitOfWork) -> Vec<String> {
+    fn eff_with_fallback(fallback: Vec<String>) -> impl Fn(&crate::uow::UnitOfWork) -> Vec<String> {
         move |n: &crate::uow::UnitOfWork| {
             if n.publish_repos.is_empty() {
                 fallback.clone()
@@ -26528,9 +27643,18 @@ mod tests {
         );
 
         // Parent precedes child within A (BFS order preserved).
-        let idx_epic = actions.iter().position(|x| x.repo == "A" && x.node_story_id == "epic").unwrap();
-        let idx_child = actions.iter().position(|x| x.repo == "A" && x.node_story_id == "childUI").unwrap();
-        assert!(idx_epic < idx_child, "parent action precedes child within a repo");
+        let idx_epic = actions
+            .iter()
+            .position(|x| x.repo == "A" && x.node_story_id == "epic")
+            .unwrap();
+        let idx_child = actions
+            .iter()
+            .position(|x| x.repo == "A" && x.node_story_id == "childUI")
+            .unwrap();
+        assert!(
+            idx_epic < idx_child,
+            "parent action precedes child within a repo"
+        );
     }
 
     #[test]
@@ -26540,8 +27664,7 @@ mod tests {
             plan_node("epic", None, &[]),
             plan_node("child", Some("epic"), &[]),
         ];
-        let actions =
-            plan_design_publish(&tree, eff_with_fallback(vec!["P1".into(), "P2".into()]));
+        let actions = plan_design_publish(&tree, eff_with_fallback(vec!["P1".into(), "P2".into()]));
 
         // Both nodes published into both fallback repos.
         for repo in ["P1", "P2"] {
@@ -26549,7 +27672,10 @@ mod tests {
             assert_eq!(r.len(), 2, "{repo} gets both nodes");
             assert_eq!(r[0].node_story_id, "epic");
             assert_eq!(r[1].node_story_id, "child");
-            assert!(r[1].link_to_parent, "child links to epic in {repo} (both present)");
+            assert!(
+                r[1].link_to_parent,
+                "child links to epic in {repo} (both present)"
+            );
         }
         assert_eq!(actions.len(), 4, "2 nodes x 2 fallback repos");
     }
@@ -26568,7 +27694,10 @@ mod tests {
             .iter()
             .find(|x| x.repo == "A" && x.node_story_id == "child")
             .unwrap();
-        assert!(child_a.link_to_parent, "child links to epic in A (parent present)");
+        assert!(
+            child_a.link_to_parent,
+            "child links to epic in A (parent present)"
+        );
 
         let child_b = actions
             .iter()
@@ -26651,7 +27780,10 @@ mod tests {
         // Epic -> Story is NOT in the schema.
         let err = validate_design_type_relation(&schema, "Epic", "Story");
         assert!(err.is_err(), "Epic -> Story must be rejected");
-        assert!(err.unwrap_err().contains("Story"), "error names the invalid type");
+        assert!(
+            err.unwrap_err().contains("Story"),
+            "error names the invalid type"
+        );
         // Unknown types.
         assert!(validate_design_type_relation(&schema, "Epic", "Bug").is_err());
     }
@@ -26662,7 +27794,10 @@ mod tests {
     #[tokio::test]
     async fn design_draft_tree_http_round_trip() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         let app = router(state.clone());
         let id = p.id.clone();
 
@@ -26704,7 +27839,10 @@ mod tests {
             .unwrap();
         assert_eq!(blank_resp.status(), StatusCode::OK);
         let blank_body = body_json(blank_resp).await;
-        let design_id = blank_body["design_id"].as_str().expect("design_id").to_string();
+        let design_id = blank_body["design_id"]
+            .as_str()
+            .expect("design_id")
+            .to_string();
         assert!(design_id.starts_with("draft-"), "design_id is a draft id");
 
         // Verify the root node has node_type=Epic in the store.
@@ -26804,7 +27942,11 @@ mod tests {
             .filter_map(|n| n["node_type"].as_str())
             .collect();
         assert!(types.contains(&"Epic"), "Epic in tree");
-        assert_eq!(types.iter().filter(|&&t| t == "Feature").count(), 2, "two Features");
+        assert_eq!(
+            types.iter().filter(|&&t| t == "Feature").count(),
+            2,
+            "two Features"
+        );
         assert!(types.contains(&"Story"), "Story in tree");
 
         // DELETE /api/designs/:id/nodes/:node_id -- delete the story node only.
@@ -26880,15 +28022,17 @@ mod tests {
     #[tokio::test]
     async fn designs_list_status_delete_http_round_trip() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         let app = router(state.clone());
         let id = p.id.clone();
 
         // Create a design root (Epic) with a title, plus one child node.
-        let root =
-            state
-                .uow
-                .create_blank_design(Some("Epic".to_string()), None, Some(id.clone()));
+        let root = state
+            .uow
+            .create_blank_design(Some("Epic".to_string()), None, Some(id.clone()));
         state.uow.append_authoring_turn(
             &root.story_id,
             "(seed)",
@@ -27031,7 +28175,10 @@ mod tests {
             0,
             "design removed from the list"
         );
-        assert!(state.uow.list_design_tree(&design_id).is_empty(), "tree gone");
+        assert!(
+            state.uow.list_design_tree(&design_id).is_empty(),
+            "tree gone"
+        );
     }
 
     /// `design_publish` sets the design root's status to `published` on success.
@@ -27040,8 +28187,7 @@ mod tests {
     #[test]
     fn publish_sets_design_root_status_to_published() {
         let store = crate::uow::UowStore::new();
-        let root =
-            store.create_blank_design(Some("Epic".to_string()), None, Some("p".to_string()));
+        let root = store.create_blank_design(Some("Epic".to_string()), None, Some("p".to_string()));
         assert_eq!(root.design_status.as_deref(), Some("draft"));
         let updated = store.set_design_status(&root.story_id, "published");
         assert_eq!(updated.unwrap().design_status.as_deref(), Some("published"));
@@ -27068,11 +28214,16 @@ mod tests {
     #[tokio::test]
     async fn project_rule_drift_route_reports_baselined_mismatch() {
         let Some((rule_id, _current_hash)) = any_corpus_rule().await else {
-            eprintln!("corpus unavailable; skipping project_rule_drift_route_reports_baselined_mismatch");
+            eprintln!(
+                "corpus unavailable; skipping project_rule_drift_route_reports_baselined_mismatch"
+            );
             return;
         };
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Drift", vec!["me/api".to_string()]).unwrap();
+        let p = state
+            .projects
+            .create("Drift", vec!["me/api".to_string()])
+            .unwrap();
         // Seed a selection baselined to a STALE hash (guaranteed != current).
         state.projects.update(&p.id, |proj| {
             proj.ruleset.selections.push(crate::project::RuleSelection {
@@ -27098,13 +28249,20 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["ok"], true);
         let drift = json["drift"].as_array().expect("drift is an array");
-        assert_eq!(drift.len(), 1, "the single baselined-mismatch rule is reported");
+        assert_eq!(
+            drift.len(),
+            1,
+            "the single baselined-mismatch rule is reported"
+        );
         let entry = &drift[0];
         // The exact keys the UI's RuleDriftEntry reads.
         assert_eq!(entry["rule_id"], rule_id);
         assert!(entry["title"].is_string(), "title present");
         assert_eq!(entry["applied_directive"], "old directive text");
-        assert!(entry["corpus_directive"].is_string(), "corpus_directive present");
+        assert!(
+            entry["corpus_directive"].is_string(),
+            "corpus_directive present"
+        );
         assert_eq!(entry["repos"][0], "me/api");
     }
 
@@ -27117,7 +28275,10 @@ mod tests {
             return;
         };
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Drift", vec!["me/api".to_string()]).unwrap();
+        let p = state
+            .projects
+            .create("Drift", vec!["me/api".to_string()])
+            .unwrap();
         state.projects.update(&p.id, |proj| {
             proj.ruleset.selections.push(crate::project::RuleSelection {
                 rule_id: rule_id.clone(),
@@ -27138,7 +28299,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/projects/{}/rule-drift/{}/accept", p.id, rule_id))
+                    .uri(format!(
+                        "/api/projects/{}/rule-drift/{}/accept",
+                        p.id, rule_id
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -27168,7 +28332,10 @@ mod tests {
     #[tokio::test]
     async fn set_repo_rule_override_reads_chosen_option_and_scopes_to_repo() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("RepoOverride", vec!["me/api".to_string()]).unwrap();
+        let p = state
+            .projects
+            .create("RepoOverride", vec!["me/api".to_string()])
+            .unwrap();
         let app = router(state.clone());
 
         let resp = app
@@ -27177,7 +28344,10 @@ mod tests {
                     .method("POST")
                     // `owner/repo` is percent-encoded into one path segment; axum's
                     // Path extractor decodes `%2F` back to `/` (see the UoW-id test).
-                    .uri(format!("/api/projects/{}/repos/me%2Fapi/rules/RUST-FMT-1", p.id))
+                    .uri(format!(
+                        "/api/projects/{}/repos/me%2Fapi/rules/RUST-FMT-1",
+                        p.id
+                    ))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"chosen_option":"b"}"#))
                     .unwrap(),
@@ -27312,7 +28482,11 @@ mod tests {
 
     // ── `GET /api/onboard/finding-context` (finding-code-context feature) ──────────
 
-    fn finding_context_state_with_fixture(repo: &str, rel_path: &str, content: &str) -> (AppState, tempfile::TempDir) {
+    fn finding_context_state_with_fixture(
+        repo: &str,
+        rel_path: &str,
+        content: &str,
+    ) -> (AppState, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let full = tmp.path().join(rel_path);
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();
@@ -27357,7 +28531,8 @@ mod tests {
     /// A `../../etc/passwd`-style traversal in `path` is refused with 400, never a read.
     #[tokio::test]
     async fn finding_context_refuses_path_traversal() {
-        let (state, _tmp) = finding_context_state_with_fixture("me/api", "src/lib.rs", "fn f() {}\n");
+        let (state, _tmp) =
+            finding_context_state_with_fixture("me/api", "src/lib.rs", "fn f() {}\n");
         let app = router(state);
         let resp = app
             .oneshot(
@@ -27468,7 +28643,10 @@ mod tests {
             &crate::onboard::Finding::default(),
             None,
         );
-        assert!(expected.is_some(), "fixture rule must have authored remediation");
+        assert!(
+            expected.is_some(),
+            "fixture rule must have authored remediation"
+        );
         assert_eq!(json["fix"], expected.unwrap());
     }
 
@@ -27534,10 +28712,16 @@ mod tests {
         })
         .await;
         let job = jobs.get(&jid).expect("job exists");
-        assert_eq!(job.status, "failed", "a panicking body must not leave the job running");
+        assert_eq!(
+            job.status, "failed",
+            "a panicking body must not leave the job running"
+        );
         let msg = job.message.expect("a failure message must be set");
         assert!(msg.contains("crashed unexpectedly"), "message: {msg}");
-        assert!(msg.contains("boom: simulated AI pipeline crash"), "message: {msg}");
+        assert!(
+            msg.contains("boom: simulated AI pipeline crash"),
+            "message: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -27552,7 +28736,10 @@ mod tests {
         })
         .await;
         let job = jobs.get(&jid).expect("job exists");
-        assert_eq!(job.status, "done", "the guard must not touch a job the body already finished");
+        assert_eq!(
+            job.status, "done",
+            "the guard must not touch a job the body already finished"
+        );
     }
 
     #[tokio::test]
@@ -27616,8 +28803,14 @@ mod tests {
         let repos = vec!["me/api".to_string()];
         let report = crate::onboard::ScanReport::crashed(&repos, "boom".to_string());
         assert_eq!(report.repos, repos);
-        assert!(!report.gated, "must not be mistaken for the GitHub-connect gate");
-        assert!(!report.blocked, "must not be mistaken for the compliance block");
+        assert!(
+            !report.gated,
+            "must not be mistaken for the GitHub-connect gate"
+        );
+        assert!(
+            !report.blocked,
+            "must not be mistaken for the compliance block"
+        );
         assert_eq!(report.ai_error.as_deref(), Some("boom"));
         assert_eq!(report.message.as_deref(), Some("boom"));
         assert!(report.findings.is_empty());
@@ -27678,10 +28871,22 @@ mod tests {
         // deserializes into an enum, so an unknown variant is a TOML deserialize error and the
         // whole file is skipped by `load_corpus_lenient`.
         let broken = body
-            .replacen("enforcement = \"architectural\"", "enforcement = \"architectual\"", 1)
-            .replacen("enforcement = \"mechanical\"", "enforcement = \"mechanicle\"", 1)
+            .replacen(
+                "enforcement = \"architectural\"",
+                "enforcement = \"architectual\"",
+                1,
+            )
+            .replacen(
+                "enforcement = \"mechanical\"",
+                "enforcement = \"mechanicle\"",
+                1,
+            )
             .replacen("enforcement = \"prose\"", "enforcement = \"proze\"", 1)
-            .replacen("enforcement = \"structured\"", "enforcement = \"structered\"", 1);
+            .replacen(
+                "enforcement = \"structured\"",
+                "enforcement = \"structered\"",
+                1,
+            );
         assert_ne!(
             broken, body,
             "the fixture builder must actually have broken something — a malformed-corpus test \

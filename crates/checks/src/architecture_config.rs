@@ -234,7 +234,10 @@ impl std::fmt::Display for ArchitectureConfigParseError {
     }
 }
 
-fn parse_str(text: &str, path_label: &str) -> Result<ArchitectureConfig, ArchitectureConfigParseError> {
+fn parse_str(
+    text: &str,
+    path_label: &str,
+) -> Result<ArchitectureConfig, ArchitectureConfigParseError> {
     toml::from_str::<ArchitectureConfig>(text).map_err(|e| ArchitectureConfigParseError {
         path: path_label.to_string(),
         cause: e.to_string(),
@@ -315,9 +318,24 @@ pub fn architecture_config_from_files(
 /// `repositories`, while `src/repository_helpers.rs` does not. See the §2 constraint above for
 /// why the vocabulary is this short.
 pub const INFERRED_LAYER_TOKENS: &[(&str, &[&str])] = &[
-    ("handlers", &["handlers", "controllers", "routes", "endpoints", "resolvers"]),
-    ("services", &["services", "usecases", "use_cases", "interactors"]),
-    ("repositories", &["repositories", "repository", "repos", "dao", "persistence"]),
+    (
+        "handlers",
+        &[
+            "handlers",
+            "controllers",
+            "routes",
+            "endpoints",
+            "resolvers",
+        ],
+    ),
+    (
+        "services",
+        &["services", "usecases", "use_cases", "interactors"],
+    ),
+    (
+        "repositories",
+        &["repositories", "repository", "repos", "dao", "persistence"],
+    ),
     ("domain", &["domain", "entities"]),
 ];
 
@@ -327,7 +345,9 @@ pub const INFERRED_LAYER_TOKENS: &[(&str, &[&str])] = &[
 /// "handlers"/"services"), so there is no canonical rank for them and callers must not invent
 /// one.
 pub fn inferred_layer_rank(layer: &str) -> Option<usize> {
-    INFERRED_LAYER_TOKENS.iter().position(|(name, _)| *name == layer)
+    INFERRED_LAYER_TOKENS
+        .iter()
+        .position(|(name, _)| *name == layer)
 }
 
 /// Whether `path` has a whole segment equal (case-insensitively) to `token`.
@@ -419,8 +439,10 @@ mod tests {
     // ── req_a4: layer-map inference (Pass-1 W4) ─────────────────────────────────────────────
 
     fn infer(pairs: &[&str]) -> Option<ArchitectureConfig> {
-        let files: Vec<(String, String)> =
-            pairs.iter().map(|p| ((*p).to_string(), String::new())).collect();
+        let files: Vec<(String, String)> = pairs
+            .iter()
+            .map(|p| ((*p).to_string(), String::new()))
+            .collect();
         infer_architecture_config(&files)
     }
 
@@ -438,7 +460,10 @@ mod tests {
             .expect("two distinct layers is sufficient evidence");
         assert!(cfg.inferred);
         assert_eq!(cfg.layers.len(), 2, "{:?}", cfg.layers);
-        assert_eq!(cfg.layers.get("handlers").map(Vec::as_slice), Some(&["**/controllers/**".to_string()][..]));
+        assert_eq!(
+            cfg.layers.get("handlers").map(Vec::as_slice),
+            Some(&["**/controllers/**".to_string()][..])
+        );
     }
 
     /// req_a4: only files the extractor layer understands count as evidence. A `domain` layer
@@ -463,10 +488,16 @@ mod tests {
         .expect("four layers");
         let handlers = cfg.imports.get("handlers").expect("handlers key");
         for below in ["handlers", "services", "repositories", "domain"] {
-            assert!(handlers.iter().any(|l| l == below), "handlers -> {below}: {handlers:?}");
+            assert!(
+                handlers.iter().any(|l| l == below),
+                "handlers -> {below}: {handlers:?}"
+            );
         }
         // The bottom layer may import only itself.
-        assert_eq!(cfg.imports.get("domain").map(Vec::as_slice), Some(&["domain".to_string()][..]));
+        assert_eq!(
+            cfg.imports.get("domain").map(Vec::as_slice),
+            Some(&["domain".to_string()][..])
+        );
         // A repository may NOT import a handler (the one verdict inference supports).
         let repos = cfg.imports.get("repositories").expect("repositories key");
         assert!(!repos.iter().any(|l| l == "handlers"), "{repos:?}");
@@ -517,12 +548,21 @@ mod tests {
         assert!(inferred.inferred);
 
         let mut authored = layered.clone();
-        authored.push((ARCHITECTURE_CONFIG_PATH.to_string(), EXAMPLE_TOML.to_string()));
+        authored.push((
+            ARCHITECTURE_CONFIG_PATH.to_string(),
+            EXAMPLE_TOML.to_string(),
+        ));
         let real = architecture_config_or_inferred(&authored).expect("authored");
-        assert!(!real.inferred, "an authored map must never be marked inferred");
+        assert!(
+            !real.inferred,
+            "an authored map must never be marked inferred"
+        );
 
         let mut broken = layered.clone();
-        broken.push((ARCHITECTURE_CONFIG_PATH.to_string(), "not ==== toml".to_string()));
+        broken.push((
+            ARCHITECTURE_CONFIG_PATH.to_string(),
+            "not ==== toml".to_string(),
+        ));
         assert!(architecture_config_or_inferred(&broken).is_none());
     }
 
@@ -532,7 +572,10 @@ mod tests {
     #[test]
     fn req_a4_the_inferred_flag_never_round_trips_through_toml() {
         let parsed = parse_str("version = 1\ninferred = true\n", "test").expect("parses");
-        assert!(!parsed.inferred, "an authored TOML must not be able to claim `inferred`");
+        assert!(
+            !parsed.inferred,
+            "an authored TOML must not be able to claim `inferred`"
+        );
     }
 
     const EXAMPLE_TOML: &str = r#"
@@ -575,7 +618,10 @@ image_component = ["src/components/AppImage.tsx"]
         let cfg = parse_str(EXAMPLE_TOML, "test").expect("valid config");
         assert_eq!(cfg.version, 1);
         assert_eq!(cfg.layers.len(), 4);
-        assert_eq!(cfg.layers["handlers"], vec!["src/routes/**", "src/controllers/**"]);
+        assert_eq!(
+            cfg.layers["handlers"],
+            vec!["src/routes/**", "src/controllers/**"]
+        );
         assert_eq!(cfg.imports["handlers"], vec!["services", "domain"]);
         let db = cfg.db.as_ref().expect("db section present");
         assert_eq!(db.handles, vec!["db", "pool", "conn", "prisma", "supabase"]);
@@ -584,7 +630,10 @@ image_component = ["src/components/AppImage.tsx"]
         let dtos = cfg.dtos.as_ref().expect("dtos section present");
         assert_eq!(dtos.controllers, vec!["src/controllers/**"]);
         let authz = cfg.authz.as_ref().expect("authz section present");
-        assert_eq!(authz.forbidden_ui_imports, vec!["@api/lib/permissions", "hasOrgPermission"]);
+        assert_eq!(
+            authz.forbidden_ui_imports,
+            vec!["@api/lib/permissions", "hasOrgPermission"]
+        );
         let helpers = cfg.helpers.as_ref().expect("helpers section present");
         assert_eq!(helpers.date_helper, vec!["src/lib/dates.ts"]);
     }
@@ -623,7 +672,10 @@ image_component = ["src/components/AppImage.tsx"]
             "cam-archcfg-test-{}-{}-{}",
             std::process::id(),
             seq,
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -641,7 +693,9 @@ image_component = ["src/components/AppImage.tsx"]
         let dir = root.join(".camerata");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("architecture.toml"), EXAMPLE_TOML).unwrap();
-        let cfg = load_architecture_config(&root).expect("no parse error").expect("present");
+        let cfg = load_architecture_config(&root)
+            .expect("no parse error")
+            .expect("present");
         assert_eq!(cfg.version, 1);
     }
 
@@ -660,7 +714,11 @@ image_component = ["src/components/AppImage.tsx"]
         let root = tmpdir();
         let dir = root.join(".camerata");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("architecture.toml"), "[layers]\na = [\"src/**\"]\n").unwrap();
+        std::fs::write(
+            dir.join("architecture.toml"),
+            "[layers]\na = [\"src/**\"]\n",
+        )
+        .unwrap();
         assert!(load_architecture_config(&root).is_err());
     }
 
@@ -674,14 +732,22 @@ image_component = ["src/components/AppImage.tsx"]
 
     #[test]
     fn present_in_file_slice_loads() {
-        let files = vec![(".camerata/architecture.toml".to_string(), EXAMPLE_TOML.to_string())];
-        let cfg = architecture_config_from_files(&files).expect("no parse error").expect("present");
+        let files = vec![(
+            ".camerata/architecture.toml".to_string(),
+            EXAMPLE_TOML.to_string(),
+        )];
+        let cfg = architecture_config_from_files(&files)
+            .expect("no parse error")
+            .expect("present");
         assert_eq!(cfg.version, 1);
     }
 
     #[test]
     fn malformed_in_file_slice_returns_err_not_panic() {
-        let files = vec![(".camerata/architecture.toml".to_string(), "}{not toml".to_string())];
+        let files = vec![(
+            ".camerata/architecture.toml".to_string(),
+            "}{not toml".to_string(),
+        )];
         assert!(architecture_config_from_files(&files).is_err());
     }
 
@@ -690,8 +756,14 @@ image_component = ["src/components/AppImage.tsx"]
     #[test]
     fn layer_for_path_matches_exactly_one_layer() {
         let cfg = parse_str(EXAMPLE_TOML, "test").unwrap();
-        assert_eq!(cfg.layer_for_path("src/routes/orders.ts"), Ok(Some("handlers")));
-        assert_eq!(cfg.layer_for_path("src/services/order_service.ts"), Ok(Some("services")));
+        assert_eq!(
+            cfg.layer_for_path("src/routes/orders.ts"),
+            Ok(Some("handlers"))
+        );
+        assert_eq!(
+            cfg.layer_for_path("src/services/order_service.ts"),
+            Ok(Some("services"))
+        );
     }
 
     #[test]

@@ -219,9 +219,10 @@ fn parse_bullets(body: &str) -> Vec<(DateTime<Utc>, String)> {
             let line = line.trim();
             let rest = line.strip_prefix("- ")?;
             match rest.split_once(": ") {
-                Some((date_part, text)) if parse_date(date_part).is_some() => {
-                    Some((parse_date(date_part).expect("checked Some above"), text.to_string()))
-                }
+                Some((date_part, text)) if parse_date(date_part).is_some() => Some((
+                    parse_date(date_part).expect("checked Some above"),
+                    text.to_string(),
+                )),
                 _ => Some((epoch(), rest.to_string())),
             }
         })
@@ -234,7 +235,9 @@ fn parse_date(s: &str) -> Option<DateTime<Utc>> {
 }
 
 fn epoch() -> DateTime<Utc> {
-    Utc.timestamp_opt(0, 0).single().expect("epoch is a valid timestamp")
+    Utc.timestamp_opt(0, 0)
+        .single()
+        .expect("epoch is a valid timestamp")
 }
 
 // ─── the thin filesystem edge ───────────────────────────────────────────────────
@@ -252,7 +255,10 @@ pub fn read_or_init(repo_dir: &std::path::Path) -> anyhow::Result<LivingSpec> {
     match std::fs::read_to_string(spec_path(repo_dir)) {
         Ok(text) => Ok(LivingSpec::parse(&text)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LivingSpec::fresh()),
-        Err(e) => Err(anyhow::anyhow!("reading {}: {e}", spec_path(repo_dir).display())),
+        Err(e) => Err(anyhow::anyhow!(
+            "reading {}: {e}",
+            spec_path(repo_dir).display()
+        )),
     }
 }
 

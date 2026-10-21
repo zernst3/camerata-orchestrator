@@ -121,7 +121,9 @@ fn normalize_join(dir: &str, rel: &str) -> String {
     } else {
         // A bare "." (tsconfig's common `baseUrl = "."`) means "repo root" — treat exactly
         // like an empty dir, not as a literal path segment.
-        dir.split('/').filter(|s| !s.is_empty() && *s != ".").collect()
+        dir.split('/')
+            .filter(|s| !s.is_empty() && *s != ".")
+            .collect()
     };
     let rel = rel.strip_prefix('/').unwrap_or(rel);
     for part in rel.split('/') {
@@ -153,17 +155,30 @@ fn rust_src_root(path: &str) -> Option<String> {
 /// `"extract/mod.rs"` (under the same `src_root`) → `["extract"]`; `"extract/rust_syn.rs"` →
 /// `["extract", "rust_syn"]`; `"lib.rs"` → `[]` (crate root).
 fn rust_module_path(path: &str, src_root: &str) -> Vec<String> {
-    let rest = path.strip_prefix(src_root).unwrap_or(path).trim_start_matches('/');
+    let rest = path
+        .strip_prefix(src_root)
+        .unwrap_or(path)
+        .trim_start_matches('/');
     let rest = rest.strip_suffix(".rs").unwrap_or(rest);
-    let mut segs: Vec<String> =
-        rest.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
-    if matches!(segs.last().map(|s| s.as_str()), Some("mod") | Some("lib") | Some("main")) {
+    let mut segs: Vec<String> = rest
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    if matches!(
+        segs.last().map(|s| s.as_str()),
+        Some("mod") | Some("lib") | Some("main")
+    ) {
         segs.pop();
     }
     segs
 }
 
-fn rust_module_candidates(src_root: &str, segments: &[String], path_set: &HashSet<&str>) -> Option<String> {
+fn rust_module_candidates(
+    src_root: &str,
+    segments: &[String],
+    path_set: &HashSet<&str>,
+) -> Option<String> {
     if segments.is_empty() {
         return None;
     }
@@ -241,8 +256,7 @@ fn load_tsconfig(files: &[(String, String)]) -> Option<TsConfigFile> {
 }
 
 const ECMA_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
-const ECMA_INDEX_CANDIDATES: &[&str] =
-    &["/index.ts", "/index.tsx", "/index.js", "/index.jsx"];
+const ECMA_INDEX_CANDIDATES: &[&str] = &["/index.ts", "/index.tsx", "/index.js", "/index.jsx"];
 
 fn try_ecma_extensions(base: &str, path_set: &HashSet<&str>) -> Option<String> {
     if path_set.contains(base) {
@@ -276,7 +290,11 @@ fn resolve_ecma(
     }
     // Non-relative (bare) specifier: only resolvable via a tsconfig `paths` alias.
     let ts = tsconfig?;
-    let base_url = ts.compiler_options.base_url.clone().unwrap_or_else(|| ".".to_string());
+    let base_url = ts
+        .compiler_options
+        .base_url
+        .clone()
+        .unwrap_or_else(|| ".".to_string());
     for (pattern, templates) in &ts.compiler_options.paths {
         let prefix = pattern.trim_end_matches('*');
         if !specifier.starts_with(prefix) {
@@ -312,9 +330,15 @@ fn try_python_extensions(base: &str, path_set: &HashSet<&str>) -> Option<String>
 /// `"app/services/__init__.py"` → `["app","services"]` — a package's `__init__.py` IS the
 /// package, not a `.__init__` submodule of it).
 fn python_module_segments(path: &str) -> Vec<String> {
-    let stripped = path.strip_suffix(".py").or_else(|| path.strip_suffix(".pyi")).unwrap_or(path);
-    let mut segs: Vec<String> =
-        stripped.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+    let stripped = path
+        .strip_suffix(".py")
+        .or_else(|| path.strip_suffix(".pyi"))
+        .unwrap_or(path);
+    let mut segs: Vec<String> = stripped
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
     if segs.last().map(|s| s.as_str()) == Some("__init__") {
         segs.pop();
     }
@@ -332,12 +356,20 @@ fn resolve_python(importer: &str, imp: &Import, path_set: &HashSet<&str>) -> Opt
         }
         if !module_rest.is_empty() {
             let rel = module_rest.replace('.', "/");
-            let joined = if base.is_empty() { rel } else { format!("{base}/{rel}") };
+            let joined = if base.is_empty() {
+                rel
+            } else {
+                format!("{base}/{rel}")
+            };
             return try_python_extensions(&joined, path_set);
         }
         // Bare `from . import x` / `from .. import x` — try `x` as a submodule of `base`.
         let name = imp.names.first()?;
-        let joined = if base.is_empty() { name.clone() } else { format!("{base}/{name}") };
+        let joined = if base.is_empty() {
+            name.clone()
+        } else {
+            format!("{base}/{name}")
+        };
         return try_python_extensions(&joined, path_set);
     }
     // Absolute dotted specifier — the repo's actual source root (`src/`, `app/`, repo root,
@@ -366,7 +398,10 @@ mod tests {
     use super::*;
 
     fn files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
-        pairs.into_iter().map(|(p, c)| (p.to_string(), c.to_string())).collect()
+        pairs
+            .into_iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect()
     }
 
     // ── TS / JS: relative resolution ───────────────────────────────────────────
@@ -407,7 +442,10 @@ mod tests {
                 "tsconfig.json",
                 r#"{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}}}"#,
             ),
-            ("src/controllers/orders.ts", "import { repo } from '@/repositories/orders';\n"),
+            (
+                "src/controllers/orders.ts",
+                "import { repo } from '@/repositories/orders';\n",
+            ),
             ("src/repositories/orders.ts", "export const repo = {};\n"),
         ]);
         let graph = build_import_graph(&f);
@@ -419,7 +457,10 @@ mod tests {
     fn ts_malformed_tsconfig_does_not_panic_and_drops_alias_import() {
         let f = files(vec![
             ("tsconfig.json", "{ not valid json !!"),
-            ("src/controllers/orders.ts", "import { repo } from '@/repositories/orders';\n"),
+            (
+                "src/controllers/orders.ts",
+                "import { repo } from '@/repositories/orders';\n",
+            ),
             ("src/repositories/orders.ts", "export const repo = {};\n"),
         ]);
         // Must not panic; the alias is simply unresolvable without a valid tsconfig.
@@ -436,7 +477,10 @@ mod tests {
                 "crates/checks/src/handler_no_db_checker.rs",
                 "use crate::arch_checker::ArchChecker;\n",
             ),
-            ("crates/checks/src/arch_checker.rs", "pub trait ArchChecker {}\n"),
+            (
+                "crates/checks/src/arch_checker.rs",
+                "pub trait ArchChecker {}\n",
+            ),
         ]);
         let graph = build_import_graph(&f);
         assert_eq!(graph.len(), 1, "{graph:#?}");
@@ -457,24 +501,40 @@ mod tests {
     #[test]
     fn rust_self_and_super_resolve_relative_to_importer_module() {
         let f = files(vec![
-            ("crates/checks/src/extract/ecma.rs", "use super::rust_syn::imports;\nuse self::helper::x;\n"),
-            ("crates/checks/src/extract/rust_syn.rs", "pub fn imports() {}\n"),
-            ("crates/checks/src/extract/ecma/helper.rs", "pub fn x() {}\n"),
+            (
+                "crates/checks/src/extract/ecma.rs",
+                "use super::rust_syn::imports;\nuse self::helper::x;\n",
+            ),
+            (
+                "crates/checks/src/extract/rust_syn.rs",
+                "pub fn imports() {}\n",
+            ),
+            (
+                "crates/checks/src/extract/ecma/helper.rs",
+                "pub fn x() {}\n",
+            ),
         ]);
         let graph = build_import_graph(&f);
         assert!(
-            graph.iter().any(|e| e.to_file == "crates/checks/src/extract/rust_syn.rs"),
+            graph
+                .iter()
+                .any(|e| e.to_file == "crates/checks/src/extract/rust_syn.rs"),
             "{graph:#?}"
         );
         assert!(
-            graph.iter().any(|e| e.to_file == "crates/checks/src/extract/ecma/helper.rs"),
+            graph
+                .iter()
+                .any(|e| e.to_file == "crates/checks/src/extract/ecma/helper.rs"),
             "{graph:#?}"
         );
     }
 
     #[test]
     fn rust_bare_extern_crate_specifier_is_dropped() {
-        let f = files(vec![("crates/checks/src/lib.rs", "use serde::Deserialize;\n")]);
+        let f = files(vec![(
+            "crates/checks/src/lib.rs",
+            "use serde::Deserialize;\n",
+        )]);
         assert!(build_import_graph(&f).is_empty());
     }
 

@@ -1543,14 +1543,16 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-7/checkout"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([{
-                "repo": "zernst3/agora",
-                "cloned": true,
-                "path": "/tmp/ws/zernst3/agora",
-                "branch": "main",
-                "dirty": false,
-                "detail": "on main",
-            }])))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "repo": "zernst3/agora",
+                    "cloned": true,
+                    "path": "/tmp/ws/zernst3/agora",
+                    "branch": "main",
+                    "dirty": false,
+                    "detail": "on main",
+                }])),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -1574,14 +1576,16 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/proj-7/checkout"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([{
-                "repo": "zernst3/agora",
-                "cloned": true,
-                "path": "/tmp/ws/zernst3/agora",
-                "branch": "main",
-                "dirty": false,
-                "detail": "cloned",
-            }])))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "repo": "zernst3/agora",
+                    "cloned": true,
+                    "path": "/tmp/ws/zernst3/agora",
+                    "branch": "main",
+                    "dirty": false,
+                    "detail": "cloned",
+                }])),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -1653,7 +1657,10 @@ mod tests {
         let out = super::start_branch("proj-7", "zernst3/agora", "camerata/work").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(out.expect("checkout").branch.as_deref(), Some("camerata/work"));
+        assert_eq!(
+            out.expect("checkout").branch.as_deref(),
+            Some("camerata/work")
+        );
     }
 
     #[tokio::test]
@@ -1679,7 +1686,13 @@ mod tests {
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let out = super::ship("proj-7", "zernst3/agora", "camerata/work", "Camerata: changes").await;
+        let out = super::ship(
+            "proj-7",
+            "zernst3/agora",
+            "camerata/work",
+            "Camerata: changes",
+        )
+        .await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(
@@ -1768,7 +1781,10 @@ mod tests {
 
         let bl = out.expect("branches parsed");
         assert_eq!(bl.current, "main");
-        assert_eq!(bl.branches, vec!["main".to_string(), "camerata/work".to_string()]);
+        assert_eq!(
+            bl.branches,
+            vec!["main".to_string(), "camerata/work".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -1962,7 +1978,10 @@ mod tests {
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(!ok);
-        assert_eq!(out, "no GitHub token set. Set CAMERATA_GITHUB_TOKEN to fetch.");
+        assert_eq!(
+            out,
+            "no GitHub token set. Set CAMERATA_GITHUB_TOKEN to fetch."
+        );
     }
 
     #[tokio::test]
@@ -2061,7 +2080,10 @@ mod tests {
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("1/2 cloned"), "cloned pill shows 1/2");
         assert!(html.contains("1 dirty"), "dirty pill shows 1");
-        assert!(html.contains("ws-health-stat warn"), "warn class for partial clone");
+        assert!(
+            html.contains("ws-health-stat warn"),
+            "warn class for partial clone"
+        );
         assert!(html.contains("ws-health-stat bad"), "bad class for dirty");
     }
 
@@ -2126,7 +2148,10 @@ mod tests {
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("git-panel"), "panel root renders");
         // The scoped repo is echoed at the top of the sync/git area (not just the checkout head).
-        assert!(html.contains("git-panel-repo"), "repo header renders in the git panel");
+        assert!(
+            html.contains("git-panel-repo"),
+            "repo header renders in the git panel"
+        );
         assert!(
             html.contains("zernst3/agora"),
             "the scoped repo slug renders in the git-panel repo header"

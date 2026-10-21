@@ -360,10 +360,7 @@ impl ClaudeRefinementReviewer {
     /// FIRST becomes the cwd + primary `--add-dir` (like [`Self::with_repo_dir`]); every other
     /// is added as its own read-only `--add-dir`, so review can scan ACROSS every repo.
     /// Builder-style. READ-ONLY — no write tools, no gateway. Empty input clears the binding.
-    pub fn with_repo_dirs(
-        mut self,
-        dirs: impl IntoIterator<Item = std::path::PathBuf>,
-    ) -> Self {
+    pub fn with_repo_dirs(mut self, dirs: impl IntoIterator<Item = std::path::PathBuf>) -> Self {
         let mut iter = dirs.into_iter();
         match iter.next() {
             Some(primary) => {
@@ -672,7 +669,10 @@ mod tests {
     #[test]
     fn with_repo_dir_binds_the_repo_for_on_demand_read() {
         let rv = ClaudeRefinementReviewer::new().with_repo_dir("/tmp/repo");
-        assert_eq!(rv.repo_dir.as_deref(), Some(std::path::Path::new("/tmp/repo")));
+        assert_eq!(
+            rv.repo_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/repo"))
+        );
         assert!(ClaudeRefinementReviewer::new().repo_dir.is_none());
     }
 
@@ -823,8 +823,7 @@ mod tests {
     fn prompt_injects_grounding_when_supplied() {
         let session = session_with_role_story(RefinementContext::PreBuild);
         let g = "=== PROJECT GROUNDING ===\nLanguages: Rust\n";
-        let prompt =
-            ClaudeRefinementReviewer::build_prompt(&session, &form_with_owner(), Some(g));
+        let prompt = ClaudeRefinementReviewer::build_prompt(&session, &form_with_owner(), Some(g));
         assert!(prompt.contains("PROJECT GROUNDING"));
         assert!(prompt.contains("Languages: Rust"));
         assert!(prompt.contains("STAFF LEAD ENGINEER"));

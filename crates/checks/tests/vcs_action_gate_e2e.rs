@@ -422,7 +422,11 @@ fn branch_naming_allowed_prefix_passes_disallowed_denied() {
     let mut config = all_disabled();
     config.branch_naming = BranchNamingConfig {
         enabled: true,
-        prefixes: vec!["feature/".to_string(), "release/".to_string(), "hotfix/".to_string()],
+        prefixes: vec![
+            "feature/".to_string(),
+            "release/".to_string(),
+            "hotfix/".to_string(),
+        ],
     };
     let rules = build_rules(&config);
 
@@ -556,7 +560,10 @@ fn commit_doc_pr_coverage_on_gates_pr_body() {
     // Substantive PR body with story id -> passes.
     assert!(gate(
         &rules,
-        &pr("Add export endpoint", "Implements the CSV export feature. Closes #99.")
+        &pr(
+            "Add export endpoint",
+            "Implements the CSV export feature. Closes #99."
+        )
     )
     .is_ok());
 }

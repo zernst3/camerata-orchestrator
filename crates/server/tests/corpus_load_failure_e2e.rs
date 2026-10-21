@@ -109,7 +109,11 @@ fn stage_fixture_as_git_repo(fixture_name: &str, dest: &Path) {
         );
     };
     g(&["init", "-q", "-b", "main"]);
-    g(&["config", "user.email", "corpus-load-failure-e2e@camerata.local"]);
+    g(&[
+        "config",
+        "user.email",
+        "corpus-load-failure-e2e@camerata.local",
+    ]);
     g(&["config", "user.name", "Camerata W13 E2E"]);
     g(&["add", "."]);
     g(&["commit", "-q", "-m", "synthetic W13 fixture"]);
@@ -159,9 +163,18 @@ fn find_real_rule_file(corpus_root: &Path, rule_id: &str) -> Option<(String, Str
 /// vacuously, and that is the B10 shape this repo has already paid for once.
 fn typo_one_enum_value(body: &str) -> Option<String> {
     for (good, typo) in [
-        ("enforcement = \"architectural\"", "enforcement = \"architectual\""),
-        ("enforcement = \"mechanical\"", "enforcement = \"mechanicle\""),
-        ("enforcement = \"structured\"", "enforcement = \"structered\""),
+        (
+            "enforcement = \"architectural\"",
+            "enforcement = \"architectual\"",
+        ),
+        (
+            "enforcement = \"mechanical\"",
+            "enforcement = \"mechanicle\"",
+        ),
+        (
+            "enforcement = \"structured\"",
+            "enforcement = \"structered\"",
+        ),
         ("enforcement = \"prose\"", "enforcement = \"proze\""),
     ] {
         if body.contains(good) {
@@ -251,11 +264,7 @@ struct Scan {
 /// `record_corpus_load_failures` sits exactly where all three production entry points put it:
 /// immediately after `audit_repos` returns, i.e. as soon as a `ScanReport` (and therefore a
 /// `ScanLedger`) exists to record into.
-async fn scan_with_corpus(
-    corpus_dir: &Path,
-    repo_dir: &Path,
-    selected: Vec<SelectedRule>,
-) -> Scan {
+async fn scan_with_corpus(corpus_dir: &Path, repo_dir: &Path, selected: Vec<SelectedRule>) -> Scan {
     let (_scannable, excluded_mechanical, _preview, corpus, load_failures) =
         camerata_server::split_scannable_rules_from(corpus_dir, selected.clone()).await;
     let load_failure_paths = load_failures.iter().map(|f| f.path.clone()).collect();

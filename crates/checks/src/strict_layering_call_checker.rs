@@ -173,7 +173,11 @@ fn allowed_join(allowed: &HashSet<&str>) -> String {
 /// discipline (an exact-segment match, never a substring search over a longer identifier).
 fn matching_marker(receiver: &str, markers: &[String]) -> Option<String> {
     let normalized = receiver.replace("::", ".");
-    let last = normalized.rsplit('.').next().unwrap_or(&normalized).to_ascii_lowercase();
+    let last = normalized
+        .rsplit('.')
+        .next()
+        .unwrap_or(&normalized)
+        .to_ascii_lowercase();
     markers.iter().find(|m| m.as_str() == last).cloned()
 }
 
@@ -182,11 +186,17 @@ mod tests {
     use super::*;
 
     fn view<'a>(files: &'a [(String, String)]) -> RepoView<'a> {
-        RepoView { spec: "test/repo", files }
+        RepoView {
+            spec: "test/repo",
+            files,
+        }
     }
 
     fn files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
-        pairs.into_iter().map(|(p, c)| (p.to_string(), c.to_string())).collect()
+        pairs
+            .into_iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect()
     }
 
     const DB_CONFIG: &str = r#"
@@ -206,7 +216,10 @@ tx_flow_control_in = ["services"]
 "#;
 
     fn with_config(mut extra: Vec<(&str, &str)>) -> Vec<(String, String)> {
-        extra.push((crate::architecture_config::ARCHITECTURE_CONFIG_PATH, DB_CONFIG));
+        extra.push((
+            crate::architecture_config::ARCHITECTURE_CONFIG_PATH,
+            DB_CONFIG,
+        ));
         files(extra)
     }
 
@@ -279,10 +292,14 @@ tx_flow_control_in = ["services"]
 
     #[test]
     fn silent_when_db_section_absent() {
-        let cfg = "version = 1\n[layers]\nhandlers = [\"src/routes/**\"]\n[imports]\nhandlers = []\n";
+        let cfg =
+            "version = 1\n[layers]\nhandlers = [\"src/routes/**\"]\n[imports]\nhandlers = []\n";
         let f = files(vec![
             (crate::architecture_config::ARCHITECTURE_CONFIG_PATH, cfg),
-            ("src/routes/orders.rs", "async fn list(db: &Db) -> Result<()> {\n    db.query(\"x\").await\n}\n"),
+            (
+                "src/routes/orders.rs",
+                "async fn list(db: &Db) -> Result<()> {\n    db.query(\"x\").await\n}\n",
+            ),
         ]);
         assert!(StrictLayeringCallChecker.check(&view(&f)).is_empty());
         assert!(StrictLayeringCallChecker.config_unsatisfied_for(&view(&f)));
@@ -330,8 +347,14 @@ handles = ["db"]
 allowed_in = []
 "#;
         let f = files(vec![
-            (crate::architecture_config::ARCHITECTURE_CONFIG_PATH, conflicting),
-            ("src/shared/x.rs", "async fn f(db: &Db) -> Result<()> {\n    db.query(\"x\").await\n}\n"),
+            (
+                crate::architecture_config::ARCHITECTURE_CONFIG_PATH,
+                conflicting,
+            ),
+            (
+                "src/shared/x.rs",
+                "async fn f(db: &Db) -> Result<()> {\n    db.query(\"x\").await\n}\n",
+            ),
         ]);
         assert!(StrictLayeringCallChecker.check(&view(&f)).is_empty());
     }

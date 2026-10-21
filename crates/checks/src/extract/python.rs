@@ -22,7 +22,9 @@ use super::{FunctionSpan, Import, ImportKind, MethodCall};
 
 fn parse(source: &str) -> Option<Tree> {
     let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&tree_sitter_python::LANGUAGE.into()).ok()?;
+    parser
+        .set_language(&tree_sitter_python::LANGUAGE.into())
+        .ok()?;
     parser.parse(source, None)
 }
 
@@ -118,7 +120,12 @@ fn collect_plain_import(node: Node, source: &str, out: &mut Vec<Import>) {
             _ => None,
         };
         if let Some(specifier) = dotted {
-            out.push(Import { specifier, names: Vec::new(), kind: ImportKind::Namespace, line });
+            out.push(Import {
+                specifier,
+                names: Vec::new(),
+                kind: ImportKind::Namespace,
+                line,
+            });
         }
     }
 }
@@ -146,9 +153,16 @@ fn collect_from_import(node: Node, source: &str, out: &mut Vec<Import>) {
     };
     let line = start_line(node);
     let mut cursor = node.walk();
-    let has_wildcard = node.children(&mut cursor).any(|c| c.kind() == "wildcard_import");
+    let has_wildcard = node
+        .children(&mut cursor)
+        .any(|c| c.kind() == "wildcard_import");
     if has_wildcard {
-        out.push(Import { specifier, names: Vec::new(), kind: ImportKind::Namespace, line });
+        out.push(Import {
+            specifier,
+            names: Vec::new(),
+            kind: ImportKind::Namespace,
+            line,
+        });
         return;
     }
     let mut cursor2 = node.walk();
@@ -250,9 +264,10 @@ fn walk_calls(node: Node, source: &str, out: &mut Vec<MethodCall>) {
     if node.kind() == "call" {
         if let Some(func) = node.child_by_field_name("function") {
             if func.kind() == "attribute" {
-                if let (Some(obj), Some(attr)) =
-                    (func.child_by_field_name("object"), func.child_by_field_name("attribute"))
-                {
+                if let (Some(obj), Some(attr)) = (
+                    func.child_by_field_name("object"),
+                    func.child_by_field_name("attribute"),
+                ) {
                     out.push(MethodCall {
                         receiver: render_attribute_path(obj, source),
                         method: text(attr, source).to_string(),
@@ -274,8 +289,12 @@ fn render_attribute_path(node: Node, source: &str) -> String {
     match node.kind() {
         "identifier" => text(node, source).to_string(),
         "attribute" => {
-            let obj = node.child_by_field_name("object").map(|n| render_attribute_path(n, source));
-            let attr = node.child_by_field_name("attribute").map(|n| text(n, source).to_string());
+            let obj = node
+                .child_by_field_name("object")
+                .map(|n| render_attribute_path(n, source));
+            let attr = node
+                .child_by_field_name("attribute")
+                .map(|n| text(n, source).to_string());
             match (obj, attr) {
                 (Some(o), Some(a)) => format!("{o}.{a}"),
                 _ => "<expr>".to_string(),
@@ -295,7 +314,9 @@ mod tests {
     fn plain_import_and_aliased() {
         let vs = imports("import os\nimport os.path as p\n");
         assert_eq!(vs.len(), 2, "{vs:#?}");
-        assert!(vs.iter().any(|i| i.specifier == "os" && i.kind == ImportKind::Namespace));
+        assert!(vs
+            .iter()
+            .any(|i| i.specifier == "os" && i.kind == ImportKind::Namespace));
         assert!(vs.iter().any(|i| i.specifier == "os.path"));
     }
 
@@ -311,7 +332,9 @@ mod tests {
     fn from_import_named_with_alias() {
         let vs = imports("from x import (a, b as c)\n");
         assert_eq!(vs.len(), 2, "{vs:#?}");
-        assert!(vs.iter().all(|i| i.specifier == "x" && i.kind == ImportKind::Named));
+        assert!(vs
+            .iter()
+            .all(|i| i.specifier == "x" && i.kind == ImportKind::Named));
         assert!(vs.iter().any(|i| i.names == vec!["a".to_string()]));
         assert!(vs.iter().any(|i| i.names == vec!["b".to_string()])); // origin, not `c`
     }
@@ -344,7 +367,11 @@ mod tests {
     #[test]
     fn importlib_import_module_literal() {
         let vs = imports("import importlib\nimportlib.import_module('x.y')\n");
-        assert!(vs.iter().any(|i| i.specifier == "x.y" && i.kind == ImportKind::Dynamic), "{vs:#?}");
+        assert!(
+            vs.iter()
+                .any(|i| i.specifier == "x.y" && i.kind == ImportKind::Dynamic),
+            "{vs:#?}"
+        );
     }
 
     #[test]
@@ -357,7 +384,8 @@ mod tests {
 
     #[test]
     fn decorated_method_captures_decorator_and_name() {
-        let src = "class Foo:\n    @app.route('/x')\n    def method(self):\n        self.db.query()\n";
+        let src =
+            "class Foo:\n    @app.route('/x')\n    def method(self):\n        self.db.query()\n";
         let fs = functions(src);
         assert_eq!(fs.len(), 1, "{fs:#?}");
         assert_eq!(fs[0].name, "method");

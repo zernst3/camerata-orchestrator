@@ -266,7 +266,10 @@ fn collect_requirement_test_names(root: &Path) -> BTreeSet<String> {
             } else if path.extension().is_some_and(|e| e == "rs") {
                 let src = fs::read_to_string(&path)
                     .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
-                for (_, rest) in src.match_indices("fn req_").map(|(i, _)| (i, &src[i + 3..])) {
+                for (_, rest) in src
+                    .match_indices("fn req_")
+                    .map(|(i, _)| (i, &src[i + 3..]))
+                {
                     let name: String = rest
                         .chars()
                         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
@@ -368,7 +371,10 @@ fn req_traceability_in_flight_requirements_are_reported_not_silently_tolerated()
 fn req_traceability_the_registry_itself_is_well_formed() {
     let mut seen = BTreeSet::new();
     for (id, coverage) in REGISTRY {
-        assert!(seen.insert(*id), "duplicate requirement id in the registry: {id}");
+        assert!(
+            seen.insert(*id),
+            "duplicate requirement id in the registry: {id}"
+        );
         match coverage {
             Required(prefixes) => assert!(
                 !prefixes.is_empty(),

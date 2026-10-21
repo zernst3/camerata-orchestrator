@@ -41,7 +41,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use camerata_agent::{HeartbeatFn, MTIME_PROBE_INTERVAL, spawn_mtime_probe};
+use camerata_agent::{spawn_mtime_probe, HeartbeatFn, MTIME_PROBE_INTERVAL};
 
 use crate::onboard::{CoverageNote, Finding, SelectedRule};
 use crate::tool_provisioning;
@@ -487,7 +487,10 @@ pub fn group_by_tool<'a, 'r>(
     selected: &'a [SelectedRule],
     lookup: &(dyn Fn(&str) -> Option<&'r Rule> + Send + Sync),
     present_languages: Option<&HashSet<String>>,
-) -> (BTreeMap<ScanTool, Vec<&'a SelectedRule>>, Vec<&'a SelectedRule>) {
+) -> (
+    BTreeMap<ScanTool, Vec<&'a SelectedRule>>,
+    Vec<&'a SelectedRule>,
+) {
     let mut by_tool: BTreeMap<ScanTool, Vec<&SelectedRule>> = BTreeMap::new();
     let mut ungrouped: Vec<&SelectedRule> = Vec::new();
 
@@ -500,7 +503,8 @@ pub fn group_by_tool<'a, 'r>(
         // Architectural rules have no off-the-shelf linter (they need a custom AST checker),
         // so the preview cannot run them. They remain covered by the AI review (advisory).
         // Only MECHANICAL rules attempt the preview.
-        if rule.enforcement != camerata_rules::EnforcementKind::Mechanical || rule.is_layer3_only() {
+        if rule.enforcement != camerata_rules::EnforcementKind::Mechanical || rule.is_layer3_only()
+        {
             continue;
         }
         match tool_for_rule(rule) {
@@ -680,13 +684,7 @@ pub fn parse_sarif(repo: &str, tool: ScanTool, json: &str) -> anyhow::Result<Vec
                 })
                 .unwrap_or_else(|| ("(repo)".to_string(), 0));
             out.push(preview_finding(
-                repo,
-                tool,
-                &path,
-                line,
-                &rule_id,
-                level,
-                &message,
+                repo, tool, &path, line, &rule_id, level, &message,
             ));
         }
     }
@@ -826,7 +824,13 @@ pub fn parse_ruff_json(repo: &str, json: &str) -> anyhow::Result<Vec<Finding>> {
         // Ruff's `S*` (flake8-bandit) are security; treat as medium by default —
         // the preview is advisory, severity is indicative.
         out.push(preview_finding(
-            repo, ScanTool::Ruff, path, line, code, "medium", message,
+            repo,
+            ScanTool::Ruff,
+            path,
+            line,
+            code,
+            "medium",
+            message,
         ));
     }
     Ok(out)
@@ -852,14 +856,19 @@ pub fn parse_clippy_json(repo: &str, ndjson: &str) -> anyhow::Result<Vec<Finding
         if v.get("reason").and_then(|r| r.as_str()) != Some("compiler-message") {
             continue;
         }
-        let Some(msg) = v.get("message") else { continue };
+        let Some(msg) = v.get("message") else {
+            continue;
+        };
         let code = msg
             .get("code")
             .and_then(|c| c.get("code"))
             .and_then(|c| c.as_str());
         // Only surface lints with a code (skip codeless notes/help).
         let Some(code) = code else { continue };
-        let level = msg.get("level").and_then(|l| l.as_str()).unwrap_or("warning");
+        let level = msg
+            .get("level")
+            .and_then(|l| l.as_str())
+            .unwrap_or("warning");
         let text = msg
             .get("message")
             .and_then(|m| m.as_str())
@@ -872,7 +881,11 @@ pub fn parse_clippy_json(repo: &str, ndjson: &str) -> anyhow::Result<Vec<Finding
             .and_then(|spans| {
                 spans
                     .iter()
-                    .find(|s| s.get("is_primary").and_then(|p| p.as_bool()).unwrap_or(false))
+                    .find(|s| {
+                        s.get("is_primary")
+                            .and_then(|p| p.as_bool())
+                            .unwrap_or(false)
+                    })
                     .or_else(|| spans.first())
             })
             .map(|sp| {
@@ -881,10 +894,7 @@ pub fn parse_clippy_json(repo: &str, ndjson: &str) -> anyhow::Result<Vec<Finding
                     .and_then(|f| f.as_str())
                     .unwrap_or("(repo)")
                     .to_string();
-                let line = sp
-                    .get("line_start")
-                    .and_then(|n| n.as_u64())
-                    .unwrap_or(0) as usize;
+                let line = sp.get("line_start").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
                 (path, line)
             })
             .unwrap_or_else(|| ("(repo)".to_string(), 0));
@@ -1086,7 +1096,10 @@ pub fn is_in_repo_scope(repo_root: &Path, finding_path: &str) -> bool {
             return false;
         }
         // `foo.generated.ts`, `foo.generated.js`, etc.
-        if let Some(stem) = std::path::Path::new(fname).file_stem().and_then(|s| s.to_str()) {
+        if let Some(stem) = std::path::Path::new(fname)
+            .file_stem()
+            .and_then(|s| s.to_str())
+        {
             if stem.ends_with(".generated") {
                 return false;
             }
@@ -1356,7 +1369,9 @@ pub async fn run_scan_tools<'r>(
         if let Some((jstore, jid)) = progress {
             jstore.det_tool_running(jid, tool.name());
         }
-        let produced = match run_one_tool(repo, dir, tool, &rules, lookup, on_progress.clone()).await {
+        let produced = match run_one_tool(repo, dir, tool, &rules, lookup, on_progress.clone())
+            .await
+        {
             Ok((mut fs, mut gaps)) => {
                 let n = fs.len();
                 findings.append(&mut fs);
@@ -1493,14 +1508,7 @@ async fn run_one_tool<'r>(
             let (stdout, _ok, stderr) = run_capture_stdout(
                 dir,
                 "ruff",
-                &[
-                    "check",
-                    "--output-format",
-                    "json",
-                    "--select",
-                    &select,
-                    ".",
-                ],
+                &["check", "--output-format", "json", "--select", &select, "."],
                 on_progress.as_ref(),
             )
             .await?;
@@ -1659,9 +1667,7 @@ mod tests {
     /// Build a `lookup` closure over a slice of hand-built rules (the real caller
     /// passes `|id| set.get_by_id(id)`; tests avoid the private `RuleSet` ctor).
     /// The explicit HRTB matches the `&dyn Fn` param's `for<'a>` bound.
-    fn lookup_over<'r>(
-        rules: &'r [Rule],
-    ) -> impl Fn(&str) -> Option<&'r Rule> + Send + Sync {
+    fn lookup_over<'r>(rules: &'r [Rule]) -> impl Fn(&str) -> Option<&'r Rule> + Send + Sync {
         move |id: &str| rules.iter().find(|r| r.id.0 == id)
     }
 
@@ -1717,8 +1723,14 @@ mod tests {
 
     #[test]
     fn linter_source_maps_to_tool() {
-        assert_eq!(tool_for_linter("clippy: unwrap_used"), Some(ScanTool::Clippy));
-        assert_eq!(tool_for_linter("clippy::unwrap_used"), Some(ScanTool::Clippy));
+        assert_eq!(
+            tool_for_linter("clippy: unwrap_used"),
+            Some(ScanTool::Clippy)
+        );
+        assert_eq!(
+            tool_for_linter("clippy::unwrap_used"),
+            Some(ScanTool::Clippy)
+        );
         assert_eq!(tool_for_linter("Ruff: S608"), Some(ScanTool::Ruff));
         assert_eq!(tool_for_linter("semgrep"), Some(ScanTool::Semgrep));
         assert_eq!(tool_for_linter("eslint: eqeqeq"), Some(ScanTool::Eslint));
@@ -1743,7 +1755,10 @@ mod tests {
             selector_for_linter("clippy: unwrap_used").as_deref(),
             Some("unwrap_used")
         );
-        assert_eq!(selector_for_linter("eslint: eqeqeq").as_deref(), Some("eqeqeq"));
+        assert_eq!(
+            selector_for_linter("eslint: eqeqeq").as_deref(),
+            Some("eqeqeq")
+        );
         assert_eq!(
             selector_for_linter("@typescript-eslint: no-explicit-any").as_deref(),
             Some("@typescript-eslint/no-explicit-any")
@@ -1863,14 +1878,24 @@ mod tests {
     #[test]
     fn group_by_tool_routes_and_excludes_layer3() {
         let rules = vec![
-            rule_with("RUST-A", EnforcementKind::Mechanical, false, &["clippy: unwrap_used"]),
+            rule_with(
+                "RUST-A",
+                EnforcementKind::Mechanical,
+                false,
+                &["clippy: unwrap_used"],
+            ),
             rule_with("PY-A", EnforcementKind::Mechanical, false, &["Ruff: S608"]),
             // layer3_only (CodeQL-style) must be EXCLUDED from the preview pass.
             rule_with("CODEQL-1", EnforcementKind::Mechanical, true, &["semgrep"]),
             // A prose rule is not CI-enforced -> excluded.
             rule_with("PROSE-1", EnforcementKind::Prose, false, &["clippy: foo"]),
             // No corpus tool -> ungrouped (graceful note).
-            rule_with("GO-A", EnforcementKind::Mechanical, false, &["golangci-lint: errcheck"]),
+            rule_with(
+                "GO-A",
+                EnforcementKind::Mechanical,
+                false,
+                &["golangci-lint: errcheck"],
+            ),
         ];
         let lookup = lookup_over(&rules);
         let sel = vec![
@@ -2447,15 +2472,7 @@ mod tests {
 
     #[test]
     fn preview_flag_round_trips() {
-        let f = preview_finding(
-            "me/api",
-            ScanTool::Ruff,
-            "a.py",
-            1,
-            "S608",
-            "medium",
-            "msg",
-        );
+        let f = preview_finding("me/api", ScanTool::Ruff, "a.py", 1, "S608", "medium", "msg");
         let json = serde_json::to_string(&f).unwrap();
         let back: Finding = serde_json::from_str(&json).unwrap();
         assert!(back.preview);
@@ -2565,9 +2582,14 @@ mod tests {
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
         let (findings, notes, attempted) =
             run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None, None).await;
-        assert!(findings.is_empty(), "missing tool must yield no finding rows");
+        assert!(
+            findings.is_empty(),
+            "missing tool must yield no finding rows"
+        );
         assert!(!notes.is_empty(), "missing tool must yield a coverage note");
-        assert!(notes.iter().any(|n| n.message.contains("Could not preview") || !n.tool.is_empty()));
+        assert!(notes
+            .iter()
+            .any(|n| n.message.contains("Could not preview") || !n.tool.is_empty()));
         assert!(
             attempted.contains("ruff"),
             "ruff was routed via group_by_tool, so it must count as attempted even though it \
@@ -2580,19 +2602,27 @@ mod tests {
         // An architectural rule must be SKIPPED entirely by group_by_tool —
         // not ungrouped (no note), not routed to a tool.
         let rules = vec![
-            rule_with("MECH-1", EnforcementKind::Mechanical, false, &["clippy: unwrap_used"]),
-            rule_with("ARCH-1", EnforcementKind::Architectural, false, &["clippy: some_ast_check"]),
+            rule_with(
+                "MECH-1",
+                EnforcementKind::Mechanical,
+                false,
+                &["clippy: unwrap_used"],
+            ),
+            rule_with(
+                "ARCH-1",
+                EnforcementKind::Architectural,
+                false,
+                &["clippy: some_ast_check"],
+            ),
         ];
         let lookup = lookup_over(&rules);
         let sel = vec![selected("MECH-1"), selected("ARCH-1")];
         let (by_tool, ungrouped) = group_by_tool(&sel, &lookup, None);
         // MECH-1 routes to clippy
-        assert!(
-            by_tool
-                .get(&ScanTool::Clippy)
-                .map(|v| v.iter().any(|s| s.id == "MECH-1"))
-                .unwrap_or(false)
-        );
+        assert!(by_tool
+            .get(&ScanTool::Clippy)
+            .map(|v| v.iter().any(|s| s.id == "MECH-1"))
+            .unwrap_or(false));
         // ARCH-1 must not appear anywhere
         assert!(
             !by_tool.values().flatten().any(|s| s.id == "ARCH-1"),
@@ -2616,14 +2646,18 @@ mod tests {
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
         let (findings, notes, attempted) =
             run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None, None).await;
-        assert!(findings.is_empty(), "a missing tool must yield NO finding row");
-        assert!(!notes.is_empty(), "a missing tool must yield a coverage note");
-        assert!(attempted.contains("ruff"), "{attempted:?}");
         assert!(
-            notes
-                .iter()
-                .any(|n| n.message.contains("Could not preview") || !n.tool.is_empty())
+            findings.is_empty(),
+            "a missing tool must yield NO finding row"
         );
+        assert!(
+            !notes.is_empty(),
+            "a missing tool must yield a coverage note"
+        );
+        assert!(attempted.contains("ruff"), "{attempted:?}");
+        assert!(notes
+            .iter()
+            .any(|n| n.message.contains("Could not preview") || !n.tool.is_empty()));
     }
 
     #[test]
@@ -2631,7 +2665,10 @@ mod tests {
         let n = note_finding("me/api", "ruff", "could not run");
         assert!(n.preview);
         assert_eq!(n.preview_tool.as_deref(), Some("ruff"));
-        assert_ne!(n.status, "active", "a note must not be an enforced/active hit");
+        assert_ne!(
+            n.status, "active",
+            "a note must not be an enforced/active hit"
+        );
     }
 
     // ── preview_tool_ids_for_rules ────────────────────────────────────────────
@@ -2644,15 +2681,30 @@ mod tests {
     fn preview_tool_ids_returns_distinct_tool_names() {
         // Three mechanical rules backed by two distinct tools (clippy + ruff).
         let rules = vec![
-            rule_with("R-1", EnforcementKind::Mechanical, false, &["clippy: unwrap_used"]),
-            rule_with("R-2", EnforcementKind::Mechanical, false, &["clippy: expect_used"]),
+            rule_with(
+                "R-1",
+                EnforcementKind::Mechanical,
+                false,
+                &["clippy: unwrap_used"],
+            ),
+            rule_with(
+                "R-2",
+                EnforcementKind::Mechanical,
+                false,
+                &["clippy: expect_used"],
+            ),
             rule_with("R-3", EnforcementKind::Mechanical, false, &["Ruff: S608"]),
         ];
         let lookup = lookup_over(&rules);
         let sel = vec![selected("R-1"), selected("R-2"), selected("R-3")];
         let ids = preview_tool_ids_for_rules(&sel, &lookup, None);
         // Two distinct tools: clippy and ruff (order: BTreeMap order = clippy < ruff).
-        assert_eq!(ids.len(), 2, "two distinct tools for three rules: {:?}", ids);
+        assert_eq!(
+            ids.len(),
+            2,
+            "two distinct tools for three rules: {:?}",
+            ids
+        );
         assert!(ids.contains(&"clippy".to_string()), "must include clippy");
         assert!(ids.contains(&"ruff".to_string()), "must include ruff");
     }
@@ -2669,7 +2721,10 @@ mod tests {
         let lookup = lookup_over(&rules);
         let sel = vec![selected("ARCH-1")];
         let ids = preview_tool_ids_for_rules(&sel, &lookup, None);
-        assert!(ids.is_empty(), "architectural rules yield no preview tool ids");
+        assert!(
+            ids.is_empty(),
+            "architectural rules yield no preview tool ids"
+        );
     }
 
     #[test]
@@ -2706,15 +2761,26 @@ mod tests {
         let langs = languages_from_files(&files);
         assert!(langs.contains("Rust"), "should detect Rust from .rs");
         assert!(langs.contains("Python"), "should detect Python from .py");
-        assert!(langs.contains("TypeScript"), "should detect TypeScript from .ts");
-        assert!(langs.contains("JavaScript"), "should detect JavaScript from .jsx");
+        assert!(
+            langs.contains("TypeScript"),
+            "should detect TypeScript from .ts"
+        );
+        assert!(
+            langs.contains("JavaScript"),
+            "should detect JavaScript from .jsx"
+        );
         assert!(!langs.contains("TOML"), "TOML has no language label");
     }
 
     /// `tool_languages_present` — None passthrough (backward-compat).
     #[test]
     fn tool_languages_present_none_always_passes() {
-        for tool in [ScanTool::Clippy, ScanTool::Ruff, ScanTool::Eslint, ScanTool::Semgrep] {
+        for tool in [
+            ScanTool::Clippy,
+            ScanTool::Ruff,
+            ScanTool::Eslint,
+            ScanTool::Semgrep,
+        ] {
             assert!(
                 tool_languages_present(tool, None),
                 "{:?} must pass when present_languages is None",
@@ -2727,17 +2793,34 @@ mod tests {
     #[test]
     fn tool_languages_present_rust_only() {
         let langs: HashSet<String> = ["Rust".to_string()].into();
-        assert!(tool_languages_present(ScanTool::Clippy, Some(&langs)), "clippy needs Rust → present");
-        assert!(tool_languages_present(ScanTool::Semgrep, Some(&langs)), "semgrep supports Rust → present");
-        assert!(!tool_languages_present(ScanTool::Ruff, Some(&langs)), "ruff needs Python → absent");
-        assert!(!tool_languages_present(ScanTool::Eslint, Some(&langs)), "eslint needs JS/TS → absent");
+        assert!(
+            tool_languages_present(ScanTool::Clippy, Some(&langs)),
+            "clippy needs Rust → present"
+        );
+        assert!(
+            tool_languages_present(ScanTool::Semgrep, Some(&langs)),
+            "semgrep supports Rust → present"
+        );
+        assert!(
+            !tool_languages_present(ScanTool::Ruff, Some(&langs)),
+            "ruff needs Python → absent"
+        );
+        assert!(
+            !tool_languages_present(ScanTool::Eslint, Some(&langs)),
+            "eslint needs JS/TS → absent"
+        );
     }
 
     /// `tool_languages_present` — empty lang set → all tools pass (conservative).
     #[test]
     fn tool_languages_present_empty_set_is_permissive() {
         let langs: HashSet<String> = HashSet::new();
-        for tool in [ScanTool::Clippy, ScanTool::Ruff, ScanTool::Eslint, ScanTool::Semgrep] {
+        for tool in [
+            ScanTool::Clippy,
+            ScanTool::Ruff,
+            ScanTool::Eslint,
+            ScanTool::Semgrep,
+        ] {
             assert!(
                 tool_languages_present(tool, Some(&langs)),
                 "{:?} must pass on an empty language set (conservative)",
@@ -2751,38 +2834,80 @@ mod tests {
     #[test]
     fn stack_gating_rust_only_repo_excludes_eslint_and_ruff() {
         let rules = vec![
-            rule_with("RUST-1", EnforcementKind::Mechanical, false, &["clippy: unwrap_used"]),
-            rule_with("JS-1",   EnforcementKind::Mechanical, false, &["eslint: eqeqeq"]),
-            rule_with("PY-1",   EnforcementKind::Mechanical, false, &["Ruff: S608"]),
-            rule_with("SG-1",   EnforcementKind::Mechanical, false, &["semgrep"]),
+            rule_with(
+                "RUST-1",
+                EnforcementKind::Mechanical,
+                false,
+                &["clippy: unwrap_used"],
+            ),
+            rule_with(
+                "JS-1",
+                EnforcementKind::Mechanical,
+                false,
+                &["eslint: eqeqeq"],
+            ),
+            rule_with("PY-1", EnforcementKind::Mechanical, false, &["Ruff: S608"]),
+            rule_with("SG-1", EnforcementKind::Mechanical, false, &["semgrep"]),
         ];
         let lookup = lookup_over(&rules);
-        let sel = vec![selected("RUST-1"), selected("JS-1"), selected("PY-1"), selected("SG-1")];
+        let sel = vec![
+            selected("RUST-1"),
+            selected("JS-1"),
+            selected("PY-1"),
+            selected("SG-1"),
+        ];
 
         // Rust-only language set.
         let rust_only: HashSet<String> = ["Rust".to_string()].into();
 
         let (by_tool, _ungrouped) = group_by_tool(&sel, &lookup, Some(&rust_only));
-        assert!(by_tool.contains_key(&ScanTool::Clippy), "clippy must run (Rust present)");
-        assert!(by_tool.contains_key(&ScanTool::Semgrep), "semgrep must run (Rust is semgrep-supported)");
-        assert!(!by_tool.contains_key(&ScanTool::Eslint), "eslint must be OMITTED (no JS/TS)");
-        assert!(!by_tool.contains_key(&ScanTool::Ruff), "ruff must be OMITTED (no Python)");
+        assert!(
+            by_tool.contains_key(&ScanTool::Clippy),
+            "clippy must run (Rust present)"
+        );
+        assert!(
+            by_tool.contains_key(&ScanTool::Semgrep),
+            "semgrep must run (Rust is semgrep-supported)"
+        );
+        assert!(
+            !by_tool.contains_key(&ScanTool::Eslint),
+            "eslint must be OMITTED (no JS/TS)"
+        );
+        assert!(
+            !by_tool.contains_key(&ScanTool::Ruff),
+            "ruff must be OMITTED (no Python)"
+        );
 
         // The pre-declared IDs must match the stack-gated set.
         let ids = preview_tool_ids_for_rules(&sel, &lookup, Some(&rust_only));
-        assert!(ids.contains(&"clippy".to_string()), "clippy in pre-declared ids");
-        assert!(ids.contains(&"semgrep".to_string()), "semgrep in pre-declared ids");
-        assert!(!ids.contains(&"eslint".to_string()), "eslint NOT in pre-declared ids for Rust-only repo");
-        assert!(!ids.contains(&"ruff".to_string()), "ruff NOT in pre-declared ids for Rust-only repo");
+        assert!(
+            ids.contains(&"clippy".to_string()),
+            "clippy in pre-declared ids"
+        );
+        assert!(
+            ids.contains(&"semgrep".to_string()),
+            "semgrep in pre-declared ids"
+        );
+        assert!(
+            !ids.contains(&"eslint".to_string()),
+            "eslint NOT in pre-declared ids for Rust-only repo"
+        );
+        assert!(
+            !ids.contains(&"ruff".to_string()),
+            "ruff NOT in pre-declared ids for Rust-only repo"
+        );
     }
 
     /// FIX 1: even if the selected JS rule was the ONLY selection, the stack gate
     /// must omit eslint entirely from a Rust-only repo (no false "✓ 0").
     #[test]
     fn stack_gating_js_rule_on_rust_repo_yields_no_eslint() {
-        let rules = vec![
-            rule_with("JS-ONLY", EnforcementKind::Mechanical, false, &["eslint: no-eval"]),
-        ];
+        let rules = vec![rule_with(
+            "JS-ONLY",
+            EnforcementKind::Mechanical,
+            false,
+            &["eslint: no-eval"],
+        )];
         let lookup = lookup_over(&rules);
         let sel = vec![selected("JS-ONLY")];
         let rust_only: HashSet<String> = ["Rust".to_string()].into();
@@ -2807,7 +2932,10 @@ mod tests {
     fn scope_excludes_rustc_stdlib_path() {
         let root = repo("/home/user/myproject");
         assert!(
-            !is_in_repo_scope(&root, "/rustc/abcdef1234567890/library/core/src/macros/mod.rs"),
+            !is_in_repo_scope(
+                &root,
+                "/rustc/abcdef1234567890/library/core/src/macros/mod.rs"
+            ),
             "rustc stdlib path must be excluded"
         );
         assert!(
@@ -2821,7 +2949,10 @@ mod tests {
     fn scope_excludes_target_directory() {
         let root = repo("/home/user/myproject");
         assert!(
-            !is_in_repo_scope(&root, "/home/user/myproject/target/debug/build/pkg/out/v2_generated.rs"),
+            !is_in_repo_scope(
+                &root,
+                "/home/user/myproject/target/debug/build/pkg/out/v2_generated.rs"
+            ),
             "target/debug/build path must be excluded"
         );
         assert!(
@@ -2853,19 +2984,31 @@ mod tests {
 
         // The exact shape that leaked, modulo the name.
         assert_eq!(
-            repo_relative_path(&root, "/Users/auditor/Documents/Repos/clients/acme/app/admin/page.tsx"),
+            repo_relative_path(
+                &root,
+                "/Users/auditor/Documents/Repos/clients/acme/app/admin/page.tsx"
+            ),
             "app/admin/page.tsx"
         );
         // A path that is already relative is untouched.
-        assert_eq!(repo_relative_path(&root, "app/api/checkout/route.ts"), "app/api/checkout/route.ts");
+        assert_eq!(
+            repo_relative_path(&root, "app/api/checkout/route.ts"),
+            "app/api/checkout/route.ts"
+        );
         // Synthetic placeholders our own parsers inject must survive verbatim, since
         // `is_in_repo_scope` deliberately keeps them.
         assert_eq!(repo_relative_path(&root, "(repo)"), "(repo)");
-        assert_eq!(repo_relative_path(&root, "(scan preview)"), "(scan preview)");
+        assert_eq!(
+            repo_relative_path(&root, "(scan preview)"),
+            "(scan preview)"
+        );
         // Nested deeply, and a repo whose own path contains a space (the real fixture did).
         let spaced = repo("/Users/auditor/Camerata tests/hearth");
         assert_eq!(
-            repo_relative_path(&spaced, "/Users/auditor/Camerata tests/hearth/app/listings/[id]/page.tsx"),
+            repo_relative_path(
+                &spaced,
+                "/Users/auditor/Camerata tests/hearth/app/listings/[id]/page.tsx"
+            ),
             "app/listings/[id]/page.tsx"
         );
         // Outside the repo: left alone on purpose. `is_in_repo_scope` is what drops these,
@@ -3024,9 +3167,9 @@ mod tests {
     /// compiler progress lines that keep the job alive.
     #[tokio::test]
     async fn run_capture_stdout_streaming_fires_heartbeat_per_line() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicU64, Ordering};
         use camerata_agent::HeartbeatFn;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
 
         let count = Arc::new(AtomicU64::new(0));
         let count_cb = count.clone();
@@ -3047,11 +3190,7 @@ mod tests {
         .expect("sh should be on PATH");
 
         assert!(ok, "sh exit should be 0");
-        assert_eq!(
-            stdout.lines().count(),
-            3,
-            "stdout should contain 3 lines"
-        );
+        assert_eq!(stdout.lines().count(), 3, "stdout should contain 3 lines");
         assert_eq!(
             count.load(Ordering::Relaxed),
             3,

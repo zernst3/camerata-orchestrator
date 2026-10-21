@@ -75,20 +75,32 @@ mod tests {
 
     #[test]
     fn all_resolved_is_ready() {
-        assert_eq!(classify_readiness(&[true, true, true]), ProjectReadiness::Ready);
+        assert_eq!(
+            classify_readiness(&[true, true, true]),
+            ProjectReadiness::Ready
+        );
         assert_eq!(classify_readiness(&[true]), ProjectReadiness::Ready);
     }
 
     #[test]
     fn none_resolved_is_unlinked() {
-        assert_eq!(classify_readiness(&[false, false]), ProjectReadiness::Unlinked);
+        assert_eq!(
+            classify_readiness(&[false, false]),
+            ProjectReadiness::Unlinked
+        );
         assert_eq!(classify_readiness(&[false]), ProjectReadiness::Unlinked);
     }
 
     #[test]
     fn mixed_is_partial() {
-        assert_eq!(classify_readiness(&[true, false]), ProjectReadiness::Partial);
-        assert_eq!(classify_readiness(&[false, true, false]), ProjectReadiness::Partial);
+        assert_eq!(
+            classify_readiness(&[true, false]),
+            ProjectReadiness::Partial
+        );
+        assert_eq!(
+            classify_readiness(&[false, true, false]),
+            ProjectReadiness::Partial
+        );
     }
 
     #[test]

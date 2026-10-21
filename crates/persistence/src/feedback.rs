@@ -479,7 +479,11 @@ mod tests {
     async fn record_defaults_fingerprint_none_and_count_one() {
         let store = FeedbackStore::open_in_memory().await.expect("open");
         store
-            .record(DefectReport::auto("proj-fp", DefectKind::RuntimeError, "boom"))
+            .record(DefectReport::auto(
+                "proj-fp",
+                DefectKind::RuntimeError,
+                "boom",
+            ))
             .await
             .expect("record");
         let reports = store.by_project("proj-fp").await.expect("by_project");

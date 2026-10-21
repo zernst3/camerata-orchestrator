@@ -107,12 +107,30 @@ mod tests {
     /// class so the activity log reads clearly. Asserts the load-bearing mappings.
     #[test]
     fn live_event_style_labels_each_layer_distinctly() {
-        assert_eq!(live_event_style("layer-1", "deny"), ("GATE DENY", "live-event deny"));
-        assert_eq!(live_event_style("layer-1", "allow"), ("GATE ALLOW", "live-event allow"));
-        assert_eq!(live_event_style("layer-2", "pass"), ("LAYER-2 PASS", "live-event allow"));
-        assert_eq!(live_event_style("layer-2", "fail"), ("LAYER-2 FAIL", "live-event deny"));
-        assert_eq!(live_event_style("layer-2", "revise"), ("REVISE", "live-event revise"));
-        assert_eq!(live_event_style("tier", "info"), ("TIER", "live-event tier"));
+        assert_eq!(
+            live_event_style("layer-1", "deny"),
+            ("GATE DENY", "live-event deny")
+        );
+        assert_eq!(
+            live_event_style("layer-1", "allow"),
+            ("GATE ALLOW", "live-event allow")
+        );
+        assert_eq!(
+            live_event_style("layer-2", "pass"),
+            ("LAYER-2 PASS", "live-event allow")
+        );
+        assert_eq!(
+            live_event_style("layer-2", "fail"),
+            ("LAYER-2 FAIL", "live-event deny")
+        );
+        assert_eq!(
+            live_event_style("layer-2", "revise"),
+            ("REVISE", "live-event revise")
+        );
+        assert_eq!(
+            live_event_style("tier", "info"),
+            ("TIER", "live-event tier")
+        );
         assert_eq!(
             live_event_style("delegate", "dispatch"),
             ("DELEGATE", "live-event delegate")
@@ -121,7 +139,10 @@ mod tests {
             live_event_style("delegate", "incomplete"),
             ("DELEGATE INCOMPLETE", "live-event deny")
         );
-        assert_eq!(live_event_style("checks", "allow"), ("CHECKS PASS", "live-event allow"));
+        assert_eq!(
+            live_event_style("checks", "allow"),
+            ("CHECKS PASS", "live-event allow")
+        );
         // Legacy/empty layer falls back to verdict-based styling.
         assert_eq!(live_event_style("", "deny"), ("DENY", "live-event deny"));
         assert_eq!(live_event_style("", "allow"), ("ALLOW", "live-event allow"));

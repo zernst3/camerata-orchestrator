@@ -83,7 +83,11 @@ pub const RULE_NO_CROSS_BOUNDARY_IMPORTS: &str = "ARCH-NO-CROSS-BOUNDARY-IMPORTS
 pub const RULE_API_DTOS: &str = "ARCH-API-DTOS-1";
 pub const RULE_STRICT_LAYERING: &str = "ARCH-STRICT-LAYERING-1";
 
-const RULE_IDS: &[&str] = &[RULE_NO_CROSS_BOUNDARY_IMPORTS, RULE_API_DTOS, RULE_STRICT_LAYERING];
+const RULE_IDS: &[&str] = &[
+    RULE_NO_CROSS_BOUNDARY_IMPORTS,
+    RULE_API_DTOS,
+    RULE_STRICT_LAYERING,
+];
 
 /// The source files the v1 extractor layer supports, plus the config files this checker
 /// needs to READ from disk on the Layer-2 path (`NativeArchCheckRunner::collect_interest_files`
@@ -148,7 +152,10 @@ impl ArchChecker for ImportBoundaryChecker {
     /// presence-only gate" section for why this checker doesn't attempt per-rule-id
     /// granularity here.
     fn config_unsatisfied_for(&self, repo: &RepoView<'_>) -> bool {
-        architecture_config_from_files(repo.files).ok().flatten().is_none()
+        architecture_config_from_files(repo.files)
+            .ok()
+            .flatten()
+            .is_none()
     }
 }
 
@@ -164,13 +171,22 @@ impl ArchChecker for ImportBoundaryChecker {
 /// (A4) Under an INFERRED map the verdict is narrowed to UPWARD edges and softened to
 /// `medium`, and the message says the map was inferred and from what. An authored map keeps
 /// today's behaviour exactly: every edge not in the allow-list, at `high`.
-fn check_cross_boundary(cfg: &ArchitectureConfig, edge: &ResolvedImport, out: &mut Vec<ArchViolation>) {
-    let (Ok(Some(from_layer)), Ok(Some(to_layer))) =
-        (cfg.layer_for_path(&edge.from_file), cfg.layer_for_path(&edge.to_file))
-    else {
+fn check_cross_boundary(
+    cfg: &ArchitectureConfig,
+    edge: &ResolvedImport,
+    out: &mut Vec<ArchViolation>,
+) {
+    let (Ok(Some(from_layer)), Ok(Some(to_layer))) = (
+        cfg.layer_for_path(&edge.from_file),
+        cfg.layer_for_path(&edge.to_file),
+    ) else {
         return;
     };
-    let allowed: &[String] = cfg.imports.get(from_layer).map(|v| v.as_slice()).unwrap_or(&[]);
+    let allowed: &[String] = cfg
+        .imports
+        .get(from_layer)
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
     if allowed.iter().any(|l| l.as_str() == to_layer) {
         return;
     }
@@ -179,9 +195,10 @@ fn check_cross_boundary(cfg: &ArchitectureConfig, edge: &ResolvedImport, out: &m
         // an upward edge can reach here, but this makes the narrowing explicit at the point of
         // judgement rather than only implied by how the map was built — so a future change to
         // the inferred map cannot silently widen what an inferred verdict covers.
-        let (Some(from_rank), Some(to_rank)) =
-            (inferred_layer_rank(from_layer), inferred_layer_rank(to_layer))
-        else {
+        let (Some(from_rank), Some(to_rank)) = (
+            inferred_layer_rank(from_layer),
+            inferred_layer_rank(to_layer),
+        ) else {
             return;
         };
         if to_rank >= from_rank {
@@ -209,7 +226,11 @@ fn check_cross_boundary(cfg: &ArchitectureConfig, edge: &ResolvedImport, out: &m
         });
         return;
     }
-    let allowed_desc = if allowed.is_empty() { "(nothing)".to_string() } else { allowed.join(", ") };
+    let allowed_desc = if allowed.is_empty() {
+        "(nothing)".to_string()
+    } else {
+        allowed.join(", ")
+    };
     out.push(ArchViolation {
         rule_id: RULE_NO_CROSS_BOUNDARY_IMPORTS.to_string(),
         file: edge.from_file.clone(),
@@ -337,9 +358,14 @@ fn allowed_join(db: &DbConfig) -> String {
 /// `sea_orm` wrapper module -> `"sea_orm"` as a single underscore-preserving token).
 fn matching_db_marker(specifier: &str, markers: &[String]) -> Option<String> {
     let lower = specifier.to_ascii_lowercase();
-    let tokens: Vec<&str> =
-        lower.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).filter(|s| !s.is_empty()).collect();
-    markers.iter().find(|m| tokens.contains(&m.as_str())).cloned()
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|s| !s.is_empty())
+        .collect();
+    markers
+        .iter()
+        .find(|m| tokens.contains(&m.as_str()))
+        .cloned()
 }
 
 fn glob_refs(globs: &[String]) -> Vec<&str> {
@@ -351,11 +377,17 @@ mod tests {
     use super::*;
 
     fn view<'a>(files: &'a [(String, String)]) -> RepoView<'a> {
-        RepoView { spec: "test/repo", files }
+        RepoView {
+            spec: "test/repo",
+            files,
+        }
     }
 
     fn files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
-        pairs.into_iter().map(|(p, c)| (p.to_string(), c.to_string())).collect()
+        pairs
+            .into_iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect()
     }
 
     const LAYERED_CONFIG: &str = r#"
@@ -402,8 +434,10 @@ domain       = []
             ("src/controllers/orders.rs", "pub struct Ctx;\n"),
         ]);
         let vs = ImportBoundaryChecker.check(&view(&f));
-        let hits: Vec<_> =
-            vs.iter().filter(|v| v.rule_id == RULE_NO_CROSS_BOUNDARY_IMPORTS).collect();
+        let hits: Vec<_> = vs
+            .iter()
+            .filter(|v| v.rule_id == RULE_NO_CROSS_BOUNDARY_IMPORTS)
+            .collect();
         assert_eq!(hits.len(), 1, "{vs:#?}");
         assert_eq!(hits[0].file, "src/repositories/orders_repo.rs");
         // An inferred verdict is deliberately weaker than a config-confirmed one, and says so.
@@ -411,7 +445,11 @@ domain       = []
         assert!(hits[0].message.contains("INFERRED"), "{}", hits[0].message);
         assert!(hits[0].message.contains("UPWARD"), "{}", hits[0].message);
         // The evidence the inference rests on is named in the finding, not taken on trust.
-        assert!(hits[0].message.contains("**/controllers/**"), "{}", hits[0].message);
+        assert!(
+            hits[0].message.contains("**/controllers/**"),
+            "{}",
+            hits[0].message
+        );
     }
 
     /// req_a4: the inferred map is PERMISSIVE downward. A handler importing a repository
@@ -484,8 +522,10 @@ domain       = []
             ("src/repositories/orders_repo.rs", "pub struct OrdersRepo;\n"),
         ]);
         let vs = ImportBoundaryChecker.check(&view(&f));
-        let hits: Vec<_> =
-            vs.iter().filter(|v| v.rule_id == RULE_NO_CROSS_BOUNDARY_IMPORTS).collect();
+        let hits: Vec<_> = vs
+            .iter()
+            .filter(|v| v.rule_id == RULE_NO_CROSS_BOUNDARY_IMPORTS)
+            .collect();
         assert_eq!(hits.len(), 1, "{vs:#?}");
         assert_eq!(hits[0].severity, SEVERITY_HIGH);
         assert!(!hits[0].message.contains("INFERRED"), "{}", hits[0].message);
@@ -518,12 +558,19 @@ domain       = []
             ("src/repositories/orders_repo.rs", "pub struct OrdersRepo;\n"),
         ]);
         let vs = ImportBoundaryChecker.check(&view(&f));
-        let hits: Vec<_> = vs.iter().filter(|v| v.rule_id == RULE_NO_CROSS_BOUNDARY_IMPORTS).collect();
+        let hits: Vec<_> = vs
+            .iter()
+            .filter(|v| v.rule_id == RULE_NO_CROSS_BOUNDARY_IMPORTS)
+            .collect();
         assert_eq!(hits.len(), 1, "{vs:#?}");
         assert_eq!(hits[0].file, "src/routes/orders.rs");
         assert_eq!(hits[0].line, 1);
         assert!(hits[0].message.contains("handlers"), "{}", hits[0].message);
-        assert!(hits[0].message.contains("repositories"), "{}", hits[0].message);
+        assert!(
+            hits[0].message.contains("repositories"),
+            "{}",
+            hits[0].message
+        );
         assert_eq!(hits[0].severity, SEVERITY_HIGH);
     }
 
@@ -555,7 +602,10 @@ domain       = []
             ("src/repositories/orders_repo.ts", "export class OrdersRepo {}\n"),
         ]);
         let vs = ImportBoundaryChecker.check(&view(&f));
-        let hits: Vec<_> = vs.iter().filter(|v| v.rule_id == RULE_NO_CROSS_BOUNDARY_IMPORTS).collect();
+        let hits: Vec<_> = vs
+            .iter()
+            .filter(|v| v.rule_id == RULE_NO_CROSS_BOUNDARY_IMPORTS)
+            .collect();
         assert_eq!(hits.len(), 1, "{vs:#?}");
         assert_eq!(hits[0].file, "src/routes/orders.ts");
         assert_eq!(hits[0].line, 1);
@@ -600,7 +650,10 @@ domain       = []
         let repo = view(&f);
         let per_repo = crate::arch_checker::checker_rule_ids_for_repo(&repo);
         for id in RULE_IDS {
-            assert!(!per_repo.contains(id), "{id} must stay LLM-advisory without config: {per_repo:?}");
+            assert!(
+                !per_repo.contains(id),
+                "{id} must stay LLM-advisory without config: {per_repo:?}"
+            );
         }
     }
 
@@ -611,7 +664,10 @@ domain       = []
         let repo = view(&f);
         let per_repo = crate::arch_checker::checker_rule_ids_for_repo(&repo);
         for id in RULE_IDS {
-            assert!(per_repo.contains(id), "{id} must be excluded from the LLM prompt once configured: {per_repo:?}");
+            assert!(
+                per_repo.contains(id),
+                "{id} must be excluded from the LLM prompt once configured: {per_repo:?}"
+            );
         }
     }
 
@@ -619,7 +675,10 @@ domain       = []
     fn malformed_config_is_treated_like_absent_config_not_a_panic() {
         let f = files(vec![
             (ARCHITECTURE_CONFIG_PATH, "}{ not valid toml at all"),
-            ("src/routes/orders.ts", "import { OrdersRepo } from '../repositories/orders_repo';\n"),
+            (
+                "src/routes/orders.ts",
+                "import { OrdersRepo } from '../repositories/orders_repo';\n",
+            ),
         ]);
         let repo = view(&f);
         assert!(ImportBoundaryChecker.check(&repo).is_empty());
@@ -630,7 +689,10 @@ domain       = []
 
     #[test]
     fn external_package_import_produces_no_false_positive() {
-        let f = with_config(vec![("src/routes/orders.ts", "import React from 'react';\n")]);
+        let f = with_config(vec![(
+            "src/routes/orders.ts",
+            "import React from 'react';\n",
+        )]);
         assert!(ImportBoundaryChecker.check(&view(&f)).is_empty());
     }
 
@@ -640,8 +702,14 @@ domain       = []
         // resolves, but neither endpoint (nor the source) is a declared layer, so it must
         // never be judged.
         let f = with_config(vec![
-            ("src/utils/misc.ts", "import { OrdersRepo } from '../repositories/orders_repo';\n"),
-            ("src/repositories/orders_repo.ts", "export class OrdersRepo {}\n"),
+            (
+                "src/utils/misc.ts",
+                "import { OrdersRepo } from '../repositories/orders_repo';\n",
+            ),
+            (
+                "src/repositories/orders_repo.ts",
+                "export class OrdersRepo {}\n",
+            ),
         ]);
         assert!(ImportBoundaryChecker.check(&view(&f)).is_empty());
     }
@@ -686,7 +754,10 @@ controllers  = ["src/controllers/**"]
     fn controller_importing_domain_type_directly_is_flagged_as_api_dtos() {
         let f = files(vec![
             (ARCHITECTURE_CONFIG_PATH, DTOS_CONFIG),
-            ("src/controllers/orders.ts", "import { Order } from '../domain/order';\n"),
+            (
+                "src/controllers/orders.ts",
+                "import { Order } from '../domain/order';\n",
+            ),
             ("src/domain/order.ts", "export class Order {}\n"),
         ]);
         let vs = ImportBoundaryChecker.check(&view(&f));
@@ -704,7 +775,10 @@ controllers  = ["src/controllers/**"]
                 "src/services/order_service.ts",
                 "import { OrdersRepo } from '../repositories/orders_repo';\n",
             ),
-            ("src/repositories/orders_repo.ts", "export class OrdersRepo {}\n"),
+            (
+                "src/repositories/orders_repo.ts",
+                "export class OrdersRepo {}\n",
+            ),
         ]);
         let vs = ImportBoundaryChecker.check(&view(&f));
         assert!(vs.iter().all(|v| v.rule_id != RULE_API_DTOS), "{vs:#?}");
@@ -732,10 +806,16 @@ tx_flow_control_in = ["services"]
     fn handler_importing_db_client_package_outside_allowed_layers_is_flagged() {
         let f = files(vec![
             (ARCHITECTURE_CONFIG_PATH, DB_CONFIG),
-            ("src/routes/orders.ts", "import { PrismaClient } from '@prisma/client';\n"),
+            (
+                "src/routes/orders.ts",
+                "import { PrismaClient } from '@prisma/client';\n",
+            ),
         ]);
         let vs = ImportBoundaryChecker.check(&view(&f));
-        let hits: Vec<_> = vs.iter().filter(|v| v.rule_id == RULE_STRICT_LAYERING).collect();
+        let hits: Vec<_> = vs
+            .iter()
+            .filter(|v| v.rule_id == RULE_STRICT_LAYERING)
+            .collect();
         assert_eq!(hits.len(), 1, "{vs:#?}");
         assert_eq!(hits[0].file, "src/routes/orders.ts");
         assert!(hits[0].message.contains("prisma"), "{}", hits[0].message);
@@ -745,10 +825,16 @@ tx_flow_control_in = ["services"]
     fn repository_importing_db_client_package_in_allowed_in_is_clean() {
         let f = files(vec![
             (ARCHITECTURE_CONFIG_PATH, DB_CONFIG),
-            ("src/repositories/orders_repo.ts", "import { PrismaClient } from '@prisma/client';\n"),
+            (
+                "src/repositories/orders_repo.ts",
+                "import { PrismaClient } from '@prisma/client';\n",
+            ),
         ]);
         let vs = ImportBoundaryChecker.check(&view(&f));
-        assert!(vs.iter().all(|v| v.rule_id != RULE_STRICT_LAYERING), "{vs:#?}");
+        assert!(
+            vs.iter().all(|v| v.rule_id != RULE_STRICT_LAYERING),
+            "{vs:#?}"
+        );
     }
 
     #[test]
@@ -758,10 +844,16 @@ tx_flow_control_in = ["services"]
         // checker's import facet must not flag it (see the module doc's exemption note).
         let f = files(vec![
             (ARCHITECTURE_CONFIG_PATH, DB_CONFIG),
-            ("src/services/order_service.ts", "import { PrismaClient } from '@prisma/client';\n"),
+            (
+                "src/services/order_service.ts",
+                "import { PrismaClient } from '@prisma/client';\n",
+            ),
         ]);
         let vs = ImportBoundaryChecker.check(&view(&f));
-        assert!(vs.iter().all(|v| v.rule_id != RULE_STRICT_LAYERING), "{vs:#?}");
+        assert!(
+            vs.iter().all(|v| v.rule_id != RULE_STRICT_LAYERING),
+            "{vs:#?}"
+        );
     }
 
     #[test]
@@ -771,14 +863,18 @@ tx_flow_control_in = ["services"]
             "import { PrismaClient } from '@prisma/client';\n",
         )]);
         let vs = ImportBoundaryChecker.check(&view(&f));
-        assert!(vs.iter().all(|v| v.rule_id != RULE_STRICT_LAYERING), "{vs:#?}");
+        assert!(
+            vs.iter().all(|v| v.rule_id != RULE_STRICT_LAYERING),
+            "{vs:#?}"
+        );
     }
 
     #[test]
     fn db_marker_token_match_does_not_substring_match_an_unrelated_specifier() {
         // "db" as a marker must NOT match a specifier like "database-types" via substring —
         // only an exact token match counts.
-        let f = files(vec![
+        let f =
+            files(vec![
             (
                 ARCHITECTURE_CONFIG_PATH,
                 "version = 1\n[layers]\nhandlers = [\"src/routes/**\"]\n[imports]\nhandlers = []\n\
@@ -787,7 +883,10 @@ tx_flow_control_in = ["services"]
             ("src/routes/orders.ts", "import { Types } from 'database-types';\n"),
         ]);
         let vs = ImportBoundaryChecker.check(&view(&f));
-        assert!(vs.iter().all(|v| v.rule_id != RULE_STRICT_LAYERING), "{vs:#?}");
+        assert!(
+            vs.iter().all(|v| v.rule_id != RULE_STRICT_LAYERING),
+            "{vs:#?}"
+        );
     }
 
     // ── adversarial: malformed source does not panic ───────────────────────────
@@ -813,8 +912,10 @@ tx_flow_control_in = ["services"]
 
     #[test]
     fn checker_is_registered_and_answers_its_three_rule_ids() {
-        let ids: HashSet<&str> =
-            crate::arch_checker::all_checkers().iter().flat_map(|c| c.rule_ids().iter().copied()).collect();
+        let ids: HashSet<&str> = crate::arch_checker::all_checkers()
+            .iter()
+            .flat_map(|c| c.rule_ids().iter().copied())
+            .collect();
         for id in RULE_IDS {
             assert!(ids.contains(id), "{id} missing from the registry: {ids:?}");
         }
@@ -823,6 +924,9 @@ tx_flow_control_in = ["services"]
     #[test]
     fn checker_interest_globs_scope_out_unrelated_files() {
         let f = files(vec![("README.md", "")]);
-        assert!(!crate::arch_checker::checker_applies(&ImportBoundaryChecker, &f));
+        assert!(!crate::arch_checker::checker_applies(
+            &ImportBoundaryChecker,
+            &f
+        ));
     }
 }

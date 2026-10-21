@@ -29,10 +29,14 @@ const RULE_RLS_POLICY_DISABLED: &str = "SUPABASE-RLS-POLICY-DISABLED-1";
 fn role_armed_with_rls_family() -> Role {
     Role {
         name: "Backend".to_string(),
-        rule_subset: [RULE_RLS_ENABLED, RULE_RLS_NO_POLICY, RULE_RLS_POLICY_DISABLED]
-            .into_iter()
-            .map(|id| RuleId(id.to_string()))
-            .collect(),
+        rule_subset: [
+            RULE_RLS_ENABLED,
+            RULE_RLS_NO_POLICY,
+            RULE_RLS_POLICY_DISABLED,
+        ]
+        .into_iter()
+        .map(|id| RuleId(id.to_string()))
+        .collect(),
         allowed_paths: vec!["supabase/".to_string()],
     }
 }
@@ -67,12 +71,16 @@ async fn worktree_with_public_table_missing_rls_is_bounced_with_exact_location()
         .expect("gov-dev loop check must not error on a well-formed worktree");
 
     assert!(
-        outcome.violated.contains(&RuleId(RULE_RLS_ENABLED.to_string())),
+        outcome
+            .violated
+            .contains(&RuleId(RULE_RLS_ENABLED.to_string())),
         "a public table with no RLS must bounce under SUPABASE-RLS-ENABLED-1, got: {:?}",
         outcome.violated
     );
     assert!(
-        outcome.diagnostics.contains("20240515000000_add_profiles.sql"),
+        outcome
+            .diagnostics
+            .contains("20240515000000_add_profiles.sql"),
         "the bounce diagnostics must name the establishing migration file: {:?}",
         outcome.diagnostics
     );
@@ -110,17 +118,23 @@ async fn worktree_with_rls_correctly_enabled_passes_clean() {
         .expect("gov-dev loop check must not error on a well-formed worktree");
 
     assert!(
-        !outcome.violated.contains(&RuleId(RULE_RLS_ENABLED.to_string())),
+        !outcome
+            .violated
+            .contains(&RuleId(RULE_RLS_ENABLED.to_string())),
         "RLS-enabled + policy must not trip RLS-ENABLED-1: {:?}",
         outcome.violated
     );
     assert!(
-        !outcome.violated.contains(&RuleId(RULE_RLS_NO_POLICY.to_string())),
+        !outcome
+            .violated
+            .contains(&RuleId(RULE_RLS_NO_POLICY.to_string())),
         "RLS-enabled + policy must not trip RLS-NO-POLICY-1: {:?}",
         outcome.violated
     );
     assert!(
-        !outcome.violated.contains(&RuleId(RULE_RLS_POLICY_DISABLED.to_string())),
+        !outcome
+            .violated
+            .contains(&RuleId(RULE_RLS_POLICY_DISABLED.to_string())),
         "RLS-enabled + policy must not trip RLS-POLICY-DISABLED-1: {:?}",
         outcome.violated
     );

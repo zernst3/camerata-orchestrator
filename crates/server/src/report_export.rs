@@ -1398,9 +1398,7 @@ pub const AUDIT_REPORT_DISCLAIMER: &str =
 /// client can act on) and it deliberately carries NEITHER the file path NOR the `RulesError`
 /// text: both name the reviewer's filesystem and TOML internals, and both stay in the note's
 /// own `message` plus the `tracing::error!` line, which no client artifact reads.
-pub(crate) fn tool_coverage_disclosures(
-    notes: &[crate::onboard::CoverageNote],
-) -> Vec<String> {
+pub(crate) fn tool_coverage_disclosures(notes: &[crate::onboard::CoverageNote]) -> Vec<String> {
     // Counted per tool, not merely collected: the W13 arm states HOW MANY rules were missing
     // from the library, which one deduplicated tool name cannot express.
     let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
@@ -2941,8 +2939,14 @@ pub(crate) const MIN_STYLE_CORPUS_FILES: usize = 3;
 /// `permissions`, `iac`, `ci-cd`) are deliberately ABSENT: a located violation there is a real
 /// defect even in a tiny app. A whitelist (not a blacklist) so an unrecognized future domain
 /// fails OPEN to over-telling — it stays in the action tier rather than being auto-demoted.
-pub(crate) const STANCE_LAYER_DOMAINS: &[&str] =
-    &["universal", "api-layer", "fullstack", "ui", "javascript", "integration"];
+pub(crate) const STANCE_LAYER_DOMAINS: &[&str] = &[
+    "universal",
+    "api-layer",
+    "fullstack",
+    "ui",
+    "javascript",
+    "integration",
+];
 
 /// C5-4: whether a finding is HELD for a human reviewer's judgment call, INDEPENDENT of its own
 /// severity — the calibrator's own hedge (`needs_review` / `confidence == "needs-review"`),
@@ -3025,7 +3029,8 @@ pub(crate) fn is_informational(
         return true;
     }
     // §2d — testing-style deviation with no test corpus to deviate FROM.
-    if finding.category.as_deref() == Some("testing-style") && test_file_count < MIN_STYLE_CORPUS_FILES
+    if finding.category.as_deref() == Some("testing-style")
+        && test_file_count < MIN_STYLE_CORPUS_FILES
     {
         return true;
     }
@@ -3465,8 +3470,14 @@ pub(crate) fn resolve_effort(
 pub(crate) fn effort_hours_bounds(effort: Option<&str>) -> (Option<(u32, u32)>, String) {
     match effort {
         Some("low") => (Some((2, 4)), "2 to 4 hours".to_string()),
-        Some("medium") => (Some((8, 16)), "1 to 2 days (about 8 to 16 hours)".to_string()),
-        Some("high") => (Some((24, 40)), "3 to 5 days (about 24 to 40 hours)".to_string()),
+        Some("medium") => (
+            Some((8, 16)),
+            "1 to 2 days (about 8 to 16 hours)".to_string(),
+        ),
+        Some("high") => (
+            Some((24, 40)),
+            "3 to 5 days (about 24 to 40 hours)".to_string(),
+        ),
         _ => (None, "not yet estimated".to_string()),
     }
 }
@@ -3639,8 +3650,7 @@ fn apply_sites_vs_rows_check(report: &mut crate::onboard::ScanReport) {
     // construction — max is a safe reconciliation if they ever diverge), plus whether the
     // rule already carries a shortfall row from a previous invocation.
     let mut claimed: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let mut already_disclosed: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut already_disclosed: std::collections::HashSet<String> = std::collections::HashSet::new();
     for f in &report.findings {
         if let Some(FindingKind::Deviation(d)) = &f.kind {
             let e = claimed.entry(f.rule_id.to_ascii_uppercase()).or_insert(0);
@@ -4065,8 +4075,10 @@ pub fn build_report_json(
     // Curated findings: grouped by rule (sorted for deterministic output), each rule's
     // sites sorted by repo/path/line.
     #[allow(clippy::type_complexity)]
-    let mut by_rule: std::collections::BTreeMap<String, Vec<(&Finding, Disposition, String, String)>> =
-        std::collections::BTreeMap::new();
+    let mut by_rule: std::collections::BTreeMap<
+        String,
+        Vec<(&Finding, Disposition, String, String)>,
+    > = std::collections::BTreeMap::new();
     // C6-B1 (closes a client-facing "counted but never rendered" bug): this loop used to
     // `continue` past an `is_uncited_ai_finding` row entirely — the stale reasoning (see the
     // removed comment, and `uncited_ai_row_provenance_and_citation_are_never_borrowed_from_a_
@@ -4087,10 +4099,12 @@ pub fn build_report_json(
     // already `"informational"` or `"held"`, never an action tier, for exactly this finding; see
     // `effective_bucket`), not by erasing the row from existence.
     for (f, disposition, reason, severity) in &code_findings {
-        by_rule
-            .entry(f.rule_id.clone())
-            .or_default()
-            .push((f, *disposition, reason.clone(), severity.clone()));
+        by_rule.entry(f.rule_id.clone()).or_default().push((
+            f,
+            *disposition,
+            reason.clone(),
+            severity.clone(),
+        ));
     }
     let mut all_curated_groups: Vec<CuratedGroupJson> = Vec::new();
     for (rule_id, mut sites) in by_rule {
@@ -4220,7 +4234,12 @@ pub fn build_report_json(
                     // "held for a human reviewer's judgment call" framing instead of printing
                     // "high"/blank next to a row that is, by construction, not curated.
                     confidence: hedge_confidence(f, bucket),
-                    disposition: disposition_label(*disposition, reason, bucket, confirmed_by_client),
+                    disposition: disposition_label(
+                        *disposition,
+                        reason,
+                        bucket,
+                        confirmed_by_client,
+                    ),
                     bucket: bucket.to_string(),
                     also_matches: f.also_matches.clone(),
                     also_matches_titles: also_matches_titles(&f.also_matches, corpus),
@@ -4508,7 +4527,8 @@ pub fn build_report_json(
         .collect();
     healthy_rules.sort_by(|a, b| {
         let grounded_first = |kind: &str| if kind == "grounded" { 0 } else { 1 };
-        (grounded_first(&a.citation.kind), &a.rule_id).cmp(&(grounded_first(&b.citation.kind), &b.rule_id))
+        (grounded_first(&a.citation.kind), &a.rule_id)
+            .cmp(&(grounded_first(&b.citation.kind), &b.rule_id))
     });
     let further_clean_count = healthy_rules.len().saturating_sub(WHATS_HEALTHY_CAP);
     healthy_rules.truncate(WHATS_HEALTHY_CAP);
@@ -4595,9 +4615,7 @@ pub fn build_report_json(
     // removes it from that bucket before it is ever counted there.
     let open = code_findings
         .iter()
-        .filter(|(_, d, _, _)| {
-            matches!(d, Disposition::Unresolved | Disposition::Confirmed)
-        })
+        .filter(|(_, d, _, _)| matches!(d, Disposition::Unresolved | Disposition::Confirmed))
         .count()
         - held_for_review_total;
     // Calibration-review fix: rank by (severity desc, precondition_count asc, confidence) —
@@ -4643,8 +4661,7 @@ pub fn build_report_json(
     let mut top3_do_now: Vec<&FindingRefJson> = Vec::new();
     let mut selected_root_causes: std::collections::HashSet<&str> =
         std::collections::HashSet::new();
-    let mut selected_rule_ids: std::collections::HashSet<&str> =
-        std::collections::HashSet::new();
+    let mut selected_rule_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for f in &do_now_sorted {
         if top3_do_now.len() >= 3 {
             break;
@@ -5432,7 +5449,11 @@ mod tests {
             json.curated_findings[0].sites[0].disposition,
             "Needs client confirmation (reviewer's proposed rationale: looks like defense-in-depth only)"
         );
-        assert_eq!(json.matrix.accepted.len(), 1, "still an accepted-bucket disposition");
+        assert_eq!(
+            json.matrix.accepted.len(),
+            1,
+            "still an accepted-bucket disposition"
+        );
     }
 
     #[test]
@@ -5511,7 +5532,10 @@ mod tests {
         // — the worst finding in the report could sit un-actioned. A critical must be Do now
         // regardless of effort.
         let f = finding("SEC-NO-HARDCODED-SECRETS-1", "a.rs", 1, "critical");
-        assert_eq!(f.effort, None, "test fixture must not carry an effort estimate");
+        assert_eq!(
+            f.effort, None,
+            "test fixture must not carry an effort estimate"
+        );
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.matrix.do_now.len(), 1, "{:?}", json.matrix);
@@ -5571,7 +5595,6 @@ mod tests {
         assert_eq!(json.scorecard.rows[0].low, 0);
         assert_eq!(json.curated_findings[0].sites[0].severity, "critical");
     }
-
 
     // ── Pass-1 W3 (A5.2/A5.6): the deviation ceiling + the kind on the PDF wire ──────────
 
@@ -5723,10 +5746,17 @@ mod tests {
         let report = report_with(vec![dev, legacy], vec!["DEV-RULE-1", "LEGACY-RULE-1"]);
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         let v = serde_json::to_value(&json.matrix).expect("matrix serializes");
-        let rows: Vec<&serde_json::Value> = ["do_now", "do_next", "plan", "accepted", "informational", "held"]
-            .iter()
-            .flat_map(|b| v[*b].as_array().into_iter().flatten())
-            .collect();
+        let rows: Vec<&serde_json::Value> = [
+            "do_now",
+            "do_next",
+            "plan",
+            "accepted",
+            "informational",
+            "held",
+        ]
+        .iter()
+        .flat_map(|b| v[*b].as_array().into_iter().flatten())
+        .collect();
         let row_for = |path: &str| -> &serde_json::Value {
             rows.iter()
                 .find(|r| r["path"] == path)
@@ -5950,12 +5980,7 @@ mod tests {
     fn exported_with(corpus: &camerata_rules::RuleSet, f: Finding) -> AuditReportJson {
         let rule_id = f.rule_id.clone();
         let report = report_with(vec![f], vec![&rule_id]);
-        build_report_json(
-            &report.seal(),
-            &HashMap::new(),
-            Some(corpus),
-            &empty_opts(),
-        )
+        build_report_json(&report.seal(), &HashMap::new(), Some(corpus), &empty_opts())
     }
 
     /// req_w8: a rule declaring `min_severity = "high"` never exports anything BELOW high —
@@ -6294,7 +6319,9 @@ mod tests {
         // FIX 4 (2026-09-13 review): the "Three things this week" box leads with the headline,
         // not the rule id — this is now the ONE place the exec-summary page names a do-now
         // finding (see `narrative_does_not_restate_the_top_do_now_headline` below).
-        assert!(json.three_things.items[0].headline.starts_with("A service_role key ships"));
+        assert!(json.three_things.items[0]
+            .headline
+            .starts_with("A service_role key ships"));
     }
 
     // ── Item 2 / FIX 4: exec-summary is counts-only, no restated top-3 ─────────
@@ -6426,7 +6453,10 @@ mod tests {
         let report = report_with(vec![], vec![]);
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(json.three_things.items.is_empty());
-        assert_eq!(json.three_things.total_hours_label, "No do-now items this run.");
+        assert_eq!(
+            json.three_things.total_hours_label,
+            "No do-now items this run."
+        );
     }
 
     // ── C6-B2: top-3 "three distinct root causes" selector ─────────────────────────────────
@@ -6541,7 +6571,11 @@ mod tests {
         let report = report_with(vec![preconditioned, unconditional], vec![]);
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
-        assert_eq!(json.matrix.do_now.len(), 2, "both are critical do-now items");
+        assert_eq!(
+            json.matrix.do_now.len(),
+            2,
+            "both are critical do-now items"
+        );
         assert_eq!(
             json.three_things.items[0].rule_id, "SEC-UNCONDITIONAL",
             "the unconditional critical must rank first, ahead of the preconditioned one: {:?}",
@@ -6640,7 +6674,10 @@ mod tests {
     /// landing in one.
     #[test]
     fn req_a9_unmappable_rule_ids_share_one_generic_category() {
-        assert_eq!(category_for("LEGACY-UNMAPPED-1", None), UNCATEGORIZED_CATEGORY);
+        assert_eq!(
+            category_for("LEGACY-UNMAPPED-1", None),
+            UNCATEGORIZED_CATEGORY
+        );
         assert_eq!(category_for("VENDOR-THING-2", None), UNCATEGORIZED_CATEGORY);
     }
 
@@ -6649,9 +6686,18 @@ mod tests {
     /// throws away a category we can actually establish.
     #[test]
     fn req_a9_taxonomy_recognised_rule_ids_get_their_real_category() {
-        assert_eq!(category_for("ARCH-NO-CROSS-BOUNDARY-IMPORTS-1", None), "Architecture");
-        assert_eq!(category_for("SEC-INJECTION-RAW-SQL-BUILD-1", None), "Injection");
-        assert_eq!(category_for("ARCH-NO-SECRETS-IN-URL-1", None), "Secret Exposure");
+        assert_eq!(
+            category_for("ARCH-NO-CROSS-BOUNDARY-IMPORTS-1", None),
+            "Architecture"
+        );
+        assert_eq!(
+            category_for("SEC-INJECTION-RAW-SQL-BUILD-1", None),
+            "Injection"
+        );
+        assert_eq!(
+            category_for("ARCH-NO-SECRETS-IN-URL-1", None),
+            "Secret Exposure"
+        );
     }
 
     // ── req_det: the cover's generated-at is the scan time, not the wall clock ─
@@ -6763,8 +6809,12 @@ mod tests {
         let report = report_with(findings, vec![]);
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
-        let picked: Vec<&str> =
-            json.three_things.items.iter().map(|i| i.rule_id.as_str()).collect();
+        let picked: Vec<&str> = json
+            .three_things
+            .items
+            .iter()
+            .map(|i| i.rule_id.as_str())
+            .collect();
         let distinct: std::collections::HashSet<&str> = picked.iter().copied().collect();
         assert_eq!(
             picked.len(),
@@ -6774,8 +6824,7 @@ mod tests {
         );
         // And the other two problems must actually surface, which is the point of the box.
         assert!(
-            distinct.contains("SEC-NO-SECRET-FILE-1")
-                && distinct.contains("ARCH-EXACT-DECIMALS-1"),
+            distinct.contains("SEC-NO-SECRET-FILE-1") && distinct.contains("ARCH-EXACT-DECIMALS-1"),
             "the genuinely distinct problems must not be crowded out: {picked:?}"
         );
     }
@@ -6802,7 +6851,10 @@ mod tests {
 
         // An EMPTY state is the same case and the likelier one in practice.
         let empty = DispositionWire::default();
-        assert_eq!(classify(&suppressed, Some(&empty)), Disposition::BaselineAccepted);
+        assert_eq!(
+            classify(&suppressed, Some(&empty)),
+            Disposition::BaselineAccepted
+        );
 
         // The converse, so the fix cannot swallow real triage: a RECOGNISED state still wins
         // over the status, because that is an actual human judgment this session.
@@ -6837,12 +6889,20 @@ mod tests {
         // Both rules were audited. Only the carrier has a row of its own.
         let report = report_with(
             vec![carrier],
-            vec!["SEC-NO-VENDOR-TOKEN-1", "SEC-NO-SECRET-FILE-1", "SEC-UNRELATED-1"],
+            vec![
+                "SEC-NO-VENDOR-TOKEN-1",
+                "SEC-NO-SECRET-FILE-1",
+                "SEC-UNRELATED-1",
+            ],
         );
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
-        let healthy: Vec<&str> =
-            json.whats_healthy.rules.iter().map(|r| r.rule_id.as_str()).collect();
+        let healthy: Vec<&str> = json
+            .whats_healthy
+            .rules
+            .iter()
+            .map(|r| r.rule_id.as_str())
+            .collect();
         assert!(
             !healthy.contains(&"SEC-NO-SECRET-FILE-1"),
             "a rule absorbed into another row's `also_locations` still FIRED; listing it as \
@@ -6871,7 +6931,10 @@ mod tests {
     #[test]
     fn snippet_is_capped_at_max_lines_with_a_truncated_marker() {
         let mut f = finding("SEC-1", "a.rs", 1, "high");
-        f.snippet = (0..50).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        f.snippet = (0..50)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         let capped = &json.curated_findings[0].sites[0].snippet;
@@ -7380,7 +7443,10 @@ mod tests {
         assert_eq!(clean_row.status, "Clean");
         assert_eq!(clean_row.audited_rules, 1);
         assert_eq!(clean_row.clean_rules, 1);
-        assert_eq!(clean_row.critical + clean_row.high + clean_row.medium + clean_row.low, 0);
+        assert_eq!(
+            clean_row.critical + clean_row.high + clean_row.medium + clean_row.low,
+            0
+        );
     }
 
     // ── Suppressed-baseline -> pre-existing accepted debt ──────────────────────
@@ -7509,9 +7575,18 @@ mod tests {
     async fn resolve_fix_binds_to_the_authored_remediation_and_substitutes_captures() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
-        let mut f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
-        f.captures.insert("table".to_string(), "profiles".to_string());
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
         let fix = resolve_fix("SUPABASE-RLS-ENABLED-1", Some(&corpus), &f, None)
             .expect("SUPABASE-RLS-ENABLED-1 must have authored remediation");
         assert!(
@@ -7519,7 +7594,8 @@ mod tests {
             "expected the captured table name substituted into the authored remediation, got: {fix:?}"
         );
         assert!(
-            !fix.to_lowercase().contains("timeline replay") && !fix.contains("emit a critical finding"),
+            !fix.to_lowercase().contains("timeline replay")
+                && !fix.contains("emit a critical finding"),
             "must bind to the client-facing `remediation` text, never the detection-recipe \
              `directive` (which mentions the replay mechanism), got: {fix:?}"
         );
@@ -7546,16 +7622,25 @@ mod tests {
     #[test]
     fn resolve_fix_is_none_not_fabricated_when_corpus_is_absent() {
         let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
-        assert_eq!(resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", None, &f, None), None);
+        assert_eq!(
+            resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", None, &f, None),
+            None
+        );
     }
 
     #[tokio::test]
     async fn resolve_fix_is_none_when_rule_id_is_unknown_to_the_corpus() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
         let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
-        assert_eq!(resolve_fix("AI-CUSTOM-ARCH-RULE-1", Some(&corpus), &f, None), None);
+        assert_eq!(
+            resolve_fix("AI-CUSTOM-ARCH-RULE-1", Some(&corpus), &f, None),
+            None
+        );
     }
 
     // ── resolve_fix honors the evaluated/chosen option (2026-09-22 audit-integrated
@@ -7571,8 +7656,16 @@ mod tests {
     async fn resolve_fix_uses_the_finding_evaluated_option_id_over_the_project_chosen_option() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
-        let mut f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
         f.evaluated_option_id = Some("enforce-rls-enabled-replayed-end-state".to_string());
         // The chosen_option PARAMETER disagrees with the finding's evaluated_option_id — the
         // finding's tag must win (it's what this SPECIFIC finding was actually judged under).
@@ -7596,8 +7689,16 @@ mod tests {
     async fn resolve_fix_falls_back_to_the_chosen_option_param_when_the_finding_has_none() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
-        let f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
         assert!(f.evaluated_option_id.is_none());
         let fix = resolve_fix(
             "SUPABASE-RLS-ENABLED-1",
@@ -7619,19 +7720,39 @@ mod tests {
     async fn resolve_fix_falls_back_to_the_corpus_default_when_nothing_else_is_set() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
-        let f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
         let fix = resolve_fix("SUPABASE-RLS-ENABLED-1", Some(&corpus), &f, None);
-        assert!(fix.is_some(), "the corpus default option has authored remediation");
+        assert!(
+            fix.is_some(),
+            "the corpus default option has authored remediation"
+        );
     }
 
     #[tokio::test]
     async fn curated_finding_site_carries_the_fix_line_populated_from_authored_remediation() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
-        let mut f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
-        f.captures.insert("table".to_string(), "profiles".to_string());
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(
             &report.clone().seal(),
@@ -7814,7 +7935,10 @@ mod tests {
     async fn no_client_facing_string_begins_with_deny_for_any_floor_rule_that_fires() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
 
         let files = vec![
             (".env".to_string(), "SERVICE_ROLE_KEY=abc\n".to_string()),
@@ -7828,8 +7952,12 @@ mod tests {
             ),
             (
                 "c.pem".to_string(),
-                concat!("-----BEGIN RSA PRIV", "ATE KEY-----\nMIIBFAKEFAKEFAKE\n-----END RSA PRIV", "ATE KEY-----\n")
-                    .to_string(),
+                concat!(
+                    "-----BEGIN RSA PRIV",
+                    "ATE KEY-----\nMIIBFAKEFAKEFAKE\n-----END RSA PRIV",
+                    "ATE KEY-----\n"
+                )
+                .to_string(),
             ),
             (
                 "d.py".to_string(),
@@ -7839,7 +7967,10 @@ mod tests {
                 "e.py".to_string(),
                 "url = f\"https://api.example.com/x?api_key={key}\"\n".to_string(),
             ),
-            ("f.py".to_string(), "requests.get(url, verify=False)\n".to_string()),
+            (
+                "f.py".to_string(),
+                "requests.get(url, verify=False)\n".to_string(),
+            ),
             ("g.py".to_string(), "yaml.load(data)\n".to_string()),
         ];
         let findings = crate::onboard::audit_files("owner/repo", &files);
@@ -7896,7 +8027,10 @@ mod tests {
     async fn every_curated_finding_has_a_non_empty_est_hours() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
         let files = vec![(".env".to_string(), "SERVICE_ROLE_KEY=abc\n".to_string())];
         let findings = crate::onboard::audit_files("owner/repo", &files);
         assert!(!findings.is_empty());
@@ -7939,7 +8073,10 @@ mod tests {
     async fn deterministic_finding_with_real_location_exports_high_confidence_and_an_estimate() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
 
         // Exactly the shape `onboard::architectural::arch_violation_to_finding` produces: no
         // calibration ever touches this finding, so `confidence`/`effort` start (and, absent
@@ -8001,8 +8138,14 @@ mod tests {
             .iter()
             .find(|r| r["rule_id"] == "SUPABASE-FUNC-SEARCH-PATH-1")
             .expect("row must be present in the xlsx/findings.json export");
-        assert_eq!(row["confidence"], "high", "xlsx confidence must match the PDF/json");
-        assert_eq!(row["effort"], "low", "xlsx effort must fall back to the authored band");
+        assert_eq!(
+            row["confidence"], "high",
+            "xlsx confidence must match the PDF/json"
+        );
+        assert_eq!(
+            row["effort"], "low",
+            "xlsx effort must fall back to the authored band"
+        );
 
         // ── PDF source ──
         if which_typst().is_none() {
@@ -8013,9 +8156,7 @@ mod tests {
             );
             return;
         }
-        let pdf = compile_pdf(&json)
-            .await
-            .expect("compile_pdf must succeed");
+        let pdf = compile_pdf(&json).await.expect("compile_pdf must succeed");
         let text = pdf_extract::extract_text_from_mem(&pdf)
             .expect("must be able to extract text from the compiled PDF");
         assert!(
@@ -8076,8 +8217,16 @@ mod tests {
     async fn ai_tier_needs_review_row_keeps_its_confidence_and_still_carries_an_estimate() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
-        let mut f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "high");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "high",
+        );
         f.confidence = Some("needs-review".to_string());
         f.needs_review = true;
         f.effort = Some("medium".to_string());
@@ -8146,10 +8295,8 @@ mod tests {
         );
         // Bucket placement is untouched by any of this — a high-severity finding still lands
         // somewhere actionable, never silently excluded.
-        let in_some_action_bucket = json.matrix.do_now.len()
-            + json.matrix.do_next.len()
-            + json.matrix.plan.len()
-            == 1;
+        let in_some_action_bucket =
+            json.matrix.do_now.len() + json.matrix.do_next.len() + json.matrix.plan.len() == 1;
         assert!(
             in_some_action_bucket,
             "the row must land in exactly one action bucket, never vanish: {:?}",
@@ -8165,7 +8312,10 @@ mod tests {
     async fn committed_secret_finding_renders_a_specific_headline_and_a_context_fact() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
         let files = vec![
             (".gitignore".to_string(), "node_modules/\n".to_string()),
             (".env".to_string(), "SERVICE_ROLE_KEY=abc\n".to_string()),
@@ -8210,7 +8360,10 @@ mod tests {
     async fn sec_no_raw_sql_concat_1_resolves_to_a_grounded_citation() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
         let citation = resolve_citation("SEC-NO-RAW-SQL-CONCAT-1", None, Some(&corpus));
         assert_eq!(
             citation.kind, "grounded",
@@ -8504,7 +8657,10 @@ mod tests {
     async fn a_clean_repo_with_no_floor_findings_still_renders_fine() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
         let files = vec![("a.py".to_string(), "print('hello world')\n".to_string())];
         let findings = crate::onboard::audit_files("owner/repo", &files);
         assert!(findings.is_empty(), "fixture must genuinely be clean");
@@ -8707,7 +8863,10 @@ mod tests {
             "supabase/migrations/1.sql",
             &captures,
         );
-        assert_eq!(text, "Enable RLS on `profiles` and lock down the `avatars` bucket.");
+        assert_eq!(
+            text,
+            "Enable RLS on `profiles` and lock down the `avatars` bucket."
+        );
     }
 
     #[test]
@@ -8743,7 +8902,10 @@ mod tests {
             "a.rs",
             &captures,
         );
-        assert!(!text.contains('<') && !text.contains('>'), "raw token escaped: {text:?}");
+        assert!(
+            !text.contains('<') && !text.contains('>'),
+            "raw token escaped: {text:?}"
+        );
         assert_eq!(text, "Check the affected resource before shipping.");
     }
 
@@ -8967,11 +9129,17 @@ mod tests {
         // de-emphasize it.
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
         let citation = resolve_citation("SEC-NO-UNSAFE-DESERIALIZATION-1", None, Some(&corpus));
         assert_eq!(citation.kind, "grounded");
         assert!(
-            !citation.sources.iter().any(|s| !is_external_source_url(&s.url)),
+            !citation
+                .sources
+                .iter()
+                .any(|s| !is_external_source_url(&s.url)),
             "an internal (non http/https) source leaked into the report: {:?}",
             citation.sources
         );
@@ -9814,7 +9982,10 @@ mod tests {
             );
         }
         // No em/en dash (house style for this deliverable — see `AUDIT_REPORT_DISCLAIMER`).
-        assert!(!line.contains('\u{2014}') && !line.contains('\u{2013}'), "{line}");
+        assert!(
+            !line.contains('\u{2014}') && !line.contains('\u{2013}'),
+            "{line}"
+        );
     }
 
     /// req_w13: the line pluralizes honestly. One broken rule file is "1 rule", not
@@ -9872,7 +10043,9 @@ mod tests {
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(
-            json.executive_summary.narrative.contains("1 candidate finding."),
+            json.executive_summary
+                .narrative
+                .contains("1 candidate finding."),
             "expected singular 'finding', got: {:?}",
             json.executive_summary.narrative
         );
@@ -10226,9 +10399,13 @@ mod tests {
         );
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
-        let first = compile_pdf(&json).await.expect("first compile must succeed");
+        let first = compile_pdf(&json)
+            .await
+            .expect("first compile must succeed");
         tokio::time::sleep(Duration::from_millis(1_100)).await;
-        let second = compile_pdf(&json).await.expect("second compile must succeed");
+        let second = compile_pdf(&json)
+            .await
+            .expect("second compile must succeed");
 
         assert!(first.starts_with(b"%PDF") && !first.is_empty());
         let first_diff = first
@@ -10237,7 +10414,8 @@ mod tests {
             .position(|(a, b)| a != b)
             .unwrap_or_else(|| first.len().min(second.len()));
         assert_eq!(
-            first, second,
+            first,
+            second,
             "two compiles of ONE report must be byte-identical; lengths {} vs {}, first \
              difference at byte {first_diff}",
             first.len(),
@@ -10260,7 +10438,12 @@ mod tests {
             return;
         }
         let report = report_with(
-            vec![finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 10, "critical")],
+            vec![finding(
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "src/a.rs",
+                10,
+                "critical",
+            )],
             vec!["SEC-NO-HARDCODED-SECRETS-1"],
         );
         // `report_with` stamps finished_at = 2026-07-23T00:05:00Z; the cover string is
@@ -11005,7 +11188,10 @@ mod tests {
         let rule = corpus
             .get_by_id("ARCH-SERVICE-DI-1")
             .expect("ARCH-SERVICE-DI-1 must exist in the bundled corpus");
-        assert_eq!(rule.enforcement, camerata_rules::EnforcementKind::Structured);
+        assert_eq!(
+            rule.enforcement,
+            camerata_rules::EnforcementKind::Structured
+        );
         assert_eq!(rule.domain, "api-layer");
 
         let mut f = finding("ARCH-SERVICE-DI-1", "src/svc.rs", 1, "medium");
@@ -11202,9 +11388,17 @@ mod tests {
         );
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
-        assert_eq!(json.matrix.informational.len(), 1, "the info finding is in the appendix");
+        assert_eq!(
+            json.matrix.informational.len(),
+            1,
+            "the info finding is in the appendix"
+        );
         assert_eq!(json.matrix.informational[0].path, "b.rs");
-        assert_eq!(json.matrix.do_now.len(), 1, "the critical is an action item");
+        assert_eq!(
+            json.matrix.do_now.len(),
+            1,
+            "the critical is an action item"
+        );
 
         // No info-severity finding may appear in any action tier.
         for tier in [&json.matrix.do_now, &json.matrix.do_next, &json.matrix.plan] {
@@ -11220,8 +11414,14 @@ mod tests {
             + json.matrix.do_next.len()
             + json.matrix.plan.len()
             + json.matrix.accepted.len();
-        assert_eq!(summed, curated, "do_now+do_next+plan+accepted must equal curated_total");
-        assert_eq!(curated, 1, "only the critical is curated; the info note is appendix-only");
+        assert_eq!(
+            summed, curated,
+            "do_now+do_next+plan+accepted must equal curated_total"
+        );
+        assert_eq!(
+            curated, 1,
+            "only the critical is curated; the info note is appendix-only"
+        );
     }
 
     /// C4-R1: the pipeline-wide null-location safety net. A synthetic `critical` finding with
@@ -11452,7 +11652,10 @@ mod tests {
             "Zachary Ernst"
         );
         let empty = empty_opts();
-        assert_eq!(resolve_prepared_by(&empty, Some("Someone Else")), "Someone Else");
+        assert_eq!(
+            resolve_prepared_by(&empty, Some("Someone Else")),
+            "Someone Else"
+        );
         // P6: with neither the per-report field nor the env var set, the resolver falls all
         // the way to the real default name, never an empty string ("Prepared by N/A" is the
         // bug this closes).
@@ -11552,11 +11755,17 @@ mod tests {
         };
 
         assert_eq!(cell("critical", "low").findings.len(), 1);
-        assert_eq!(cell("critical", "low").findings[0].rule_id, "SUPABASE-RLS-ENABLED-1");
+        assert_eq!(
+            cell("critical", "low").findings[0].rule_id,
+            "SUPABASE-RLS-ENABLED-1"
+        );
         // `high_medium` is do_next (high severity, medium effort is not "low"); still an
         // ACTION-tier finding, so it must still land in the grid.
         assert_eq!(cell("high", "medium").findings.len(), 1);
-        assert_eq!(cell("high", "medium").findings[0].rule_id, "SUPABASE-AUTH-EDGE-JWT-1");
+        assert_eq!(
+            cell("high", "medium").findings[0].rule_id,
+            "SUPABASE-AUTH-EDGE-JWT-1"
+        );
         // An uncalibrated effort normalizes to the "unscoped" column, never dropped.
         assert_eq!(cell("high", "unscoped").findings.len(), 1);
         assert_eq!(cell("high", "unscoped").findings[0].rule_id, "ARCH-1");
@@ -11570,7 +11779,10 @@ mod tests {
         accepted.effort = Some("low".to_string());
         let info = finding("SOME-RULE-1", "b.rs", 2, "info");
         let mut dispositions = HashMap::new();
-        dispositions.insert(finding_key(&accepted), wire("Ignored", "accepted for now", ""));
+        dispositions.insert(
+            finding_key(&accepted),
+            wire("Ignored", "accepted for now", ""),
+        );
         let report = report_with(vec![accepted, info], vec![]);
         let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
 
@@ -11578,7 +11790,9 @@ mod tests {
         for row in &json.priority_grid.rows {
             for cell in &row.cells {
                 assert!(
-                    cell.findings.iter().all(|f| f.rule_id != "SEC-1" && f.rule_id != "SOME-RULE-1"),
+                    cell.findings
+                        .iter()
+                        .all(|f| f.rule_id != "SEC-1" && f.rule_id != "SOME-RULE-1"),
                     "accepted/informational findings must never appear in the priority grid"
                 );
             }
@@ -12254,7 +12468,10 @@ mod tests {
             matrix_bucket(Disposition::Confirmed, "high", Some("low")),
             "do_now"
         );
-        assert_eq!(matrix_bucket(Disposition::Confirmed, "medium", None), "plan");
+        assert_eq!(
+            matrix_bucket(Disposition::Confirmed, "medium", None),
+            "plan"
+        );
 
         let confirmed = finding("SEC-1", "a.rs", 1, "critical");
         let mut dispositions = HashMap::new();
@@ -13973,7 +14190,8 @@ mod export_invariants_gate {
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
 
-        let content = "fn handler() {\n let q = raw_sql(id);\n let page = rows.skip(n).take(k);\n}\n";
+        let content =
+            "fn handler() {\n let q = raw_sql(id);\n let page = rows.skip(n).take(k);\n}\n";
         let files = vec![("src/api/handler.rs".to_string(), content.to_string())];
         let mut injection = finding(
             "SEC-SQL-INJECTION-SINK-1",
@@ -14671,8 +14889,9 @@ mod export_invariants_gate {
             "ARCH-EXPLICIT-TX-1".to_string(),
             crate::ai_audit::RuleRecommendation {
                 rule_id: "ARCH-EXPLICIT-TX-1".to_string(),
-                recommended_option_id: "services-own-the-transaction-lifecycle-repositories-receive-the-handle"
-                    .to_string(),
+                recommended_option_id:
+                    "services-own-the-transaction-lifecycle-repositories-receive-the-handle"
+                        .to_string(),
                 recommendation_reasoning: "the codebase already does it this way".to_string(),
                 hallucinated: false,
                 operator_chosen: false,
@@ -14804,7 +15023,11 @@ mod export_invariants_gate {
         // And downstream it is HELD — outside every action tier — not an action row and not
         // a refused export.
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
-        let in_held = json.matrix.held.iter().any(|r| r.line == 0 && r.rule_id == "ARCH-API-VERSIONING-1");
+        let in_held = json
+            .matrix
+            .held
+            .iter()
+            .any(|r| r.line == 0 && r.rule_id == "ARCH-API-VERSIONING-1");
         let in_informational = json
             .matrix
             .informational
@@ -15086,7 +15309,10 @@ mod export_invariants_gate {
             serde_json::to_value(&findings_export).expect("FindingsExport must serialize");
         let mut findings_json_ids: std::collections::BTreeSet<(String, String, String, usize)> =
             std::collections::BTreeSet::new();
-        for row in findings_export_value["findings"].as_array().expect("must be an array") {
+        for row in findings_export_value["findings"]
+            .as_array()
+            .expect("must be an array")
+        {
             findings_json_ids.insert((
                 row["rule_id"].as_str().expect("rule_id").to_string(),
                 row["repo"].as_str().expect("repo").to_string(),
@@ -15114,15 +15340,21 @@ mod export_invariants_gate {
             "the evidence-gate-synthesized row must reach the PDF: {pdf_ids:#?}"
         );
         assert!(
-            findings_json_ids.iter().any(|(rid, ..)| rid == "ARCH-EXPLICIT-TX-1"),
+            findings_json_ids
+                .iter()
+                .any(|(rid, ..)| rid == "ARCH-EXPLICIT-TX-1"),
             "the evidence-gate-synthesized row must reach findings.json: {findings_json_ids:#?}"
         );
         assert!(
-            pdf_ids.iter().any(|(rid, ..)| rid == "SEC-NO-RAW-SQL-CONCAT-1"),
+            pdf_ids
+                .iter()
+                .any(|(rid, ..)| rid == "SEC-NO-RAW-SQL-CONCAT-1"),
             "the external-tool-preview row must reach the PDF: {pdf_ids:#?}"
         );
         assert!(
-            findings_json_ids.iter().any(|(rid, ..)| rid == "SEC-NO-RAW-SQL-CONCAT-1"),
+            findings_json_ids
+                .iter()
+                .any(|(rid, ..)| rid == "SEC-NO-RAW-SQL-CONCAT-1"),
             "the external-tool-preview row must reach findings.json: {findings_json_ids:#?}"
         );
 
@@ -15188,7 +15420,10 @@ mod export_invariants_gate {
         // `confidence: needs-review`, so it must land in the `held` bucket, and the executive
         // summary's `held_for_review` reconciling count must include it.
         assert!(
-            json.matrix.held.iter().any(|f| f.rule_id == "ARCH-EXPLICIT-TX-1"),
+            json.matrix
+                .held
+                .iter()
+                .any(|f| f.rule_id == "ARCH-EXPLICIT-TX-1"),
             "the evidence-gate row must be a hedge (held bucket): {:?}",
             json.matrix.held
         );

@@ -77,7 +77,8 @@ async fn regenerate_sample_report() {
     // Detector-supplied placeholder binding (Fix 1): a real scan's RLS checker sets this via
     // `arch_violation_to_finding`; the fixture sets it explicitly so the remediation names the
     // actual object ("ALTER TABLE profiles ...") instead of the generic fallback.
-    rls_enabled.captures = std::collections::BTreeMap::from([("table".to_string(), "profiles".to_string())]);
+    rls_enabled.captures =
+        std::collections::BTreeMap::from([("table".to_string(), "profiles".to_string())]);
     rls_enabled.snippet = "create table public.profiles (\n  id uuid primary key references auth.users,\n  full_name text,\n  email text,\n  phone text\n);".to_string();
     // Item 1: `detail`'s FIRST SENTENCE is the punchy, defect-first headline the report's
     // serializer mechanically lifts out (`defect_headline`) — the owner's own target voice
@@ -94,7 +95,8 @@ async fn regenerate_sample_report() {
     );
     key_service_role.effort = Some("low".to_string());
     key_service_role.confidence = Some("high".to_string());
-    key_service_role.snippet = "NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=sb_secret_[redacted]".to_string();
+    key_service_role.snippet =
+        "NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=sb_secret_[redacted]".to_string();
     key_service_role.detail = "The service_role key is shipped to every browser: it bypasses all Row Level Security and grants full read and write access to every table. A service_role secret is assigned to a NEXT_PUBLIC_ environment variable, which Next.js inlines into the client bundle at build time. Anyone who opens browser developer tools obtains this key. Rotate it immediately, remove it from client-delivered code, and move privileged operations to a server-side route.".to_string();
 
     let mut auth_edge_jwt = finding(
@@ -106,8 +108,10 @@ async fn regenerate_sample_report() {
     );
     auth_edge_jwt.effort = Some("medium".to_string());
     auth_edge_jwt.confidence = Some("needs-review".to_string());
-    auth_edge_jwt.captures =
-        std::collections::BTreeMap::from([("function-name".to_string(), "charge-membership".to_string())]);
+    auth_edge_jwt.captures = std::collections::BTreeMap::from([(
+        "function-name".to_string(),
+        "charge-membership".to_string(),
+    )]);
     auth_edge_jwt.snippet = "[functions.charge-membership]\nverify_jwt = false".to_string();
     auth_edge_jwt.detail = "The charge-membership edge function has JWT verification disabled: any anonymous caller on the internet can invoke the payment path. Its body does not perform its own authorization check either. Re-enable verify_jwt, or add an explicit authenticated-user check inside the handler before any privileged work.".to_string();
 
@@ -149,7 +153,9 @@ async fn regenerate_sample_report() {
     rls_permissive.confidence = Some("high".to_string());
     rls_permissive.captures =
         std::collections::BTreeMap::from([("table".to_string(), "messages".to_string())]);
-    rls_permissive.snippet = "create policy \"messages are readable\"\n  on public.messages for select\n  using (true);".to_string();
+    rls_permissive.snippet =
+        "create policy \"messages are readable\"\n  on public.messages for select\n  using (true);"
+            .to_string();
     rls_permissive.detail = "The messages table's read policy grants access to everyone: using (true) lets every anon and authenticated caller read every row. If messages are meant to be private between members, scope the policy to the owning user, for example using (auth.uid() = sender_id).".to_string();
 
     // Long, real-looking path (a Next.js route group directory) — exercises the M8 path-wrap
@@ -163,24 +169,38 @@ async fn regenerate_sample_report() {
     );
     auth_getsession.effort = Some("medium".to_string());
     auth_getsession.confidence = Some("high".to_string());
-    auth_getsession.snippet = "const { data: { session } } = await supabase.auth.getSession()".to_string();
+    auth_getsession.snippet =
+        "const { data: { session } } = await supabase.auth.getSession()".to_string();
     auth_getsession.detail = "The billing settings page trusts an unverified session cookie: a forged cookie could impersonate any user at this layer. Server-side code reads getSession(), which returns the client's unverified cookie JWT rather than validating it against the auth server.".to_string();
 
     // ── 3 findings dispositioned FalsePositive (excluded, counted once in methodology) ──
-    let fp_sql = finding("SEC-NO-RAW-SQL-CONCAT-1", PORTAL, "scripts/report.rs", 40, "critical");
-    let fp_secret = finding("SEC-NO-HARDCODED-SECRETS-1", EDGE, "supabase/functions/_shared/config.ts", 5, "critical");
-    let fp_url = finding("ARCH-NO-SECRETS-IN-URL-1", PORTAL, "apps/web/lib/analytics.ts", 18, "critical");
+    let fp_sql = finding(
+        "SEC-NO-RAW-SQL-CONCAT-1",
+        PORTAL,
+        "scripts/report.rs",
+        40,
+        "critical",
+    );
+    let fp_secret = finding(
+        "SEC-NO-HARDCODED-SECRETS-1",
+        EDGE,
+        "supabase/functions/_shared/config.ts",
+        5,
+        "critical",
+    );
+    let fp_url = finding(
+        "ARCH-NO-SECRETS-IN-URL-1",
+        PORTAL,
+        "apps/web/lib/analytics.ts",
+        18,
+        "critical",
+    );
 
     // ── 1 dependency finding (carved into its own §7 lane, not counted in curated_total) ──
-    let mut dep_next = finding(
-        DEP_AUDIT_RULE_ID,
-        PORTAL,
-        "package-lock.json",
-        0,
-        "medium",
-    );
+    let mut dep_next = finding(DEP_AUDIT_RULE_ID, PORTAL, "package-lock.json", 0, "medium");
     dep_next.snippet = "next@14.1.0".to_string();
-    dep_next.detail = "Next.js SSRF via image optimization (GHSA-fr5h-rqp8-mj6g). Fixed in 14.1.1.".to_string();
+    dep_next.detail =
+        "Next.js SSRF via image optimization (GHSA-fr5h-rqp8-mj6g). Fixed in 14.1.1.".to_string();
 
     let all_findings = vec![
         rls_enabled.clone(),
@@ -355,7 +375,10 @@ async fn regenerate_sample_report() {
     // ═══ Load the REAL bundled rule corpus so citations/domains/titles resolve for real ═══
     let corpus_path = camerata_rules::corpus_path();
     let (corpus, corpus_errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-    assert!(corpus_errors.is_empty(), "corpus must load cleanly: {corpus_errors:?}");
+    assert!(
+        corpus_errors.is_empty(),
+        "corpus must load cleanly: {corpus_errors:?}"
+    );
 
     // No `executive_summary_override` — the narrative shown is `default_narrative`'s REAL
     // output, not hand-written prose (this is the S7 self-consistency fix: the old sample
@@ -409,13 +432,18 @@ async fn regenerate_sample_report() {
     // ═══ Write sample-report/data.json (pretty, reproducible byte-for-byte from this test) ═══
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sample-report");
     let data_json = serde_json::to_string_pretty(&json).expect("serialize AuditReportJson");
-    std::fs::write(repo_root.join("data.json"), data_json + "\n").expect("write sample-report/data.json");
+    std::fs::write(repo_root.join("data.json"), data_json + "\n")
+        .expect("write sample-report/data.json");
 
     // ═══ Build the REAL Excel workbook (the xlsx sibling of the PDF, same data pass) ═══
     let xlsx =
         xlsx_export::build_workbook(&report.clone().seal(), &dispositions, Some(&corpus), &opts)
             .expect("build_workbook must succeed for the sample fixture");
-    assert_eq!(&xlsx[0..2], b"PK", "the workbook must be a valid xlsx (zip) container");
+    assert_eq!(
+        &xlsx[0..2],
+        b"PK",
+        "the workbook must be a valid xlsx (zip) container"
+    );
     std::fs::write(repo_root.join("camerata-sample-audit-findings.xlsx"), &xlsx)
         .expect("write sample-report/camerata-sample-audit-findings.xlsx");
     // Sanity-check the xlsx structure: it must open as a zip and carry a workbook.xml with
@@ -556,7 +584,11 @@ async fn regenerate_sample_report() {
         &provenance,
     )
     .expect("build the sample product zip");
-    assert_eq!(&zip_bytes[0..2], b"PK", "the product-export zip itself must be a valid zip");
+    assert_eq!(
+        &zip_bytes[0..2],
+        b"PK",
+        "the product-export zip itself must be a valid zip"
+    );
     std::fs::write(repo_root.join("camerata-sample-audit.zip"), &zip_bytes)
         .expect("write sample-report/camerata-sample-audit.zip");
     eprintln!(

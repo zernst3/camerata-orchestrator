@@ -508,7 +508,10 @@ impl PathHygiene {
                 h.offending_rows += 1;
                 // Keep the LONGEST offender: prose paths are the hardest to recognise from a
                 // count alone, and they are the long ones.
-                if h.worst_example.as_ref().is_none_or(|w| w.len() < path.len()) {
+                if h.worst_example
+                    .as_ref()
+                    .is_none_or(|w| w.len() < path.len())
+                {
                     h.worst_example = Some(path.chars().take(160).collect());
                 }
             }
@@ -806,7 +809,14 @@ impl ScanLedger {
         let (tier, files_evaluated, existing_note, existing_not_applicable) = self
             .rules
             .get(&rule_id)
-            .map(|e| (e.tier, e.files_evaluated, e.coverage_note.clone(), e.not_applicable))
+            .map(|e| {
+                (
+                    e.tier,
+                    e.files_evaluated,
+                    e.coverage_note.clone(),
+                    e.not_applicable,
+                )
+            })
             .unwrap_or((RuleTier::ExternalTool, 0, None, false));
         let coverage_note = existing_note.or_else(|| {
             self.config_gated_pending
@@ -1811,13 +1821,20 @@ mod tests {
     fn req_w13_a_corpus_load_failure_is_recorded_as_not_run_and_never_verified_clean() {
         let mut ledger = ScanLedger::new();
         // A healthy rule beside it, so this is not passing merely because nothing is credited.
-        ledger.record_rule("SEC-NO-RAW-SQL-CONCAT-1", RuleTier::Deterministic, true, None, 3, 0);
+        ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            RuleTier::Deterministic,
+            true,
+            None,
+            3,
+            0,
+        );
         ledger.record_corpus_load_failure("SEC-NO-SILENT-CORPUS-DROP-1");
 
-        let entry = ledger
-            .rule("SEC-NO-SILENT-CORPUS-DROP-1")
-            .expect("the ledger must carry an entry for a rule file that would not parse — \
-                    ABSENT is the defect");
+        let entry = ledger.rule("SEC-NO-SILENT-CORPUS-DROP-1").expect(
+            "the ledger must carry an entry for a rule file that would not parse — \
+                    ABSENT is the defect",
+        );
         assert!(!entry.ran, "a rule that never loaded never ran");
         assert!(
             !entry.verified_clean(),
@@ -1845,8 +1862,10 @@ mod tests {
         let hit = excluded
             .iter()
             .find(|(id, _)| *id == "SEC-NO-SILENT-CORPUS-DROP-1")
-            .expect("it must appear in `excluded_rules()`, which is what the report JSON's \
-                    `rules_not_run` and the workbook's coverage sheet both render from");
+            .expect(
+                "it must appear in `excluded_rules()`, which is what the report JSON's \
+                    `rules_not_run` and the workbook's coverage sheet both render from",
+            );
         assert_eq!(
             hit.1, CORPUS_LOAD_FAILED_REASON,
             "the reason must be the shared constant verbatim, so the gate's classifier cannot \
@@ -1869,7 +1888,15 @@ mod tests {
             .and_then(|e| e.skip_reason.clone())
             .expect("a reason must be recorded");
 
-        for leak in [".toml", "/", "\\", "TOML", "toml", "parse error", "expected"] {
+        for leak in [
+            ".toml",
+            "/",
+            "\\",
+            "TOML",
+            "toml",
+            "parse error",
+            "expected",
+        ] {
             assert!(
                 !reason.contains(leak),
                 "the client-facing reason must not contain {leak:?}: {reason}"
@@ -1947,8 +1974,14 @@ mod tests {
         ledger.record_corpus_load_failure("SEC-NO-RAW-SQL-CONCAT-1");
 
         let entry = ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
-        assert!(entry.ran, "a rule that genuinely ran must not be downgraded");
-        assert_eq!(entry.findings_emitted, 3, "real findings must not be erased");
+        assert!(
+            entry.ran,
+            "a rule that genuinely ran must not be downgraded"
+        );
+        assert_eq!(
+            entry.findings_emitted, 3,
+            "real findings must not be erased"
+        );
         assert_eq!(entry.files_evaluated, 7);
         assert_eq!(entry.tier, RuleTier::Deterministic);
         assert!(

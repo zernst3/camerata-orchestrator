@@ -48,7 +48,10 @@ pub fn functions(source: &str) -> Vec<FunctionSpan> {
     let Ok(file) = syn::parse_file(source) else {
         return Vec::new();
     };
-    let mut visitor = FnVisitor { source, out: Vec::new() };
+    let mut visitor = FnVisitor {
+        source,
+        out: Vec::new(),
+    };
     visitor.visit_file(&file);
     visitor.out
 }
@@ -95,7 +98,12 @@ impl<'ast> Visit<'ast> for ImportVisitor {
 /// accumulated path-segment `prefix` (only `UseTree::Path` segments contribute to it — the
 /// final leaf segment becomes `names`, not part of `specifier`, matching the design's
 /// "module path + imported symbol" split).
-fn walk_use_tree(tree: &syn::UseTree, prefix: &mut Vec<String>, line: usize, out: &mut Vec<Import>) {
+fn walk_use_tree(
+    tree: &syn::UseTree,
+    prefix: &mut Vec<String>,
+    line: usize,
+    out: &mut Vec<Import>,
+) {
     match tree {
         syn::UseTree::Path(p) => {
             prefix.push(p.ident.to_string());
@@ -273,9 +281,13 @@ mod tests {
     fn grouped_import_with_alias_and_plain() {
         let vs = imports("use foo::bar::{Baz, Qux as Quux};\n");
         assert_eq!(vs.len(), 2, "{vs:#?}");
-        assert!(vs.iter().any(|i| i.specifier == "foo::bar" && i.names == vec!["Baz".to_string()]));
+        assert!(vs
+            .iter()
+            .any(|i| i.specifier == "foo::bar" && i.names == vec!["Baz".to_string()]));
         // Aliased leaf records the ORIGIN name (Qux), not the local alias (Quux).
-        assert!(vs.iter().any(|i| i.specifier == "foo::bar" && i.names == vec!["Qux".to_string()]));
+        assert!(vs
+            .iter()
+            .any(|i| i.specifier == "foo::bar" && i.names == vec!["Qux".to_string()]));
     }
 
     #[test]
@@ -291,7 +303,9 @@ mod tests {
     fn self_leaf_imports_the_module_itself() {
         let vs = imports("use foo::bar::{self, Baz};\n");
         assert_eq!(vs.len(), 2, "{vs:#?}");
-        assert!(vs.iter().any(|i| i.specifier == "foo::bar" && i.kind == ImportKind::Namespace && i.names.is_empty()));
+        assert!(vs.iter().any(|i| i.specifier == "foo::bar"
+            && i.kind == ImportKind::Namespace
+            && i.names.is_empty()));
         assert!(vs.iter().any(|i| i.names == vec!["Baz".to_string()]));
     }
 
@@ -314,7 +328,9 @@ mod tests {
     #[test]
     fn fn_local_use_is_found() {
         let vs = imports("fn f() {\n    use std::collections::HashMap;\n    let _m: HashMap<u8,u8> = HashMap::new();\n}\n");
-        assert!(vs.iter().any(|i| i.specifier == "std::collections" && i.names == vec!["HashMap".to_string()]));
+        assert!(vs
+            .iter()
+            .any(|i| i.specifier == "std::collections" && i.names == vec!["HashMap".to_string()]));
     }
 
     // ── functions ─────────────────────────────────────────────────────────────
@@ -386,8 +402,12 @@ mod tests {
     fn chained_calls_both_captured() {
         let cs = method_calls("fn h() {\n    self.db.query().execute();\n}\n");
         assert_eq!(cs.len(), 2, "{cs:#?}");
-        assert!(cs.iter().any(|c| c.method == "query" && c.receiver == "self.db"));
-        assert!(cs.iter().any(|c| c.method == "execute" && c.receiver == "<expr>"));
+        assert!(cs
+            .iter()
+            .any(|c| c.method == "query" && c.receiver == "self.db"));
+        assert!(cs
+            .iter()
+            .any(|c| c.method == "execute" && c.receiver == "<expr>"));
     }
 
     // ── adversarial: malformed / truncated input must never panic ────────────

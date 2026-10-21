@@ -191,7 +191,10 @@ mod tests {
 
     #[test]
     fn done_and_blocked_get_distinct_terminal_labels() {
-        assert_eq!(empty_output_label("done"), "finished \u{2014} no output captured");
+        assert_eq!(
+            empty_output_label("done"),
+            "finished \u{2014} no output captured"
+        );
         assert_eq!(empty_output_label("blocked"), "blocked \u{2014} no output");
     }
 
@@ -247,7 +250,10 @@ mod tests {
         assert_eq!(agents[0].status, "running");
         assert_eq!(agents[0].prompt, "Generated prompt for the PO agent.");
         assert_eq!(agents[1].status, "blocked");
-        assert_eq!(agents[1].output, "", "the empty-output (thinking) case round-trips");
+        assert_eq!(
+            agents[1].output, "",
+            "the empty-output (thinking) case round-trips"
+        );
         // `.expect(1)` on the mock asserts (on server drop) the helper hit GET /api/runs/run-42/agents
         // exactly once — i.e. it interpolated the run_id into the path correctly.
     }
@@ -274,7 +280,10 @@ mod tests {
         let result = super::fetch_agents("run-9").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert!(result.is_none(), "a body that doesn't match AgentTranscript yields None");
+        assert!(
+            result.is_none(),
+            "a body that doesn't match AgentTranscript yields None"
+        );
     }
 
     // ── Tier-1 UI test: render the AgentActivity component to HTML headlessly ─────

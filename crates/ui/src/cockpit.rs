@@ -29,7 +29,6 @@ pub(crate) use chorale_dioxus::{use_table, RowCellRenderer, RowCellRenderers, Ro
 
 // ── Projects ───────────────────────────────────────────────────────────────────
 
-
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct RuleSelectionView {
     rule_id: String,
@@ -189,13 +188,34 @@ struct HierarchySchemaView {
 /// The default palette the builder offers (the common Scrum/ADO types). A short explanation per type
 /// powers the `(i)` hover so people new to the terminology are not lost.
 const DEFAULT_TYPE_PALETTE: &[(&str, &str)] = &[
-    ("Initiative", "A large, cross-team goal spanning multiple epics; the top of the ladder."),
-    ("Epic", "A large body of work delivered over multiple sprints, decomposed into features/stories."),
-    ("Feature", "A shippable capability under an epic; groups the stories that build it."),
-    ("Story", "A user-facing increment of value, small enough to finish in a sprint."),
-    ("Defect", "A flaw in delivered work that must be corrected; tracked alongside stories."),
-    ("Task", "A unit of implementation work under a story; often a technical step."),
-    ("Bug", "A specific coding error to fix; the smallest defect-style item."),
+    (
+        "Initiative",
+        "A large, cross-team goal spanning multiple epics; the top of the ladder.",
+    ),
+    (
+        "Epic",
+        "A large body of work delivered over multiple sprints, decomposed into features/stories.",
+    ),
+    (
+        "Feature",
+        "A shippable capability under an epic; groups the stories that build it.",
+    ),
+    (
+        "Story",
+        "A user-facing increment of value, small enough to finish in a sprint.",
+    ),
+    (
+        "Defect",
+        "A flaw in delivered work that must be corrected; tracked alongside stories.",
+    ),
+    (
+        "Task",
+        "A unit of implementation work under a story; often a technical step.",
+    ),
+    (
+        "Bug",
+        "A specific coding error to fix; the smallest defect-style item.",
+    ),
 ];
 
 // ── Pure schema mutations (unit-tested; the component calls these on its working copy) ──────────
@@ -207,14 +227,20 @@ fn schema_add_type(schema: &mut HierarchySchemaView, name: &str, builtin: bool) 
     if name.is_empty() || schema.types.iter().any(|t| t.name == name) {
         return false;
     }
-    schema.types.push(WorkTypeView { name: name.to_string(), builtin, is_design_root: false });
+    schema.types.push(WorkTypeView {
+        name: name.to_string(),
+        builtin,
+        is_design_root: false,
+    });
     true
 }
 
 /// Remove a type AND every relation that references it (so no dangling edges remain).
 fn schema_remove_type(schema: &mut HierarchySchemaView, name: &str) {
     schema.types.retain(|t| t.name != name);
-    schema.relations.retain(|r| r.parent != name && r.child != name);
+    schema
+        .relations
+        .retain(|r| r.parent != name && r.child != name);
 }
 
 /// Toggle whether a type may be a design root (the top of a design tree).
@@ -255,28 +281,39 @@ fn schema_add_relation(
     if parent == child {
         return Err("a type cannot nest under itself");
     }
-    if schema.relations.iter().any(|r| r.parent == parent && r.child == child) {
+    if schema
+        .relations
+        .iter()
+        .any(|r| r.parent == parent && r.child == child)
+    {
         return Err("that nesting already exists");
     }
     if schema_would_cycle(schema, parent, child) {
         return Err("that would create a cycle");
     }
-    schema
-        .relations
-        .push(TypeRelationView { parent: parent.to_string(), child: child.to_string() });
+    schema.relations.push(TypeRelationView {
+        parent: parent.to_string(),
+        child: child.to_string(),
+    });
     Ok(())
 }
 
 /// Remove an allowed `parent → child` nesting.
 fn schema_remove_relation(schema: &mut HierarchySchemaView, parent: &str, child: &str) {
-    schema.relations.retain(|r| !(r.parent == parent && r.child == child));
+    schema
+        .relations
+        .retain(|r| !(r.parent == parent && r.child == child));
 }
 
 /// Save the project's work hierarchy schema (the whole graph) — the drag-and-drop builder's Save.
 /// POSTs the schema object directly (the server handler deserializes a `HierarchySchema` body).
 async fn set_hierarchy_schema(id: &str, schema: &HierarchySchemaView) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/hierarchy", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/projects/{}/hierarchy",
+            crate::bff_base(),
+            id
+        ))
         .json(schema)
         .send()
         .await
@@ -468,7 +505,11 @@ async fn set_active_project(id: &str) -> bool {
 /// all bands are always sent so a single round-trip sets the whole map.
 async fn set_project_tier_map(id: &str, map: &TierMapView) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/tier-map", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/projects/{}/tier-map",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({
             "fast":     map.fast,
             "balanced": map.balanced,
@@ -485,7 +526,11 @@ async fn set_project_tier_map(id: &str, map: &TierMapView) -> bool {
 /// Uses `POST /api/projects/:id/vision-enabled {enabled: bool}`.
 pub(super) async fn set_project_vision_enabled(id: &str, enabled: bool) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/vision-enabled", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/projects/{}/vision-enabled",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({ "enabled": enabled }))
         .send()
         .await
@@ -507,7 +552,10 @@ pub(super) async fn set_project_vision_enabled(id: &str, enabled: bool) -> bool 
 /// compliance-relevant setting, so the UI must reflect what the server actually persisted, never
 /// an optimistic guess that silently drifted from it. Returns `None` on any failure (network,
 /// non-2xx, unparseable body, unknown project, or an explicit `ok: false`).
-pub(super) async fn set_project_backend(id: &str, backend: ProjectBackend) -> Option<ProjectBackend> {
+pub(super) async fn set_project_backend(
+    id: &str,
+    backend: ProjectBackend,
+) -> Option<ProjectBackend> {
     let resp = reqwest::Client::new()
         .post(format!("{}/api/projects/{}/backend", crate::bff_base(), id))
         .json(&serde_json::json!({ "backend": backend.as_wire() }))
@@ -532,7 +580,11 @@ pub(super) async fn set_project_backend(id: &str, backend: ProjectBackend) -> Op
 /// endpoint and keep Audit + Calibration bidirectionally synced.
 pub(super) async fn set_project_step_model(id: &str, step: &str, model: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/step-models", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/projects/{}/step-models",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({ "step": step, "model": model }))
         .send()
         .await
@@ -560,7 +612,11 @@ async fn set_max_iterations(id: &str, max_iterations: usize) -> bool {
 /// Save the project's free-text product brief (#112).
 async fn set_product_brief(id: &str, brief: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/product-brief", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/projects/{}/product-brief",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({ "product_brief": brief }))
         .send()
         .await
@@ -582,7 +638,12 @@ async fn add_memory_entry(id: &str, kind: &str, text: &str) -> bool {
 /// Patch a memory entry's status (`"approved"` | `"archived"` | `"proposed"`).
 async fn patch_memory_status(id: &str, eid: &str, status: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/memory/{}", crate::bff_base(), id, eid))
+        .post(format!(
+            "{}/api/projects/{}/memory/{}",
+            crate::bff_base(),
+            id,
+            eid
+        ))
         .json(&serde_json::json!({ "status": status }))
         .send()
         .await
@@ -593,7 +654,12 @@ async fn patch_memory_status(id: &str, eid: &str, status: &str) -> bool {
 /// Save an edit to a memory entry's text + kind (the view/edit modal).
 async fn save_memory_edit(id: &str, eid: &str, kind: &str, text: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/memory/{}", crate::bff_base(), id, eid))
+        .post(format!(
+            "{}/api/projects/{}/memory/{}",
+            crate::bff_base(),
+            id,
+            eid
+        ))
         .json(&serde_json::json!({ "kind": kind, "text": text }))
         .send()
         .await
@@ -604,7 +670,12 @@ async fn save_memory_edit(id: &str, eid: &str, kind: &str, text: &str) -> bool {
 /// Delete a memory entry (discard a proposal, or prune).
 async fn delete_memory_entry(id: &str, eid: &str) -> bool {
     reqwest::Client::new()
-        .delete(format!("{}/api/projects/{}/memory/{}", crate::bff_base(), id, eid))
+        .delete(format!(
+            "{}/api/projects/{}/memory/{}",
+            crate::bff_base(),
+            id,
+            eid
+        ))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -639,7 +710,11 @@ fn run_mem_action(
         if ok {
             refresh += 1;
         } else {
-            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "That memory action failed.");
+            crate::toast::push_toast(
+                toasts,
+                crate::toast::ToastKind::Error,
+                "That memory action failed.",
+            );
         }
     });
 }
@@ -1183,7 +1258,11 @@ fn MemoryEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
 /// Uses the `POST /api/projects/:id/l3-review` endpoint (R7).
 async fn set_project_l3_review(id: &str, enabled: bool, model: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/l3-review", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/projects/{}/l3-review",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({ "enabled": enabled, "model": model }))
         .send()
         .await
@@ -1192,7 +1271,10 @@ async fn set_project_l3_review(id: &str, enabled: bool, model: &str) -> bool {
 }
 
 /// Fetch the proposed model assignments for a profile WITHOUT applying them.
-pub(super) async fn preview_model_profile(project_id: &str, profile: &str) -> Option<serde_json::Value> {
+pub(super) async fn preview_model_profile(
+    project_id: &str,
+    profile: &str,
+) -> Option<serde_json::Value> {
     reqwest::get(format!(
         "{}/api/projects/{}/model-profile/preview?profile={}",
         crate::bff_base(),
@@ -1207,9 +1289,16 @@ pub(super) async fn preview_model_profile(project_id: &str, profile: &str) -> Op
 }
 
 /// Apply a profile to a project (set profile + cascade + auto-save).
-pub(super) async fn apply_model_profile(project_id: &str, profile: &str) -> Option<serde_json::Value> {
+pub(super) async fn apply_model_profile(
+    project_id: &str,
+    profile: &str,
+) -> Option<serde_json::Value> {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/model-profile", crate::bff_base(), project_id))
+        .post(format!(
+            "{}/api/projects/{}/model-profile",
+            crate::bff_base(),
+            project_id
+        ))
         .json(&serde_json::json!({ "profile": profile }))
         .send()
         .await
@@ -1223,7 +1312,11 @@ pub(super) async fn apply_model_profile(project_id: &str, profile: &str) -> Opti
 /// Uses the `POST /api/projects/:id/stall-thresholds` endpoint.
 async fn set_project_stall_thresholds(id: &str, watched_secs: u64, routine_secs: u64) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/stall-thresholds", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/projects/{}/stall-thresholds",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({ "watched_secs": watched_secs, "routine_secs": routine_secs }))
         .send()
         .await
@@ -1419,7 +1512,11 @@ async fn start_dev_run(
 ) -> StartRunOutcome {
     let body = dev_run_body(tier_map, skip_layer2);
     let resp = match reqwest::Client::new()
-        .post(format!("{}/api/stories/{}/run", crate::bff_base(), enc_seg(story_id)))
+        .post(format!(
+            "{}/api/stories/{}/run",
+            crate::bff_base(),
+            enc_seg(story_id)
+        ))
         .json(&body)
         .send()
         .await
@@ -1492,7 +1589,9 @@ async fn post_investigation_run(url: String, model: &str) -> BeginInvestigationO
             .await
             .ok()
             .and_then(|v| v.get("reason").and_then(|r| r.as_str().map(String::from)))
-            .unwrap_or_else(|| "The investigation could not begin from the current stage.".to_string());
+            .unwrap_or_else(|| {
+                "The investigation could not begin from the current stage.".to_string()
+            });
         return BeginInvestigationOutcome::Blocked(reason);
     }
     if !resp.status().is_success() {
@@ -1527,7 +1626,10 @@ async fn begin_investigation_run(story_id: &str, model: &str) -> BeginInvestigat
 /// repeat the Intake → Investigating transition (see `uow_rerun_investigation` server-side),
 /// so this is safe to call any time the UoW is in the Investigation & Refinement phase —
 /// including right after a run that produced no output, or one that failed.
-pub(crate) async fn rerun_investigation_run(story_id: &str, model: &str) -> BeginInvestigationOutcome {
+pub(crate) async fn rerun_investigation_run(
+    story_id: &str,
+    model: &str,
+) -> BeginInvestigationOutcome {
     post_investigation_run(
         format!(
             "{}/api/uow/{}/rerun-investigation",
@@ -3201,13 +3303,12 @@ pub use scan::*;
 pub use table::*;
 pub use uow::*;
 
-
 #[cfg(test)]
 mod tests {
     use super::{
         dev_run_body, is_enforced_floor, run_is_cancellable, run_status_badge, FindingView,
-        JobStatusEnvelope, JobStateView, ProjectBackend, RunGateEvent, RunView, StallThresholdsView,
-        TierMapView,
+        JobStateView, JobStatusEnvelope, ProjectBackend, RunGateEvent, RunView,
+        StallThresholdsView, TierMapView,
     };
 
     /// The job-state view deserializes the server's `deterministic` progress section
@@ -3236,7 +3337,10 @@ mod tests {
         let legacy: JobStateView =
             serde_json::from_str(r#"{"status":"running","done":1,"total":4,"findings":[]}"#)
                 .unwrap();
-        assert_eq!((legacy.deterministic.done, legacy.deterministic.total), (0, 0));
+        assert_eq!(
+            (legacy.deterministic.done, legacy.deterministic.total),
+            (0, 0)
+        );
         assert!(legacy.deterministic.tools.is_empty());
     }
 
@@ -3258,7 +3362,7 @@ mod tests {
         assert_eq!(fmt_tokens(1_500), "1.5k");
         assert_eq!(fmt_tokens(3_400), "3.4k");
         assert_eq!(fmt_tokens(999_999), "1000.0k"); // still below the 1M cutoff
-        // Millions: one decimal place + `M`.
+                                                    // Millions: one decimal place + `M`.
         assert_eq!(fmt_tokens(1_000_000), "1.0M");
         assert_eq!(fmt_tokens(1_200_000), "1.2M");
     }
@@ -3322,7 +3426,10 @@ mod tests {
 
         // ON: the flag is present and true; tier_map is unchanged.
         let on = dev_run_body(&tm, true);
-        assert_eq!(on.get("skip_layer2").unwrap(), &serde_json::Value::Bool(true));
+        assert_eq!(
+            on.get("skip_layer2").unwrap(),
+            &serde_json::Value::Bool(true)
+        );
         let tier = on.get("tier_map").expect("tier_map still present");
         assert_eq!(tier.get("strongest").unwrap(), "opus-x");
         // Exactly tier_map + skip_layer2.
@@ -3385,7 +3492,10 @@ mod tests {
         }];
         let tip = verif_sources_tooltip(&sources);
         assert!(tip.contains("Example rule"), "title absent: {tip}");
-        assert!(tip.contains("eslint: no-unused-vars"), "linter absent: {tip}");
+        assert!(
+            tip.contains("eslint: no-unused-vars"),
+            "linter absent: {tip}"
+        );
     }
 
     #[test]
@@ -3402,8 +3512,16 @@ mod tests {
     #[test]
     fn verif_sources_tooltip_multiple_sources_joined_with_separator() {
         let sources = vec![
-            RuleSourceView { url: "u1".to_string(), title: "Source A".to_string(), linter: None },
-            RuleSourceView { url: "u2".to_string(), title: "Source B".to_string(), linter: Some("tool: rule".to_string()) },
+            RuleSourceView {
+                url: "u1".to_string(),
+                title: "Source A".to_string(),
+                linter: None,
+            },
+            RuleSourceView {
+                url: "u2".to_string(),
+                title: "Source B".to_string(),
+                linter: Some("tool: rule".to_string()),
+            },
         ];
         let tip = verif_sources_tooltip(&sources);
         // Both titles must appear; the separator is " · " (middle dot).
@@ -3427,7 +3545,11 @@ mod tests {
 
     use super::{FeatureFlagMap, ProposedRuleView};
 
-    fn make_proposed_rule(recommended: bool, verification: &str, is_auto_recommended: bool) -> ProposedRuleView {
+    fn make_proposed_rule(
+        recommended: bool,
+        verification: &str,
+        is_auto_recommended: bool,
+    ) -> ProposedRuleView {
         ProposedRuleView {
             id: "TEST-1".to_string(),
             title: "Test rule".to_string(),
@@ -3453,7 +3575,10 @@ mod tests {
     #[test]
     fn effective_auto_recommended_server_true_pre_checks() {
         let r = make_proposed_rule(false, "draft", true);
-        assert!(r.effective_auto_recommended(), "server flag true must pre-check");
+        assert!(
+            r.effective_auto_recommended(),
+            "server flag true must pre-check"
+        );
     }
 
     /// Server sends `is_auto_recommended: false` → rule is NOT pre-checked,
@@ -3488,21 +3613,30 @@ mod tests {
     #[test]
     fn effective_auto_recommended_server_false_draft_not_pre_checked() {
         let r = make_proposed_rule(true, "draft", false);
-        assert!(!r.effective_auto_recommended(), "draft rules with server false must not be pre-checked");
+        assert!(
+            !r.effective_auto_recommended(),
+            "draft rules with server false must not be pre-checked"
+        );
     }
 
     /// `needs_recheck` with server false is not pre-checked.
     #[test]
     fn effective_auto_recommended_server_false_needs_recheck_not_pre_checked() {
         let r = make_proposed_rule(true, "needs_recheck", false);
-        assert!(!r.effective_auto_recommended(), "needs_recheck with server false must not be pre-checked");
+        assert!(
+            !r.effective_auto_recommended(),
+            "needs_recheck with server false must not be pre-checked"
+        );
     }
 
     /// Not recommended at all with server false: not pre-checked.
     #[test]
     fn effective_auto_recommended_server_false_not_recommended_not_pre_checked() {
         let r = make_proposed_rule(false, "grounded", false);
-        assert!(!r.effective_auto_recommended(), "grounded-but-not-recommended with server false must not be pre-checked");
+        assert!(
+            !r.effective_auto_recommended(),
+            "grounded-but-not-recommended with server false must not be pre-checked"
+        );
     }
 
     // ── pw/cockpit-ui: Feature 5 — FeatureFlagMap deserialization ─────────────
@@ -3536,7 +3670,11 @@ mod tests {
         let json = r#"{"soc2": true, "future_flag": true, "another": 42}"#;
         let m: FeatureFlagMap = serde_json::from_str(json).unwrap();
         assert!(m.soc2, "soc2 should still parse when extra keys present");
-        assert_eq!(m.extra.len(), 2, "extra keys should be absorbed into the extra map");
+        assert_eq!(
+            m.extra.len(),
+            2,
+            "extra keys should be absorbed into the extra map"
+        );
     }
 
     #[test]
@@ -3682,7 +3820,11 @@ mod tests {
         // max_depth = 2 → tiers = 2 → each row has 2 hierarchy cols (one per ancestor
         // tier; the item itself is the row, not an extra tier).
         for row in &rows {
-            assert_eq!(row.hierarchy_cols.len(), 2, "all rows have 2 cols at max_depth=2");
+            assert_eq!(
+                row.hierarchy_cols.len(),
+                2,
+                "all rows have 2 cols at max_depth=2"
+            );
         }
 
         // Root (number 1, depth 0, has children): own label in both tiers.
@@ -3742,13 +3884,25 @@ mod tests {
         let section = render_pulled_issues_for_chat(&items);
 
         // Root at depth 0: no indent.
-        assert!(section.contains("- #1 [open]: Issue 1\n"), "root at no indent");
+        assert!(
+            section.contains("- #1 [open]: Issue 1\n"),
+            "root at no indent"
+        );
         // Child at depth 1: 2-space indent.
-        assert!(section.contains("  - #2 [open]: Issue 2\n"), "child 2-space indent");
+        assert!(
+            section.contains("  - #2 [open]: Issue 2\n"),
+            "child 2-space indent"
+        );
         // Grandchild at depth 2: 4-space indent.
-        assert!(section.contains("    - #3 [open]: Issue 3\n"), "grandchild 4-space indent");
+        assert!(
+            section.contains("    - #3 [open]: Issue 3\n"),
+            "grandchild 4-space indent"
+        );
         // Standalone at depth 0: no indent.
-        assert!(section.contains("- #9 [open]: Issue 9\n"), "standalone no indent");
+        assert!(
+            section.contains("- #9 [open]: Issue 9\n"),
+            "standalone no indent"
+        );
         // No "Epic" wording in output.
         assert!(!section.contains("Epic"), "no Epic wording in chat output");
     }
@@ -3758,7 +3912,10 @@ mod tests {
         // Child whose parent (99) is not in the list: rendered at depth 0.
         let orphan = make_wi(5, Some(99));
         let section = render_pulled_issues_for_chat(&[orphan]);
-        assert!(section.contains("- #5 [open]: Issue 5\n"), "orphan at root level");
+        assert!(
+            section.contains("- #5 [open]: Issue 5\n"),
+            "orphan at root level"
+        );
     }
 
     #[test]
@@ -3778,7 +3935,10 @@ mod tests {
 
     #[test]
     fn create_or_open_label_dedup_logic() {
-        assert_eq!(create_or_open_label(false), "Create Unit of Work from this issue");
+        assert_eq!(
+            create_or_open_label(false),
+            "Create Unit of Work from this issue"
+        );
         assert_eq!(create_or_open_label(true), "Open Unit of Work");
     }
 
@@ -3833,11 +3993,17 @@ mod tests {
     #[test]
     fn apply_mention_selection_replaces_trailing_token() {
         // Completes the active partial with the chosen login + trailing space.
-        assert_eq!(apply_mention_selection("hey @oct", "octocat"), "hey @octocat ");
+        assert_eq!(
+            apply_mention_selection("hey @oct", "octocat"),
+            "hey @octocat "
+        );
         // A bare `@` completes to the full handle.
         assert_eq!(apply_mention_selection("hey @", "hubot"), "hey @hubot ");
         // No active token -> appends a mention (with a separating space).
-        assert_eq!(apply_mention_selection("hello", "octocat"), "hello @octocat ");
+        assert_eq!(
+            apply_mention_selection("hello", "octocat"),
+            "hello @octocat "
+        );
         // Appending onto empty input needs no leading space.
         assert_eq!(apply_mention_selection("", "octocat"), "@octocat ");
     }
@@ -3873,15 +4039,17 @@ mod tests {
         let item: WorkItem = serde_json::from_str(json).unwrap();
         assert_eq!(item.id, "github:acme/web#42");
         assert_eq!(item.number, 42);
-        assert_eq!(item.labels, vec!["enhancement".to_string(), "ui".to_string()]);
+        assert_eq!(
+            item.labels,
+            vec!["enhancement".to_string(), "ui".to_string()]
+        );
         assert_eq!(labels_summary(&item.labels), "enhancement, ui");
     }
 
     // ── CiRulesPanel helpers ───────────────────────────────────────────────────
 
     use super::{
-        ci_rule_items_from_proposed, ci_rule_items_from_selections, first_linter,
-        RuleSelectionView,
+        ci_rule_items_from_proposed, ci_rule_items_from_selections, first_linter, RuleSelectionView,
     };
 
     fn make_rule(id: &str, enforcement: &str, linter: Option<&str>) -> ProposedRuleView {
@@ -3903,11 +4071,13 @@ mod tests {
             is_auto_recommended: false,
             verification: "draft".to_string(),
             sources: linter
-                .map(|l| vec![RuleSourceView {
-                    url: "https://example.com".to_string(),
-                    title: "Source".to_string(),
-                    linter: Some(l.to_string()),
-                }])
+                .map(|l| {
+                    vec![RuleSourceView {
+                        url: "https://example.com".to_string(),
+                        title: "Source".to_string(),
+                        linter: Some(l.to_string()),
+                    }]
+                })
                 .unwrap_or_default(),
         }
     }
@@ -3922,7 +4092,11 @@ mod tests {
             make_rule("PROSE-1", "prose", None),
         ];
         let items = ci_rule_items_from_proposed(&rules);
-        assert_eq!(items.len(), 2, "only mechanical + architectural should pass");
+        assert_eq!(
+            items.len(),
+            2,
+            "only mechanical + architectural should pass"
+        );
         assert!(items.iter().any(|i| i.id == "MECH-1"));
         assert!(items.iter().any(|i| i.id == "ARCH-1"));
         assert!(!items.iter().any(|i| i.id == "STRUCT-1"));
@@ -3932,7 +4106,11 @@ mod tests {
     /// The linter is carried through from the first source with one.
     #[test]
     fn ci_rule_items_from_proposed_carries_linter_from_first_source() {
-        let rules = vec![make_rule("MECH-1", "mechanical", Some("eslint: no-unused-vars"))];
+        let rules = vec![make_rule(
+            "MECH-1",
+            "mechanical",
+            Some("eslint: no-unused-vars"),
+        )];
         let items = ci_rule_items_from_proposed(&rules);
         assert_eq!(items[0].linter.as_deref(), Some("eslint: no-unused-vars"));
     }
@@ -3960,9 +4138,21 @@ mod tests {
             make_rule("PROSE-1", "prose", None),
         ];
         let selections = vec![
-            RuleSelectionView { rule_id: "MECH-1".to_string(), chosen_option: None, repos: vec![] },
-            RuleSelectionView { rule_id: "ARCH-1".to_string(), chosen_option: None, repos: vec![] },
-            RuleSelectionView { rule_id: "PROSE-1".to_string(), chosen_option: None, repos: vec![] },
+            RuleSelectionView {
+                rule_id: "MECH-1".to_string(),
+                chosen_option: None,
+                repos: vec![],
+            },
+            RuleSelectionView {
+                rule_id: "ARCH-1".to_string(),
+                chosen_option: None,
+                repos: vec![],
+            },
+            RuleSelectionView {
+                rule_id: "PROSE-1".to_string(),
+                chosen_option: None,
+                repos: vec![],
+            },
         ];
         let items = ci_rule_items_from_selections(&selections, &corpus);
         assert_eq!(items.len(), 2, "prose should be excluded");
@@ -3975,8 +4165,16 @@ mod tests {
     fn ci_rule_items_from_selections_drops_unknown_rule_ids() {
         let corpus = vec![make_rule("MECH-1", "mechanical", None)];
         let selections = vec![
-            RuleSelectionView { rule_id: "MECH-1".to_string(), chosen_option: None, repos: vec![] },
-            RuleSelectionView { rule_id: "GHOST-99".to_string(), chosen_option: None, repos: vec![] },
+            RuleSelectionView {
+                rule_id: "MECH-1".to_string(),
+                chosen_option: None,
+                repos: vec![],
+            },
+            RuleSelectionView {
+                rule_id: "GHOST-99".to_string(),
+                chosen_option: None,
+                repos: vec![],
+            },
         ];
         let items = ci_rule_items_from_selections(&selections, &corpus);
         assert_eq!(items.len(), 1);
@@ -3988,8 +4186,16 @@ mod tests {
     fn first_linter_returns_first_nonempty_linter() {
         let rule = ProposedRuleView {
             sources: vec![
-                RuleSourceView { url: "u1".to_string(), title: "S1".to_string(), linter: None },
-                RuleSourceView { url: "u2".to_string(), title: "S2".to_string(), linter: Some("mypy".to_string()) },
+                RuleSourceView {
+                    url: "u1".to_string(),
+                    title: "S1".to_string(),
+                    linter: None,
+                },
+                RuleSourceView {
+                    url: "u2".to_string(),
+                    title: "S2".to_string(),
+                    linter: Some("mypy".to_string()),
+                },
             ],
             ..make_rule("R-1", "mechanical", None)
         };
@@ -4045,7 +4251,10 @@ mod tests {
                 "snippet":"x","detail":"d"}"#,
         )
         .unwrap();
-        assert!(!floor.preview, "absent preview field defaults to false (back-compat)");
+        assert!(
+            !floor.preview,
+            "absent preview field defaults to false (back-compat)"
+        );
         assert_eq!(authority_label(&floor), "enforced");
 
         // An AI-advisory finding (no preview, not a floor id) stays "advisory".
@@ -4154,7 +4363,8 @@ mod tests {
     #[test]
     fn stall_thresholds_view_defaults() {
         // With both fields present.
-        let s: StallThresholdsView = serde_json::from_str(r#"{"watched_secs":60,"routine_secs":300}"#).unwrap();
+        let s: StallThresholdsView =
+            serde_json::from_str(r#"{"watched_secs":60,"routine_secs":300}"#).unwrap();
         assert_eq!(s.watched_secs, 60);
         assert_eq!(s.routine_secs, 300);
         // Back-compat: no fields → defaults. LIFECYCLE-6: the routine (autonomous) default is
@@ -4344,7 +4554,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects"))
-            .and(body_json(serde_json::json!({ "name": "New", "repos": ["acme/web"] })))
+            .and(body_json(
+                serde_json::json!({ "name": "New", "repos": ["acme/web"] }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "project": { "id": "p-new", "name": "New", "repos": ["acme/web"] }
             })))
@@ -4372,7 +4584,9 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/projects/active"))
             .and(body_json(serde_json::json!({ "id": "p-7" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -4521,7 +4735,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/step-models"))
-            .and(body_json(serde_json::json!({ "step": "audit", "model": "claude-opus-5" })))
+            .and(body_json(
+                serde_json::json!({ "step": "audit", "model": "claude-opus-5" }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
@@ -4548,7 +4764,9 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/api/projects/p-9/step-models"))
-                .and(body_json(serde_json::json!({ "step": step, "model": "claude-sonnet-5" })))
+                .and(body_json(
+                    serde_json::json!({ "step": step, "model": "claude-sonnet-5" }),
+                ))
                 .respond_with(ResponseTemplate::new(200))
                 .expect(1)
                 .mount(&server)
@@ -4558,7 +4776,10 @@ mod tests {
             let ok = super::set_project_step_model("p-9", step, "claude-sonnet-5").await;
             std::env::remove_var("CAMERATA_BFF_URL");
 
-            assert!(ok, "step variant `{step}` POSTs its name verbatim and maps 2xx to true");
+            assert!(
+                ok,
+                "step variant `{step}` POSTs its name verbatim and maps 2xx to true"
+            );
         }
     }
 
@@ -4630,7 +4851,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/product-brief"))
-            .and(body_json(serde_json::json!({ "product_brief": "We build X for Y." })))
+            .and(body_json(
+                serde_json::json!({ "product_brief": "We build X for Y." }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
@@ -4653,7 +4876,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/memory"))
-            .and(body_json(serde_json::json!({ "kind": "gotcha", "text": "Watch the FK index." })))
+            .and(body_json(
+                serde_json::json!({ "kind": "gotcha", "text": "Watch the FK index." }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
@@ -4699,7 +4924,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/memory/e-9"))
-            .and(body_json(serde_json::json!({ "kind": "decision", "text": "Edited." })))
+            .and(body_json(
+                serde_json::json!({ "kind": "decision", "text": "Edited." }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
@@ -4774,7 +5001,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/l3-review"))
-            .and(body_json(serde_json::json!({ "enabled": true, "model": "claude-opus-5" })))
+            .and(body_json(
+                serde_json::json!({ "enabled": true, "model": "claude-opus-5" }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
@@ -4797,7 +5026,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/stall-thresholds"))
-            .and(body_json(serde_json::json!({ "watched_secs": 90, "routine_secs": 450 })))
+            .and(body_json(
+                serde_json::json!({ "watched_secs": 90, "routine_secs": 450 }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
@@ -4963,7 +5194,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/feature-flags"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "soc2": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "soc2": true })),
+            )
             .mount(&server)
             .await;
 
@@ -4992,7 +5225,10 @@ mod tests {
         let flags = super::fetch_feature_flags().await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert!(!flags.soc2, "an error degrades to all-off (the conservative default)");
+        assert!(
+            !flags.soc2,
+            "an error degrades to all-off (the conservative default)"
+        );
     }
 
     /// `fetch_app_chat_model` GETs /api/settings and returns the non-empty chat model.
@@ -5080,7 +5316,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/p-1/reconcile"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
+            )
             .mount(&server)
             .await;
 
@@ -5102,7 +5340,9 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/model-profile"))
             .and(body_json(serde_json::json!({ "profile": "max_quality" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -5126,7 +5366,9 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/projects/p-1/model-profile/preview"))
             .and(query_param("profile", "balanced"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "preview": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "preview": true })),
+            )
             .mount(&server)
             .await;
 
@@ -5151,7 +5393,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/stories/CAM-7/run"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "run-7" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "run-7" })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -5199,7 +5443,9 @@ mod tests {
         std::env::remove_var("CAMERATA_BFF_URL");
 
         match outcome {
-            StartRunOutcome::Blocked(reason) => assert_eq!(reason, "Decisions are not all approved."),
+            StartRunOutcome::Blocked(reason) => {
+                assert_eq!(reason, "Decisions are not all approved.")
+            }
             _ => panic!("expected Blocked"),
         }
     }
@@ -5272,7 +5518,9 @@ mod tests {
         // The helper parses the payload, inserts overwrite:true, and re-serialises.
         Mock::given(method("POST"))
             .and(path("/api/projects/import"))
-            .and(body_json(serde_json::json!({ "name": "Imp", "overwrite": true })))
+            .and(body_json(
+                serde_json::json!({ "name": "Imp", "overwrite": true }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
                 "project": { "id": "p-imp", "name": "Imp" }
@@ -5341,9 +5589,15 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("cockpit-notice-title"), "the title class renders; html=\n{html}");
+        assert!(
+            html.contains("cockpit-notice-title"),
+            "the title class renders; html=\n{html}"
+        );
         // SSR escapes the apostrophe in "Can't" to &#39;, so assert on the apostrophe-free portion.
-        assert!(html.contains("reach the engine"), "the error title; html=\n{html}");
+        assert!(
+            html.contains("reach the engine"),
+            "the error title; html=\n{html}"
+        );
     }
 
     /// `CockpitNotice` "loading" kind renders the distinct "connecting" copy (a different
@@ -5359,15 +5613,24 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("cockpit-notice-title"), "the title class renders; html=\n{html}");
+        assert!(
+            html.contains("cockpit-notice-title"),
+            "the title class renders; html=\n{html}"
+        );
         // The loading title is "Connecting to the engine…" — distinct from the error copy.
-        assert!(html.contains("Connecting to the engine"), "the loading title; html=\n{html}");
+        assert!(
+            html.contains("Connecting to the engine"),
+            "the loading title; html=\n{html}"
+        );
         assert!(
             html.contains("Reaching the local Camerata server"),
             "the loading body; html=\n{html}"
         );
         // It must NOT show the error-kind copy (proves the match picked the loading arm).
-        assert!(!html.contains("isn&#39;t responding"), "loading is not the error variant; html=\n{html}");
+        assert!(
+            !html.contains("isn&#39;t responding"),
+            "loading is not the error variant; html=\n{html}"
+        );
     }
 
     /// `CockpitNotice` with an unknown kind falls back to the empty-state copy.
@@ -5381,7 +5644,10 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("No stories yet"), "the empty-state title; html=\n{html}");
+        assert!(
+            html.contains("No stories yet"),
+            "the empty-state title; html=\n{html}"
+        );
     }
 
     /// `GateSelfCheck` renders its title + the run button before any result is fetched
@@ -5396,9 +5662,15 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("gate-selfcheck"), "the wrapper class; html=\n{html}");
+        assert!(
+            html.contains("gate-selfcheck"),
+            "the wrapper class; html=\n{html}"
+        );
         assert!(html.contains("Gate self-check"), "the title; html=\n{html}");
-        assert!(html.contains("Run gate self-check"), "the run button label; html=\n{html}");
+        assert!(
+            html.contains("Run gate self-check"),
+            "the run button label; html=\n{html}"
+        );
     }
 
     /// `HomeNav` renders the three project-independent tabs (a bound signal prop; no
@@ -5414,12 +5686,18 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("cockpit-nav"), "the nav wrapper; html=\n{html}");
+        assert!(
+            html.contains("cockpit-nav"),
+            "the nav wrapper; html=\n{html}"
+        );
         assert!(html.contains("Projects"), "the Projects tab; html=\n{html}");
         assert!(html.contains("Docs"), "the Docs tab; html=\n{html}");
         assert!(html.contains("Settings"), "the Settings tab; html=\n{html}");
         // Projects is the active view → its button carries the `on` modifier.
-        assert!(html.contains("cockpit-nav-tab on"), "the active tab modifier; html=\n{html}");
+        assert!(
+            html.contains("cockpit-nav-tab on"),
+            "the active tab modifier; html=\n{html}"
+        );
     }
 
     /// `DocsView` renders its two doc tabs + the markdown body wrapper. The body uses
@@ -5435,10 +5713,22 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("docs-view"), "the docs wrapper; html=\n{html}");
-        assert!(html.contains("User Guide"), "the user-guide tab; html=\n{html}");
-        assert!(html.contains("Technical"), "the technical tab; html=\n{html}");
-        assert!(html.contains("docs-body"), "the body wrapper (dangerous_inner_html); html=\n{html}");
+        assert!(
+            html.contains("docs-view"),
+            "the docs wrapper; html=\n{html}"
+        );
+        assert!(
+            html.contains("User Guide"),
+            "the user-guide tab; html=\n{html}"
+        );
+        assert!(
+            html.contains("Technical"),
+            "the technical tab; html=\n{html}"
+        );
+        assert!(
+            html.contains("docs-body"),
+            "the body wrapper (dangerous_inner_html); html=\n{html}"
+        );
     }
 
     /// `UsageMeter` renders its neutral placeholder before the first poll lands (the
@@ -5453,7 +5743,10 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("usage-meter-loading"), "the loading placeholder class; html=\n{html}");
+        assert!(
+            html.contains("usage-meter-loading"),
+            "the loading placeholder class; html=\n{html}"
+        );
     }
 
     // Build a minimal ProjectView fixture from JSON (it has many serde-default
@@ -5469,16 +5762,22 @@ mod tests {
     /// to `Cli`, the same zero-setup default a freshly-created project gets.
     #[test]
     fn project_view_deserializes_backend_with_legacy_absent_default() {
-        assert_eq!(project_fixture().backend, ProjectBackend::Cli, "bare fixture defaults to Cli");
+        assert_eq!(
+            project_fixture().backend,
+            ProjectBackend::Cli,
+            "bare fixture defaults to Cli"
+        );
 
-        let cli: super::ProjectView =
-            serde_json::from_value(serde_json::json!({ "id": "p-1", "name": "Acme", "backend": "cli" }))
-                .expect("valid ProjectView fixture");
+        let cli: super::ProjectView = serde_json::from_value(
+            serde_json::json!({ "id": "p-1", "name": "Acme", "backend": "cli" }),
+        )
+        .expect("valid ProjectView fixture");
         assert_eq!(cli.backend, ProjectBackend::Cli);
 
-        let api: super::ProjectView =
-            serde_json::from_value(serde_json::json!({ "id": "p-1", "name": "Acme", "backend": "api" }))
-                .expect("valid ProjectView fixture");
+        let api: super::ProjectView = serde_json::from_value(
+            serde_json::json!({ "id": "p-1", "name": "Acme", "backend": "api" }),
+        )
+        .expect("valid ProjectView fixture");
         assert_eq!(api.backend, ProjectBackend::Api);
 
         // A project persisted before the migration carries the old `cli_active` key and no
@@ -5488,7 +5787,11 @@ mod tests {
             "id": "p-1", "name": "Acme", "cli_active": true,
         }))
         .expect("valid ProjectView fixture despite the dead cli_active field");
-        assert_eq!(legacy.backend, ProjectBackend::Cli, "legacy cli_active project migrates to Cli");
+        assert_eq!(
+            legacy.backend,
+            ProjectBackend::Cli,
+            "legacy cli_active project migrates to Cli"
+        );
     }
 
     /// `ProductBriefEditor` needs the toast context (use_context::<Signal<Vec<Toast>>>),
@@ -5505,10 +5808,19 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("soft-ctx-card"), "the card wrapper; html=\n{html}");
+        assert!(
+            html.contains("soft-ctx-card"),
+            "the card wrapper; html=\n{html}"
+        );
         assert!(html.contains("Product brief"), "the title; html=\n{html}");
-        assert!(html.contains("soft-ctx-brief"), "the brief textarea; html=\n{html}");
-        assert!(html.contains("Save brief"), "the save button label; html=\n{html}");
+        assert!(
+            html.contains("soft-ctx-brief"),
+            "the brief textarea; html=\n{html}"
+        );
+        assert!(
+            html.contains("Save brief"),
+            "the save button label; html=\n{html}"
+        );
     }
 
     /// `OperatingPrinciplesEditor` (toast context provided) renders the card + add control.
@@ -5524,10 +5836,22 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("soft-ctx-card"), "the card wrapper; html=\n{html}");
-        assert!(html.contains("Operating principles"), "the title; html=\n{html}");
-        assert!(html.contains("op-add"), "the add-principle row; html=\n{html}");
-        assert!(html.contains("Save principles"), "the save button; html=\n{html}");
+        assert!(
+            html.contains("soft-ctx-card"),
+            "the card wrapper; html=\n{html}"
+        );
+        assert!(
+            html.contains("Operating principles"),
+            "the title; html=\n{html}"
+        );
+        assert!(
+            html.contains("op-add"),
+            "the add-principle row; html=\n{html}"
+        );
+        assert!(
+            html.contains("Save principles"),
+            "the save button; html=\n{html}"
+        );
     }
 
     /// `MemoryEditor` (toast context provided) renders the card, the empty-state line
@@ -5544,10 +5868,19 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("soft-ctx-card"), "the card wrapper; html=\n{html}");
+        assert!(
+            html.contains("soft-ctx-card"),
+            "the card wrapper; html=\n{html}"
+        );
         assert!(html.contains("Project memory"), "the title; html=\n{html}");
-        assert!(html.contains("mem-empty"), "the empty-state line (no memory in the fixture); html=\n{html}");
-        assert!(html.contains("mem-kind-select"), "the kind selector; html=\n{html}");
+        assert!(
+            html.contains("mem-empty"),
+            "the empty-state line (no memory in the fixture); html=\n{html}"
+        );
+        assert!(
+            html.contains("mem-kind-select"),
+            "the kind selector; html=\n{html}"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -5589,12 +5922,30 @@ mod tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("Work hierarchy"), "the title; html=\n{html}");
-        assert!(html.contains("hier-palette"), "the type palette; html=\n{html}");
-        assert!(html.contains("hier-type-card"), "a card per type; html=\n{html}");
-        assert!(html.contains("Epic"), "a schema type renders; html=\n{html}");
-        assert!(html.contains("hier-children"), "the children drop zone; html=\n{html}");
-        assert!(html.contains("hier-child-chip"), "an allowed-child chip renders; html=\n{html}");
-        assert!(html.contains("Save hierarchy"), "the save button; html=\n{html}");
+        assert!(
+            html.contains("hier-palette"),
+            "the type palette; html=\n{html}"
+        );
+        assert!(
+            html.contains("hier-type-card"),
+            "a card per type; html=\n{html}"
+        );
+        assert!(
+            html.contains("Epic"),
+            "a schema type renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("hier-children"),
+            "the children drop zone; html=\n{html}"
+        );
+        assert!(
+            html.contains("hier-child-chip"),
+            "an allowed-child chip renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("Save hierarchy"),
+            "the save button; html=\n{html}"
+        );
     }
 
     // ── Pure schema-mutation logic (the highest-ROI layer) ──────────────────────
@@ -5603,8 +5954,14 @@ mod tests {
     fn schema_add_type_dedups_and_ignores_blank() {
         let mut s = super::HierarchySchemaView::default();
         assert!(super::schema_add_type(&mut s, "Epic", true));
-        assert!(!super::schema_add_type(&mut s, "Epic", true), "no duplicate");
-        assert!(!super::schema_add_type(&mut s, "   ", false), "blank ignored");
+        assert!(
+            !super::schema_add_type(&mut s, "Epic", true),
+            "no duplicate"
+        );
+        assert!(
+            !super::schema_add_type(&mut s, "   ", false),
+            "blank ignored"
+        );
         assert_eq!(s.types.len(), 1);
     }
 
@@ -5616,7 +5973,10 @@ mod tests {
         super::schema_add_relation(&mut s, "Epic", "Feature").unwrap();
         super::schema_remove_type(&mut s, "Feature");
         assert!(s.types.iter().all(|t| t.name != "Feature"));
-        assert!(s.relations.is_empty(), "the relation referencing Feature is removed too");
+        assert!(
+            s.relations.is_empty(),
+            "the relation referencing Feature is removed too"
+        );
     }
 
     #[test]
@@ -5635,14 +5995,26 @@ mod tests {
         for t in ["A", "B", "C"] {
             super::schema_add_type(&mut s, t, false);
         }
-        assert!(super::schema_add_relation(&mut s, "A", "A").is_err(), "self-loop rejected");
+        assert!(
+            super::schema_add_relation(&mut s, "A", "A").is_err(),
+            "self-loop rejected"
+        );
         super::schema_add_relation(&mut s, "A", "B").unwrap();
         super::schema_add_relation(&mut s, "B", "C").unwrap();
-        assert!(super::schema_add_relation(&mut s, "A", "B").is_err(), "duplicate rejected");
+        assert!(
+            super::schema_add_relation(&mut s, "A", "B").is_err(),
+            "duplicate rejected"
+        );
         // C→A would close the cycle A→B→C→A.
-        assert!(super::schema_add_relation(&mut s, "C", "A").is_err(), "cycle rejected");
+        assert!(
+            super::schema_add_relation(&mut s, "C", "A").is_err(),
+            "cycle rejected"
+        );
         // A→C is fine: C may sit under BOTH A and B (a DAG with multiple parents, not a cycle).
-        assert!(super::schema_add_relation(&mut s, "A", "C").is_ok(), "multi-parent DAG edge allowed");
+        assert!(
+            super::schema_add_relation(&mut s, "A", "C").is_ok(),
+            "multi-parent DAG edge allowed"
+        );
     }
 
     #[test]
@@ -5673,7 +6045,9 @@ mod tests {
                 "types": [{ "name": "Epic", "builtin": true, "is_design_root": true }],
                 "relations": [{ "parent": "Epic", "child": "Feature" }]
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;

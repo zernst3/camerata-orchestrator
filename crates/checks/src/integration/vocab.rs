@@ -226,10 +226,8 @@ fn canonical_segment(seg: &str) -> String {
         || (seg.starts_with('<') && seg.ends_with('>'))
         || (seg.starts_with('[') && seg.ends_with(']'));
     // Template interpolations the consumer wrote into the path string.
-    let interpolation = seg.contains("${")
-        || seg.contains("#{")
-        || seg.contains("%{")
-        || seg.contains("{{");
+    let interpolation =
+        seg.contains("${") || seg.contains("#{") || seg.contains("%{") || seg.contains("{{");
     if explicit_param || interpolation || is_concrete_id(seg) {
         "{}".to_string()
     } else {

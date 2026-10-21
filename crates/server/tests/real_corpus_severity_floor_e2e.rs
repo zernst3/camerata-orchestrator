@@ -136,7 +136,10 @@ fn exported_severities(
     proposed: &str,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Vec<String> {
-    let report = report_with(vec![defect(rule_id, "src/a.ts", 1, proposed)], vec![rule_id]);
+    let report = report_with(
+        vec![defect(rule_id, "src/a.ts", 1, proposed)],
+        vec![rule_id],
+    );
     let json = build_report_json(
         &report.seal(),
         &HashMap::new(),

@@ -185,7 +185,10 @@ pub fn classify(action: &Action, ctx: &ClassifyCtx) -> Classification {
 
 fn classify_effect(action: &Action) -> DecisionClass {
     match action {
-        Action::Write { path, content_signal } => classify_write(path, content_signal),
+        Action::Write {
+            path,
+            content_signal,
+        } => classify_write(path, content_signal),
         Action::Command { program, args } => classify_command(program, args),
     }
 }
@@ -342,7 +345,10 @@ fn classify_command(program: &str, args: &[String]) -> DecisionClass {
     if program == "rm" && rm_is_recursive_and_forced(args) {
         return DecisionClass::Irreversible;
     }
-    if args.iter().any(|a| a.to_ascii_uppercase().contains("DROP TABLE")) {
+    if args
+        .iter()
+        .any(|a| a.to_ascii_uppercase().contains("DROP TABLE"))
+    {
         return DecisionClass::Irreversible;
     }
 
@@ -764,8 +770,14 @@ mod tests {
 
     #[test]
     fn decision_class_as_str_is_stable() {
-        assert_eq!(DecisionClass::MechanicallyVerified.as_str(), "mechanically_verified");
-        assert_eq!(DecisionClass::PreviewReversible.as_str(), "preview_reversible");
+        assert_eq!(
+            DecisionClass::MechanicallyVerified.as_str(),
+            "mechanically_verified"
+        );
+        assert_eq!(
+            DecisionClass::PreviewReversible.as_str(),
+            "preview_reversible"
+        );
         assert_eq!(DecisionClass::Irreversible.as_str(), "irreversible");
     }
 

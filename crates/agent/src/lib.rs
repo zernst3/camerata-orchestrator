@@ -31,7 +31,7 @@ pub mod generic;
 pub use generic::GenericCliDriver;
 
 pub mod liveness;
-pub use liveness::{spawn_mtime_probe, newest_mtime, HeartbeatFn, MTIME_PROBE_INTERVAL};
+pub use liveness::{newest_mtime, spawn_mtime_probe, HeartbeatFn, MTIME_PROBE_INTERVAL};
 
 pub mod post_story_hook;
 pub use post_story_hook::{DocConvention, PostStoryHook, StoryCompletion, StoryDocEmitter};
@@ -50,7 +50,10 @@ pub enum AgentError {
     ParseOutput(#[source] serde_json::Error),
 
     #[error("agent subprocess stalled: no output for {idle_secs}s (last line: {last_line:?})")]
-    Stalled { idle_secs: u64, last_line: Option<String> },
+    Stalled {
+        idle_secs: u64,
+        last_line: Option<String>,
+    },
 }
 
 // ─── heartbeat + timeout constants ───────────────────────────────────────────
@@ -628,7 +631,10 @@ mod tests {
         let lead = ClaudeCliDriver::new("/tmp/mcp.json").as_orchestrator(true);
         let lead_args = lead.build_args(&role(), "task");
         let lead_allowed = {
-            let i = lead_args.iter().position(|a| a == "--allowedTools").unwrap();
+            let i = lead_args
+                .iter()
+                .position(|a| a == "--allowedTools")
+                .unwrap();
             lead_args[i + 1].clone()
         };
         assert!(
@@ -696,7 +702,9 @@ mod tests {
             normal_args[i + 1].clone()
         };
         assert!(
-            !normal_allowed.split(' ').any(|t| t == ASK_CLARIFICATION_TOOL),
+            !normal_allowed
+                .split(' ')
+                .any(|t| t == ASK_CLARIFICATION_TOOL),
             "ask_clarification must be absent unless opted in"
         );
 
@@ -856,8 +864,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_subprocess_fires_heartbeat_per_line() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
         let counter = Arc::new(AtomicUsize::new(0));
         let counter2 = counter.clone();
         let cb: HeartbeatFn = Arc::new(move || {
@@ -892,7 +900,10 @@ mod tests {
         )
         .await;
         match result {
-            Err(AgentError::Stalled { idle_secs: _, last_line }) => {
+            Err(AgentError::Stalled {
+                idle_secs: _,
+                last_line,
+            }) => {
                 // last_line is Some("started") because we got that before the sleep.
                 assert_eq!(last_line.as_deref(), Some("started"));
             }
@@ -910,7 +921,7 @@ mod tests {
         let result = stream_subprocess(
             cmd,
             None,
-            std::time::Duration::from_secs(10),   // inactivity: long
+            std::time::Duration::from_secs(10), // inactivity: long
             std::time::Duration::from_millis(300), // total: short for test
         )
         .await;

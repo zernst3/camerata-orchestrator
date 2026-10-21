@@ -22,8 +22,8 @@
 //! t.is_stalled(120_000, now_ms())         // → true once past threshold
 //! ```
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// A shared, cheap-to-clone handle to a liveness tracker.
 ///
@@ -165,7 +165,10 @@ mod tests {
 
         t.record_progress("clippy");
         let now = now_ms();
-        assert!(t.idle_ms(now) < 5_000, "idle should be near-zero after record_progress");
+        assert!(
+            t.idle_ms(now) < 5_000,
+            "idle should be near-zero after record_progress"
+        );
         assert_eq!(t.last_label(), Some("clippy".to_string()));
 
         // Label updates on subsequent calls.
@@ -203,6 +206,9 @@ mod tests {
         // t2 should see the same label and a near-zero idle.
         assert_eq!(t2.last_label(), Some("shared".to_string()));
         let now = now_ms();
-        assert!(t2.idle_ms(now) < 5_000, "clone should share the reset timestamp");
+        assert!(
+            t2.idle_ms(now) < 5_000,
+            "clone should share the reset timestamp"
+        );
     }
 }

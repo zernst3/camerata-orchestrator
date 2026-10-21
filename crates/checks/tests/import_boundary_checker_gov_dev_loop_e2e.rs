@@ -43,10 +43,14 @@ domain       = []
 fn role_armed_with_import_boundary_family() -> Role {
     Role {
         name: "Backend".to_string(),
-        rule_subset: [RULE_NO_CROSS_BOUNDARY_IMPORTS, RULE_API_DTOS, RULE_STRICT_LAYERING]
-            .into_iter()
-            .map(|id| RuleId(id.to_string()))
-            .collect(),
+        rule_subset: [
+            RULE_NO_CROSS_BOUNDARY_IMPORTS,
+            RULE_API_DTOS,
+            RULE_STRICT_LAYERING,
+        ]
+        .into_iter()
+        .map(|id| RuleId(id.to_string()))
+        .collect(),
         allowed_paths: vec!["src/".to_string()],
     }
 }
@@ -75,7 +79,11 @@ async fn worktree_with_cross_boundary_violation_is_bounced_with_exact_location()
         "import { OrdersRepo } from '../repositories/orders_repo';\n\
          export function listOrdersHandler(repo: OrdersRepo) { return repo.count(); }\n",
     );
-    write_file(dir.path(), "src/repositories/orders_repo.ts", "export class OrdersRepo { count() { return 0; } }\n");
+    write_file(
+        dir.path(),
+        "src/repositories/orders_repo.ts",
+        "export class OrdersRepo { count() { return 0; } }\n",
+    );
 
     let runner = runner_for_worktree(dir.path());
     let role = role_armed_with_import_boundary_family();
@@ -159,7 +167,11 @@ async fn unarmed_import_boundary_rule_does_not_bounce_the_combined_runner() {
         "src/routes/orders.ts",
         "import { OrdersRepo } from '../repositories/orders_repo';\n",
     );
-    write_file(dir.path(), "src/repositories/orders_repo.ts", "export class OrdersRepo {}\n");
+    write_file(
+        dir.path(),
+        "src/repositories/orders_repo.ts",
+        "export class OrdersRepo {}\n",
+    );
 
     let runner = runner_for_worktree(dir.path());
     let role = Role {
@@ -167,7 +179,10 @@ async fn unarmed_import_boundary_rule_does_not_bounce_the_combined_runner() {
         rule_subset: vec![], // nothing armed
         allowed_paths: vec![],
     };
-    let outcome = runner.check(&role, dir.path()).await.expect("gov-dev loop check must not error");
+    let outcome = runner
+        .check(&role, dir.path())
+        .await
+        .expect("gov-dev loop check must not error");
 
     assert!(
         outcome.violated.is_empty(),
@@ -189,11 +204,18 @@ async fn unconfigured_worktree_with_the_same_import_shape_does_not_bounce() {
         "src/routes/orders.ts",
         "import { OrdersRepo } from '../repositories/orders_repo';\n",
     );
-    write_file(dir.path(), "src/repositories/orders_repo.ts", "export class OrdersRepo {}\n");
+    write_file(
+        dir.path(),
+        "src/repositories/orders_repo.ts",
+        "export class OrdersRepo {}\n",
+    );
 
     let runner = runner_for_worktree(dir.path());
     let role = role_armed_with_import_boundary_family();
-    let outcome = runner.check(&role, dir.path()).await.expect("gov-dev loop check must not error");
+    let outcome = runner
+        .check(&role, dir.path())
+        .await
+        .expect("gov-dev loop check must not error");
 
     assert!(
         outcome.violated.is_empty(),

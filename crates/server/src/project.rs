@@ -27,8 +27,8 @@ pub use camerata_app_core::project::{
     RuleSelection, StallThresholds, StepKind, StepModels, TypeRelation, WorkType, DEFAULT_MODEL,
 };
 
-use camerata_checks::vcs_action::ProcessRuleConfig;
 use crate::model_tier::TierMap;
+use camerata_checks::vcs_action::ProcessRuleConfig;
 
 /// Project store + the active selection, persisted to a JSON file so projects
 /// (their configs + pointers, NOT repo contents) survive across launches.
@@ -311,22 +311,13 @@ impl ProjectStore {
     /// saves. Per-project isolation is structural — the closure borrows just that one
     /// project's `&mut`, so a change to project A can never touch project B. Returns the
     /// updated project, or `None` when no project has that id.
-    pub fn set_step_model(
-        &self,
-        id: &str,
-        step: StepKind,
-        model: String,
-    ) -> Option<Project> {
+    pub fn set_step_model(&self, id: &str, step: StepKind, model: String) -> Option<Project> {
         self.update(id, |p| p.set_model_for_step(step, model))
     }
 
     /// Set the stall thresholds for a single project by id. Returns the updated project,
     /// or `None` when no project has that id.
-    pub fn set_stall_thresholds(
-        &self,
-        id: &str,
-        thresholds: StallThresholds,
-    ) -> Option<Project> {
+    pub fn set_stall_thresholds(&self, id: &str, thresholds: StallThresholds) -> Option<Project> {
         self.update(id, |p| p.set_stall_thresholds(thresholds))
     }
 
@@ -538,7 +529,8 @@ mod tests {
             "imported project seeds a usable (non-empty) hierarchy schema",
         );
         assert_eq!(
-            project.hierarchy_schema, default_hierarchy_schema(),
+            project.hierarchy_schema,
+            default_hierarchy_schema(),
             "the seeded schema is the default ladder",
         );
 
@@ -556,7 +548,8 @@ mod tests {
             .unwrap()
             .into_project();
         assert_eq!(
-            empty.hierarchy_schema, default_hierarchy_schema(),
+            empty.hierarchy_schema,
+            default_hierarchy_schema(),
             "an empty imported schema is seeded to the default ladder",
         );
     }
@@ -831,7 +824,10 @@ mod tests {
         );
         // And A's OTHER steps are untouched too (patch semantics, one step per call).
         assert_eq!(
-            store.get(&a.id).unwrap().model_for_step(StepKind::Calibration),
+            store
+                .get(&a.id)
+                .unwrap()
+                .model_for_step(StepKind::Calibration),
             DEFAULT_MODEL,
             "setting A's audit model must not touch A's calibration model"
         );
@@ -855,7 +851,11 @@ mod tests {
             let store = ProjectStore::load_or_new(path.clone());
             let p = store.create("Persisted", vec![]).unwrap();
             store
-                .set_step_model(&p.id, StepKind::Escalation, "claude-haiku-4-5-20251001".to_string())
+                .set_step_model(
+                    &p.id,
+                    StepKind::Escalation,
+                    "claude-haiku-4-5-20251001".to_string(),
+                )
                 .unwrap();
             p.id
         };
@@ -942,7 +942,11 @@ mod tests {
         // Fresh store from the SAME file: the change must have been written through.
         let reloaded = ProjectStore::load_or_new(path.clone());
         let p = reloaded.get(&id).expect("project survived reload");
-        assert_eq!(p.backend, ProjectBackend::Api, "backend survived persistence + reload");
+        assert_eq!(
+            p.backend,
+            ProjectBackend::Api,
+            "backend survived persistence + reload"
+        );
 
         // Cleanup (best-effort).
         let _ = std::fs::remove_dir_all(&dir);
@@ -975,19 +979,28 @@ mod tests {
                 "explicit-unitofwork-parameter-on-transactional-repository-methods",
             )
             .expect("project A exists");
-        assert!(matched, "A's selection for this rule must be found and updated");
+        assert!(
+            matched,
+            "A's selection for this rule must be found and updated"
+        );
         assert_eq!(
-            store.get(&a.id).unwrap().ruleset.selections[0].chosen_option.as_deref(),
+            store.get(&a.id).unwrap().ruleset.selections[0]
+                .chosen_option
+                .as_deref(),
             Some("explicit-unitofwork-parameter-on-transactional-repository-methods")
         );
         // B must be untouched.
-        assert!(store.get(&b.id).unwrap().ruleset.selections[0].chosen_option.is_none());
+        assert!(store.get(&b.id).unwrap().ruleset.selections[0]
+            .chosen_option
+            .is_none());
     }
 
     #[test]
     fn set_rule_chosen_option_returns_none_for_unknown_project() {
         let store = ProjectStore::new();
-        assert!(store.set_rule_chosen_option("does-not-exist", "RUST-DOMAIN-7", "opt-x").is_none());
+        assert!(store
+            .set_rule_chosen_option("does-not-exist", "RUST-DOMAIN-7", "opt-x")
+            .is_none());
     }
 
     #[test]
@@ -1030,10 +1043,21 @@ mod tests {
         let store = ProjectStore::new();
         let a = store.create("A", vec![]).unwrap();
         let b = store.create("B", vec![]).unwrap();
-        store.set_stall_thresholds(&a.id, StallThresholds { watched_secs: 300, routine_secs: 1800 }).unwrap();
+        store
+            .set_stall_thresholds(
+                &a.id,
+                StallThresholds {
+                    watched_secs: 300,
+                    routine_secs: 1800,
+                },
+            )
+            .unwrap();
         let updated_a = store.get(&a.id).unwrap();
         let unchanged_b = store.get(&b.id).unwrap();
         assert_eq!(updated_a.stall_thresholds.watched_secs, 300);
-        assert_eq!(unchanged_b.stall_thresholds.watched_secs, 120, "B must be untouched");
+        assert_eq!(
+            unchanged_b.stall_thresholds.watched_secs, 120,
+            "B must be untouched"
+        );
     }
 }

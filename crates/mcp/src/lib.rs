@@ -50,13 +50,13 @@
 //! job.
 
 use camerata_api_types::run::StartRunRequest;
+use camerata_api_types::workitems::AssignWorkItemRequest;
 use camerata_client::{Client, ClientError};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router, ServerHandler,
 };
-use camerata_api_types::workitems::AssignWorkItemRequest;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -267,11 +267,7 @@ impl Camerata {
         description = "Get the most recently recorded governance events across ALL runs, newest first. READ-ONLY. Args: optional `limit` (default 100, capped at 1000 server-side). Same event shape as `run_events`. Useful for a global recent-activity view without knowing a specific run id."
     )]
     pub async fn recent_events(&self, args: Parameters<RecentEventsArgs>) -> CallToolResult {
-        dto_tool_result(
-            self.client
-                .recent_events(args.0.limit.unwrap_or(100))
-                .await,
-        )
+        dto_tool_result(self.client.recent_events(args.0.limit.unwrap_or(100)).await)
     }
 
     /// READ — `GET /api/projects/:id/feedback` via [`Client::project_feedback`].
@@ -573,7 +569,10 @@ mod tests {
 
         assert_eq!(result.is_error, Some(true));
         let text = text_of(&result);
-        assert!(text.contains("404"), "error text must carry the status: {text}");
+        assert!(
+            text.contains("404"),
+            "error text must carry the status: {text}"
+        );
         assert!(
             text.contains("run not found"),
             "error text must carry the BFF body: {text}"
@@ -605,7 +604,10 @@ mod tests {
 
         assert_eq!(result.is_error, Some(true));
         let text = text_of(&result);
-        assert!(text.contains("404"), "error text must carry the status: {text}");
+        assert!(
+            text.contains("404"),
+            "error text must carry the status: {text}"
+        );
         assert!(
             text.contains("run not found"),
             "error text must carry the BFF body: {text}"
@@ -658,8 +660,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-x/feedback"))
             .respond_with(
-                ResponseTemplate::new(500)
-                    .set_body_json(serde_json::json!({ "error": "boom" })),
+                ResponseTemplate::new(500).set_body_json(serde_json::json!({ "error": "boom" })),
             )
             .expect(1)
             .mount(&bff)
@@ -674,7 +675,10 @@ mod tests {
 
         assert_eq!(result.is_error, Some(true));
         let text = text_of(&result);
-        assert!(text.contains("500"), "error text must carry the status: {text}");
+        assert!(
+            text.contains("500"),
+            "error text must carry the status: {text}"
+        );
     }
 
     /// A transport-level failure (nothing listening at the base URL) also maps to a

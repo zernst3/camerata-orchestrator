@@ -12,9 +12,9 @@
 //! transcripts) stay in the `camerata-server` adapter, which re-exports the items here so
 //! existing `crate::run::X` call sites are unchanged.
 
-use serde::{Deserialize, Serialize};
 use serde::de::{self, Deserializer};
 use serde::ser::Serializer;
+use serde::{Deserialize, Serialize};
 
 use camerata_core::RuleId;
 use camerata_liveness::LivenessTracker;
@@ -102,7 +102,9 @@ pub enum RunStatus {
     AwaitingReview,
     AwaitingQa,
     /// The run failed with a human-readable reason (e.g. stall timeout, infra error).
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
     /// The run was explicitly cancelled (by the architect or by automatic stall policy).
     Cancelled,
 }
@@ -485,8 +487,7 @@ mod tests {
             }
         );
 
-        let from_obj: RunStatus =
-            serde_json::from_str(r#"{"failed":{"reason":"boom"}}"#).unwrap();
+        let from_obj: RunStatus = serde_json::from_str(r#"{"failed":{"reason":"boom"}}"#).unwrap();
         assert_eq!(
             from_obj,
             RunStatus::Failed {

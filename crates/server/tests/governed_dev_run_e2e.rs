@@ -215,7 +215,9 @@ fn scope2_run_reaches_development_only_after_gates_are_satisfied() {
     );
 
     // This story crosses a contract boundary with NO contract: still blocked, now on R3.g.
-    state.uow().set_decisions(story_id, vec![approved(story_id, "a")]);
+    state
+        .uow()
+        .set_decisions(story_id, vec![approved(story_id, "a")]);
     state.uow().set_contract(story_id, "", true);
     let r3g = ensure_development_gate(&state, story_id).unwrap_err();
     assert!(
@@ -350,7 +352,10 @@ async fn scope3c_delegate_child_receives_gated_write_only_jailed_non_orchestrato
     )
     .await
     .expect("delegate returns the child's framed output");
-    assert!(out.contains("child did the subtask"), "the child ran: {out}");
+    assert!(
+        out.contains("child did the subtask"),
+        "the child ran: {out}"
+    );
 
     // The factory was asked for EXACTLY the balanced model (per-tier resolution).
     assert_eq!(
@@ -496,7 +501,9 @@ fn scope3f_security_floor_is_always_active_and_not_selection_gated() {
     )];
     let findings = camerata_server::onboard::audit_files("o/r", &files);
     assert!(
-        findings.iter().any(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
+        findings
+            .iter()
+            .any(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
         "the security floor fires on a real secret with NO rule selection: {findings:?}"
     );
 }
@@ -510,10 +517,7 @@ fn scope3g_unknown_session_fails_closed_at_the_gate() {
         tool: GATED_WRITE_TOOL.to_string(),
         input: serde_json::json!({ "path": "src/x.rs", "content": "fn x() {}" }),
     };
-    let decision = gw.try_evaluate(
-        &camerata_core::SessionId("never-bound".to_string()),
-        &call,
-    );
+    let decision = gw.try_evaluate(&camerata_core::SessionId("never-bound".to_string()), &call);
     assert!(
         decision.is_err(),
         "an unbound session is a gate error (fail-closed), not a silent allow"
@@ -575,15 +579,23 @@ async fn scope4_reconcile_local_mirrors_emitted_gate_config_into_project_state()
     // ADOPT into project-state shape: the project now MIRRORS what was emitted in the repo.
     let (selections, customs) = adopt_from_applied(&applied);
     assert!(
-        selections.iter().any(|s| s.rule_id == "RULE-A" && s.repos.contains(&repo_spec)),
+        selections
+            .iter()
+            .any(|s| s.rule_id == "RULE-A" && s.repos.contains(&repo_spec)),
         "the base selection mirrors the emit, scoped to the repo"
     );
     let house = customs
         .iter()
         .find(|c| c.name == "house-style")
         .expect("the custom rule is rebuilt from the round-tripped body");
-    assert_eq!(house.body, "Prefer explicit.", "the custom body round-trips");
-    assert!(house.repos.contains(&repo_spec), "the custom scoping round-trips");
+    assert_eq!(
+        house.body, "Prefer explicit.",
+        "the custom body round-trips"
+    );
+    assert!(
+        house.repos.contains(&repo_spec),
+        "the custom scoping round-trips"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -661,5 +673,8 @@ async fn scope5_fan_out_workers_are_partitioned_and_camerata_remains_sole_commit
     assert!(tools.iter().any(|t| t == GATED_WRITE_TOOL));
     assert!(!tools.iter().any(|t| t == FAN_OUT_TOOL));
     assert!(!tools.iter().any(|t| t == DELEGATE_TOOL));
-    assert!(!tools.iter().any(|t| t == "Bash"), "a worker has no shell -> cannot git/commit");
+    assert!(
+        !tools.iter().any(|t| t == "Bash"),
+        "a worker has no shell -> cannot git/commit"
+    );
 }

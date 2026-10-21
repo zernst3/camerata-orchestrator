@@ -137,9 +137,11 @@ impl CheckRunner for ManifestCheckRunner {
                         // Local tool is the pinned version — proceed to run the check.
                     }
                     VersionCheckOutcome::Mismatch { ref reported } => {
-                        let install_hint = check.install.as_deref().map(|cmd| {
-                            format!(" — install the pinned version with: `{cmd}`")
-                        }).unwrap_or_default();
+                        let install_hint = check
+                            .install
+                            .as_deref()
+                            .map(|cmd| format!(" — install the pinned version with: `{cmd}`"))
+                            .unwrap_or_default();
                         let msg = format!(
                             "[camerata-checks] VERSION DRIFT: {} ({}) — local {} is {} \
                              but manifest pins {}{}; results may differ from CI. \
@@ -153,9 +155,11 @@ impl CheckRunner for ManifestCheckRunner {
                         continue;
                     }
                     VersionCheckOutcome::ToolAbsent { ref reason } => {
-                        let install_hint = check.install.as_deref().map(|cmd| {
-                            format!(" — install it with: `{cmd}`")
-                        }).unwrap_or_default();
+                        let install_hint = check
+                            .install
+                            .as_deref()
+                            .map(|cmd| format!(" — install it with: `{cmd}`"))
+                            .unwrap_or_default();
                         let msg = format!(
                             "[camerata-checks] VERSION DRIFT: {} ({}) — tool `{}` not found \
                              or could not be queried ({}){} Skipping check.",
@@ -225,7 +229,10 @@ struct ManifestCheckOutput {
 /// at the cost of a shell fork — acceptable for per-task gates that already run
 /// cargo builds. We capture output (rather than `.status()`) so a failing check
 /// can feed its verbatim toolchain diagnostics into the Layer-2 bounce.
-async fn run_manifest_check(worktree: &Path, command: &str) -> std::io::Result<ManifestCheckOutput> {
+async fn run_manifest_check(
+    worktree: &Path,
+    command: &str,
+) -> std::io::Result<ManifestCheckOutput> {
     let out = Command::new("sh")
         .args(["-c", command])
         .current_dir(worktree)
@@ -270,7 +277,12 @@ pub enum VersionCheckOutcome {
 pub async fn check_tool_version(tool: &str, pinned: &str) -> VersionCheckOutcome {
     // Spawn `<tool> --version` directly (no sh -c) so we query the tool that
     // would be found on PATH — the same one the check command would invoke.
-    let output = match Command::new(tool).arg("--version").kill_on_drop(true).output().await {
+    let output = match Command::new(tool)
+        .arg("--version")
+        .kill_on_drop(true)
+        .output()
+        .await
+    {
         Ok(o) => o,
         Err(e) => {
             return VersionCheckOutcome::ToolAbsent {
@@ -332,8 +344,8 @@ pub fn version_matches(output: &str, pinned: &str) -> bool {
             // Check left boundary: start-of-string or non-alphanumeric-or-dot.
             let left_ok = i == 0 || !is_version_char(output_bytes[i - 1]);
             // Check right boundary: end-of-string or non-alphanumeric-or-dot.
-            let right_ok = (i + plen) == output_bytes.len()
-                || !is_version_char(output_bytes[i + plen]);
+            let right_ok =
+                (i + plen) == output_bytes.len() || !is_version_char(output_bytes[i + plen]);
             if left_ok && right_ok {
                 return true;
             }
@@ -392,8 +404,7 @@ mod tests {
     use std::fs;
 
     fn tmpdir() -> std::path::PathBuf {
-        static COUNTER: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(0);
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
             "cam-manifest-runner-{}-{}-{}",
@@ -456,7 +467,11 @@ mod tests {
         let wt = tmpdir();
         let runner = ManifestCheckRunner::empty();
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("check must not err").violated;
+        let violations = runner
+            .check(&role, &wt)
+            .await
+            .expect("check must not err")
+            .violated;
         assert!(
             violations.is_empty(),
             "absent manifest must produce zero violations"
@@ -470,11 +485,16 @@ mod tests {
     async fn exit_zero_produces_no_violation() {
         let wt = tmpdir();
         let manifest = CheckManifest {
-            checks: vec![make_check("ARCH-TEST-PASS-1", "exit 0", true)], ..Default::default()
+            checks: vec![make_check("ARCH-TEST-PASS-1", "exit 0", true)],
+            ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("check must not err").violated;
+        let violations = runner
+            .check(&role, &wt)
+            .await
+            .expect("check must not err")
+            .violated;
         assert!(
             violations.is_empty(),
             "exit-0 command must produce zero violations, got {violations:?}"
@@ -488,11 +508,16 @@ mod tests {
     async fn exit_nonzero_maps_to_violation_under_check_id() {
         let wt = tmpdir();
         let manifest = CheckManifest {
-            checks: vec![make_check("ARCH-API-LAYERING-1", "exit 1", true)], ..Default::default()
+            checks: vec![make_check("ARCH-API-LAYERING-1", "exit 1", true)],
+            ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("check must not err").violated;
+        let violations = runner
+            .check(&role, &wt)
+            .await
+            .expect("check must not err")
+            .violated;
         assert_eq!(
             violations,
             vec![RuleId("ARCH-API-LAYERING-1".to_string())],
@@ -512,14 +537,20 @@ mod tests {
                 "ARCH-API-LAYERING-1",
                 "echo 'db.select outside repositories/' >&2; exit 1",
                 true,
-            )], ..Default::default()
+            )],
+            ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
         let outcome = runner.check(&role, &wt).await.expect("check must not err");
-        assert_eq!(outcome.violated, vec![RuleId("ARCH-API-LAYERING-1".to_string())]);
+        assert_eq!(
+            outcome.violated,
+            vec![RuleId("ARCH-API-LAYERING-1".to_string())]
+        );
         assert!(
-            outcome.diagnostics.contains("db.select outside repositories/"),
+            outcome
+                .diagnostics
+                .contains("db.select outside repositories/"),
             "diagnostics must carry the failing command's captured output, got: {:?}",
             outcome.diagnostics
         );
@@ -537,11 +568,16 @@ mod tests {
                 make_check("SEC-SECRETS-SCAN-1", "exit 1", false),
                 // This passes and is in_loop.
                 make_check("ARCH-API-LAYERING-1", "exit 0", true),
-            ], ..Default::default()
+            ],
+            ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("check must not err").violated;
+        let violations = runner
+            .check(&role, &wt)
+            .await
+            .expect("check must not err")
+            .violated;
         assert!(
             violations.is_empty(),
             "ci-only check must be skipped; only in_loop checks run, got {violations:?}"
@@ -559,13 +595,22 @@ mod tests {
                 make_check("RULE-A", "exit 0", true),
                 make_check("RULE-B", "exit 1", true),
                 make_check("RULE-C", "exit 2", true),
-            ], ..Default::default()
+            ],
+            ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("check must not err").violated;
+        let violations = runner
+            .check(&role, &wt)
+            .await
+            .expect("check must not err")
+            .violated;
         // A and C-failing both produce violations; A is clean.
-        assert_eq!(violations.len(), 2, "expected 2 violations, got {violations:?}");
+        assert_eq!(
+            violations.len(),
+            2,
+            "expected 2 violations, got {violations:?}"
+        );
         assert!(violations.iter().any(|v| v.0 == "RULE-B"));
         assert!(violations.iter().any(|v| v.0 == "RULE-C"));
     }
@@ -583,7 +628,8 @@ mod tests {
                 "ARCH-MISSING-TOOL-1",
                 "this_binary_definitely_does_not_exist_xyzzy_42",
                 true,
-            )], ..Default::default()
+            )],
+            ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
@@ -698,11 +744,16 @@ mod tests {
                 "this_tool_definitely_does_not_exist_xyzzy_42",
                 "6.3.0",
                 "npm install -g dependency-cruiser@6.3.0",
-            )], ..Default::default()
+            )],
+            ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("must not err").violated;
+        let violations = runner
+            .check(&role, &wt)
+            .await
+            .expect("must not err")
+            .violated;
         assert_eq!(
             violations,
             vec![RuleId("DEP-CRUISER-LAYERING-1".to_string())],
@@ -736,11 +787,16 @@ mod tests {
                 "sh",
                 "999.999.999",
                 "install-sh-999",
-            )], ..Default::default()
+            )],
+            ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("must not err").violated;
+        let violations = runner
+            .check(&role, &wt)
+            .await
+            .expect("must not err")
+            .violated;
         assert_eq!(
             violations,
             vec![RuleId("ARCH-LAYERING-1".to_string())],
@@ -772,8 +828,8 @@ mod tests {
             .await
             .expect("cargo must be present to build this crate");
         let ver_str = String::from_utf8_lossy(&ver_output.stdout);
-        let extracted = extract_version_token(&ver_str)
-            .expect("cargo --version must contain a version token");
+        let extracted =
+            extract_version_token(&ver_str).expect("cargo --version must contain a version token");
 
         let wt = tmpdir();
         let manifest = CheckManifest {
@@ -790,11 +846,16 @@ mod tests {
                 "cargo",
                 &extracted,
                 "# cargo is already installed",
-            )], ..Default::default()
+            )],
+            ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("must not err").violated;
+        let violations = runner
+            .check(&role, &wt)
+            .await
+            .expect("must not err")
+            .violated;
         // Exactly one violation: the command failed (not a drift violation).
         // The key property: we GOT here (version matched, command ran).
         assert_eq!(

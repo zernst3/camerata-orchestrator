@@ -47,7 +47,8 @@ const PROFILES_MIGRATION_LINE: usize = 5;
 /// `e2e_report_pipeline.rs::stage_fixture_as_git_repo` exactly (duplicated per this repo's
 /// existing convention of each e2e test file owning its own fixture-staging helpers).
 fn stage_fixture_as_git_repo(dest: &Path) {
-    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/supabase_rls_repo");
+    let fixture_root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/supabase_rls_repo");
     copy_dir_recursive(&fixture_root, dest);
 
     let g = |args: &[&str]| {
@@ -56,13 +57,22 @@ fn stage_fixture_as_git_repo(dest: &Path) {
             .args(args)
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
-        assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "architectural-e2e@camerata.local"]);
     g(&["config", "user.name", "Camerata Architectural E2E Test"]);
     g(&["add", "."]);
-    g(&["commit", "-q", "-m", "e2e fixture: one RLS hole + one clean table"]);
+    g(&[
+        "commit",
+        "-q",
+        "-m",
+        "e2e fixture: one RLS hole + one clean table",
+    ]);
 }
 
 fn copy_dir_recursive(src: &Path, dest: &Path) {
@@ -75,7 +85,8 @@ fn copy_dir_recursive(src: &Path, dest: &Path) {
         if ty.is_dir() {
             copy_dir_recursive(&from, &to);
         } else {
-            std::fs::copy(&from, &to).unwrap_or_else(|e| panic!("failed to copy fixture file {from:?} -> {to:?}: {e}"));
+            std::fs::copy(&from, &to)
+                .unwrap_or_else(|e| panic!("failed to copy fixture file {from:?} -> {to:?}: {e}"));
         }
     }
 }
@@ -90,14 +101,18 @@ fn typst_on_path() -> bool {
 }
 
 fn selected_rls_rules() -> Vec<SelectedRule> {
-    [RULE_RLS_ENABLED, RULE_RLS_NO_POLICY, RULE_RLS_POLICY_DISABLED]
-        .into_iter()
-        .map(|id| SelectedRule {
-            id: id.to_string(),
-            directive: format!("architectural-executor e2e: {id}"),
-            repos: Vec::new(), // project-level: applies to every scanned repo
-        })
-        .collect()
+    [
+        RULE_RLS_ENABLED,
+        RULE_RLS_NO_POLICY,
+        RULE_RLS_POLICY_DISABLED,
+    ]
+    .into_iter()
+    .map(|id| SelectedRule {
+        id: id.to_string(),
+        directive: format!("architectural-executor e2e: {id}"),
+        repos: Vec::new(), // project-level: applies to every scanned repo
+    })
+    .collect()
 }
 
 /// Run the real scan entry point over the fixture, deterministic-only. Shared by both
@@ -112,15 +127,15 @@ async fn run_fixture_scan(repo_dir: &Path, repo_spec: &str) -> onboard::ScanRepo
         None,       // model — unused, run_ai_review is false
         None,       // calibration_model — unused
         ScanMode::Sequential,
-        false, // thorough — unused (no AI review)
-        None,  // feedback
-        None,  // job
-        None,  // incremental_prior — full scan
-        false, // deep
-        false, // soc2_enabled
-        false, // run_ai_review — zero API spend
-        true,  // run_deterministic — the floor AND the architectural engine both run
-        None,  // ledger
+        false,                                        // thorough — unused (no AI review)
+        None,                                         // feedback
+        None,                                         // job
+        None,                                         // incremental_prior — full scan
+        false,                                        // deep
+        false,                                        // soc2_enabled
+        false,                                        // run_ai_review — zero API spend
+        true, // run_deterministic — the floor AND the architectural engine both run
+        None, // ledger
         camerata_server::llm::BackendResolution::Api, // backend gate: not under test here
         None, // corpus
         &std::collections::HashMap::new(), // chosen_options
@@ -137,7 +152,10 @@ async fn deterministic_scan_finds_the_planted_rls_hole() {
 
     let report = run_fixture_scan(repo_dir.path(), &repo_spec).await;
 
-    assert!(!report.gated, "a local-dir scan is never gated on a GitHub token");
+    assert!(
+        !report.gated,
+        "a local-dir scan is never gated on a GitHub token"
+    );
     assert_eq!(report.repos, vec![repo_spec.clone()]);
 
     // ═══ Exactly the ONE planted finding: `profiles` has no RLS. No finding for `orders` ═══
@@ -146,7 +164,11 @@ async fn deterministic_scan_finds_the_planted_rls_hole() {
     let rls_findings: Vec<&onboard::Finding> = report
         .findings
         .iter()
-        .filter(|f| f.rule_id == RULE_RLS_ENABLED || f.rule_id == RULE_RLS_NO_POLICY || f.rule_id == RULE_RLS_POLICY_DISABLED)
+        .filter(|f| {
+            f.rule_id == RULE_RLS_ENABLED
+                || f.rule_id == RULE_RLS_NO_POLICY
+                || f.rule_id == RULE_RLS_POLICY_DISABLED
+        })
         .collect();
     assert_eq!(
         rls_findings.len(),
@@ -157,15 +179,29 @@ async fn deterministic_scan_finds_the_planted_rls_hole() {
     let finding = rls_findings[0];
 
     assert_eq!(finding.rule_id, RULE_RLS_ENABLED);
-    assert_eq!(finding.severity, "critical", "an exposed table with no RLS is critical");
+    assert_eq!(
+        finding.severity, "critical",
+        "an exposed table with no RLS is critical"
+    );
     assert_eq!(finding.repo, repo_spec);
     assert_eq!(
         finding.path, PROFILES_MIGRATION_FILE,
         "the finding must be attributed to the migration that established (never changed) the RLS state"
     );
-    assert_eq!(finding.line, PROFILES_MIGRATION_LINE, "must point at the CREATE TABLE statement's line");
-    assert!(finding.snippet.contains("profiles"), "snippet must name the table: {:?}", finding.snippet);
-    assert!(finding.detail.contains("profiles"), "detail must name the table: {:?}", finding.detail);
+    assert_eq!(
+        finding.line, PROFILES_MIGRATION_LINE,
+        "must point at the CREATE TABLE statement's line"
+    );
+    assert!(
+        finding.snippet.contains("profiles"),
+        "snippet must name the table: {:?}",
+        finding.snippet
+    );
+    assert!(
+        finding.detail.contains("profiles"),
+        "detail must name the table: {:?}",
+        finding.detail
+    );
     assert!(
         finding.detail.to_lowercase().contains("confirm against"),
         "detail must carry the repo-vs-production honesty caveat: {:?}",
@@ -178,13 +214,19 @@ async fn deterministic_scan_finds_the_planted_rls_hole() {
     );
 
     // ═══ Provenance: deterministic-arch tagging (the mechanism the UI badges on) ═══
-    assert!(finding.preview, "an architectural finding uses the existing preview mechanism");
+    assert!(
+        finding.preview,
+        "an architectural finding uses the existing preview mechanism"
+    );
     assert_eq!(
         finding.preview_tool.as_deref(),
         Some("camerata-arch"),
         "must carry the camerata-arch provenance tag"
     );
-    assert_eq!(finding.status, "active", "no suppression/baseline in the fixture — must be active");
+    assert_eq!(
+        finding.status, "active",
+        "no suppression/baseline in the fixture — must be active"
+    );
 
     // ═══ Provenance stamp sanity (mirrors e2e_report_pipeline.rs) ═══
     assert!(!report.provenance.audited_refs.is_empty());
@@ -214,7 +256,10 @@ async fn architectural_finding_rides_through_report_to_pdf() {
     let dispositions: HashMap<String, DispositionWire> = HashMap::new();
     let corpus_path = camerata_rules::corpus_path();
     let (corpus, corpus_errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-    assert!(corpus_errors.is_empty(), "the bundled rule corpus must load cleanly: {corpus_errors:?}");
+    assert!(
+        corpus_errors.is_empty(),
+        "the bundled rule corpus must load cleanly: {corpus_errors:?}"
+    );
 
     let opts = ReportOptions {
         client_name: "Acme Corp".to_string(),
@@ -270,6 +315,12 @@ async fn architectural_finding_rides_through_report_to_pdf() {
     let pdf_bytes = report_export::compile_pdf(&json)
         .await
         .expect("typst compile must succeed for a well-formed report");
-    assert!(pdf_bytes.starts_with(b"%PDF"), "output must be a real PDF (starts with the %PDF magic bytes)");
-    assert!(pdf_bytes.len() > 1000, "a real compiled PDF is not a trivially tiny file");
+    assert!(
+        pdf_bytes.starts_with(b"%PDF"),
+        "output must be a real PDF (starts with the %PDF magic bytes)"
+    );
+    assert!(
+        pdf_bytes.len() > 1000,
+        "a real compiled PDF is not a trivially tiny file"
+    );
 }

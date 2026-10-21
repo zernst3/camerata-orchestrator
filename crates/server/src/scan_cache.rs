@@ -830,14 +830,8 @@ mod tests {
         assert_eq!(m.files["me/api"].len(), 2);
         assert_eq!(m.files["me/web"].len(), 2);
         // Verify findings are separated by repo.
-        assert_eq!(
-            m.findings.iter().filter(|f| f.repo == "me/api").count(),
-            2
-        );
-        assert_eq!(
-            m.findings.iter().filter(|f| f.repo == "me/web").count(),
-            2
-        );
+        assert_eq!(m.findings.iter().filter(|f| f.repo == "me/api").count(), 2);
+        assert_eq!(m.findings.iter().filter(|f| f.repo == "me/web").count(), 2);
     }
 
     #[test]
@@ -849,14 +843,11 @@ mod tests {
             rules_fingerprint: "".to_string(),
             files: {
                 let mut m = BTreeMap::new();
-                m.insert(
-                    "me/api".to_string(),
-                    {
-                        let mut inner = BTreeMap::new();
-                        inner.insert("a.rs".to_string(), content_fingerprint("unchanged"));
-                        inner
-                    },
-                );
+                m.insert("me/api".to_string(), {
+                    let mut inner = BTreeMap::new();
+                    inner.insert("a.rs".to_string(), content_fingerprint("unchanged"));
+                    inner
+                });
                 m
             },
             findings: vec![],
@@ -885,28 +876,52 @@ mod tests {
 
         // Two sequential puts must both be visible and not overwrite each other.
         let mut b1 = ManifestBuilder::new();
-        b1.record_repo("me/api", &[file("a.rs", "x")], &[finding("me/api", "a.rs", "R1")]);
+        b1.record_repo(
+            "me/api",
+            &[file("a.rs", "x")],
+            &[finding("me/api", "a.rs", "R1")],
+        );
         store.put("proj-alpha", b1.finish());
 
         let mut b2 = ManifestBuilder::new();
-        b2.record_repo("me/web", &[file("b.ts", "y")], &[finding("me/web", "b.ts", "R2")]);
+        b2.record_repo(
+            "me/web",
+            &[file("b.ts", "y")],
+            &[finding("me/web", "b.ts", "R2")],
+        );
         store.put("proj-beta", b2.finish());
 
         // Both projects must be present after the two puts.
-        let alpha = store.get("proj-alpha").expect("proj-alpha must be present after put");
-        assert!(alpha.files.contains_key("me/api"), "proj-alpha must have me/api fingerprints");
+        let alpha = store
+            .get("proj-alpha")
+            .expect("proj-alpha must be present after put");
+        assert!(
+            alpha.files.contains_key("me/api"),
+            "proj-alpha must have me/api fingerprints"
+        );
         assert_eq!(alpha.findings.len(), 1);
         assert_eq!(alpha.findings[0].rule_id, "R1");
 
-        let beta = store.get("proj-beta").expect("proj-beta must be present after put");
-        assert!(beta.files.contains_key("me/web"), "proj-beta must have me/web fingerprints");
+        let beta = store
+            .get("proj-beta")
+            .expect("proj-beta must be present after put");
+        assert!(
+            beta.files.contains_key("me/web"),
+            "proj-beta must have me/web fingerprints"
+        );
         assert_eq!(beta.findings.len(), 1);
         assert_eq!(beta.findings[0].rule_id, "R2");
 
         // After clear, the cleared project is gone but the other survives.
         store.clear("proj-alpha");
-        assert!(store.get("proj-alpha").is_none(), "proj-alpha must be absent after clear");
-        assert!(store.get("proj-beta").is_some(), "proj-beta must survive clear of proj-alpha");
+        assert!(
+            store.get("proj-alpha").is_none(),
+            "proj-alpha must be absent after clear"
+        );
+        assert!(
+            store.get("proj-beta").is_some(),
+            "proj-beta must survive clear of proj-alpha"
+        );
     }
 
     /// Verify that `put` after `clear` restores the manifest without any stale state.
@@ -914,16 +929,30 @@ mod tests {
     fn bug11_put_after_clear_restores_cleanly() {
         let store = ScanCacheStore::new();
         let mut b = ManifestBuilder::new();
-        b.record_repo("me/api", &[file("a.rs", "x")], &[finding("me/api", "a.rs", "R1")]);
+        b.record_repo(
+            "me/api",
+            &[file("a.rs", "x")],
+            &[finding("me/api", "a.rs", "R1")],
+        );
         store.put("proj-x", b.finish());
         store.clear("proj-x");
-        assert!(store.get("proj-x").is_none(), "clear must remove the manifest");
+        assert!(
+            store.get("proj-x").is_none(),
+            "clear must remove the manifest"
+        );
 
         // Re-put must work correctly after a clear.
         let mut b2 = ManifestBuilder::new();
-        b2.record_repo("me/api", &[file("a.rs", "x2")], &[finding("me/api", "a.rs", "R2")]);
+        b2.record_repo(
+            "me/api",
+            &[file("a.rs", "x2")],
+            &[finding("me/api", "a.rs", "R2")],
+        );
         store.put("proj-x", b2.finish());
         let got = store.get("proj-x").expect("re-put must restore manifest");
-        assert_eq!(got.findings[0].rule_id, "R2", "re-put must store the new manifest, not the cleared one");
+        assert_eq!(
+            got.findings[0].rule_id, "R2",
+            "re-put must store the new manifest, not the cleared one"
+        );
     }
 }

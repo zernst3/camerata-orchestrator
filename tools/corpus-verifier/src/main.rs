@@ -81,7 +81,10 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             println!("Grounded queue ({} rules, risk-ordered):\n", rows.len());
-            println!("{:<42}  {:<20}  {:<14}  source", "RULE ID", "DOMAIN", "ENFORCEMENT");
+            println!(
+                "{:<42}  {:<20}  {:<14}  source",
+                "RULE ID", "DOMAIN", "ENFORCEMENT"
+            );
             for r in &rows {
                 println!(
                     "{:<42}  {:<20}  {:<14}  {}",

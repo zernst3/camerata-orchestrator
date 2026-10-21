@@ -16,8 +16,7 @@ use camerata_agent::HeartbeatFn;
 use camerata_fleet::tier::TierMap;
 use camerata_fleet::{
     build_from_plan_with_model_iterations_layer2_and_activity,
-    build_from_plan_with_tier_map_layer2_and_activity,
-    locate_gateway_bin, BuildEvent,
+    build_from_plan_with_tier_map_layer2_and_activity, locate_gateway_bin, BuildEvent,
 };
 use camerata_intake::{Plan, PlanTask, TaskKind};
 
@@ -165,7 +164,11 @@ struct LiveObservability {
 ///
 /// Observability only: this routes WHERE decisions are recorded and surfaces them; it
 /// changes nothing about what the gate decides.
-fn start_gate_observability(store: &RunStore, run_id: &str, root: &std::path::Path) -> LiveObservability {
+fn start_gate_observability(
+    store: &RunStore,
+    run_id: &str,
+    root: &std::path::Path,
+) -> LiveObservability {
     let _ = std::fs::create_dir_all(root);
     let sink_path = root.join("gate-events.jsonl");
     // Fresh sink per run.
@@ -180,7 +183,12 @@ fn start_gate_observability(store: &RunStore, run_id: &str, root: &std::path::Pa
         seq.clone(),
         done.clone(),
     ));
-    LiveObservability { seq, sink_path, done, tailer }
+    LiveObservability {
+        seq,
+        sink_path,
+        done,
+        tailer,
+    }
 }
 
 /// Signal the tailer to stop and wait for its final drain pass. Best-effort.
@@ -252,7 +260,9 @@ pub async fn execute_live_run(
             finish_live_run(
                 &store,
                 &run_id,
-                Err(anyhow::anyhow!("could not create run scaffold temp dir: {e}")),
+                Err(anyhow::anyhow!(
+                    "could not create run scaffold temp dir: {e}"
+                )),
             );
             return;
         }
@@ -365,7 +375,9 @@ pub async fn execute_live_run_tiered(
             rule: None,
             detail: format!(
                 "Tiered run: lead/orchestrator = {} (strongest); balanced = {}; fast = {}.",
-                tier_map.strongest, tier_map.balanced_primary(), tier_map.fast_primary()
+                tier_map.strongest,
+                tier_map.balanced_primary(),
+                tier_map.fast_primary()
             ),
             content_hash: None,
         },
@@ -400,7 +412,9 @@ pub async fn execute_live_run_tiered(
             finish_live_run(
                 &store,
                 &run_id,
-                Err(anyhow::anyhow!("could not create run scaffold temp dir: {e}")),
+                Err(anyhow::anyhow!(
+                    "could not create run scaffold temp dir: {e}"
+                )),
             );
             return;
         }
@@ -548,7 +562,10 @@ fn build_event_to_gate_event(seq: usize, event: BuildEvent) -> Option<GateEvent>
             verdict: "info".to_string(),
             rule: None,
             detail: if is_lead {
-                format!("Stage {}: {role} → {model} (lead/orchestrator, may delegate).", index + 1)
+                format!(
+                    "Stage {}: {role} → {model} (lead/orchestrator, may delegate).",
+                    index + 1
+                )
             } else {
                 format!("Stage {}: {role} → {model}.", index + 1)
             },
@@ -627,7 +644,12 @@ fn build_event_to_gate_event(seq: usize, event: BuildEvent) -> Option<GateEvent>
         } => GateEvent {
             seq,
             layer: "checks".to_string(),
-            verdict: if compiled && tests_passed { "allow" } else { "deny" }.to_string(),
+            verdict: if compiled && tests_passed {
+                "allow"
+            } else {
+                "deny"
+            }
+            .to_string(),
             rule: None,
             detail: format!("cargo build={compiled}, cargo test={tests_passed}."),
             content_hash: None,

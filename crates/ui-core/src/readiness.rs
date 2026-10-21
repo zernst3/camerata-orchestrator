@@ -73,7 +73,11 @@ pub fn paused_banner_text(readiness: ProjectReadiness, unresolved_count: usize) 
             Some("Paused — link this project's repo before you can run it.".to_string())
         }
         ProjectReadiness::Partial => {
-            let plural = if unresolved_count == 1 { "repo" } else { "repos" };
+            let plural = if unresolved_count == 1 {
+                "repo"
+            } else {
+                "repos"
+            };
             Some(format!(
                 "Paused — {unresolved_count} {plural} still need a local clone before this project can run."
             ))
@@ -108,16 +112,30 @@ mod tests {
         RepoResolution {
             repo: repo.to_string(),
             resolved,
-            path: if resolved { format!("/ws/{repo}") } else { String::new() },
-            reason: if resolved { "ok".to_string() } else { "no local match".to_string() },
+            path: if resolved {
+                format!("/ws/{repo}")
+            } else {
+                String::new()
+            },
+            reason: if resolved {
+                "ok".to_string()
+            } else {
+                "no local match".to_string()
+            },
         }
     }
 
     #[test]
     fn parse_maps_known_strings() {
         assert_eq!(ProjectReadiness::parse("ready"), ProjectReadiness::Ready);
-        assert_eq!(ProjectReadiness::parse("partial"), ProjectReadiness::Partial);
-        assert_eq!(ProjectReadiness::parse("unlinked"), ProjectReadiness::Unlinked);
+        assert_eq!(
+            ProjectReadiness::parse("partial"),
+            ProjectReadiness::Partial
+        );
+        assert_eq!(
+            ProjectReadiness::parse("unlinked"),
+            ProjectReadiness::Unlinked
+        );
     }
 
     #[test]
@@ -137,7 +155,11 @@ mod tests {
 
     #[test]
     fn unresolved_repos_filters_and_preserves_order() {
-        let repos = vec![res("a/one", false), res("a/two", true), res("a/three", false)];
+        let repos = vec![
+            res("a/one", false),
+            res("a/two", true),
+            res("a/three", false),
+        ];
         let un = unresolved_repos(&repos);
         assert_eq!(un.len(), 2);
         assert_eq!(un[0].repo, "a/one");

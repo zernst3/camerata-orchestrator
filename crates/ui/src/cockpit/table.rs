@@ -151,7 +151,10 @@ mod tests {
         // larger so EVERY group is in the view before `collapse_all_groups` runs.
         // If this regressed below the real max row count, the partial-collapse
         // symptom would return for the rows past the page boundary.
-        assert!(collapse_page_size() > 50, "must exceed chorale's default page size");
+        assert!(
+            collapse_page_size() > 50,
+            "must exceed chorale's default page size"
+        );
         assert_eq!(collapse_page_size(), COLLAPSE_LOAD_PAGE_SIZE);
     }
 
@@ -256,7 +259,10 @@ mod render_tests {
         // chorale renders each column's header label inside a <th>. The wrapper
         // forwarding the columns through is the contract under test.
         assert!(html.contains("Name"), "missing 'Name' header in:\n{html}");
-        assert!(html.contains("Domain"), "missing 'Domain' header in:\n{html}");
+        assert!(
+            html.contains("Domain"),
+            "missing 'Domain' header in:\n{html}"
+        );
         // House default: the wrapper always sets sticky_header: true. chorale's
         // sticky header emits position: sticky on the header element.
         assert!(
@@ -273,6 +279,9 @@ mod render_tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("Name"), "missing 'Name' header in:\n{html}");
-        assert!(html.contains("Domain"), "missing 'Domain' header in:\n{html}");
+        assert!(
+            html.contains("Domain"),
+            "missing 'Domain' header in:\n{html}"
+        );
     }
 }

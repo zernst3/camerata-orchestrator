@@ -34,14 +34,17 @@ const INTEREST_GLOBS: &[&str] = &["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx"];
 /// The forbidden call-shape substrings, per the rule TOML + the design table. Order doesn't
 /// matter; a line is flagged on the FIRST one it contains (one violation per line is enough
 /// to surface it for review).
-const FORBIDDEN_CALLS: &[&str] =
-    &["toLocaleString(", "toLocaleDateString(", "toLocaleTimeString(", "Intl.DateTimeFormat("];
+const FORBIDDEN_CALLS: &[&str] = &[
+    "toLocaleString(",
+    "toLocaleDateString(",
+    "toLocaleTimeString(",
+    "Intl.DateTimeFormat(",
+];
 
 /// Path fragments that mark generated/vendor/build output this checker should never scan —
 /// findings there are noise, not actionable feature code. Not expressed as a NEGATIVE glob
 /// (the seam's `interest_globs` has no exclusion syntax), so filtered here instead.
-const SKIP_PATH_FRAGMENTS: &[&str] =
-    &["node_modules/", "/dist/", "/build/", "/.next/", ".min.js"];
+const SKIP_PATH_FRAGMENTS: &[&str] = &["node_modules/", "/dist/", "/build/", "/.next/", ".min.js"];
 
 pub struct UtcDatesChecker;
 
@@ -150,11 +153,17 @@ mod tests {
     use super::*;
 
     fn view<'a>(files: &'a [(String, String)]) -> RepoView<'a> {
-        RepoView { spec: "test/repo", files }
+        RepoView {
+            spec: "test/repo",
+            files,
+        }
     }
 
     fn files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
-        pairs.into_iter().map(|(p, c)| (p.to_string(), c.to_string())).collect()
+        pairs
+            .into_iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect()
     }
 
     #[test]
@@ -172,7 +181,10 @@ mod tests {
 
     #[test]
     fn flags_intl_datetimeformat() {
-        let f = files(vec![("src/lib/foo.ts", "new Intl.DateTimeFormat('en-US').format(d);\n")]);
+        let f = files(vec![(
+            "src/lib/foo.ts",
+            "new Intl.DateTimeFormat('en-US').format(d);\n",
+        )]);
         let vs = UtcDatesChecker.check(&view(&f));
         assert_eq!(vs.len(), 1, "{vs:#?}");
         assert!(vs[0].object.as_deref() == Some("Intl.DateTimeFormat"));
@@ -189,19 +201,28 @@ mod tests {
 
     #[test]
     fn clean_file_with_no_forbidden_calls_is_untouched() {
-        let f = files(vec![("src/lib/dates.ts", "export function formatDate(d: Date) { return d.toISOString(); }\n")]);
+        let f = files(vec![(
+            "src/lib/dates.ts",
+            "export function formatDate(d: Date) { return d.toISOString(); }\n",
+        )]);
         assert!(UtcDatesChecker.check(&view(&f)).is_empty());
     }
 
     #[test]
     fn ignores_a_line_comment_occurrence() {
-        let f = files(vec![("a.ts", "// x.toLocaleString() is banned here\nconst y = 1;\n")]);
+        let f = files(vec![(
+            "a.ts",
+            "// x.toLocaleString() is banned here\nconst y = 1;\n",
+        )]);
         assert!(UtcDatesChecker.check(&view(&f)).is_empty());
     }
 
     #[test]
     fn ignores_a_block_comment_occurrence_single_line() {
-        let f = files(vec![("a.ts", "/* x.toLocaleString() banned */\nconst y = 1;\n")]);
+        let f = files(vec![(
+            "a.ts",
+            "/* x.toLocaleString() banned */\nconst y = 1;\n",
+        )]);
         assert!(UtcDatesChecker.check(&view(&f)).is_empty());
     }
 
@@ -249,14 +270,20 @@ mod tests {
         // negative (missing the real call after it) is the accepted failure mode.
         let f = files(vec![("a.ts", "/* unterminated\nx.toLocaleString();\n")]);
         let vs = UtcDatesChecker.check(&view(&f));
-        assert!(vs.is_empty(), "unterminated block comment suppresses the rest of the file: {vs:#?}");
+        assert!(
+            vs.is_empty(),
+            "unterminated block comment suppresses the rest of the file: {vs:#?}"
+        );
     }
 
     #[test]
     fn non_utf8_safe_binary_like_content_does_not_panic() {
         // A file whose "content" is unusual bytes-as-lossy-string; must not panic (RepoView
         // carries String, so real invalid UTF-8 never reaches here, but stress it anyway).
-        let f = files(vec![("a.ts", "\u{FFFD}\u{FFFD} weird content, no forbidden calls\n")]);
+        let f = files(vec![(
+            "a.ts",
+            "\u{FFFD}\u{FFFD} weird content, no forbidden calls\n",
+        )]);
         assert!(UtcDatesChecker.check(&view(&f)).is_empty());
     }
 }

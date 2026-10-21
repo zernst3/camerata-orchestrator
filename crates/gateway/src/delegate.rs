@@ -412,17 +412,15 @@ pub async fn run_delegated(
     //    process that has no provider machinery) we keep TODAY's exact ClaudeCliDriver
     //    behavior — same construction, same gate — for full back-compat.
     let driver: Box<dyn AgentDriver> = match &config.child_driver_factory {
-        Some(factory) => {
-            match factory.build_child(&model, &config.worktree_root, &[]) {
-                Ok(d) => d,
-                Err(e) => {
-                    return Ok(format!(
+        Some(factory) => match factory.build_child(&model, &config.worktree_root, &[]) {
+            Ok(d) => d,
+            Err(e) => {
+                return Ok(format!(
                         "[delegate tier={tier} model={model}] child driver build FAILED: {e}\n\
                          INCOMPLETE: could not construct the per-model child driver; do this yourself."
                     ));
-                }
             }
-        }
+        },
         None => Box::new(
             ClaudeCliDriver::new(mcp_config.display().to_string())
                 .with_worktree(&config.worktree_root)
@@ -573,9 +571,14 @@ mod tests {
         // A Claude tier -> the factory is asked for the Claude model id (per-model coupling).
         let factory = Arc::new(RecordingFactory::default());
         let config = cfg_with_factory(0, 1, models(), factory.clone());
-        let out = run_delegated(&config, vec![RuleId("GOV-1".to_string())], "do x", "balanced")
-            .await
-            .unwrap();
+        let out = run_delegated(
+            &config,
+            vec![RuleId("GOV-1".to_string())],
+            "do x",
+            "balanced",
+        )
+        .await
+        .unwrap();
         // The factory-built child ran (echo marker present, model echoed).
         assert!(out.contains("ECHO model=claude-sonnet-5"), "got: {out}");
         // And the factory was asked for EXACTLY the balanced (Claude) model.
@@ -611,9 +614,14 @@ mod tests {
         // The vision tier routes to the configured vision model via the factory.
         let factory = Arc::new(RecordingFactory::default());
         let config = cfg_with_factory(0, 1, models_with_vision(), factory.clone());
-        let out = run_delegated(&config, vec![RuleId("GOV-1".to_string())], "design", "vision")
-            .await
-            .unwrap();
+        let out = run_delegated(
+            &config,
+            vec![RuleId("GOV-1".to_string())],
+            "design",
+            "vision",
+        )
+        .await
+        .unwrap();
         assert!(out.contains("ECHO model=claude-vision-model"), "got: {out}");
         let asked = factory.models.lock().unwrap().clone();
         assert_eq!(asked, vec!["claude-vision-model".to_string()]);
@@ -636,7 +644,10 @@ mod tests {
             "None factory must NOT take the factory path: {out}"
         );
         // It went down the CLI driver path (tier/model framing present).
-        assert!(out.contains("tier=fast"), "expected CLI-path framing: {out}");
+        assert!(
+            out.contains("tier=fast"),
+            "expected CLI-path framing: {out}"
+        );
     }
 
     #[test]
@@ -700,9 +711,14 @@ mod tests {
     #[tokio::test]
     async fn run_delegated_refuses_unknown_tier_without_spawning() {
         // depth allows, but the tier is bogus -> refuse BEFORE any spawn/IO.
-        let err = run_delegated(&cfg(0, 1), vec![RuleId("GOV-1".to_string())], "do x", "ultra")
-            .await
-            .unwrap_err();
+        let err = run_delegated(
+            &cfg(0, 1),
+            vec![RuleId("GOV-1".to_string())],
+            "do x",
+            "ultra",
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err, DelegateError::UnknownTier("ultra".to_string()));
     }
 

@@ -117,7 +117,10 @@ pub fn slice_lines(source: &str, start_line: usize, end_line: usize) -> Vec<Stri
     if end < start_line {
         return Vec::new();
     }
-    lines[start_line - 1..end].iter().map(|s| s.to_string()).collect()
+    lines[start_line - 1..end]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn is_sql_path(path: &str) -> bool {
@@ -129,7 +132,11 @@ fn is_sql_path(path: &str) -> bool {
 
 /// The smallest (innermost) function span containing `line`, or `None` when no span contains
 /// it (top-level code, or a parse failure that yielded zero spans).
-fn smallest_containing_function(lang: SourceLang, source: &str, line: usize) -> Option<(usize, usize)> {
+fn smallest_containing_function(
+    lang: SourceLang,
+    source: &str,
+    line: usize,
+) -> Option<(usize, usize)> {
     functions(lang, source)
         .into_iter()
         .filter(|f| f.start_line <= line && line <= f.end_line)
@@ -154,7 +161,12 @@ fn enclosing_sql_statement(source: &str, line: usize, total_lines: usize) -> Enc
         .unwrap_or(total_lines);
 
     let raw: Vec<&str> = source.lines().collect();
-    while end > line && raw.get(end.saturating_sub(1)).map(|l| l.trim().is_empty()).unwrap_or(false) {
+    while end > line
+        && raw
+            .get(end.saturating_sub(1))
+            .map(|l| l.trim().is_empty())
+            .unwrap_or(false)
+    {
         end -= 1;
     }
     EnclosingBlock {
@@ -182,16 +194,22 @@ mod tests {
 
     #[test]
     fn rust_nested_function_picks_innermost() {
-        let src = "fn outer() -> i32 {\n    fn inner() -> i32 {\n        1\n    }\n    inner()\n}\n";
+        let src =
+            "fn outer() -> i32 {\n    fn inner() -> i32 {\n        1\n    }\n    inner()\n}\n";
         // line 3 ("1") sits inside `inner` (lines 2-4), which is nested inside `outer` (1-6).
         let block = enclosing_block("src/lib.rs", src, 3).unwrap();
         assert_eq!(block.kind, BlockKind::Function);
-        assert_eq!((block.start_line, block.end_line), (2, 4), "must pick the INNER fn, not outer");
+        assert_eq!(
+            (block.start_line, block.end_line),
+            (2, 4),
+            "must pick the INNER fn, not outer"
+        );
     }
 
     #[test]
     fn typescript_nested_function_picks_innermost() {
-        let src = "function outer() {\n  function inner() {\n    return 1;\n  }\n  return inner();\n}\n";
+        let src =
+            "function outer() {\n  function inner() {\n    return 1;\n  }\n  return inner();\n}\n";
         let block = enclosing_block("src/lib.ts", src, 3).unwrap();
         assert_eq!(block.kind, BlockKind::Function);
         assert_eq!((block.start_line, block.end_line), (2, 4));
@@ -199,7 +217,8 @@ mod tests {
 
     #[test]
     fn javascript_nested_function_picks_innermost() {
-        let src = "function outer() {\n  function inner() {\n    return 1;\n  }\n  return inner();\n}\n";
+        let src =
+            "function outer() {\n  function inner() {\n    return 1;\n  }\n  return inner();\n}\n";
         let block = enclosing_block("src/index.js", src, 3).unwrap();
         assert_eq!(block.kind, BlockKind::Function);
         assert_eq!((block.start_line, block.end_line), (2, 4));
@@ -234,7 +253,11 @@ mod tests {
     fn top_level_rust_statement_outside_any_fn_falls_back_to_window() {
         let src = "const X: i32 = 1;\nconst Y: i32 = 2;\n";
         let block = enclosing_block("src/lib.rs", src, 1).unwrap();
-        assert_eq!(block.kind, BlockKind::Window, "no fn contains a top-level const");
+        assert_eq!(
+            block.kind,
+            BlockKind::Window,
+            "no fn contains a top-level const"
+        );
     }
 
     #[test]
@@ -263,7 +286,8 @@ mod tests {
 
     #[test]
     fn sql_bounds_middle_statement_between_two_others() {
-        let sql = "create table a (id int);\ncreate table b (\n  id int\n);\ncreate table c (id int);\n";
+        let sql =
+            "create table a (id int);\ncreate table b (\n  id int\n);\ncreate table c (id int);\n";
         // line 3 ("  id int") is inside the second statement, which starts at line 2 and the
         // next statement starts at line 5, so it should be bounded [2, 4].
         let block = enclosing_block("migrations/0001.sql", sql, 3).unwrap();
@@ -390,13 +414,19 @@ mod tests {
     #[test]
     fn slice_lines_returns_the_requested_raw_range() {
         let src = "a\nb\nc\nd\n";
-        assert_eq!(slice_lines(src, 2, 3), vec!["b".to_string(), "c".to_string()]);
+        assert_eq!(
+            slice_lines(src, 2, 3),
+            vec!["b".to_string(), "c".to_string()]
+        );
     }
 
     #[test]
     fn slice_lines_clamps_end_past_eof() {
         let src = "a\nb\n";
-        assert_eq!(slice_lines(src, 1, 99), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            slice_lines(src, 1, 99),
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 
     #[test]

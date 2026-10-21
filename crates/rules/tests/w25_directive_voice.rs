@@ -20,8 +20,18 @@ use camerata_rules::{corpus_path, load_corpus_lenient};
 fn reads_as_scanner_instruction(directive: &str) -> bool {
     let d = directive.trim_start();
     const OPENERS: &[&str] = &[
-        "Scan ", "Scan for", "Regex-scan", "Parse each", "Parse every", "Trace ", "Survey ",
-        "Emit a finding", "Emit a ", "Flag as ", "Flag every", "Grep ",
+        "Scan ",
+        "Scan for",
+        "Regex-scan",
+        "Parse each",
+        "Parse every",
+        "Trace ",
+        "Survey ",
+        "Emit a finding",
+        "Emit a ",
+        "Flag as ",
+        "Flag every",
+        "Grep ",
     ];
     OPENERS.iter().any(|o| d.starts_with(o))
 }

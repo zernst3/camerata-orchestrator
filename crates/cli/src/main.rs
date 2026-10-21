@@ -259,8 +259,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let client = make_client(bff_url);
             print_result(
-                camerata::http_cmd::handle_start_run(&client, &story_id, model, skip_layer2)
-                    .await,
+                camerata::http_cmd::handle_start_run(&client, &story_id, model, skip_layer2).await,
             )
         }
         Command::Events { run_id } => {
@@ -538,13 +537,10 @@ mod cli_parse_tests {
             other => panic!("expected Command::Assign, got a different variant: {other:?}"),
         }
         // Missing `--assignee` must fail to parse.
-        assert!(Cli::try_parse_from([
-            "camerata",
-            "assign",
-            "--work-item",
-            "github:owner/repo#1"
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from(["camerata", "assign", "--work-item", "github:owner/repo#1"])
+                .is_err()
+        );
     }
 
     #[test]

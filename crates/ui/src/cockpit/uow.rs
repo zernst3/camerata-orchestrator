@@ -143,7 +143,12 @@ pub(super) struct PrInfoResult {
 /// server degrades to `ok=false` rather than erroring, so a network failure maps to the
 /// same "no PR" empty payload.
 pub(super) async fn fetch_uow_pr(story_id: &str) -> PrInfoResult {
-    let resp = reqwest::get(format!("{}/api/uow/{}/pr", crate::bff_base(), enc_seg(story_id))).await;
+    let resp = reqwest::get(format!(
+        "{}/api/uow/{}/pr",
+        crate::bff_base(),
+        enc_seg(story_id)
+    ))
+    .await;
     match resp {
         Ok(r) => r.json::<PrInfoResult>().await.unwrap_or_default(),
         Err(_) => PrInfoResult::default(),
@@ -160,7 +165,11 @@ pub(super) enum OpenPrOutcome {
 /// Push the UoW branch + open a PR into `base_branch` (empty → server default branch).
 pub(super) async fn open_uow_pr(story_id: &str, base_branch: &str) -> OpenPrOutcome {
     let resp = match reqwest::Client::new()
-        .post(format!("{}/api/uow/{}/pr/open", crate::bff_base(), enc_seg(story_id)))
+        .post(format!(
+            "{}/api/uow/{}/pr/open",
+            crate::bff_base(),
+            enc_seg(story_id)
+        ))
         .json(&serde_json::json!({ "base_branch": base_branch }))
         .send()
         .await
@@ -183,7 +192,10 @@ pub(super) async fn open_uow_pr(story_id: &str, base_branch: &str) -> OpenPrOutc
     match v.get("pr_number").and_then(|n| n.as_u64()) {
         Some(n) => OpenPrOutcome::Opened(
             n,
-            v.get("pr_url").and_then(|u| u.as_str()).unwrap_or_default().to_string(),
+            v.get("pr_url")
+                .and_then(|u| u.as_str())
+                .unwrap_or_default()
+                .to_string(),
         ),
         None => OpenPrOutcome::Failed,
     }
@@ -483,7 +495,11 @@ pub(super) async fn save_meta(story_id: &str, body: serde_json::Value) -> bool {
 /// Post a comment on the UoW's PR. Returns the created comment url on success.
 pub(super) async fn comment_on_uow_pr(story_id: &str, body: &str) -> Option<String> {
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/uow/{}/pr/comment", crate::bff_base(), enc_seg(story_id)))
+        .post(format!(
+            "{}/api/uow/{}/pr/comment",
+            crate::bff_base(),
+            enc_seg(story_id)
+        ))
         .json(&serde_json::json!({ "body": body }))
         .send()
         .await
@@ -498,7 +514,11 @@ pub(super) async fn comment_on_uow_pr(story_id: &str, body: &str) -> Option<Stri
 /// Start the gated "resolve PR feedback" run for a UoW. Mirrors `start_update_branch_run`.
 pub(super) async fn start_pr_resolve_run(story_id: &str, model: &str) -> StartRunOutcome {
     let resp = match reqwest::Client::new()
-        .post(format!("{}/api/uow/{}/pr/resolve", crate::bff_base(), enc_seg(story_id)))
+        .post(format!(
+            "{}/api/uow/{}/pr/resolve",
+            crate::bff_base(),
+            enc_seg(story_id)
+        ))
         .json(&serde_json::json!({ "model": model }))
         .send()
         .await
@@ -558,12 +578,16 @@ pub(super) struct RunProvenanceView {
 
 /// Fetch the provenance summary for a run.
 pub(super) async fn fetch_provenance(run_id: &str) -> Option<RunProvenanceView> {
-    reqwest::get(format!("{}/api/runs/{}/provenance", crate::bff_base(), run_id))
-        .await
-        .ok()?
-        .json::<RunProvenanceView>()
-        .await
-        .ok()
+    reqwest::get(format!(
+        "{}/api/runs/{}/provenance",
+        crate::bff_base(),
+        run_id
+    ))
+    .await
+    .ok()?
+    .json::<RunProvenanceView>()
+    .await
+    .ok()
 }
 
 /// One entry in the governance-event audit trail (Phase H3, `GET /api/runs/:id/events`)
@@ -589,11 +613,14 @@ pub(super) struct GovernanceEventView {
 /// renders nothing rather than surfacing a fetch error for what is a read-only diagnostic
 /// view.
 pub(super) async fn fetch_governance_events(run_id: &str) -> Vec<GovernanceEventView> {
-    let resp = match reqwest::get(format!("{}/api/runs/{}/events", crate::bff_base(), run_id)).await {
+    let resp = match reqwest::get(format!("{}/api/runs/{}/events", crate::bff_base(), run_id)).await
+    {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
-    resp.json::<Vec<GovernanceEventView>>().await.unwrap_or_default()
+    resp.json::<Vec<GovernanceEventView>>()
+        .await
+        .unwrap_or_default()
 }
 
 /// Send a stop/cancel request for ANY active run (investigation / dev / update-branch /
@@ -613,7 +640,11 @@ pub(super) async fn cancel_run(run_id: &str) -> bool {
 /// Send a cancel request for an audit job. Fire-and-forget; 204 = success.
 pub(super) async fn cancel_audit_job(job_id: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/onboard/audit/job/{}/cancel", crate::bff_base(), job_id))
+        .post(format!(
+            "{}/api/onboard/audit/job/{}/cancel",
+            crate::bff_base(),
+            job_id
+        ))
         .send()
         .await
         .map(|r| r.status() == reqwest::StatusCode::NO_CONTENT)
@@ -644,7 +675,11 @@ pub(super) async fn sign_off_run(
     waive_reason: Option<&str>,
 ) -> SignOffOutcome {
     let resp = match reqwest::Client::new()
-        .post(format!("{}/api/runs/{}/sign-off", crate::bff_base(), run_id))
+        .post(format!(
+            "{}/api/runs/{}/sign-off",
+            crate::bff_base(),
+            run_id
+        ))
         .json(&serde_json::json!({ "by": by, "note": note, "waive_reason": waive_reason }))
         .send()
         .await
@@ -782,9 +817,7 @@ pub(super) fn stage_to_phase(stage: UowStage) -> PhaseTab {
     match stage {
         UowStage::Intake => PhaseTab::Intake,
         UowStage::Investigating | UowStage::DecisionsApproved => PhaseTab::Investigation,
-        UowStage::Development | UowStage::AwaitingQa | UowStage::SignedOff => {
-            PhaseTab::Development
-        }
+        UowStage::Development | UowStage::AwaitingQa | UowStage::SignedOff => PhaseTab::Development,
     }
 }
 
@@ -810,8 +843,14 @@ mod stage_mapping_tests {
         // Intake is its own phase.
         assert_eq!(stage_to_phase(UowStage::Intake), PhaseTab::Intake);
         // Both investigation-era stages collapse into Investigation.
-        assert_eq!(stage_to_phase(UowStage::Investigating), PhaseTab::Investigation);
-        assert_eq!(stage_to_phase(UowStage::DecisionsApproved), PhaseTab::Investigation);
+        assert_eq!(
+            stage_to_phase(UowStage::Investigating),
+            PhaseTab::Investigation
+        );
+        assert_eq!(
+            stage_to_phase(UowStage::DecisionsApproved),
+            PhaseTab::Investigation
+        );
         // Development, Awaiting QA, and the terminal Signed Off all map to Development
         // (the caller separately stamps `meta.done` for SignedOff).
         assert_eq!(stage_to_phase(UowStage::Development), PhaseTab::Development);
@@ -828,9 +867,18 @@ mod stage_mapping_tests {
     #[test]
     fn stage_to_status_label_covers_all_stages() {
         assert_eq!(stage_to_status_label(UowStage::Intake), "Intake");
-        assert_eq!(stage_to_status_label(UowStage::Investigating), "Investigating");
-        assert_eq!(stage_to_status_label(UowStage::DecisionsApproved), "Decisions Approved");
-        assert_eq!(stage_to_status_label(UowStage::Development), "In Development");
+        assert_eq!(
+            stage_to_status_label(UowStage::Investigating),
+            "Investigating"
+        );
+        assert_eq!(
+            stage_to_status_label(UowStage::DecisionsApproved),
+            "Decisions Approved"
+        );
+        assert_eq!(
+            stage_to_status_label(UowStage::Development),
+            "In Development"
+        );
         assert_eq!(stage_to_status_label(UowStage::AwaitingQa), "Awaiting QA");
         assert_eq!(stage_to_status_label(UowStage::SignedOff), "Signed Off");
     }
@@ -944,12 +992,16 @@ pub(super) struct UowView {
 
 /// Fetch the UoW for a single story (get-or-create semantics).
 pub(super) async fn fetch_uow(story_id: &str) -> Option<UowView> {
-    reqwest::get(format!("{}/api/uow/{}", crate::bff_base(), enc_seg(story_id)))
-        .await
-        .ok()?
-        .json::<UowView>()
-        .await
-        .ok()
+    reqwest::get(format!(
+        "{}/api/uow/{}",
+        crate::bff_base(),
+        enc_seg(story_id)
+    ))
+    .await
+    .ok()?
+    .json::<UowView>()
+    .await
+    .ok()
 }
 
 /// POST a new dev-status for a story's UoW. Returns `Some(())` on a 2xx. The server
@@ -959,7 +1011,11 @@ pub(super) async fn fetch_uow(story_id: &str) -> Option<UowView> {
 /// status" toast even when the server succeeded.)
 pub(super) async fn post_uow_status(story_id: &str, status: DevStatus) -> Option<()> {
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/uow/{}/status", crate::bff_base(), enc_seg(story_id)))
+        .post(format!(
+            "{}/api/uow/{}/status",
+            crate::bff_base(),
+            enc_seg(story_id)
+        ))
         .json(&serde_json::json!({ "status": status.wire_str() }))
         .send()
         .await
@@ -980,7 +1036,12 @@ pub(super) enum TransitionOutcome {
 /// POST a lifecycle transition (`begin-investigation` / `approve-decisions`) and map the
 /// response: 2xx → the updated UoW, 409 → the block reason, anything else → Failed.
 pub(super) async fn post_uow_transition(story_id: &str, action: &str) -> TransitionOutcome {
-    let url = format!("{}/api/uow/{}/{}", crate::bff_base(), enc_seg(story_id), action);
+    let url = format!(
+        "{}/api/uow/{}/{}",
+        crate::bff_base(),
+        enc_seg(story_id),
+        action
+    );
     let resp = match reqwest::Client::new().post(url).send().await {
         Ok(r) => r,
         Err(_) => return TransitionOutcome::Failed,
@@ -1044,20 +1105,27 @@ pub(super) struct WorkItemRow {
 /// is seen twice the walk stops immediately, treating the last known node as root.
 ///
 /// Returns root-first. An item with no parent returns an empty `Vec`.
-pub(super) fn ancestor_path(by_number: &std::collections::HashMap<u64, &WorkItem>, item: &WorkItem) -> Vec<u64> {
+pub(super) fn ancestor_path(
+    by_number: &std::collections::HashMap<u64, &WorkItem>,
+    item: &WorkItem,
+) -> Vec<u64> {
     let mut path: Vec<u64> = Vec::with_capacity(8);
     let mut visited: std::collections::HashSet<u64> = std::collections::HashSet::new();
     visited.insert(item.number);
     let mut current = item;
     // Walk upward; cap at 8 hops (GitHub sub-issue depth ceiling).
     for _ in 0..8 {
-        let Some(pn) = current.parent_number else { break };
+        let Some(pn) = current.parent_number else {
+            break;
+        };
         if !visited.insert(pn) {
             // Cycle detected — stop.
             break;
         }
         path.push(pn);
-        let Some(parent) = by_number.get(&pn) else { break };
+        let Some(parent) = by_number.get(&pn) else {
+            break;
+        };
         current = parent;
     }
     path.reverse(); // root-first
@@ -1092,7 +1160,10 @@ mod issue_group_label_tests {
 
     #[test]
     fn formats_number_and_title() {
-        assert_eq!(issue_group_label(&wi(42, "Add CSV export")), "#42: Add CSV export");
+        assert_eq!(
+            issue_group_label(&wi(42, "Add CSV export")),
+            "#42: Add CSV export"
+        );
     }
 
     #[test]
@@ -1119,8 +1190,7 @@ mod issue_group_label_tests {
 pub(super) fn build_work_item_rows(items: &[WorkItem]) -> Vec<WorkItemRow> {
     use std::collections::HashMap;
     // O(1) parent-title lookups.
-    let by_number: HashMap<u64, &WorkItem> =
-        items.iter().map(|it| (it.number, it)).collect();
+    let by_number: HashMap<u64, &WorkItem> = items.iter().map(|it| (it.number, it)).collect();
 
     // Phase 1: compute each item's ancestor path and its own label.
     struct ItemMeta<'a> {
@@ -1155,8 +1225,7 @@ pub(super) fn build_work_item_rows(items: &[WorkItem]) -> Vec<WorkItemRow> {
             let mut cols: Vec<String> = Vec::with_capacity(tiers);
             if depth == 0 {
                 // Root parent, standalone, or orphan (its parent wasn't pulled).
-                let label = if parents.contains(&m.item.number) || m.item.parent_number.is_some()
-                {
+                let label = if parents.contains(&m.item.number) || m.item.parent_number.is_some() {
                     issue_group_label(m.item)
                 } else {
                     "(no parent)".to_string()
@@ -1182,14 +1251,19 @@ pub(super) fn build_work_item_rows(items: &[WorkItem]) -> Vec<WorkItemRow> {
                 let pad = if parents.contains(&m.item.number) {
                     issue_group_label(m.item)
                 } else {
-                    cols.last().cloned().unwrap_or_else(|| issue_group_label(m.item))
+                    cols.last()
+                        .cloned()
+                        .unwrap_or_else(|| issue_group_label(m.item))
                 };
                 while cols.len() < tiers {
                     cols.push(pad.clone());
                 }
                 cols.truncate(tiers);
             }
-            WorkItemRow { work_item: m.item.clone(), hierarchy_cols: cols }
+            WorkItemRow {
+                work_item: m.item.clone(),
+                hierarchy_cols: cols,
+            }
         })
         .collect()
 }
@@ -1208,8 +1282,7 @@ pub(super) fn render_pulled_issues_for_chat(items: &[WorkItem]) -> String {
     }
     use std::collections::HashMap;
 
-    let by_number: HashMap<u64, &WorkItem> =
-        items.iter().map(|it| (it.number, it)).collect();
+    let by_number: HashMap<u64, &WorkItem> = items.iter().map(|it| (it.number, it)).collect();
     // Map each parent number to its direct children (sorted for stable output).
     let mut children_of: HashMap<u64, Vec<&WorkItem>> = HashMap::new();
     for it in items {
@@ -1233,7 +1306,9 @@ pub(super) fn render_pulled_issues_for_chat(items: &[WorkItem]) -> String {
         s: &mut String,
         count: &mut usize,
     ) {
-        if *count >= 200 { return; }
+        if *count >= 200 {
+            return;
+        }
         *count += 1;
         let indent = "  ".repeat(depth);
         s.push_str(&format!(
@@ -1251,8 +1326,11 @@ pub(super) fn render_pulled_issues_for_chat(items: &[WorkItem]) -> String {
     let roots: Vec<&WorkItem> = {
         let mut v: Vec<&WorkItem> = items
             .iter()
-            .filter(|it| it.parent_number.map_or(true, |pn| !by_number.contains_key(&pn))
-                && it.parent_number.is_none())
+            .filter(|it| {
+                it.parent_number
+                    .map_or(true, |pn| !by_number.contains_key(&pn))
+                    && it.parent_number.is_none()
+            })
             .collect();
         v.sort_by_key(|it| it.number);
         v
@@ -1449,7 +1527,10 @@ pub(super) fn labels_summary(labels: &[String]) -> String {
 /// Whether a work item already has a UoW (dedup display logic). When true, the detail
 /// view shows "Open Unit of Work" (and the existing UoW id) instead of a Create button.
 /// Matching is by the work item's stable id against each UoW's referenced work item id.
-pub(super) fn existing_uow_for<'a>(uows: &'a [UowListEntry], work_item_id: &str) -> Option<&'a UowListEntry> {
+pub(super) fn existing_uow_for<'a>(
+    uows: &'a [UowListEntry],
+    work_item_id: &str,
+) -> Option<&'a UowListEntry> {
     uows.iter()
         .find(|u| u.work_item.as_ref().is_some_and(|wi| wi.id == work_item_id))
 }
@@ -1561,16 +1642,18 @@ pub(super) async fn create_blank_uow(parent_id: Option<String>) -> Option<String
         .json()
         .await
         .ok()?;
-    v.get("uow_id")
-        .and_then(|x| x.as_str())
-        .map(String::from)
+    v.get("uow_id").and_then(|x| x.as_str()).map(String::from)
 }
 
 /// Delete a UoW entirely (`DELETE /api/uow/:id`). Returns `true` on a 2xx. The UI gates
 /// this behind an "are you sure?" confirmation before calling it.
 pub(super) async fn delete_uow(story_id: &str) -> bool {
     reqwest::Client::new()
-        .delete(format!("{}/api/uow/{}", crate::bff_base(), enc_seg(story_id)))
+        .delete(format!(
+            "{}/api/uow/{}",
+            crate::bff_base(),
+            enc_seg(story_id)
+        ))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -1603,12 +1686,16 @@ pub(super) async fn set_draft_parent(story_id: &str, parent_id: &str) -> bool {
 
 /// Fetch a draft UoW's current authoring state (`GET /api/uow/:id`).
 pub(super) async fn fetch_authoring_uow(story_id: &str) -> Option<AuthoringUowView> {
-    reqwest::get(format!("{}/api/uow/{}", crate::bff_base(), enc_seg(story_id)))
-        .await
-        .ok()?
-        .json::<AuthoringUowView>()
-        .await
-        .ok()
+    reqwest::get(format!(
+        "{}/api/uow/{}",
+        crate::bff_base(),
+        enc_seg(story_id)
+    ))
+    .await
+    .ok()?
+    .json::<AuthoringUowView>()
+    .await
+    .ok()
 }
 
 /// Send a message to the story-authoring assistant (`POST /api/uow/:id/author`). Returns
@@ -1625,7 +1712,11 @@ pub(super) async fn post_author_message(
         body["model"] = serde_json::Value::String(model.trim().to_string());
     }
     reqwest::Client::new()
-        .post(format!("{}/api/uow/{}/author", crate::bff_base(), enc_seg(story_id)))
+        .post(format!(
+            "{}/api/uow/{}/author",
+            crate::bff_base(),
+            enc_seg(story_id)
+        ))
         .json(&body)
         .send()
         .await
@@ -1647,7 +1738,11 @@ pub(super) enum PublishOutcome {
 
 /// Publish a drafted story to the board and link the UoW (`POST /api/uow/:id/publish`).
 pub(super) async fn post_publish(story_id: &str, repo: &str) -> PublishOutcome {
-    let url = format!("{}/api/uow/{}/publish", crate::bff_base(), enc_seg(story_id));
+    let url = format!(
+        "{}/api/uow/{}/publish",
+        crate::bff_base(),
+        enc_seg(story_id)
+    );
     let resp = match reqwest::Client::new()
         .post(url)
         .json(&serde_json::json!({ "repo": repo }))
@@ -1788,10 +1883,7 @@ pub(super) async fn set_work_item_parent(
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
-    let v: serde_json::Value = res
-        .json()
-        .await
-        .map_err(|e| format!("bad response: {e}"))?;
+    let v: serde_json::Value = res.json().await.map_err(|e| format!("bad response: {e}"))?;
     if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
         Ok(())
     } else {
@@ -2336,8 +2428,10 @@ pub(super) fn IssueManagementPanel(
     let proj_id = proj.as_ref().map(|p| p.id.clone()).unwrap_or_default();
     // `pulled_for` returns the cache only when it belongs to the active project (and
     // never for an empty project id) — a project switch never shows stale items.
-    let item_list: Option<Vec<WorkItem>> =
-        GOV_DEV_STATE.read().pulled_for(&proj_id).map(<[WorkItem]>::to_vec);
+    let item_list: Option<Vec<WorkItem>> = GOV_DEV_STATE
+        .read()
+        .pulled_for(&proj_id)
+        .map(<[WorkItem]>::to_vec);
     // Resolve the open detail item against the current pull.
     let open_item = match (&item_list, detail_id()) {
         (Some(list), Some(id)) => list.iter().find(|it| it.id == id).cloned(),
@@ -2475,20 +2569,13 @@ pub(super) fn work_item_columns(
     // strings is bounded by `max_depth + 1` (≤ 9 per table construction).
     let mut cols: Vec<ColumnDef<WorkItemRow>> = (0..=max_depth)
         .map(|lvl| {
-            let id: &'static str =
-                Box::leak(format!("lvl{lvl}").into_boxed_str());
+            let id: &'static str = Box::leak(format!("lvl{lvl}").into_boxed_str());
             // The column header is intentionally blank — Chorale renders the
             // cell value as the group-header label, so no additional header text
             // is needed at the column level.
-            ColumnDef::new(
-                ColumnId(id),
-                "",
-                move |r: &WorkItemRow| {
-                    CellValue::Text(
-                        r.hierarchy_cols.get(lvl).cloned().unwrap_or_default(),
-                    )
-                },
-            )
+            ColumnDef::new(ColumnId(id), "", move |r: &WorkItemRow| {
+                CellValue::Text(r.hierarchy_cols.get(lvl).cloned().unwrap_or_default())
+            })
             .initial_width(220.0)
         })
         .collect();
@@ -2499,7 +2586,9 @@ pub(super) fn work_item_columns(
             CellValue::Text(r.work_item.repo.clone())
         })
         .sortable()
-        .filter(FilterKind::MultiSelect { options: repo_options })
+        .filter(FilterKind::MultiSelect {
+            options: repo_options,
+        })
         .initial_width(180.0),
         ColumnDef::new(ColumnId("num"), "ID", |r: &WorkItemRow| {
             CellValue::Text(format!("#{}", r.work_item.number))
@@ -2517,7 +2606,9 @@ pub(super) fn work_item_columns(
             CellValue::Text(r.work_item.state.to_ascii_lowercase())
         })
         .sortable()
-        .filter(FilterKind::MultiSelect { options: state_options })
+        .filter(FilterKind::MultiSelect {
+            options: state_options,
+        })
         .render_kind(RenderKind::Badge(state_badges))
         .initial_width(110.0),
         ColumnDef::new(ColumnId("labels"), "Labels", |r: &WorkItemRow| {
@@ -2554,27 +2645,33 @@ pub(super) fn WorkItemTable(items: Vec<WorkItem>, on_open: EventHandler<String>)
             // Derive distinct sorted repo and state values for the multi-select filters.
             let mut repos: Vec<String> = {
                 let mut seen = std::collections::BTreeSet::new();
-                for r in &built { seen.insert(r.work_item.repo.clone()); }
+                for r in &built {
+                    seen.insert(r.work_item.repo.clone());
+                }
                 seen.into_iter().collect()
             };
             repos.sort();
             let mut states: Vec<String> = {
                 let mut seen = std::collections::BTreeSet::new();
-                for r in &built { seen.insert(r.work_item.state.to_ascii_lowercase()); }
+                for r in &built {
+                    seen.insert(r.work_item.state.to_ascii_lowercase());
+                }
                 seen.into_iter().collect()
             };
             states.sort();
-            let rows = built
-                .into_iter()
-                .map(|r| (RowId::new(), r))
-                .collect();
+            let rows = built.into_iter().map(|r| (RowId::new(), r)).collect();
             (rows, max_depth, repos, states)
         }
     });
-    let id_map: std::collections::HashMap<RowId, String> =
-        rows.iter().map(|(r, row)| (*r, row.work_item.id.clone())).collect();
+    let id_map: std::collections::HashMap<RowId, String> = rows
+        .iter()
+        .map(|(r, row)| (*r, row.work_item.id.clone()))
+        .collect();
     let handle = use_table(move || {
-        TableState::new(rows.clone(), work_item_columns(max_depth, repo_options.clone(), state_options.clone()))
+        TableState::new(
+            rows.clone(),
+            work_item_columns(max_depth, repo_options.clone(), state_options.clone()),
+        )
     });
     // Group by all hierarchy levels (lvl0..lvl{max_depth}), producing genuinely nested
     // subgroups (mirrors the 2-level findings-triage pattern). The wrapper collapses every
@@ -3318,9 +3415,10 @@ pub(super) fn UowDevControls(
                     item.set(updated);
                     // Re-baseline: clear any stale CHANGED flag and advance last-seen to
                     // what was just pulled.
-                    GOV_DEV_STATE
-                        .write()
-                        .apply(GovDevMsg::PulledLatest { id: wid, updated_at: ua });
+                    GOV_DEV_STATE.write().apply(GovDevMsg::PulledLatest {
+                        id: wid,
+                        updated_at: ua,
+                    });
                 }
             }
         });
@@ -3405,11 +3503,7 @@ pub(super) fn UowDevControls(
     // a refresh doesn't fight a just-toggled Finish/Reopen before it persists.
     let mut meta_hydrated = use_signal(|| false);
     {
-        let loaded_meta = uow_for_stage
-            .read()
-            .clone()
-            .flatten()
-            .map(|u| u.meta);
+        let loaded_meta = uow_for_stage.read().clone().flatten().map(|u| u.meta);
         use_effect(use_reactive(&loaded_meta, move |loaded_meta| {
             if meta_hydrated() {
                 return;
@@ -3485,9 +3579,7 @@ pub(super) fn UowDevControls(
     }
 
     // Informational status label — purely display, never drives control flow.
-    let status_label = stage
-        .map(stage_to_status_label)
-        .unwrap_or("Loading…");
+    let status_label = stage.map(stage_to_status_label).unwrap_or("Loading…");
 
     // Stop-run busy flag (surfaced in top bar when a run is live).
     let mut stopping = use_signal(|| false);
@@ -3924,7 +4016,12 @@ pub(super) fn IntakePhaseView(
 
     // Repo/branch scoping — R6.
     let project_res = use_resource(fetch_active_project);
-    let project_repos = project_res.read().clone().flatten().map(|p| p.repos.clone()).unwrap_or_default();
+    let project_repos = project_res
+        .read()
+        .clone()
+        .flatten()
+        .map(|p| p.repos.clone())
+        .unwrap_or_default();
 
     let mut selected_repos: Signal<Vec<String>> = use_signal(Vec::new);
     let mut repo_branch_modes: Signal<std::collections::HashMap<String, RepoBranchScope>> =
@@ -4497,7 +4594,11 @@ pub(super) fn InvestigationPhaseView(
                     .iter()
                     .map(|t| {
                         // Normalize the persisted "agent" role to the UI's "assistant" class.
-                        let role = if t.role == "user" { "user" } else { "assistant" };
+                        let role = if t.role == "user" {
+                            "user"
+                        } else {
+                            "assistant"
+                        };
                         (role.to_string(), t.text.clone())
                     })
                     .collect();
@@ -5029,7 +5130,11 @@ pub(super) fn DevelopmentPhaseView(
                     .chat
                     .iter()
                     .map(|t| {
-                        let role = if t.role == "user" { "user" } else { "assistant" };
+                        let role = if t.role == "user" {
+                            "user"
+                        } else {
+                            "assistant"
+                        };
                         (role.to_string(), t.text.clone())
                     })
                     .collect();
@@ -5050,17 +5155,19 @@ pub(super) fn DevelopmentPhaseView(
         .clone()
         .flatten()
         .and_then(|u| u.gate_provenance)
-        .map(|p| format!(
-            "Layer-2: {} allowed, {} denied ({} bounces). Rules fired: {}",
-            p.allow_count,
-            p.deny_count,
-            p.total_bounces,
-            if p.rules_fired.is_empty() {
-                "none".to_string()
-            } else {
-                p.rules_fired.join(", ")
-            }
-        ));
+        .map(|p| {
+            format!(
+                "Layer-2: {} allowed, {} denied ({} bounces). Rules fired: {}",
+                p.allow_count,
+                p.deny_count,
+                p.total_bounces,
+                if p.rules_fired.is_empty() {
+                    "none".to_string()
+                } else {
+                    p.rules_fired.join(", ")
+                }
+            )
+        });
 
     // ── Ship panel state ──────────────────────────────────────────────────────────
     // Base branch for opening the PR (empty → server default branch).
@@ -5073,7 +5180,12 @@ pub(super) fn DevelopmentPhaseView(
         // TODO(#105): replace with actual in-scope repos from UoW intake state (R6)
         // For now, derive from the active project or the work item's repo.
         let project_res = use_resource(fetch_active_project);
-        let repos = project_res.read().clone().flatten().map(|p| p.repos.clone()).unwrap_or_default();
+        let repos = project_res
+            .read()
+            .clone()
+            .flatten()
+            .map(|p| p.repos.clone())
+            .unwrap_or_default();
         if repos.is_empty() {
             // Graceful fallback: no repos configured means nothing to ship.
             Vec::new()
@@ -5899,7 +6011,10 @@ mod ci_story_tier_tests {
 
     #[test]
     fn mechanical_rule_stays_mechanical() {
-        assert_eq!(ci_story_tier_for(&item("LINT-NO-ANY-1", "mechanical")), "mechanical");
+        assert_eq!(
+            ci_story_tier_for(&item("LINT-NO-ANY-1", "mechanical")),
+            "mechanical"
+        );
     }
 
     #[test]
@@ -6674,8 +6789,7 @@ pub(super) fn DecisionsReviewPanel(
     let no_real_output = !review.note_present;
     let note_html = crate::md::md_to_html(&note_text);
     let decisions = review.decisions.clone();
-    let all_approved =
-        !decisions.is_empty() && decisions.iter().all(|d| d.outcome.is_approved());
+    let all_approved = !decisions.is_empty() && decisions.iter().all(|d| d.outcome.is_approved());
 
     // BUG B: the reason the LAST investigation run failed (if it did) + whether live mode
     // is on — both come straight off the `/investigation` fetch so this panel can surface
@@ -7465,7 +7579,9 @@ mod bff_tests {
                 "source": "origin",
                 "model": "claude-opus-5",
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "run-42" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "run-42" })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -7489,7 +7605,10 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-9/update-branch"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({ "error": "no branch yet" })))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(serde_json::json!({ "error": "no branch yet" })),
+            )
             .mount(&server)
             .await;
 
@@ -7579,7 +7698,10 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-3/pr/open"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({ "error": "branch not pushed" })))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(serde_json::json!({ "error": "branch not pushed" })),
+            )
             .mount(&server)
             .await;
 
@@ -7670,7 +7792,9 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-1/investigation/chat"))
-            .and(body_json(serde_json::json!({ "role": "user", "text": "hi" })))
+            .and(body_json(
+                serde_json::json!({ "role": "user", "text": "hi" }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
@@ -7692,7 +7816,9 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-1/development/chat"))
-            .and(body_json(serde_json::json!({ "role": "agent", "text": "done" })))
+            .and(body_json(
+                serde_json::json!({ "role": "agent", "text": "done" }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
@@ -7733,8 +7859,14 @@ mod bff_tests {
         );
         assert!(sys.contains("CAM-42"), "story id grounded");
         assert!(sys.contains("investigation & refinement agent"));
-        assert!(sys.contains("The auth token is not refreshed."), "note grounded");
-        assert!(sys.contains("Use rotating refresh tokens"), "decision grounded");
+        assert!(
+            sys.contains("The auth token is not refreshed."),
+            "note grounded"
+        );
+        assert!(
+            sys.contains("Use rotating refresh tokens"),
+            "decision grounded"
+        );
     }
 
     #[test]
@@ -7756,7 +7888,10 @@ mod bff_tests {
         assert!(sys.contains("CAM-7"), "story id grounded");
         assert!(sys.contains("development agent"));
         assert!(sys.contains("bound to the approved decisions"));
-        assert!(sys.contains("Ship behind a feature flag"), "decision grounded");
+        assert!(
+            sys.contains("Ship behind a feature flag"),
+            "decision grounded"
+        );
     }
 
     #[test]
@@ -7800,12 +7935,18 @@ mod bff_tests {
             note_present: false,
             note: None,
             decisions: vec![
-                mk("Use Postgres", "matches existing infra", DecisionOutcomeView::Approved),
+                mk(
+                    "Use Postgres",
+                    "matches existing infra",
+                    DecisionOutcomeView::Approved,
+                ),
                 mk("Use SQLite", "", DecisionOutcomeView::Pending),
                 mk(
                     "Skip caching",
                     "",
-                    DecisionOutcomeView::Rejected { reason: "no".to_string() },
+                    DecisionOutcomeView::Rejected {
+                        reason: "no".to_string(),
+                    },
                 ),
                 mk("Add index", "", DecisionOutcomeView::Approved),
             ],
@@ -7883,7 +8024,9 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/chat"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "text": "  " })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "text": "  " })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -7904,7 +8047,9 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-1/contract"))
-            .and(body_json(serde_json::json!({ "contract": "fn foo()", "crosses_boundary": true })))
+            .and(body_json(
+                serde_json::json!({ "contract": "fn foo()", "crosses_boundary": true }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
@@ -7951,7 +8096,10 @@ mod bff_tests {
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-1/pr/comment"))
             .and(body_json(serde_json::json!({ "body": "ship it" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "url": "http://gh/c/1" })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "url": "http://gh/c/1" })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -7994,7 +8142,9 @@ mod bff_tests {
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-1/pr/resolve"))
             .and(body_json(serde_json::json!({ "model": "claude-sonnet-4" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "run-7" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "run-7" })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -8233,7 +8383,9 @@ mod bff_tests {
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-1/status"))
             .and(body_json(serde_json::json!({ "status": "in_progress" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "any": "body" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "any": "body" })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -8276,7 +8428,10 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-1/approve-decisions"))
-            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({ "reason": "decisions pending" })))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_json(serde_json::json!({ "reason": "decisions pending" })),
+            )
             .mount(&server)
             .await;
 
@@ -8370,7 +8525,10 @@ mod bff_tests {
         let out = super::assign_work_item("github:o/r#20", "octocat").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert!(out.is_none(), "ok:false must map to None so the caller toasts");
+        assert!(
+            out.is_none(),
+            "ok:false must map to None so the caller toasts"
+        );
     }
 
     // ── fetch_me_login: GET /api/me → login ─────────────────────────────────────
@@ -8384,7 +8542,9 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/me"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "login": "octocat" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "login": "octocat" })),
+            )
             .mount(&server)
             .await;
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
@@ -8396,7 +8556,9 @@ mod bff_tests {
         let server2 = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/me"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "login": null })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "login": null })),
+            )
             .mount(&server2)
             .await;
         std::env::set_var("CAMERATA_BFF_URL", server2.uri());
@@ -8473,7 +8635,9 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/uow/from-workitem"))
-            .and(body_json(serde_json::json!({ "work_item_id": "github:o/r#1" })))
+            .and(body_json(
+                serde_json::json!({ "work_item_id": "github:o/r#1" }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "uow_id": "CAM-1", "created": true
             })))
@@ -8501,7 +8665,9 @@ mod bff_tests {
         Mock::given(method("POST"))
             .and(path("/api/uow/blank"))
             .and(body_json(serde_json::json!({ "parent_id": null })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "uow_id": "CAM-9" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "uow_id": "CAM-9" })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -8523,7 +8689,9 @@ mod bff_tests {
         Mock::given(method("POST"))
             .and(path("/api/uow/blank"))
             .and(body_json(serde_json::json!({ "parent_id": "42" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "uow_id": "CAM-9" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "uow_id": "CAM-9" })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -8643,7 +8811,10 @@ mod bff_tests {
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-1/author"))
             .and(body_json(serde_json::json!({ "message": "hi" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "story_id": "CAM-1" })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "story_id": "CAM-1" })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -8664,8 +8835,13 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-1/author"))
-            .and(body_json(serde_json::json!({ "message": "hi", "model": "claude-opus-5" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "story_id": "CAM-1" })))
+            .and(body_json(
+                serde_json::json!({ "message": "hi", "model": "claude-opus-5" }),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "story_id": "CAM-1" })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -8709,7 +8885,10 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-1/publish"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({ "error": "title required" })))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(serde_json::json!({ "error": "title required" })),
+            )
             .mount(&server)
             .await;
 
@@ -8733,7 +8912,9 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/workitems/refresh"))
-            .and(body_json(serde_json::json!({ "work_item_id": "github:o/r#1" })))
+            .and(body_json(
+                serde_json::json!({ "work_item_id": "github:o/r#1" }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "item": { "id": "github:o/r#1", "title": "Refreshed", "number": 1 }
             })))
@@ -8759,8 +8940,13 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/workitems/comment"))
-            .and(body_json(serde_json::json!({ "work_item_id": "wi-1", "body": "note" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true, "url": "http://gh/c" })))
+            .and(body_json(
+                serde_json::json!({ "work_item_id": "wi-1", "body": "note" }),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ok": true, "url": "http://gh/c" })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -8781,7 +8967,9 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/workitems/comment"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
+            )
             .mount(&server)
             .await;
 
@@ -8802,8 +8990,12 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/workitems/set-parent"))
-            .and(body_json(serde_json::json!({ "work_item_id": "wi-1", "parent_number": "42" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .and(body_json(
+                serde_json::json!({ "work_item_id": "wi-1", "parent_number": "42" }),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -8824,7 +9016,10 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/workitems/set-parent"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false, "message": "no such parent" })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ok": false, "message": "no such parent" })),
+            )
             .mount(&server)
             .await;
 
@@ -8958,7 +9153,9 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-1/investigation/review"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -8979,7 +9176,9 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-1/investigation/review"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
+            )
             .mount(&server)
             .await;
 
@@ -9011,7 +9210,10 @@ mod bff_tests {
                 "tier": "mechanical",
                 "rules": rules.clone(),
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true, "url": "http://gh/issue/1" })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "ok": true, "url": "http://gh/issue/1" })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -9032,7 +9234,11 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/onboard/ci-rules"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false, "message": "repo not onboarded" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({ "ok": false, "message": "repo not onboarded" }),
+                ),
+            )
             .mount(&server)
             .await;
 
@@ -9207,7 +9413,10 @@ mod render_tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         // Compact variant swaps to the small edit-button class.
-        assert!(html.contains("btn-edit-sm"), "compact variant uses btn-edit-sm");
+        assert!(
+            html.contains("btn-edit-sm"),
+            "compact variant uses btn-edit-sm"
+        );
         assert!(
             !html.contains("btn-run"),
             "compact variant must not use the full btn-run class"
@@ -9245,18 +9454,12 @@ mod render_tests {
             html.contains("govdev-nav-top"),
             "top-level nav button present"
         );
-        assert!(
-            html.contains("govdev-nav-top-title"),
-            "title span present"
-        );
+        assert!(html.contains("govdev-nav-top-title"), "title span present");
         assert!(html.contains("govdev-nav-top-sub"), "subtitle span present");
         // The idle title + subtitle copy (unescaped words only — the title has an em-space
         // and a sparkle glyph, the subtitle a middot, all of which we sidestep by matching
         // stable plain words).
-        assert!(
-            html.contains("New Unit of Work"),
-            "idle title copy renders"
-        );
+        assert!(html.contains("New Unit of Work"), "idle title copy renders");
         assert!(
             html.contains("Draft a story with AI"),
             "subtitle copy renders"

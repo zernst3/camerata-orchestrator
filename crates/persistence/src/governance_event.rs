@@ -122,17 +122,29 @@ impl GovernanceEvent {
     }
 
     /// Construct an `"info"`-severity event.
-    pub fn info(run_id: impl Into<String>, kind: impl Into<String>, actor: impl Into<String>) -> Self {
+    pub fn info(
+        run_id: impl Into<String>,
+        kind: impl Into<String>,
+        actor: impl Into<String>,
+    ) -> Self {
         Self::new(run_id, kind, "info", actor)
     }
 
     /// Construct a `"warn"`-severity event.
-    pub fn warn(run_id: impl Into<String>, kind: impl Into<String>, actor: impl Into<String>) -> Self {
+    pub fn warn(
+        run_id: impl Into<String>,
+        kind: impl Into<String>,
+        actor: impl Into<String>,
+    ) -> Self {
         Self::new(run_id, kind, "warn", actor)
     }
 
     /// Construct an `"error"`-severity event.
-    pub fn error(run_id: impl Into<String>, kind: impl Into<String>, actor: impl Into<String>) -> Self {
+    pub fn error(
+        run_id: impl Into<String>,
+        kind: impl Into<String>,
+        actor: impl Into<String>,
+    ) -> Self {
         Self::new(run_id, kind, "error", actor)
     }
 
@@ -344,9 +356,13 @@ mod tests {
 
         {
             let log = GovernanceLog::open(&path).await.expect("open");
-            log.record(GovernanceEvent::info("run-durable", "run_started", "system"))
-                .await
-                .expect("record");
+            log.record(GovernanceEvent::info(
+                "run-durable",
+                "run_started",
+                "system",
+            ))
+            .await
+            .expect("record");
         }
         assert!(path.exists(), "open should create the database file");
 
@@ -382,7 +398,10 @@ mod tests {
             .await
             .expect("record run-b");
 
-        assert!(id1 < id2 && id2 < id3, "ids should be monotonically increasing");
+        assert!(
+            id1 < id2 && id2 < id3,
+            "ids should be monotonically increasing"
+        );
 
         let events = log.by_run("run-a").await.expect("by_run");
         assert_eq!(events.len(), 3, "only run-a's 3 events, not run-b's");
@@ -469,9 +488,7 @@ mod tests {
         }
         let events = log.by_run("run-vocab").await.expect("by_run");
         assert_eq!(events.len(), kinds_and_severities.len());
-        for (event, (kind, severity, actor)) in
-            events.iter().zip(kinds_and_severities.iter())
-        {
+        for (event, (kind, severity, actor)) in events.iter().zip(kinds_and_severities.iter()) {
             assert_eq!(&event.kind, kind);
             assert_eq!(&event.severity, severity);
             assert_eq!(&event.actor, actor);

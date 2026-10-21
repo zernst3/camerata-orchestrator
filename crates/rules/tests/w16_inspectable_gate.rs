@@ -306,10 +306,7 @@ async fn req_w16_the_inspectable_gate_fires_on_a_rule_that_omits_the_field() {
             "declared.toml",
             rule_toml("W16-FIXTURE-DECLARED-1", "inspectable = true"),
         ),
-        (
-            "undeclared.toml",
-            rule_toml("W16-FIXTURE-UNDECLARED-1", ""),
-        ),
+        ("undeclared.toml", rule_toml("W16-FIXTURE-UNDECLARED-1", "")),
     ]);
     let (set, errs) = load_corpus_lenient(dir.path()).await;
     assert!(errs.is_empty(), "the synthetic corpus must parse: {errs:?}");
@@ -374,7 +371,10 @@ async fn req_w16_the_emit_only_population_is_pinned() {
          vacuously over a field nothing exercises — the `max_severity` lesson"
     );
 
-    let mut expected: Vec<String> = EMIT_ONLY_RULES.iter().map(|(id, _)| id.to_string()).collect();
+    let mut expected: Vec<String> = EMIT_ONLY_RULES
+        .iter()
+        .map(|(id, _)| id.to_string())
+        .collect();
     expected.sort();
     assert_eq!(
         actual, expected,

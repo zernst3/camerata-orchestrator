@@ -76,10 +76,13 @@ struct ConventionalCommitConfigView {
 }
 
 fn default_cc_types() -> Vec<String> {
-    ["feat", "fix", "chore", "docs", "refactor", "test", "perf", "build", "ci", "style", "revert"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    [
+        "feat", "fix", "chore", "docs", "refactor", "test", "perf", "build", "ci", "style",
+        "revert",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 impl Default for ConventionalCommitConfigView {
@@ -251,10 +254,7 @@ async fn fetch_process_rule_config(project_id: &str) -> Option<ProcessRuleConfig
     serde_json::from_value(v.get("process_rule_config")?.clone()).ok()
 }
 
-async fn save_process_rule_config(
-    project_id: &str,
-    config: &ProcessRuleConfigView,
-) -> bool {
+async fn save_process_rule_config(project_id: &str, config: &ProcessRuleConfigView) -> bool {
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/process-rule-config",
@@ -382,9 +382,17 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                 let ok = save_process_rule_config(&pid, &cfg).await;
                 saving.set(false);
                 if ok {
-                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "VCS gate settings saved.");
+                    crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Info,
+                        "VCS gate settings saved.",
+                    );
                 } else {
-                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Failed to save VCS gate settings.");
+                    crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Error,
+                        "Failed to save VCS gate settings.",
+                    );
                 }
             });
         }
@@ -851,10 +859,7 @@ mod tests {
 
     #[test]
     fn vcs_rule_selected_true_when_present() {
-        let selections = vec![
-            "SOME-OTHER-RULE-1".to_string(),
-            RULE_COMMIT_DOC.to_string(),
-        ];
+        let selections = vec!["SOME-OTHER-RULE-1".to_string(), RULE_COMMIT_DOC.to_string()];
         assert!(vcs_rule_selected(&selections, RULE_COMMIT_DOC));
     }
 
@@ -941,7 +946,10 @@ mod tests {
     #[test]
     fn bug2_pr_coverage_defaults_to_true_true() {
         let cfg: ProcessRuleConfigView = serde_json::from_str("{}").expect("empty obj must deser");
-        assert!(cfg.pr.apply_body_rule, "apply_body_rule must default to true");
+        assert!(
+            cfg.pr.apply_body_rule,
+            "apply_body_rule must default to true"
+        );
         assert!(cfg.pr.apply_id_rule, "apply_id_rule must default to true");
     }
 
@@ -1021,8 +1029,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-2/ruleset"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "ok": false })),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
             )
             .mount(&server)
             .await;
@@ -1081,8 +1088,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-4/process-rule-config"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "ok": false })),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
             )
             .mount(&server)
             .await;
@@ -1119,7 +1125,9 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/projects/proj-5/process-rule-config"))
             .and(body_json(expected_body))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -1179,7 +1187,8 @@ mod tests {
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let result = super::test_bypass("proj-7", "auto merge", "machine-generated merge commit").await;
+        let result =
+            super::test_bypass("proj-7", "auto merge", "machine-generated merge commit").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         let record = result.expect("ok:true is not an Err");
@@ -1212,7 +1221,10 @@ mod tests {
         std::env::remove_var("CAMERATA_BFF_URL");
 
         let inner = result.expect("ok:true is not an Err");
-        assert!(inner.is_none(), "bypassed:false maps to Ok(None) — no bypass needed");
+        assert!(
+            inner.is_none(),
+            "bypassed:false maps to Ok(None) — no bypass needed"
+        );
     }
 
     /// POST helper: `ok:false` returns `Err(message)` carrying the server's message string.

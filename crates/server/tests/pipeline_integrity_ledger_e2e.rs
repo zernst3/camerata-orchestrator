@@ -68,8 +68,16 @@ fn stage_fixture_as_git_repo(dest: &Path) {
         );
     };
     g(&["init", "-q", "-b", "main"]);
-    g(&["config", "user.email", "pipeline-integrity-ledger-e2e@camerata.local"]);
-    g(&["config", "user.name", "Camerata Pipeline-Integrity-Ledger E2E Test"]);
+    g(&[
+        "config",
+        "user.email",
+        "pipeline-integrity-ledger-e2e@camerata.local",
+    ]);
+    g(&[
+        "config",
+        "user.name",
+        "Camerata Pipeline-Integrity-Ledger E2E Test",
+    ]);
     g(&["add", "."]);
     g(&[
         "commit",
@@ -129,15 +137,15 @@ async fn run_fixture_scan(
         None,       // model — unused, run_ai_review is false
         None,       // calibration_model — unused
         ScanMode::Sequential,
-        false, // thorough — unused (no AI review)
-        None,  // feedback
-        None,  // job
-        None,  // incremental_prior — full scan
-        false, // deep
-        false, // soc2_enabled
-        false, // run_ai_review — zero API spend
-        true,  // run_deterministic — the floor AND the architectural engine both run
-        None,  // usage ledger
+        false,                                        // thorough — unused (no AI review)
+        None,                                         // feedback
+        None,                                         // job
+        None,                                         // incremental_prior — full scan
+        false,                                        // deep
+        false,                                        // soc2_enabled
+        false,                                        // run_ai_review — zero API spend
+        true, // run_deterministic — the floor AND the architectural engine both run
+        None, // usage ledger
         camerata_server::llm::BackendResolution::Api, // backend gate: not under test here
         Some(corpus),
         &std::collections::HashMap::new(), // chosen_options
@@ -160,7 +168,10 @@ async fn ledger_reconciles_and_the_no_detector_rule_is_excluded_never_healthy() 
     stage_fixture_as_git_repo(repo_dir.path());
 
     let report = run_fixture_scan(repo_dir.path(), &repo_spec, &corpus).await;
-    assert!(!report.gated, "a local-dir scan is never gated on a GitHub token");
+    assert!(
+        !report.gated,
+        "a local-dir scan is never gated on a GitHub token"
+    );
 
     // ═══ The planted violation actually fired (sanity: the ledger assertions below are ═══
     // meaningless if the floor didn't really run). ═══
@@ -195,7 +206,9 @@ async fn ledger_reconciles_and_the_no_detector_rule_is_excluded_never_healthy() 
     let no_detector_entry = excluded
         .iter()
         .find(|(id, _)| *id == RULE_NO_DETECTOR)
-        .unwrap_or_else(|| panic!("{RULE_NO_DETECTOR} must appear in excluded_rules: {excluded:?}"));
+        .unwrap_or_else(|| {
+            panic!("{RULE_NO_DETECTOR} must appear in excluded_rules: {excluded:?}")
+        });
     // W4: this run has `run_ai_review: false`, and `RUBY-FROZEN-STRING-LITERAL-1` has no
     // deterministic detector — its only possible route (the semantic pass) was never taken
     // this run, which is an ORDINARY, honestly-scoped skip, not a pipeline-integrity alarm.
@@ -249,10 +262,17 @@ async fn ledger_reconciles_and_the_no_detector_rule_is_excluded_never_healthy() 
         &opts,
     );
 
-    let healthy_ids: std::collections::HashSet<&str> =
-        json.whats_healthy.rules.iter().map(|r| r.rule_id.as_str()).collect();
-    let excluded_ids: std::collections::HashSet<&str> =
-        json.rules_not_run.iter().map(|r| r.rule_id.as_str()).collect();
+    let healthy_ids: std::collections::HashSet<&str> = json
+        .whats_healthy
+        .rules
+        .iter()
+        .map(|r| r.rule_id.as_str())
+        .collect();
+    let excluded_ids: std::collections::HashSet<&str> = json
+        .rules_not_run
+        .iter()
+        .map(|r| r.rule_id.as_str())
+        .collect();
     assert!(healthy_ids.contains(RULE_SECRETS));
     assert!(!healthy_ids.contains(RULE_SQL_CONCAT));
     assert!(excluded_ids.contains(RULE_NO_DETECTOR));

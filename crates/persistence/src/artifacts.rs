@@ -408,9 +408,9 @@ fn row_to_revision(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactRevision, Pe
     // timestamp with no observable error. Map the parse error to sqlx::Error::Decode
     // (the same pattern used for kind/actor/op above) so the caller can decide whether
     // to surface or skip the row.
-    let created_at: DateTime<Utc> = created_at_str
-        .parse()
-        .map_err(|e| sqlx::Error::Decode(format!("invalid created_at timestamp '{created_at_str}': {e}").into()))?;
+    let created_at: DateTime<Utc> = created_at_str.parse().map_err(|e| {
+        sqlx::Error::Decode(format!("invalid created_at timestamp '{created_at_str}': {e}").into())
+    })?;
 
     Ok(ArtifactRevision {
         revision_id,

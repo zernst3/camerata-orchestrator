@@ -15,8 +15,8 @@
 //! crates.io to depend on). The architect-only fields are never emitted: the
 //! consumer agent sees one instruction, not the curation surface.
 
-use camerata_checks::{CheckManifest, ManifestCheck};
 use crate::workflow_gen::{generate_gates_workflow, RepoStack};
+use camerata_checks::{CheckManifest, ManifestCheck};
 use serde::{Deserialize, Serialize};
 
 /// One rule to install, fully resolved by the UI: `directive` is the chosen
@@ -293,8 +293,10 @@ fn emit_checks_toml_and_workflow(ci_tier: &[&ArmRule]) -> (String, String) {
         })
         .collect();
 
-    let manifest = CheckManifest { checks, ..Default::default()
-        };
+    let manifest = CheckManifest {
+        checks,
+        ..Default::default()
+    };
 
     // Serialize via the real structs so the output is guaranteed to round-trip through
     // load_manifest. `toml::to_string` on a CheckManifest serializes as `[[check]]`
@@ -318,8 +320,8 @@ fn emit_checks_toml_and_workflow(ci_tier: &[&ArmRule]) -> (String, String) {
         "#\n",
         "# Re-generate this file with Camerata's Apply flow; do not edit by hand.\n\n",
     );
-    let serialized = toml::to_string(&manifest)
-        .unwrap_or_else(|e| format!("# serialization error: {e}\n"));
+    let serialized =
+        toml::to_string(&manifest).unwrap_or_else(|e| format!("# serialization error: {e}\n"));
     let toml_content = format!("{toml_preamble}{serialized}");
 
     // Generate the REAL Layer-3 workflow via the shared generator. RepoStack::Unknown
@@ -423,8 +425,7 @@ pub async fn post_pr_comment(
     } else {
         eprintln!(
             "[evidence] PR comment HTTP {} for {owner}/{repo}#{pr_number}: {}",
-            resp.status,
-            resp.body
+            resp.status, resp.body
         );
         // Degrade gracefully — a PR comment failure must never block sign-off.
         Ok(None)
@@ -659,8 +660,14 @@ mod tests {
             wf.contains("camerata-gates"),
             "workflow must be named camerata-gates"
         );
-        assert!(wf.contains("pull_request"), "workflow must trigger on pull_request");
-        assert!(wf.contains("M-1"), "M-1 must surface in the generated workflow");
+        assert!(
+            wf.contains("pull_request"),
+            "workflow must trigger on pull_request"
+        );
+        assert!(
+            wf.contains("M-1"),
+            "M-1 must surface in the generated workflow"
+        );
     }
 
     #[test]
@@ -697,10 +704,18 @@ mod tests {
             .expect("manifest must be present");
 
         // Round-trip: emitted M-1 must be recoverable.
-        assert_eq!(manifest.checks.len(), 1, "expected 1 check, got {:?}", manifest.checks);
+        assert_eq!(
+            manifest.checks.len(),
+            1,
+            "expected 1 check, got {:?}",
+            manifest.checks
+        );
         assert_eq!(manifest.checks[0].id, "M-1");
         assert_eq!(manifest.checks[0].severity, "high");
-        assert!(manifest.checks[0].in_loop, "emitted check must have in_loop=true");
+        assert!(
+            manifest.checks[0].in_loop,
+            "emitted check must have in_loop=true"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -738,7 +753,10 @@ mod tests {
             .find(|(n, _)| n == ".camerata/checks.toml")
             .unwrap()
             .1;
-        assert!(toml.contains("A-1"), "architectural rule is a CI-tier check in checks.toml");
+        assert!(
+            toml.contains("A-1"),
+            "architectural rule is a CI-tier check in checks.toml"
+        );
         let wf = &files
             .iter()
             .find(|(n, _)| n == ".github/workflows/camerata-gates.yml")

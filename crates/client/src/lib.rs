@@ -280,7 +280,10 @@ impl Client {
     /// `GET /api/projects/:id/feedback` — one project's defect reports, newest first.
     /// Empty when no feedback store is open server-side. See
     /// `crates/server/src/lib.rs::project_feedback`.
-    pub async fn project_feedback(&self, project_id: &str) -> Result<Vec<DefectReport>, ClientError> {
+    pub async fn project_feedback(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<DefectReport>, ClientError> {
         self.get_json(&format!(
             "/api/projects/{}/feedback",
             Self::enc_seg(project_id)
@@ -692,8 +695,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-x/feedback"))
             .respond_with(
-                ResponseTemplate::new(500)
-                    .set_body_json(serde_json::json!({ "error": "boom" })),
+                ResponseTemplate::new(500).set_body_json(serde_json::json!({ "error": "boom" })),
             )
             .expect(1)
             .mount(&server)

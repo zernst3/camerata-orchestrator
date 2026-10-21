@@ -129,7 +129,6 @@ pub struct ManifestCheck {
     // `install` SHOULD also be set (the fields are independent by serde but the
     // combination is meaningful). A check without any of these fields is
     // un-pinned (back-compat); its behavior at Layer 2 and Layer 3 is unchanged.
-
     /// The external tool name to verify / install (e.g. `"dependency-cruiser"`,
     /// `"semgrep"`). Used by Layer 2 as the binary to `<tool> --version` against,
     /// and by the workflow generator as a human label for the install step.
@@ -260,12 +259,7 @@ pub struct ManifestParseError {
 
 impl std::fmt::Display for ManifestParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "failed to parse {}: {}",
-            self.path.display(),
-            self.cause
-        )
+        write!(f, "failed to parse {}: {}", self.path.display(), self.cause)
     }
 }
 
@@ -281,9 +275,7 @@ impl std::fmt::Display for ManifestParseError {
 /// # Panics
 ///
 /// Never panics. All I/O and parse errors are returned or swallowed by callers.
-pub fn load_manifest(
-    repo_root: &Path,
-) -> Result<Option<CheckManifest>, ManifestParseError> {
+pub fn load_manifest(repo_root: &Path) -> Result<Option<CheckManifest>, ManifestParseError> {
     let path = repo_root.join(".camerata/checks.toml");
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
@@ -297,10 +289,12 @@ pub fn load_manifest(
             });
         }
     };
-    toml::from_str::<CheckManifest>(&text).map(Some).map_err(|e| ManifestParseError {
-        path,
-        cause: e.to_string(),
-    })
+    toml::from_str::<CheckManifest>(&text)
+        .map(Some)
+        .map_err(|e| ManifestParseError {
+            path,
+            cause: e.to_string(),
+        })
 }
 
 // ─── tests (ORCH-NEW-PATH-TESTS-1) ───────────────────────────────────────────
@@ -311,8 +305,7 @@ mod tests {
     use std::fs;
 
     fn tmpdir() -> std::path::PathBuf {
-        static COUNTER: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(0);
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
             "cam-manifest-test-{}-{}-{}",
@@ -484,10 +477,14 @@ severity = "high"
                     version: None,
                     install: None,
                 },
-            ], ..Default::default()
+            ],
+            ..Default::default()
         };
 
-        let loop_cmds: Vec<&str> = manifest.in_loop_checks().map(|c| c.command.as_str()).collect();
+        let loop_cmds: Vec<&str> = manifest
+            .in_loop_checks()
+            .map(|c| c.command.as_str())
+            .collect();
         assert_eq!(loop_cmds, vec!["cmd_a", "cmd_c"]);
 
         let all_cmds: Vec<&str> = manifest.all_checks().map(|c| c.command.as_str()).collect();
@@ -617,6 +614,9 @@ in_loop  = false
         let pinned = &manifest.checks[1];
         assert_eq!(pinned.tool.as_deref(), Some("semgrep"));
         assert_eq!(pinned.version.as_deref(), Some("1.55.2"));
-        assert_eq!(pinned.install.as_deref(), Some("pip install semgrep==1.55.2"));
+        assert_eq!(
+            pinned.install.as_deref(),
+            Some("pip install semgrep==1.55.2")
+        );
     }
 }

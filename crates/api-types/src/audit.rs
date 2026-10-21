@@ -427,9 +427,15 @@ mod tests {
             })),
         };
         let v = serde_json::to_value(&row).unwrap();
-        assert_eq!(v["kind"], "deviation", "flat discriminator on the row itself");
+        assert_eq!(
+            v["kind"], "deviation",
+            "flat discriminator on the row itself"
+        );
         assert_eq!(v["deviating_sites"], 2);
-        assert_eq!(v["detail"], "2 deviating endpoints", "row's own field untouched");
+        assert_eq!(
+            v["detail"], "2 deviating endpoints",
+            "row's own field untouched"
+        );
         let back: Row = serde_json::from_value(v).unwrap();
         assert_eq!(back, row);
         // (2b) a legacy row with a STRAY unknown key and no `kind` tag: the flatten
@@ -486,7 +492,10 @@ mod tests {
             kind: KindOnWire(None),
         })
         .unwrap();
-        assert_eq!(legacy["kind"], "unspecified", "absent kind must be explicit on the wire");
+        assert_eq!(
+            legacy["kind"], "unspecified",
+            "absent kind must be explicit on the wire"
+        );
         assert_ne!(legacy["kind"], "defect");
     }
 

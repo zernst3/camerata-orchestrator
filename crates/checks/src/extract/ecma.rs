@@ -106,7 +106,9 @@ fn preceding_decorators<'s>(node: Node, source: &'s str) -> Vec<String> {
 /// REGISTRATION call (`router.get(...)`, `app.post(...)`, ...) — deliberately excludes `use`
 /// (Express middleware registration covers far more than routes, e.g. `app.use(cors())`, and
 /// including it would flag a huge amount of non-handler code as handler-classified).
-const EXPRESS_ROUTE_VERBS: &[&str] = &["get", "post", "put", "delete", "patch", "options", "head", "all"];
+const EXPRESS_ROUTE_VERBS: &[&str] = &[
+    "get", "post", "put", "delete", "patch", "options", "head", "all",
+];
 
 /// Best-effort Express-style route-REGISTRATION marker for an anonymous `arrow_function` /
 /// `function_expression`: when `node` is (syntactically) a callback ARGUMENT passed directly to
@@ -173,7 +175,9 @@ fn collect_import_statement(node: Node, source: &str, out: &mut Vec<Import>) {
     };
     let line = start_line(node);
     let mut cursor = node.walk();
-    let clause = node.children(&mut cursor).find(|c| c.kind() == "import_clause");
+    let clause = node
+        .children(&mut cursor)
+        .find(|c| c.kind() == "import_clause");
     let Some(clause) = clause else {
         // `import 'side-effect';` — no clause at all.
         out.push(Import {
@@ -201,7 +205,10 @@ fn collect_import_statement(node: Node, source: &str, out: &mut Vec<Import>) {
             }),
             "named_imports" => {
                 let mut nc = part.walk();
-                for spec in part.children(&mut nc).filter(|c| c.kind() == "import_specifier") {
+                for spec in part
+                    .children(&mut nc)
+                    .filter(|c| c.kind() == "import_specifier")
+                {
                     if let Some(name_node) = spec.child_by_field_name("name") {
                         out.push(Import {
                             specifier: specifier.to_string(),
@@ -232,10 +239,15 @@ fn collect_export_from(node: Node, source: &str, out: &mut Vec<Import>) {
     };
     let line = start_line(node);
     let mut cursor = node.walk();
-    let export_clause = node.children(&mut cursor).find(|c| c.kind() == "export_clause");
+    let export_clause = node
+        .children(&mut cursor)
+        .find(|c| c.kind() == "export_clause");
     if let Some(clause) = export_clause {
         let mut cc = clause.walk();
-        for spec in clause.children(&mut cc).filter(|c| c.kind() == "export_specifier") {
+        for spec in clause
+            .children(&mut cc)
+            .filter(|c| c.kind() == "export_specifier")
+        {
             if let Some(name_node) = spec.child_by_field_name("name") {
                 out.push(Import {
                     specifier: specifier.to_string(),
@@ -249,7 +261,12 @@ fn collect_export_from(node: Node, source: &str, out: &mut Vec<Import>) {
         return;
     }
     // `export * from 'x'` or `export * as ns from 'x'` — no enumerable names.
-    out.push(Import { specifier: specifier.to_string(), names: Vec::new(), kind: ImportKind::ReExport, line });
+    out.push(Import {
+        specifier: specifier.to_string(),
+        names: Vec::new(),
+        kind: ImportKind::ReExport,
+        line,
+    });
 }
 
 /// A dynamic `import('x')` call, or a CommonJS `require('x')` call — both are runtime
@@ -374,8 +391,12 @@ fn render_member_path(node: Node, source: &str) -> String {
     match node.kind() {
         "identifier" | "this" | "property_identifier" => text(node, source).to_string(),
         "member_expression" => {
-            let obj = node.child_by_field_name("object").map(|n| render_member_path(n, source));
-            let prop = node.child_by_field_name("property").map(|n| text(n, source).to_string());
+            let obj = node
+                .child_by_field_name("object")
+                .map(|n| render_member_path(n, source));
+            let prop = node
+                .child_by_field_name("property")
+                .map(|n| text(n, source).to_string());
             match (obj, prop) {
                 (Some(o), Some(p)) => format!("{o}.{p}"),
                 _ => "<expr>".to_string(),
@@ -400,9 +421,10 @@ fn walk_calls(node: Node, source: &str, out: &mut Vec<MethodCall>) {
     if node.kind() == "call_expression" {
         if let Some(func) = node.child_by_field_name("function") {
             if func.kind() == "member_expression" {
-                if let (Some(obj), Some(prop)) =
-                    (func.child_by_field_name("object"), func.child_by_field_name("property"))
-                {
+                if let (Some(obj), Some(prop)) = (
+                    func.child_by_field_name("object"),
+                    func.child_by_field_name("property"),
+                ) {
                     out.push(MethodCall {
                         receiver: render_member_path(obj, source),
                         method: text(prop, source).to_string(),
@@ -441,7 +463,10 @@ mod tests {
 
     #[test]
     fn named_import_with_alias() {
-        let vs = imports(EcmaDialect::TypeScript, "import { a as b, c } from 'bar';\n");
+        let vs = imports(
+            EcmaDialect::TypeScript,
+            "import { a as b, c } from 'bar';\n",
+        );
         assert_eq!(vs.len(), 2, "{vs:#?}");
         // Origin names recorded (a, c), not the local alias (b).
         assert!(vs.iter().any(|i| i.names == vec!["a".to_string()]));
@@ -458,11 +483,18 @@ mod tests {
 
     #[test]
     fn re_export_named_and_star() {
-        let vs = imports(EcmaDialect::TypeScript, "export { a as b } from 'bar';\nexport * from 'baz';\n");
+        let vs = imports(
+            EcmaDialect::TypeScript,
+            "export { a as b } from 'bar';\nexport * from 'baz';\n",
+        );
         assert_eq!(vs.len(), 2, "{vs:#?}");
         assert!(vs.iter().all(|i| i.kind == ImportKind::ReExport));
-        assert!(vs.iter().any(|i| i.specifier == "bar" && i.names == vec!["a".to_string()]));
-        assert!(vs.iter().any(|i| i.specifier == "baz" && i.names.is_empty()));
+        assert!(vs
+            .iter()
+            .any(|i| i.specifier == "bar" && i.names == vec!["a".to_string()]));
+        assert!(vs
+            .iter()
+            .any(|i| i.specifier == "baz" && i.names.is_empty()));
     }
 
     #[test]
@@ -489,7 +521,10 @@ mod tests {
 
     #[test]
     fn tsx_import_parses_with_tsx_dialect() {
-        let vs = imports(EcmaDialect::Tsx, "import React from 'react';\nconst x = <div>hi</div>;\n");
+        let vs = imports(
+            EcmaDialect::Tsx,
+            "import React from 'react';\nconst x = <div>hi</div>;\n",
+        );
         assert_eq!(vs.len(), 1, "{vs:#?}");
         assert_eq!(vs[0].specifier, "react");
     }
@@ -505,14 +540,20 @@ mod tests {
 
     #[test]
     fn arrow_function_named_via_const() {
-        let fs = functions(EcmaDialect::TypeScript, "const handler = (req, res) => {};\n");
+        let fs = functions(
+            EcmaDialect::TypeScript,
+            "const handler = (req, res) => {};\n",
+        );
         assert_eq!(fs.len(), 1, "{fs:#?}");
         assert_eq!(fs[0].name, "handler");
     }
 
     #[test]
     fn method_definition_in_class_with_decorator() {
-        let fs = functions(EcmaDialect::TypeScript, "class Foo {\n  @Get('/x')\n  method() {}\n}\n");
+        let fs = functions(
+            EcmaDialect::TypeScript,
+            "class Foo {\n  @Get('/x')\n  method() {}\n}\n",
+        );
         assert_eq!(fs.len(), 1, "{fs:#?}");
         assert_eq!(fs[0].name, "method");
         assert_eq!(fs[0].attrs, vec!["@Get('/x')".to_string()]);
@@ -527,25 +568,37 @@ mod tests {
 
     #[test]
     fn callback_argument_arrow_is_still_captured_anonymously() {
-        let fs = functions(EcmaDialect::TypeScript, "router.get('/x', (req,res) => {});\n");
+        let fs = functions(
+            EcmaDialect::TypeScript,
+            "router.get('/x', (req,res) => {});\n",
+        );
         assert_eq!(fs.len(), 1, "{fs:#?}");
         assert_eq!(fs[0].name, "<anonymous>");
     }
 
     #[test]
     fn express_route_registration_callback_carries_a_synthetic_route_marker() {
-        let fs = functions(EcmaDialect::TypeScript, "router.get('/x', (req,res) => {});\n");
+        let fs = functions(
+            EcmaDialect::TypeScript,
+            "router.get('/x', (req,res) => {});\n",
+        );
         assert_eq!(fs.len(), 1, "{fs:#?}");
         assert_eq!(fs[0].attrs, vec!["<express-route:router.get>".to_string()]);
     }
 
     #[test]
     fn express_route_registration_recognizes_app_and_every_http_verb() {
-        for verb in ["get", "post", "put", "delete", "patch", "options", "head", "all"] {
+        for verb in [
+            "get", "post", "put", "delete", "patch", "options", "head", "all",
+        ] {
             let src = format!("app.{verb}('/x', function (req, res) {{}});\n");
             let fs = functions(EcmaDialect::JavaScript, &src);
             assert_eq!(fs.len(), 1, "{fs:#?}");
-            assert_eq!(fs[0].attrs, vec![format!("<express-route:app.{verb}>")], "verb {verb}");
+            assert_eq!(
+                fs[0].attrs,
+                vec![format!("<express-route:app.{verb}>")],
+                "verb {verb}"
+            );
         }
     }
 
@@ -553,7 +606,10 @@ mod tests {
     fn express_middleware_use_is_not_marked_as_a_route() {
         // Deliberately excluded (see EXPRESS_ROUTE_VERBS doc): app.use(...) covers far more
         // than routes and would over-classify ordinary middleware as a handler.
-        let fs = functions(EcmaDialect::JavaScript, "app.use((req,res,next) => { next(); });\n");
+        let fs = functions(
+            EcmaDialect::JavaScript,
+            "app.use((req,res,next) => { next(); });\n",
+        );
         assert_eq!(fs.len(), 1, "{fs:#?}");
         assert!(fs[0].attrs.is_empty(), "{fs:#?}");
     }
@@ -567,7 +623,10 @@ mod tests {
 
     #[test]
     fn object_method_shorthand() {
-        let fs = functions(EcmaDialect::TypeScript, "const obj = { method() { return 1; } };\n");
+        let fs = functions(
+            EcmaDialect::TypeScript,
+            "const obj = { method() { return 1; } };\n",
+        );
         assert_eq!(fs.len(), 1, "{fs:#?}");
         assert_eq!(fs[0].name, "method");
     }
@@ -576,7 +635,10 @@ mod tests {
 
     #[test]
     fn this_field_chain_receiver() {
-        let cs = method_calls(EcmaDialect::TypeScript, "class A { m() { this.db.query(); } }\n");
+        let cs = method_calls(
+            EcmaDialect::TypeScript,
+            "class A { m() { this.db.query(); } }\n",
+        );
         assert_eq!(cs.len(), 1, "{cs:#?}");
         assert_eq!(cs[0].receiver, "this.db");
         assert_eq!(cs[0].method, "query");
@@ -594,7 +656,9 @@ mod tests {
     fn chained_calls_both_captured() {
         let cs = method_calls(EcmaDialect::TypeScript, "self.db.query().execute();\n");
         assert_eq!(cs.len(), 2, "{cs:#?}");
-        assert!(cs.iter().any(|c| c.method == "query" && c.receiver == "self.db"));
+        assert!(cs
+            .iter()
+            .any(|c| c.method == "query" && c.receiver == "self.db"));
         assert!(cs.iter().any(|c| c.method == "execute"));
     }
 
@@ -602,7 +666,11 @@ mod tests {
 
     #[test]
     fn truncated_source_does_not_panic() {
-        for dialect in [EcmaDialect::TypeScript, EcmaDialect::Tsx, EcmaDialect::JavaScript] {
+        for dialect in [
+            EcmaDialect::TypeScript,
+            EcmaDialect::Tsx,
+            EcmaDialect::JavaScript,
+        ] {
             let src = "function broken( {{{ ??? ";
             let _ = imports(dialect, src);
             let _ = functions(dialect, src);
@@ -613,7 +681,11 @@ mod tests {
     #[test]
     fn binary_like_content_does_not_panic() {
         let weird = "\u{0}\u{1}\u{FFFD} not js at all \u{FFFD} {{{";
-        for dialect in [EcmaDialect::TypeScript, EcmaDialect::Tsx, EcmaDialect::JavaScript] {
+        for dialect in [
+            EcmaDialect::TypeScript,
+            EcmaDialect::Tsx,
+            EcmaDialect::JavaScript,
+        ] {
             let _ = imports(dialect, weird);
             let _ = functions(dialect, weird);
             let _ = method_calls(dialect, weird);
@@ -622,7 +694,11 @@ mod tests {
 
     #[test]
     fn empty_source_does_not_panic() {
-        for dialect in [EcmaDialect::TypeScript, EcmaDialect::Tsx, EcmaDialect::JavaScript] {
+        for dialect in [
+            EcmaDialect::TypeScript,
+            EcmaDialect::Tsx,
+            EcmaDialect::JavaScript,
+        ] {
             assert!(imports(dialect, "").is_empty());
             assert!(functions(dialect, "").is_empty());
             assert!(method_calls(dialect, "").is_empty());

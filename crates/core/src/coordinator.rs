@@ -110,14 +110,14 @@ impl<'a> Coordinator<'a> {
                 })?;
 
         // 2. Layer-2 check.
-        let initial_check =
-            self.checks
-                .check(role, &self.worktree)
-                .await
-                .map_err(|source| CoordinatorError::Check {
-                    pass: "initial",
-                    source,
-                })?;
+        let initial_check = self
+            .checks
+            .check(role, &self.worktree)
+            .await
+            .map_err(|source| CoordinatorError::Check {
+                pass: "initial",
+                source,
+            })?;
         let initial_violations = initial_check.violated;
 
         // Clean on the first pass — no bounce.
@@ -134,8 +134,7 @@ impl<'a> Coordinator<'a> {
         // 3. ONE bounce-and-revise pass: append the violated rule ids AND the
         //    captured toolchain diagnostics to the task so the agent knows exactly
         //    what to fix, then re-run + re-check.
-        let revise_task =
-            build_revise_task(task, &initial_violations, &initial_check.diagnostics);
+        let revise_task = build_revise_task(task, &initial_violations, &initial_check.diagnostics);
         let revised_outcome = self
             .driver
             .run(role, &revise_task)
@@ -357,7 +356,10 @@ mod tests {
         assert!(task.contains("error[E0308]: mismatched types"));
         let diag_pos = task.find("error[E0308]").unwrap();
         let ids_pos = task.find("RUST-CLIPPY").unwrap();
-        assert!(diag_pos > ids_pos, "diagnostics must come after the rule ids");
+        assert!(
+            diag_pos > ids_pos,
+            "diagnostics must come after the rule ids"
+        );
     }
 
     #[tokio::test]

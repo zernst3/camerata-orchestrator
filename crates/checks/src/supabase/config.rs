@@ -24,10 +24,16 @@ pub fn parse_exposed_schemas(config_toml: &str) -> BTreeSet<String> {
         Ok(v) => v,
         Err(_) => return default_schemas(),
     };
-    let schemas = value.get("api").and_then(|api| api.get("schemas")).and_then(|s| s.as_array());
+    let schemas = value
+        .get("api")
+        .and_then(|api| api.get("schemas"))
+        .and_then(|s| s.as_array());
     match schemas {
         Some(arr) => {
-            let set: BTreeSet<String> = arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+            let set: BTreeSet<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
             if set.is_empty() {
                 default_schemas()
             } else {
@@ -68,7 +74,10 @@ mod tests {
     fn parses_multiple_schemas() {
         let toml = "[api]\nschemas = [\"public\", \"app\", \"billing\"]\n";
         let got = parse_exposed_schemas(toml);
-        let expected: BTreeSet<String> = ["public", "app", "billing"].into_iter().map(String::from).collect();
+        let expected: BTreeSet<String> = ["public", "app", "billing"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert_eq!(got, expected);
     }
 

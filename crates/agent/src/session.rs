@@ -381,8 +381,14 @@ mod tests {
         // gateway write-jail env is set too, but it is independent — the driver-side
         // `--add-dir` is what grants the read window.
         let wt = std::env::temp_dir().join("cam-prepare-wt-readscope");
-        let spawn = prepare_session(Path::new("/bin/camerata-gateway"), &role(), Some(&wt), &[], None)
-            .unwrap();
+        let spawn = prepare_session(
+            Path::new("/bin/camerata-gateway"),
+            &role(),
+            Some(&wt),
+            &[],
+            None,
+        )
+        .unwrap();
         let args = spawn.driver.build_args(&role(), "task");
         let idx = args
             .iter()
@@ -428,7 +434,9 @@ mod tests {
             .map(|(i, _)| &args[i + 1])
             .collect();
         assert!(add_dirs.iter().any(|d| **d == wt.display().to_string()));
-        assert!(add_dirs.iter().any(|d| **d == backend.display().to_string()));
+        assert!(add_dirs
+            .iter()
+            .any(|d| **d == backend.display().to_string()));
         assert!(add_dirs.iter().any(|d| **d == shared.display().to_string()));
 
         // WRITE jail: the gateway's CAMERATA_WORKTREE_ROOT is ONLY the worktree — never a
@@ -459,15 +467,29 @@ mod tests {
         // lands it in that gateway subprocess' mcp-config env — no process-global state.
         // Two concurrent runs therefore write to DISTINCT sinks, so their gate provenance
         // cannot cross-contaminate.
-        let sink_a = std::env::temp_dir().join("cam-run-a").join("gate-events.jsonl");
-        let sink_b = std::env::temp_dir().join("cam-run-b").join("gate-events.jsonl");
+        let sink_a = std::env::temp_dir()
+            .join("cam-run-a")
+            .join("gate-events.jsonl");
+        let sink_b = std::env::temp_dir()
+            .join("cam-run-b")
+            .join("gate-events.jsonl");
 
-        let spawn_a =
-            prepare_session(Path::new("/bin/camerata-gateway"), &role(), None, &[], Some(&sink_a))
-                .unwrap();
-        let spawn_b =
-            prepare_session(Path::new("/bin/camerata-gateway"), &role(), None, &[], Some(&sink_b))
-                .unwrap();
+        let spawn_a = prepare_session(
+            Path::new("/bin/camerata-gateway"),
+            &role(),
+            None,
+            &[],
+            Some(&sink_a),
+        )
+        .unwrap();
+        let spawn_b = prepare_session(
+            Path::new("/bin/camerata-gateway"),
+            &role(),
+            None,
+            &[],
+            Some(&sink_b),
+        )
+        .unwrap();
 
         let read_sink = |spawn: &SessionSpawn| -> String {
             let cfg: serde_json::Value =
@@ -482,6 +504,9 @@ mod tests {
         let b = read_sink(&spawn_b);
         assert_eq!(a, sink_a.display().to_string());
         assert_eq!(b, sink_b.display().to_string());
-        assert_ne!(a, b, "two runs must get DISTINCT sinks (no cross-contamination)");
+        assert_ne!(
+            a, b,
+            "two runs must get DISTINCT sinks (no cross-contamination)"
+        );
     }
 }

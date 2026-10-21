@@ -274,18 +274,30 @@ mod tests {
     #[test]
     fn verif_badge_verified_returns_checkmark_label_and_green_class() {
         let (label, cls) = verif_badge("verified");
-        assert!(label.contains("Verified"), "label should mention Verified, got: {label}");
+        assert!(
+            label.contains("Verified"),
+            "label should mention Verified, got: {label}"
+        );
         assert_eq!(cls, "verified");
     }
 
     #[test]
     fn verif_badge_grounded_returns_grounded_label_and_blue_class() {
         let (label, cls) = verif_badge("grounded");
-        assert!(label.contains("Grounded"), "label should mention Grounded, got: {label}");
+        assert!(
+            label.contains("Grounded"),
+            "label should mention Grounded, got: {label}"
+        );
         // Grounded must carry its own distinct symbol (the circled source-dot), separate from
         // the verified checkmark, so it's a clear table status not a faint tint.
-        assert!(label.contains('\u{29bf}'), "grounded label should carry its source-dot symbol");
-        assert!(!label.contains('\u{2713}'), "grounded must NOT reuse the verified checkmark");
+        assert!(
+            label.contains('\u{29bf}'),
+            "grounded label should carry its source-dot symbol"
+        );
+        assert!(
+            !label.contains('\u{2713}'),
+            "grounded must NOT reuse the verified checkmark"
+        );
         assert_eq!(cls, "grounded");
     }
 
@@ -299,7 +311,10 @@ mod tests {
     #[test]
     fn verif_badge_needs_recheck_returns_distinct_label_and_class() {
         let (label, cls) = verif_badge("needs_recheck");
-        assert!(label.contains("re-check") || label.contains("recheck"), "label should signal re-check, got: {label}");
+        assert!(
+            label.contains("re-check") || label.contains("recheck"),
+            "label should signal re-check, got: {label}"
+        );
         assert_eq!(cls, "needs-recheck");
     }
 
@@ -345,11 +360,23 @@ mod tests {
 
     #[test]
     fn bucket_of_maps_scope_to_bucket() {
-        assert_eq!(bucket_of(&rule_with_scope("cross-repo")), SelectionBucket::CrossRepo);
-        assert_eq!(bucket_of(&rule_with_scope("process")), SelectionBucket::Process);
-        assert_eq!(bucket_of(&rule_with_scope("repo-local")), SelectionBucket::Selections);
+        assert_eq!(
+            bucket_of(&rule_with_scope("cross-repo")),
+            SelectionBucket::CrossRepo
+        );
+        assert_eq!(
+            bucket_of(&rule_with_scope("process")),
+            SelectionBucket::Process
+        );
+        assert_eq!(
+            bucket_of(&rule_with_scope("repo-local")),
+            SelectionBucket::Selections
+        );
         // An unknown scope defaults to the repo-local Selections bucket.
-        assert_eq!(bucket_of(&rule_with_scope("whatever")), SelectionBucket::Selections);
+        assert_eq!(
+            bucket_of(&rule_with_scope("whatever")),
+            SelectionBucket::Selections
+        );
     }
 
     // ── project_level_insert ──────────────────────────────────────────────────
@@ -376,7 +403,10 @@ mod tests {
         // Repo-local selections are chosen per-repo via a separate flow; an option
         // pick must not auto-add them (which repo would it target?).
         let repos = vec!["me/api".to_string(), "me/web".to_string()];
-        assert_eq!(project_level_insert(SelectionBucket::Selections, &repos), None);
+        assert_eq!(
+            project_level_insert(SelectionBucket::Selections, &repos),
+            None
+        );
     }
 
     #[test]
@@ -493,7 +523,11 @@ mod tests {
         let selected: std::collections::HashSet<String> = ["R1".to_string()].into_iter().collect();
 
         let needing = rules_needing_option_chosen(&rules, &selected, |id| {
-            if id == "R1" { Some("b".to_string()) } else { None }
+            if id == "R1" {
+                Some("b".to_string())
+            } else {
+                None
+            }
         });
 
         assert_eq!(needing, ["R1".to_string()].into_iter().collect());
@@ -521,7 +555,8 @@ mod tests {
             "rule_id,title,kind,scope,enforcement,placement,finding_count,repos"
         );
         let row = lines.next().unwrap();
-        assert!(row.starts_with("RUST-FMT-1,Format with rustfmt,mechanical,repo-local,mechanical,CI,3,"));
+        assert!(row
+            .starts_with("RUST-FMT-1,Format with rustfmt,mechanical,repo-local,mechanical,CI,3,"));
         // repos are space-joined inside the single CSV field.
         assert!(row.contains("me/api me/web"), "row=\n{row}");
     }

@@ -78,17 +78,25 @@ fn scope1_full_progression_walks_every_stage_in_order() {
         "a new UoW starts at Intake"
     );
 
-    let after_inv = store.begin_investigation(s).expect("Intake -> Investigating");
+    let after_inv = store
+        .begin_investigation(s)
+        .expect("Intake -> Investigating");
     assert_eq!(after_inv.stage, UowStage::Investigating);
 
     store.set_decisions(s, vec![approved(s, "a"), approved(s, "b")]);
-    let after_approve = store.approve_decisions(s).expect("Investigating -> DecisionsApproved");
+    let after_approve = store
+        .approve_decisions(s)
+        .expect("Investigating -> DecisionsApproved");
     assert_eq!(after_approve.stage, UowStage::DecisionsApproved);
 
-    let after_dev = store.start_development(s).expect("DecisionsApproved -> Development");
+    let after_dev = store
+        .start_development(s)
+        .expect("DecisionsApproved -> Development");
     assert_eq!(after_dev.stage, UowStage::Development);
 
-    let after_qa = store.finish_development(s).expect("Development -> AwaitingQa");
+    let after_qa = store
+        .finish_development(s)
+        .expect("Development -> AwaitingQa");
     assert_eq!(after_qa.stage, UowStage::AwaitingQa);
 
     let after_signoff = store.sign_off(s, "zach", "run-1", None);
@@ -141,7 +149,10 @@ fn scope1_invalid_transitions_are_refused_and_leave_stage_unchanged() {
     let s3 = "S-early-signoff";
     store.begin_investigation(s3).unwrap();
     let uow = store.sign_off(s3, "zach", "run-x", None);
-    assert!(uow.sign_off.is_some(), "the sign-off record is still written");
+    assert!(
+        uow.sign_off.is_some(),
+        "the sign-off record is still written"
+    );
     assert_eq!(
         uow.stage,
         UowStage::Investigating,
@@ -198,7 +209,9 @@ fn scope2_decision_gate_blocks_into_development_until_every_decision_approved() 
 
     // (d) Every decision approved: ALLOWED.
     store.set_decisions(s, vec![approved(s, "a"), approved(s, "b")]);
-    let ok = store.approve_decisions(s).expect("gate opens when all approved");
+    let ok = store
+        .approve_decisions(s)
+        .expect("gate opens when all approved");
     assert_eq!(ok.stage, UowStage::DecisionsApproved);
 }
 
@@ -228,7 +241,9 @@ fn scope2_start_development_rechecks_the_gate_after_a_reopen() {
 
     // Re-approve: the gate opens.
     store.set_decisions(s, vec![approved(s, "a")]);
-    let ok = store.start_development(s).expect("re-approved -> Development");
+    let ok = store
+        .start_development(s)
+        .expect("re-approved -> Development");
     assert_eq!(ok.stage, UowStage::Development);
 }
 
@@ -356,7 +371,10 @@ fn scope4_from_workitem_dedups_within_the_active_project() {
         .iter()
         .filter(|u| u.story_id == story_id)
         .count();
-    assert_eq!(count, 1, "the same work item must never create a duplicate UoW");
+    assert_eq!(
+        count, 1,
+        "the same work item must never create a duplicate UoW"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════

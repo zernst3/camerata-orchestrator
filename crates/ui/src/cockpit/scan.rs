@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// One repo's local-path resolution status (issue #33), from `/api/projects/:id/repo-health`.
 #[derive(Clone, PartialEq, serde::Deserialize)]
 pub(super) struct RepoResolutionView {
@@ -502,9 +501,7 @@ pub(super) use camerata_ui_core::triage::bulk_reason_heading;
 // sentence as the group header's own label; `deviation_groups` is the same partition lifted out
 // for the rule-level bulk actions. Both are pure and structured-fields-only — there is no prose
 // path in either, and there must never be one.
-pub(super) use camerata_ui_core::triage::{
-    deviation_groups, rule_group_label, DeviationGroup,
-};
+pub(super) use camerata_ui_core::triage::{deviation_groups, rule_group_label, DeviationGroup};
 
 // Pass 2 step 4 (THE DOCKED DETAIL PANE, design §2 + the owner's Q5 ruling in §13). All pure
 // and all in core: the row cursor that arrow keys drive, the SCOPED key handler (the whole of
@@ -1390,10 +1387,16 @@ impl AuditModelsResp {
     /// Return models grouped by provider for `<optgroup>` rendering.
     /// Each group is `(group_label, entries)`. Claude always comes first.
     pub fn grouped(&self) -> Vec<(&'static str, Vec<&AuditModelOption>)> {
-        let claude: Vec<&AuditModelOption> =
-            self.models.iter().filter(|m| m.provider == "claude").collect();
-        let openrouter: Vec<&AuditModelOption> =
-            self.models.iter().filter(|m| m.provider == "openrouter").collect();
+        let claude: Vec<&AuditModelOption> = self
+            .models
+            .iter()
+            .filter(|m| m.provider == "claude")
+            .collect();
+        let openrouter: Vec<&AuditModelOption> = self
+            .models
+            .iter()
+            .filter(|m| m.provider == "openrouter")
+            .collect();
         let mut groups = Vec::new();
         if !claude.is_empty() {
             groups.push(("Claude (subscription)", claude));
@@ -1407,10 +1410,16 @@ impl AuditModelsResp {
     /// Return only vision-capable models, grouped by provider.
     /// Used to populate the Designer (vision) band model selector.
     pub fn vision_grouped(&self) -> Vec<(&'static str, Vec<&AuditModelOption>)> {
-        let claude: Vec<&AuditModelOption> =
-            self.models.iter().filter(|m| m.provider == "claude" && m.vision).collect();
-        let openrouter: Vec<&AuditModelOption> =
-            self.models.iter().filter(|m| m.provider == "openrouter" && m.vision).collect();
+        let claude: Vec<&AuditModelOption> = self
+            .models
+            .iter()
+            .filter(|m| m.provider == "claude" && m.vision)
+            .collect();
+        let openrouter: Vec<&AuditModelOption> = self
+            .models
+            .iter()
+            .filter(|m| m.provider == "openrouter" && m.vision)
+            .collect();
         let mut groups = Vec::new();
         if !claude.is_empty() {
             groups.push(("Claude (subscription)", claude));
@@ -1443,7 +1452,11 @@ pub(super) async fn fetch_audit_models() -> Option<AuditModelsResp> {
         .map(|m| m.id.clone())
         .unwrap_or_default();
 
-    Some(AuditModelsResp { models, default, openrouter_fetched: resp.openrouter_fetched })
+    Some(AuditModelsResp {
+        models,
+        default,
+        openrouter_fetched: resp.openrouter_fetched,
+    })
 }
 
 /// One deterministic-scan tool's live progress (mirror of the server's `DetToolProgress`).
@@ -1767,7 +1780,10 @@ pub(super) fn finding_row_class(f: &FindingView) -> Option<String> {
     (f.severity == "critical").then(|| "finding-row-critical".to_string())
 }
 
-pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<FindingView>> {
+pub(super) fn finding_columns(
+    repos: Vec<String>,
+    show_bucket: bool,
+) -> Vec<ColumnDef<FindingView>> {
     // chorale 0.2.3's palette has a native orange, so each severity gets a distinct color
     // straight from RenderKind::Badge — no custom cell renderer needed (Critical = red,
     // High = orange, Medium = yellow, Low = gray).
@@ -1776,9 +1792,18 @@ pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<Colu
     // accessor emits (the cell value doubles as the column's sort key — see below). The LABELS
     // are unchanged, so the rendered badge still reads "Critical" / "High" / "Medium" / "Low".
     let sev = BadgeVariantMap::new()
-        .with(severity_sort_value("critical"), BadgeVariant::new("Critical", "red"))
-        .with(severity_sort_value("high"), BadgeVariant::new("High", "orange"))
-        .with(severity_sort_value("medium"), BadgeVariant::new("Medium", "yellow"))
+        .with(
+            severity_sort_value("critical"),
+            BadgeVariant::new("Critical", "red"),
+        )
+        .with(
+            severity_sort_value("high"),
+            BadgeVariant::new("High", "orange"),
+        )
+        .with(
+            severity_sort_value("medium"),
+            BadgeVariant::new("Medium", "yellow"),
+        )
         .with(severity_sort_value("low"), BadgeVariant::new("Low", "gray"));
     let mut cols = vec![
         ColumnDef::new(ColumnId("repo"), "Repo", |f: &FindingView| {
@@ -1869,7 +1894,10 @@ pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<Colu
                 // chorale 0.2.3 added blue/purple to the palette, so the authorities
                 // read as distinct colors (no more gray fallback collision).
                 .with("enforced", BadgeVariant::new("Rule · enforced", "green"))
-                .with("preview", BadgeVariant::new("Preview · not enforced until wired", "purple"))
+                .with(
+                    "preview",
+                    BadgeVariant::new("Preview · not enforced until wired", "purple"),
+                )
                 .with("advisory", BadgeVariant::new("AI · advisory", "blue")),
         ))
         .initial_width(220.0),
@@ -1914,7 +1942,9 @@ pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<Colu
             CellValue::Text(confidence_tag(f).to_string())
         })
         .sortable()
-        .filter(FilterKind::MultiSelect { options: confidence_tags() })
+        .filter(FilterKind::MultiSelect {
+            options: confidence_tags(),
+        })
         .render_kind(RenderKind::Badge(
             BadgeVariantMap::new()
                 .with("test", BadgeVariant::new("Test", "yellow"))
@@ -2002,9 +2032,7 @@ pub(super) fn finding_table_state(
     // Set directly on the state rather than through `handle.set_column_visibility` after
     // mount: the column must never be visible, not even for the first frame, and a transition
     // fired from an effect is one render too late.
-    state
-        .column_visibility
-        .insert(RULE_GROUP_COLUMN, false);
+    state.column_visibility.insert(RULE_GROUP_COLUMN, false);
     state
 }
 
@@ -2829,7 +2857,9 @@ impl DetailPaneRow {
             sites: f.also_locations.iter().map(|s| pane_site(f, s)).collect(),
             site_count: site_count(f),
             snippet: f.snippet.clone(),
-            standard: directive.map(str::to_string).filter(|d| !d.trim().is_empty()),
+            standard: directive
+                .map(str::to_string)
+                .filter(|d| !d.trim().is_empty()),
             explanation: body,
             needs_review,
             confidence: f.confidence.clone(),
@@ -3211,13 +3241,15 @@ pub(super) fn FindingsTable(
     /// Open the RULE HUB (design §8). Raised from the two surfaces inside this table that
     /// carry a rule id and CAN carry a click: the docked detail pane (which is how a Queue row
     /// reaches it) and the deviation bulk bar (which is how a deviation group header does).
-    #[props(default)] on_open_hub: Callback<RuleHubRequest>,
+    #[props(default)]
+    on_open_hub: Callback<RuleHubRequest>,
     /// THE HUB'S QUEUE JUMP, arriving as state rather than as a call: "show me this rule in
     /// the Queue" is a column filter, exactly as design §8 describes the File join — "a
     /// filter, not a hyperlink graph". The parent writes a rule id here; the effect below
     /// applies it to chorale's own `type` column filter, so the jump leaves the curator in a
     /// normal, visibly-filtered table he can clear with the controls already on screen.
-    #[props(default)] queue_rule_filter: Signal<Option<String>>,
+    #[props(default)]
+    queue_rule_filter: Signal<Option<String>>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     // Filter to THIS table's triage state + apply the default triage order (enforced/new before
@@ -3226,7 +3258,10 @@ pub(super) fn FindingsTable(
     // paralysis; this floats the exploitable-bug criticals to the very top so a hardcoded secret
     // can never sit below "no mappers crate." Absent from the map = Unresolved.
     let findings: Vec<FindingView> = {
-        let model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+        let model = TriageModel {
+            dispositions: dispositions.peek().clone(),
+            triage_view,
+        };
         model.visible(&findings)
     };
     // Distinct repos for the repo multi-select filter. (Finding type is a Text/contains
@@ -3254,9 +3289,8 @@ pub(super) fn FindingsTable(
     // The column set is rebuilt for the order indicator below, so the repo list is cloned
     // before `use_table` takes ownership of its copy.
     let indicator_repos = filter_repos.clone();
-    let handle = use_table(move || {
-        finding_table_state(rows.clone(), filter_repos.clone(), in_techdebt)
-    });
+    let handle =
+        use_table(move || finding_table_state(rows.clone(), filter_repos.clone(), in_techdebt));
     // ── THE HUB'S QUEUE JUMP, applied to chorale's own column filter ────────────────────
     //
     // `applied` is PEEKED, never read, so this effect subscribes to exactly one signal
@@ -3293,9 +3327,8 @@ pub(super) fn FindingsTable(
     // The column set the bar resolves sorted-column headers against. Built once per mount and
     // shared by `Rc`, so the bar's props stay cheap to compare (`ColumnDef` holds `Arc`'d
     // closures and is not `PartialEq`).
-    let order_columns = use_hook(|| {
-        std::rc::Rc::new(finding_columns(indicator_repos.clone(), in_techdebt))
-    });
+    let order_columns =
+        use_hook(|| std::rc::Rc::new(finding_columns(indicator_repos.clone(), in_techdebt)));
     // Subscribe to the disposition map so the bucket flag column re-renders when the architect
     // marks resolve-later/now (the renderer below captures this snapshot).
     let bucket_snapshot = dispositions.read().clone();
@@ -3354,8 +3387,10 @@ pub(super) fn FindingsTable(
     } else {
         Vec::new()
     });
-    let bulk_rows: Vec<DeviationBulkRow> =
-        bulk_groups.iter().map(DeviationBulkRow::from_group).collect();
+    let bulk_rows: Vec<DeviationBulkRow> = bulk_groups
+        .iter()
+        .map(DeviationBulkRow::from_group)
+        .collect();
     // `finding_key` -> `RowId`, so a bulk action can drop exactly its own group's rows from
     // the table. Built from the same `id_map` the per-row buttons use, so the two paths
     // resolve rows identically.
@@ -3380,10 +3415,14 @@ pub(super) fn FindingsTable(
     let commit_toolbar_reason = Callback::new({
         let key_to_row_id = key_to_row_id.clone();
         move |()| {
-            let Some(p) = toolbar_prompt.peek().clone() else { return };
+            let Some(p) = toolbar_prompt.peek().clone() else {
+                return;
+            };
             let reason = toolbar_reason.peek().clone();
-            let mut model =
-                TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+            let mut model = TriageModel {
+                dispositions: dispositions.peek().clone(),
+                triage_view,
+            };
             let (ids, message) = match &p.target {
                 ReasonTarget::Selection { ids, rows } => {
                     // THE REQUIRE-REASON INVARIANT for the per-selection path, enforced at
@@ -3409,7 +3448,10 @@ pub(super) fn FindingsTable(
                         _ => model.mark_false_positive(rows, &reason),
                     }
                     let moved = rows.len();
-                    (ids.clone(), format!("Moved {moved} to {}.", p.state.label()))
+                    (
+                        ids.clone(),
+                        format!("Moved {moved} to {}.", p.state.label()),
+                    )
                 }
                 ReasonTarget::Group(group) => {
                     // The SAME `bulk_false_positive` the bar called directly before §9.2 —
@@ -3420,10 +3462,7 @@ pub(super) fn FindingsTable(
                         crate::toast::push_toast(
                             toasts,
                             crate::toast::ToastKind::Warning,
-                            reason_required_message(
-                                TriageState::FalsePositive,
-                                group.rows.len(),
-                            ),
+                            reason_required_message(TriageState::FalsePositive, group.rows.len()),
                         );
                         return;
                     };
@@ -3434,7 +3473,10 @@ pub(super) fn FindingsTable(
                         .collect();
                     (
                         ids,
-                        format!("Marked all {moved} {} row(s) as false positive.", group.rule_id),
+                        format!(
+                            "Marked all {moved} {} row(s) as false positive.",
+                            group.rule_id
+                        ),
                     )
                 }
             };
@@ -3466,9 +3508,7 @@ pub(super) fn FindingsTable(
             chorale_core::visible_grouped_view(&state)
                 .into_iter()
                 .filter_map(|r| match r {
-                    chorale_core::GroupedRow::Data(rid, _) => {
-                        id_map.get(&rid).map(finding_key)
-                    }
+                    chorale_core::GroupedRow::Data(rid, _) => id_map.get(&rid).map(finding_key),
                     // Group headers are not rows the cursor can land on; `GroupedRow` is
                     // `#[non_exhaustive]`, so anything chorale adds later is skipped rather
                     // than silently treated as a focusable row.
@@ -3578,7 +3618,8 @@ pub(super) fn FindingsTable(
             dispositions: dispositions.peek().clone(),
             triage_view,
         };
-        let Some(entry) = model.dispose_with_undo(std::slice::from_ref(&f), state, &reason, now) else {
+        let Some(entry) = model.dispose_with_undo(std::slice::from_ref(&f), state, &reason, now)
+        else {
             crate::toast::push_toast(
                 toasts,
                 crate::toast::ToastKind::Warning,
@@ -4378,7 +4419,8 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
     let gf_result = use_signal(|| Option::<GreenfieldScaffoldResult>::None);
     // Load corpus rules for the greenfield picker (the full library, no scan needed).
     let corpus_res = use_resource(fetch_corpus_rules);
-    let corpus_rules: Vec<ProposedRuleView> = corpus_res.read().clone().flatten().unwrap_or_default();
+    let corpus_rules: Vec<ProposedRuleView> =
+        corpus_res.read().clone().flatten().unwrap_or_default();
 
     // RESTORE a saved onboarding draft on first mount (issue #27): if there's no live scan
     // but a draft exists on disk, bring its scan back so the architect resumes exactly where
@@ -4926,7 +4968,11 @@ fn split_compliance_notes(message: &str) -> (Vec<String>, Option<String>) {
             }
         }
     }
-    let other = if other.is_empty() { None } else { Some(other.join(" · ")) };
+    let other = if other.is_empty() {
+        None
+    } else {
+        Some(other.join(" · "))
+    };
     (compliance, other)
 }
 
@@ -6345,10 +6391,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // SOC-2 section visibility, deep-export scope. Fetched once on mount; degrades
     // gracefully (all flags default to false) when the server is old.
     let feature_flags_res = use_resource(fetch_feature_flags);
-    let feature_flags = feature_flags_res
-        .read()
-        .clone()
-        .unwrap_or_default();
+    let feature_flags = feature_flags_res.read().clone().unwrap_or_default();
     // Live progress for an async job: (passes done, passes total, findings so far).
     let mut job_progress = use_signal(|| Option::<(usize, usize, usize)>::None);
     // Live DETERMINISTIC-pass progress (floor + preview tools), rendered above the AI
@@ -6404,7 +6447,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 let ids: Vec<String> = report
                     .proposed_rules
                     .iter()
-                    .filter(|r| r.effective_auto_recommended() && r.repos.iter().any(|rp| rp == repo))
+                    .filter(|r| {
+                        r.effective_auto_recommended() && r.repos.iter().any(|rp| rp == repo)
+                    })
                     .map(|r| r.id.clone())
                     .collect();
                 m.insert(repo.clone(), ids);
@@ -6668,32 +6713,33 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // option a rule is evaluated against. `staged` is `None` here because the staged-override
     // map is the panel's own state: the hub reports what the scan did, and the panel is where
     // a change is made. See the panel's doc comment.
-    let open_hub_alternatives: Option<AlternativeControlsRow> = hub_open.read().as_ref().and_then(|req| {
-        let rec = audited
-            .as_ref()
-            .and_then(|a| a.recommendations.get(&req.rule_id))
-            .cloned()?;
-        let rule = report
-            .proposed_rules
-            .iter()
-            .find(|r| r.id == req.rule_id && r.options.len() >= 2)?;
-        let scoped: Vec<&FindingView> = findings
-            .iter()
-            .filter(|f| f.repo == req.repo && f.rule_id == req.rule_id)
-            .collect();
-        let evaluated = scoped
-            .iter()
-            .find_map(|f| f.evaluated_option_id.clone())
-            .filter(|o| !o.is_empty());
-        Some(alternative_controls_row(
-            rule,
-            &rec,
-            scoped.len(),
-            evaluated.as_deref(),
-            None,
-            false,
-        ))
-    });
+    let open_hub_alternatives: Option<AlternativeControlsRow> =
+        hub_open.read().as_ref().and_then(|req| {
+            let rec = audited
+                .as_ref()
+                .and_then(|a| a.recommendations.get(&req.rule_id))
+                .cloned()?;
+            let rule = report
+                .proposed_rules
+                .iter()
+                .find(|r| r.id == req.rule_id && r.options.len() >= 2)?;
+            let scoped: Vec<&FindingView> = findings
+                .iter()
+                .filter(|f| f.repo == req.repo && f.rule_id == req.rule_id)
+                .collect();
+            let evaluated = scoped
+                .iter()
+                .find_map(|f| f.evaluated_option_id.clone())
+                .filter(|o| !o.is_empty());
+            Some(alternative_controls_row(
+                rule,
+                &rec,
+                scoped.len(),
+                evaluated.as_deref(),
+                None,
+                false,
+            ))
+        });
 
     rsx! {
         // Row-detail modal: hosted here, at the results-subtree root, so it is NOT a
@@ -8324,7 +8370,10 @@ mod tests {
             "proposed_rules": [],
             "gated": false,
         });
-        for (k, v) in overrides.as_object().expect("overrides must be a JSON object") {
+        for (k, v) in overrides
+            .as_object()
+            .expect("overrides must be a JSON object")
+        {
             base[k] = v.clone();
         }
         serde_json::from_value(base).expect("valid ScanReportView fixture")
@@ -8385,7 +8434,10 @@ mod tests {
             report.ai_blocked_reason.as_deref(),
             Some("This project is API-only (CLI disabled). Add an Anthropic API key to run.")
         );
-        assert_eq!(report.ai_error.as_deref(), Some("me/api: AI audit skipped (boom)"));
+        assert_eq!(
+            report.ai_error.as_deref(),
+            Some("me/api: AI audit skipped (boom)")
+        );
     }
 
     #[test]
@@ -8417,7 +8469,10 @@ mod tests {
         // interleaved with ordinary per-repo notes.
         let msg = "me/api: AI review deselected — deterministic only · \u{26a0} COMPLIANCE: falling back to the Claude CLI. · me/web: audit failed (timeout)";
         let (compliance, other) = super::split_compliance_notes(msg);
-        assert_eq!(compliance, vec!["falling back to the Claude CLI.".to_string()]);
+        assert_eq!(
+            compliance,
+            vec!["falling back to the Claude CLI.".to_string()]
+        );
         assert_eq!(
             other,
             Some(
@@ -8444,13 +8499,23 @@ mod tests {
     fn onboarding_draft_back_compat_missing_optional_fields() {
         // A minimal draft from before dispositions / triage_view / viewed_repo were added.
         let json = format!(r#"{{"scan": {}}}"#, minimal_scan_json());
-        let d: OnboardingDraft = serde_json::from_str(&json).expect("back-compat deserialization failed");
-        assert!(d.dispositions.is_empty(), "dispositions should default to empty");
-        assert!(d.repo_selection.is_empty(), "repo_selection should default to empty");
+        let d: OnboardingDraft =
+            serde_json::from_str(&json).expect("back-compat deserialization failed");
+        assert!(
+            d.dispositions.is_empty(),
+            "dispositions should default to empty"
+        );
+        assert!(
+            d.repo_selection.is_empty(),
+            "repo_selection should default to empty"
+        );
         assert!(d.chosen.is_empty(), "chosen should default to empty");
         assert!(d.custom.is_empty(), "custom should default to empty");
         assert!(d.audit.is_none(), "audit should default to None");
-        assert!(d.viewed_repo.is_empty(), "viewed_repo should default to empty string");
+        assert!(
+            d.viewed_repo.is_empty(),
+            "viewed_repo should default to empty string"
+        );
     }
 
     /// A draft with repo_selection and chosen round-trips through serde without data loss.
@@ -8461,14 +8526,12 @@ mod tests {
             SINGLE_REPO_SELECTION_KEY.to_string(),
             vec!["rule-a".to_string(), "rule-b".to_string()],
         );
-        repo_selection.insert(
-            "my-repo".to_string(),
-            vec!["rule-c".to_string()],
-        );
+        repo_selection.insert("my-repo".to_string(), vec!["rule-c".to_string()]);
         let mut chosen = std::collections::HashMap::new();
         chosen.insert("rule-a".to_string(), "opt-2".to_string());
 
-        let json = format!(r#"{{
+        let json = format!(
+            r#"{{
             "scan": {},
             "repo_selection": {},
             "chosen": {}
@@ -8478,7 +8541,8 @@ mod tests {
             serde_json::to_string(&chosen).unwrap(),
         );
 
-        let d: OnboardingDraft = serde_json::from_str(&json).expect("round-trip deserialization failed");
+        let d: OnboardingDraft =
+            serde_json::from_str(&json).expect("round-trip deserialization failed");
 
         // repo_selection is preserved exactly.
         assert_eq!(
@@ -8521,14 +8585,19 @@ mod tests {
         // User deselects B and selects D (non-recommended).
         // After user interaction, effective selection = {A, C, D}.
         // This is what gets saved in repo_selection.
-        let suggested: std::collections::HashSet<&str> = ["rule-a", "rule-b", "rule-c"].iter().copied().collect();
-        let user_effective: std::collections::HashSet<&str> = ["rule-a", "rule-c", "rule-d"].iter().copied().collect();
+        let suggested: std::collections::HashSet<&str> =
+            ["rule-a", "rule-b", "rule-c"].iter().copied().collect();
+        let user_effective: std::collections::HashSet<&str> =
+            ["rule-a", "rule-c", "rule-d"].iter().copied().collect();
 
         // On save: repo_selection holds the user's effective selection.
         let mut repo_selection = std::collections::HashMap::new();
         repo_selection.insert(
             SINGLE_REPO_SELECTION_KEY.to_string(),
-            user_effective.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            user_effective
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
         );
 
         // On restore: the table seed logic sees a saved entry and restores it exactly —
@@ -8537,17 +8606,32 @@ mod tests {
             .get(SINGLE_REPO_SELECTION_KEY)
             .map(|ids| ids.iter().cloned().collect());
 
-        assert!(saved.is_some(), "saved entry must be present after user interaction");
+        assert!(
+            saved.is_some(),
+            "saved entry must be present after user interaction"
+        );
         let restored: std::collections::HashSet<&str> =
             saved.as_ref().unwrap().iter().map(|s| s.as_str()).collect();
 
         // rule-b: user deselected — must NOT be in the restored set.
-        assert!(!restored.contains("rule-b"), "user-deselected rule must not be restored");
+        assert!(
+            !restored.contains("rule-b"),
+            "user-deselected rule must not be restored"
+        );
         // rule-d: user added (non-recommended) — must be in the restored set.
-        assert!(restored.contains("rule-d"), "user-added non-recommended rule must be restored");
+        assert!(
+            restored.contains("rule-d"),
+            "user-added non-recommended rule must be restored"
+        );
         // rule-a, rule-c: user kept (untouched suggestions) — must be in the restored set.
-        assert!(restored.contains("rule-a"), "untouched suggested rule must be preserved");
-        assert!(restored.contains("rule-c"), "untouched suggested rule must be preserved");
+        assert!(
+            restored.contains("rule-a"),
+            "untouched suggested rule must be preserved"
+        );
+        assert!(
+            restored.contains("rule-c"),
+            "untouched suggested rule must be preserved"
+        );
         // The suggested baseline for rule-b is NOT respected once the user has saved a delta.
         assert!(!suggested.is_empty(), "sanity: suggested set is non-empty");
     }
@@ -8579,34 +8663,52 @@ mod tests {
     fn badge_free_model_shows_free_not_price() {
         let label = super::model_badge_label("DeepSeek R1", true, true, 64_000, 0.0, false, true);
         assert!(label.contains("FREE"), "free model must show FREE: {label}");
-        assert!(!label.contains('$'), "free model must not show a price: {label}");
+        assert!(
+            !label.contains('$'),
+            "free model must not show a price: {label}"
+        );
     }
 
     #[test]
     fn badge_paid_model_shows_price_per_million() {
         // $0.55/M output
         let label = super::model_badge_label("DeepSeek R1", false, true, 64_000, 0.55, false, true);
-        assert!(label.contains("$0.55/M"), "paid model must show output price: {label}");
-        assert!(!label.contains("FREE"), "paid model must not show FREE: {label}");
+        assert!(
+            label.contains("$0.55/M"),
+            "paid model must show output price: {label}"
+        );
+        assert!(
+            !label.contains("FREE"),
+            "paid model must not show FREE: {label}"
+        );
     }
 
     #[test]
     fn badge_round_price_strips_trailing_decimal() {
         // $15.0/M → "$15/M" (no trailing zero)
         let label = super::model_badge_label("Opus", false, true, 200_000, 15.0, false, true);
-        assert!(label.contains("$15/M"), "round price must strip decimal: {label}");
+        assert!(
+            label.contains("$15/M"),
+            "round price must strip decimal: {label}"
+        );
     }
 
     #[test]
     fn badge_caching_true_shows_cache_tag() {
         let label = super::model_badge_label("DeepSeek R1", false, true, 64_000, 0.55, true, true);
-        assert!(label.contains("cache"), "caching model must show cache tag: {label}");
+        assert!(
+            label.contains("cache"),
+            "caching model must show cache tag: {label}"
+        );
     }
 
     #[test]
     fn badge_caching_false_omits_cache_tag() {
         let label = super::model_badge_label("Llama 3.1", false, true, 128_000, 0.10, false, true);
-        assert!(!label.contains("cache"), "non-caching model must not show cache tag: {label}");
+        assert!(
+            !label.contains("cache"),
+            "non-caching model must not show cache tag: {label}"
+        );
     }
 
     #[test]
@@ -8618,7 +8720,8 @@ mod tests {
 
     #[test]
     fn badge_free_with_cache() {
-        let label = super::model_badge_label("DeepSeek R1 Free", true, true, 64_000, 0.0, true, true);
+        let label =
+            super::model_badge_label("DeepSeek R1 Free", true, true, 64_000, 0.0, true, true);
         assert!(label.contains("FREE"), "free label: {label}");
         assert!(label.contains("cache"), "free+cache label: {label}");
     }
@@ -8630,16 +8733,26 @@ mod tests {
     #[test]
     fn badge_unknown_price_shows_price_unknown_not_zero_or_free() {
         let label = super::model_badge_label("Claude Brand New", false, true, 0, 0.0, true, false);
-        assert!(label.contains("price unknown"), "unknown price must be labeled: {label}");
-        assert!(!label.contains("FREE"), "unknown price must NOT be shown as FREE: {label}");
-        assert!(!label.contains('$'), "unknown price must not show a dollar figure: {label}");
+        assert!(
+            label.contains("price unknown"),
+            "unknown price must be labeled: {label}"
+        );
+        assert!(
+            !label.contains("FREE"),
+            "unknown price must NOT be shown as FREE: {label}"
+        );
+        assert!(
+            !label.contains('$'),
+            "unknown price must not show a dollar figure: {label}"
+        );
     }
 
     /// A free model (price_known irrelevant) must still show FREE even if `price_known`
     /// happens to be `false` — `free` takes priority in the badge-selection order.
     #[test]
     fn badge_free_wins_over_unknown_price() {
-        let label = super::model_badge_label("Some Free Model", true, true, 64_000, 0.0, false, false);
+        let label =
+            super::model_badge_label("Some Free Model", true, true, 64_000, 0.0, false, false);
         assert!(label.contains("FREE"));
         assert!(!label.contains("price unknown"));
     }
@@ -8663,7 +8776,11 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].0, "Claude (subscription)");
         assert_eq!(
-            groups[0].1.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            groups[0]
+                .1
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["opus", "sonnet"]
         );
         assert_eq!(groups[1].0, "OpenRouter");
@@ -8690,12 +8807,20 @@ mod tests {
         assert_eq!(groups.len(), 2);
         // Only the vision-capable claude model survives.
         assert_eq!(
-            groups[0].1.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            groups[0]
+                .1
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["opus"]
         );
         // Only the vision-capable openrouter model survives.
         assert_eq!(
-            groups[1].1.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            groups[1]
+                .1
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["pixtral"]
         );
     }
@@ -8811,7 +8936,10 @@ mod tests {
             "header row; csv=\n{csv}"
         );
         // also_matches is space-joined in its single cell.
-        assert!(csv.contains("ARCH-2 ARCH-3"), "also_matches joined; csv=\n{csv}");
+        assert!(
+            csv.contains("ARCH-2 ARCH-3"),
+            "also_matches joined; csv=\n{csv}"
+        );
         // Line + rule + path are present on the data row.
         assert!(csv.contains("ARCH-1"), "rule id; csv=\n{csv}");
         assert!(csv.contains("src/lib.rs"), "path; csv=\n{csv}");
@@ -8830,7 +8958,10 @@ mod tests {
             "detail": "d",
         }));
         let csv = super::findings_csv(&[f]);
-        assert!(csv.contains("\"a, b, c\""), "comma snippet must be quoted; csv=\n{csv}");
+        assert!(
+            csv.contains("\"a, b, c\""),
+            "comma snippet must be quoted; csv=\n{csv}"
+        );
     }
 
     // (finding_key / finding_state / TriageState-default tests moved to
@@ -8880,14 +9011,23 @@ mod tests {
         assert_eq!(p.audited_refs.len(), 1);
         assert_eq!(p.audited_refs[0].repo, "owner/repo");
         assert_eq!(p.audited_refs[0].branch.as_deref(), Some("main"));
-        assert!(p.audited_refs[0].dirty, "dirty flag must survive the round trip");
+        assert!(
+            p.audited_refs[0].dirty,
+            "dirty flag must survive the round trip"
+        );
         assert_eq!(p.audit_model.as_deref(), Some("claude-sonnet-5"));
         assert_eq!(p.calibration_model.as_deref(), Some("claude-haiku-4-5"));
         assert_eq!(p.mode, "parallel");
         assert!(p.thorough);
         assert!(!p.deep);
         assert_eq!(p.rules_fingerprint, "fp-123");
-        assert_eq!(p.audited_rule_ids, vec!["SEC-NO-HARDCODED-SECRETS-1".to_string(), "ARCH-1".to_string()]);
+        assert_eq!(
+            p.audited_rule_ids,
+            vec![
+                "SEC-NO-HARDCODED-SECRETS-1".to_string(),
+                "ARCH-1".to_string()
+            ]
+        );
         assert_eq!(p.camerata_version, "0.1.0");
         assert_eq!(p.osv_scanner_version.as_deref(), Some("v1.9.2"));
         assert_eq!(p.started_at, "2026-07-23T00:00:00+00:00");
@@ -8929,7 +9069,10 @@ mod tests {
                 }
             }
         }));
-        assert_eq!(r.findings[0].evaluated_option_id.as_deref(), Some("layered"));
+        assert_eq!(
+            r.findings[0].evaluated_option_id.as_deref(),
+            Some("layered")
+        );
         assert_eq!(r.recommendations.len(), 2);
         let arch1 = &r.recommendations["ARCH-1"];
         assert_eq!(arch1.recommended_option_id, "layered");
@@ -8949,14 +9092,23 @@ mod tests {
             "explicit applicable:false must survive the round trip"
         );
         let arch2 = &r.recommendations["ARCH-2"];
-        assert!(arch2.hallucinated, "hallucinated flag must survive the round trip");
-        assert!(arch2.operator_chosen, "operator_chosen flag must survive the round trip");
+        assert!(
+            arch2.hallucinated,
+            "hallucinated flag must survive the round trip"
+        );
+        assert!(
+            arch2.operator_chosen,
+            "operator_chosen flag must survive the round trip"
+        );
         // ARCH-2's JSON predates P7 (no evidence/applicable keys at all) — legacy-absent case:
         // must deserialize as no-evidence + applicable defaulting to TRUE (matching the server's
         // own `default_recommendation_applicable`), not `bool::default()`'s `false`, so an old
         // persisted report never renders every recommendation as "Not applicable".
         assert_eq!(arch2.evidence, None, "absent evidence deserializes as None");
-        assert!(arch2.applicable, "absent applicable must default to true, not false");
+        assert!(
+            arch2.applicable,
+            "absent applicable must default to true, not false"
+        );
     }
 
     #[test]
@@ -9002,7 +9154,8 @@ mod tests {
         existing_recs.insert("ARCH-1".to_string(), rec("opt-a", false));
         existing_recs.insert("ARCH-2".to_string(), rec("opt-b", false));
 
-        let rescanned: std::collections::HashSet<String> = ["ARCH-2".to_string()].into_iter().collect();
+        let rescanned: std::collections::HashSet<String> =
+            ["ARCH-2".to_string()].into_iter().collect();
         let new_findings = vec![finding_for("ARCH-2", "b.rs")]; // the operator's forced re-audit shrank it to 1
         let mut new_recs = std::collections::HashMap::new();
         new_recs.insert("ARCH-2".to_string(), rec("opt-c", true));
@@ -9017,13 +9170,29 @@ mod tests {
 
         // ARCH-1's finding is untouched; ARCH-2's two old findings are replaced by the one new one.
         assert_eq!(merged_findings.len(), 2, "ARCH-1 (1) + the new ARCH-2 (1)");
-        assert!(merged_findings.iter().any(|f| f.rule_id == "ARCH-1" && f.path == "a.rs"));
-        assert!(merged_findings.iter().any(|f| f.rule_id == "ARCH-2" && f.path == "b.rs"));
-        assert!(!merged_findings.iter().any(|f| f.path == "c.rs"), "the old ARCH-2 finding must be gone");
+        assert!(merged_findings
+            .iter()
+            .any(|f| f.rule_id == "ARCH-1" && f.path == "a.rs"));
+        assert!(merged_findings
+            .iter()
+            .any(|f| f.rule_id == "ARCH-2" && f.path == "b.rs"));
+        assert!(
+            !merged_findings.iter().any(|f| f.path == "c.rs"),
+            "the old ARCH-2 finding must be gone"
+        );
 
-        assert_eq!(merged_recs["ARCH-1"].recommended_option_id, "opt-a", "untouched");
-        assert_eq!(merged_recs["ARCH-2"].recommended_option_id, "opt-c", "replaced by the rescan");
-        assert!(merged_recs["ARCH-2"].operator_chosen, "rescanned rule is now operator-chosen");
+        assert_eq!(
+            merged_recs["ARCH-1"].recommended_option_id, "opt-a",
+            "untouched"
+        );
+        assert_eq!(
+            merged_recs["ARCH-2"].recommended_option_id, "opt-c",
+            "replaced by the rescan"
+        );
+        assert!(
+            merged_recs["ARCH-2"].operator_chosen,
+            "rescanned rule is now operator-chosen"
+        );
     }
 
     #[test]
@@ -9074,7 +9243,11 @@ mod tests {
         let mut pending = std::collections::HashMap::new();
         pending.insert("ARCH-2".to_string(), "opt-x".to_string());
         super::stage_or_clear_override(&mut pending, "ARCH-1", "layered", "hexagonal");
-        assert_eq!(pending.get("ARCH-2"), Some(&"opt-x".to_string()), "untouched");
+        assert_eq!(
+            pending.get("ARCH-2"),
+            Some(&"opt-x".to_string()),
+            "untouched"
+        );
         assert_eq!(pending.get("ARCH-1"), Some(&"hexagonal".to_string()));
     }
 
@@ -9220,8 +9393,12 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/repo-path"))
-            .and(body_json(serde_json::json!({ "repo": "owner/a", "path": "/local/a" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .and(body_json(
+                serde_json::json!({ "repo": "owner/a", "path": "/local/a" }),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -9257,7 +9434,8 @@ mod tests {
         .unwrap();
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let url = super::ignore_findings("owner/repo", &[f], "noise", Some("CAM-9".to_string())).await;
+        let url =
+            super::ignore_findings("owner/repo", &[f], "noise", Some("CAM-9".to_string())).await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(url.as_deref(), Some("https://github.com/owner/repo/pull/9"));
@@ -9272,7 +9450,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/onboard/ignore"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
+            )
             .mount(&server)
             .await;
 
@@ -9292,7 +9472,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/onboard/scan"))
-            .and(body_json(serde_json::json!({ "repos": ["owner/a", "owner/b"] })))
+            .and(body_json(
+                serde_json::json!({ "repos": ["owner/a", "owner/b"] }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "repos": ["owner/a", "owner/b"],
                 "files_scanned": 12,
@@ -9310,7 +9492,10 @@ mod tests {
 
         let report = report.expect("scan report parses");
         assert_eq!(report.files_scanned, 12);
-        assert_eq!(report.repos, vec!["owner/a".to_string(), "owner/b".to_string()]);
+        assert_eq!(
+            report.repos,
+            vec!["owner/a".to_string(), "owner/b".to_string()]
+        );
         assert!(!report.gated);
     }
 
@@ -9374,7 +9559,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/onboard/draft"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -9401,7 +9588,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/onboard/draft/clear"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -9420,7 +9609,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/onboard/complete"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .mount(&server)
             .await;
 
@@ -9517,8 +9708,16 @@ mod tests {
         assert_eq!(resp.models.len(), 2);
         // The badge label is built from registry fields at fetch time.
         let opus = resp.models.iter().find(|m| m.id == "opus").unwrap();
-        assert!(opus.label.contains("Opus"), "label carries display name: {}", opus.label);
-        assert!(opus.label.contains("$15/M"), "label carries output price: {}", opus.label);
+        assert!(
+            opus.label.contains("Opus"),
+            "label carries display name: {}",
+            opus.label
+        );
+        assert!(
+            opus.label.contains("$15/M"),
+            "label carries output price: {}",
+            opus.label
+        );
     }
 
     #[tokio::test]
@@ -9542,7 +9741,10 @@ mod tests {
                 "run_ai_review": true,
                 "run_deterministic": true,
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "job_id": "job-123" })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "job_id": "job-123" })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -9647,7 +9849,10 @@ mod tests {
         let env = env.expect("envelope parses");
         assert_eq!(env.job.status, "done");
         let report = env.job.report.expect("a done job carries its report");
-        assert_eq!(report.ai_error.as_deref(), Some("me/api: AI audit skipped (boom)"));
+        assert_eq!(
+            report.ai_error.as_deref(),
+            Some("me/api: AI audit skipped (boom)")
+        );
     }
 
     #[tokio::test]
@@ -9719,7 +9924,9 @@ mod tests {
         // decision via its feature flag. The request is a bare GET on the path.
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-1/deep-report"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("# Deep Report\n\nsome markdown"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("# Deep Report\n\nsome markdown"),
+            )
             .mount(&server)
             .await;
 
@@ -9748,7 +9955,10 @@ mod tests {
         let md = super::fetch_deep_report("proj-1").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert!(md.is_none(), "a non-2xx must yield None, not the error body");
+        assert!(
+            md.is_none(),
+            "a non-2xx must yield None, not the error body"
+        );
     }
 
     // ── rescan_alternatives / accept_alternatives (audit-integrated alternative
@@ -9937,15 +10147,30 @@ mod render_tests {
         let mut vdom = VirtualDom::new(det_progress_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("det-progress"), "root container; html=\n{html}");
+        assert!(
+            html.contains("det-progress"),
+            "root container; html=\n{html}"
+        );
         assert!(html.contains("Deterministic scan"), "title; html=\n{html}");
-        assert!(html.contains("1/2 tools"), "done/total count; html=\n{html}");
+        assert!(
+            html.contains("1/2 tools"),
+            "done/total count; html=\n{html}"
+        );
         // det_tool_label maps "floor" → "Security floor"; "clippy" passes through.
-        assert!(html.contains("Security floor"), "floor label; html=\n{html}");
+        assert!(
+            html.contains("Security floor"),
+            "floor label; html=\n{html}"
+        );
         assert!(html.contains("clippy"), "clippy label; html=\n{html}");
         // The done tool shows its findings count; the running tool shows its status.
-        assert!(html.contains("3 finding(s)"), "done tool findings; html=\n{html}");
-        assert!(html.contains("running"), "running tool status; html=\n{html}");
+        assert!(
+            html.contains("3 finding(s)"),
+            "done tool findings; html=\n{html}"
+        );
+        assert!(
+            html.contains("running"),
+            "running tool status; html=\n{html}"
+        );
     }
 
     // ── Tier-1 render: GreenfieldResultView, success branch (props-only) ───────
@@ -9968,12 +10193,21 @@ mod render_tests {
         let mut vdom = VirtualDom::new(gf_ok_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("gf-result-ok"), "success container class; html=\n{html}");
-        assert!(html.contains("Repo scaffolded"), "success heading; html=\n{html}");
+        assert!(
+            html.contains("gf-result-ok"),
+            "success container class; html=\n{html}"
+        );
+        assert!(
+            html.contains("Repo scaffolded"),
+            "success heading; html=\n{html}"
+        );
         assert!(html.contains("CONVENTIONS.md"), "first file; html=\n{html}");
         assert!(html.contains("AGENTS.md"), "second file; html=\n{html}");
         assert!(html.contains("abc123"), "commit sha; html=\n{html}");
-        assert!(html.contains("/dest/my-proj"), "location path; html=\n{html}");
+        assert!(
+            html.contains("/dest/my-proj"),
+            "location path; html=\n{html}"
+        );
     }
 
     // ── Tier-1 render: GreenfieldResultView, error branch (props-only) ─────────
@@ -9993,9 +10227,18 @@ mod render_tests {
         let mut vdom = VirtualDom::new(gf_err_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("gf-result-err"), "error container class; html=\n{html}");
-        assert!(html.contains("Scaffold failed"), "error heading; html=\n{html}");
-        assert!(html.contains("directory already exists"), "error message; html=\n{html}");
+        assert!(
+            html.contains("gf-result-err"),
+            "error container class; html=\n{html}"
+        );
+        assert!(
+            html.contains("Scaffold failed"),
+            "error heading; html=\n{html}"
+        );
+        assert!(
+            html.contains("directory already exists"),
+            "error message; html=\n{html}"
+        );
     }
 
     // ── Tier-1 render: DeepReportExportPanel (needs the toast context) ─────────
@@ -10014,14 +10257,29 @@ mod render_tests {
         let mut vdom = VirtualDom::new(deep_export_harness_soc2_on);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("deep-export-panel"), "panel container; html=\n{html}");
-        assert!(html.contains("Export deep compliance report"), "section label; html=\n{html}");
+        assert!(
+            html.contains("deep-export-panel"),
+            "panel container; html=\n{html}"
+        );
+        assert!(
+            html.contains("Export deep compliance report"),
+            "section label; html=\n{html}"
+        );
         // soc2_enabled = true → the "also included" hint, not the "disabled" one.
-        assert!(html.contains("SOC-2 gap analysis is also included"), "soc2-on hint; html=\n{html}");
+        assert!(
+            html.contains("SOC-2 gap analysis is also included"),
+            "soc2-on hint; html=\n{html}"
+        );
         // The CTA label (loading() is false initially).
-        assert!(html.contains("Export deep report"), "export button label; html=\n{html}");
+        assert!(
+            html.contains("Export deep report"),
+            "export button label; html=\n{html}"
+        );
         // No modal overlay until a report loads.
-        assert!(!html.contains("deep-export-modal-overlay"), "no modal before fetch; html=\n{html}");
+        assert!(
+            !html.contains("deep-export-modal-overlay"),
+            "no modal before fetch; html=\n{html}"
+        );
     }
 
     fn deep_export_harness_soc2_off() -> Element {
@@ -10065,16 +10323,24 @@ mod render_tests {
         let mut vdom = VirtualDom::new(ai_blocked_banner_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("AI review did not run"), "heading; html=\n{html}");
         assert!(
-            html.contains("This project is API-only (CLI disabled). Add an Anthropic API key to run."),
+            html.contains("AI review did not run"),
+            "heading; html=\n{html}"
+        );
+        assert!(
+            html.contains(
+                "This project is API-only (CLI disabled). Add an Anthropic API key to run."
+            ),
             "the exact block reason must be visible verbatim; html=\n{html}"
         );
         assert!(
             html.contains("Add an Anthropic API key in Settings"),
             "actionable remediation hint; html=\n{html}"
         );
-        assert!(!html.contains("AI review failed"), "must not ALSO show the error heading; html=\n{html}");
+        assert!(
+            !html.contains("AI review failed"),
+            "must not ALSO show the error heading; html=\n{html}"
+        );
     }
 
     fn ai_error_banner_harness() -> Element {
@@ -10111,7 +10377,10 @@ mod render_tests {
         let mut vdom = VirtualDom::new(ai_banner_neither_set_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(!html.contains("onboard-gate"), "no banner markup at all on the happy path; html=\n{html}");
+        assert!(
+            !html.contains("onboard-gate"),
+            "no banner markup at all on the happy path; html=\n{html}"
+        );
     }
 
     // ── Tier-1 render: ScanJobFailedBanner (background-job silent-death fix) ───────────────
@@ -10141,7 +10410,10 @@ mod render_tests {
             html.contains("claude CLI (`claude`) was not found on PATH"),
             "the real underlying failure text must be visible verbatim, not swallowed; html=\n{html}"
         );
-        assert!(html.contains("onboard-gate"), "reuses the same unmissable banner styling; html=\n{html}");
+        assert!(
+            html.contains("onboard-gate"),
+            "reuses the same unmissable banner styling; html=\n{html}"
+        );
     }
 
     fn scan_job_failed_banner_none_harness() -> Element {
@@ -10157,7 +10429,10 @@ mod render_tests {
         let mut vdom = VirtualDom::new(scan_job_failed_banner_none_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(!html.contains("onboard-gate"), "no banner markup at all on the happy path; html=\n{html}");
+        assert!(
+            !html.contains("onboard-gate"),
+            "no banner markup at all on the happy path; html=\n{html}"
+        );
     }
 
     // ── Tier-1 render: audit-integrated alternative recommendation ─────────────────────────
@@ -10182,7 +10457,12 @@ mod render_tests {
         .expect("valid ProposedRuleView fixture")
     }
 
-    fn recommendation(option_id: &str, reasoning: &str, hallucinated: bool, operator_chosen: bool) -> RuleRecommendationView {
+    fn recommendation(
+        option_id: &str,
+        reasoning: &str,
+        hallucinated: bool,
+        operator_chosen: bool,
+    ) -> RuleRecommendationView {
         RuleRecommendationView {
             recommended_option_id: option_id.to_string(),
             recommendation_reasoning: reasoning.to_string(),
@@ -10232,18 +10512,29 @@ mod render_tests {
             proposed_rule_with_options(
                 "ARCH-1",
                 "Layering",
-                &[("layered", "Layered architecture"), ("hexagonal", "Hexagonal architecture")],
+                &[
+                    ("layered", "Layered architecture"),
+                    ("hexagonal", "Hexagonal architecture"),
+                ],
             ),
             proposed_rule_with_options(
                 "ARCH-2",
                 "Error handling",
-                &[("result", "Result-based"), ("exceptions", "Exception-based")],
+                &[
+                    ("result", "Result-based"),
+                    ("exceptions", "Exception-based"),
+                ],
             ),
         ];
         let mut recommendations = std::collections::HashMap::new();
         recommendations.insert(
             "ARCH-1".to_string(),
-            recommendation("layered", "The repo already separates controllers from services.", false, false),
+            recommendation(
+                "layered",
+                "The repo already separates controllers from services.",
+                false,
+                false,
+            ),
         );
         recommendations.insert(
             "ARCH-2".to_string(),
@@ -10267,27 +10558,66 @@ mod render_tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("rec-panel"), "panel container; html=\n{html}");
-        assert!(html.contains("Rule alternatives"), "panel heading; html=\n{html}");
+        assert!(
+            html.contains("Rule alternatives"),
+            "panel heading; html=\n{html}"
+        );
         // ARCH-1: has a finding, evaluated against its AI-recommended option.
         assert!(html.contains("ARCH-1"), "rule id; html=\n{html}");
         assert!(html.contains("Layering"), "rule title; html=\n{html}");
-        assert!(html.contains("Evaluated against"), "evaluated-against label; html=\n{html}");
-        assert!(html.contains("Layered architecture"), "evaluated option label; html=\n{html}");
-        assert!(html.contains("AI recommended"), "AI-recommended badge; html=\n{html}");
-        assert!(html.contains("1 finding(s)"), "ARCH-1 finding count; html=\n{html}");
+        assert!(
+            html.contains("Evaluated against"),
+            "evaluated-against label; html=\n{html}"
+        );
+        assert!(
+            html.contains("Layered architecture"),
+            "evaluated option label; html=\n{html}"
+        );
+        assert!(
+            html.contains("AI recommended"),
+            "AI-recommended badge; html=\n{html}"
+        );
+        assert!(
+            html.contains("1 finding(s)"),
+            "ARCH-1 finding count; html=\n{html}"
+        );
         assert!(html.contains("Why?"), "Why control; html=\n{html}");
-        assert!(html.contains("rec-select"), "Change dropdown; html=\n{html}");
-        assert!(html.contains("Hexagonal architecture"), "the non-evaluated option is still offered; html=\n{html}");
+        assert!(
+            html.contains("rec-select"),
+            "Change dropdown; html=\n{html}"
+        );
+        assert!(
+            html.contains("Hexagonal architecture"),
+            "the non-evaluated option is still offered; html=\n{html}"
+        );
         // ARCH-2: zero findings, but still listed with its own controls (build item 2 — the
         // review panel includes zero-violation rules so they can still be overridden).
-        assert!(html.contains("ARCH-2"), "zero-violation rule id; html=\n{html}");
-        assert!(html.contains("Error handling"), "zero-violation rule title; html=\n{html}");
-        assert!(html.contains("0 findings"), "zero-violation finding count; html=\n{html}");
-        assert!(html.contains("Result-based"), "zero-violation rule's evaluated option; html=\n{html}");
+        assert!(
+            html.contains("ARCH-2"),
+            "zero-violation rule id; html=\n{html}"
+        );
+        assert!(
+            html.contains("Error handling"),
+            "zero-violation rule title; html=\n{html}"
+        );
+        assert!(
+            html.contains("0 findings"),
+            "zero-violation finding count; html=\n{html}"
+        );
+        assert!(
+            html.contains("Result-based"),
+            "zero-violation rule's evaluated option; html=\n{html}"
+        );
         // Accept alternatives is present and enabled (nothing staged yet).
-        assert!(html.contains("Accept alternatives"), "accept button; html=\n{html}");
+        assert!(
+            html.contains("Accept alternatives"),
+            "accept button; html=\n{html}"
+        );
         // No sticky bar yet — nothing staged.
-        assert!(!html.contains("rec-sticky-bar"), "no sticky bar before any override is staged; html=\n{html}");
+        assert!(
+            !html.contains("rec-sticky-bar"),
+            "no sticky bar before any override is staged; html=\n{html}"
+        );
     }
 
     /// Bounded internal scroll (46-rule regression): the panel used to grow one row per rule and
@@ -10501,7 +10831,9 @@ mod render_tests {
         // must render nothing, not an empty shell.
         fn harness() -> Element {
             use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
-            use_context_provider(|| Signal::new(std::collections::HashMap::<String, String>::new()));
+            use_context_provider(
+                || Signal::new(std::collections::HashMap::<String, String>::new()),
+            );
             let audit = use_signal(|| None::<ScanReportView>);
             rsx! {
                 RuleAlternativesPanel {
@@ -10517,7 +10849,10 @@ mod render_tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(!html.contains("rec-panel"), "no panel shell when nothing is in scope; html=\n{html}");
+        assert!(
+            !html.contains("rec-panel"),
+            "no panel shell when nothing is in scope; html=\n{html}"
+        );
     }
 
     // ── Tier-1 render: RuleWhyModal (extracted so the "open" shape is directly testable) ────
@@ -10541,12 +10876,18 @@ mod render_tests {
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("ARCH-1"), "rule id; html=\n{html}");
         assert!(html.contains("Layering"), "title; html=\n{html}");
-        assert!(html.contains("Why this alternative"), "section label; html=\n{html}");
+        assert!(
+            html.contains("Why this alternative"),
+            "section label; html=\n{html}"
+        );
         assert!(
             html.contains("The repo already separates controllers from services."),
             "reasoning body; html=\n{html}"
         );
-        assert!(!html.contains("rec-hallucinated-note"), "no hallucination note when false; html=\n{html}");
+        assert!(
+            !html.contains("rec-hallucinated-note"),
+            "no hallucination note when false; html=\n{html}"
+        );
     }
 
     fn why_modal_hallucinated_harness() -> Element {
@@ -10566,7 +10907,10 @@ mod render_tests {
         let mut vdom = VirtualDom::new(why_modal_hallucinated_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("rec-hallucinated-note"), "hallucination note class; html=\n{html}");
+        assert!(
+            html.contains("rec-hallucinated-note"),
+            "hallucination note class; html=\n{html}"
+        );
         assert!(
             html.contains("did not return a valid choice"),
             "hallucination explanation; html=\n{html}"
@@ -10608,7 +10952,10 @@ mod render_tests {
         let mut vdom = VirtualDom::new(sticky_bar_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("rec-sticky-bar"), "sticky bar container; html=\n{html}");
+        assert!(
+            html.contains("rec-sticky-bar"),
+            "sticky bar container; html=\n{html}"
+        );
         assert!(
             html.contains("Rescan 3 overridden rules"),
             "count reflected in both the label and the button; html=\n{html}"
@@ -10626,8 +10973,14 @@ mod render_tests {
         let mut vdom = VirtualDom::new(sticky_bar_rescanning_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("Rescanning"), "in-flight label; html=\n{html}");
-        assert!(html.contains("disabled"), "button disabled while rescanning; html=\n{html}");
+        assert!(
+            html.contains("Rescanning"),
+            "in-flight label; html=\n{html}"
+        );
+        assert!(
+            html.contains("disabled"),
+            "button disabled while rescanning; html=\n{html}"
+        );
     }
 
     // ── Pass 2 step 1: the Kind column + the three informational panels ──────
@@ -10657,7 +11010,11 @@ mod render_tests {
             .expect("the findings table must carry a Kind column");
         assert_eq!(kind_col.header, "Kind");
 
-        let defect = kinded_finding("SQL-INJECTION-1", "critical", serde_json::json!({"kind": "defect"}));
+        let defect = kinded_finding(
+            "SQL-INJECTION-1",
+            "critical",
+            serde_json::json!({"kind": "defect"}),
+        );
         let deviation = kinded_finding(
             "API-VERSIONING-1",
             "medium",
@@ -10667,8 +11024,14 @@ mod render_tests {
             }),
         );
         let unmapped = kinded_finding("LEGACY-1", "high", serde_json::json!({}));
-        assert_eq!((kind_col.accessor)(&defect), CellValue::Text("defect".to_string()));
-        assert_eq!((kind_col.accessor)(&deviation), CellValue::Text("deviation".to_string()));
+        assert_eq!(
+            (kind_col.accessor)(&defect),
+            CellValue::Text("defect".to_string())
+        );
+        assert_eq!(
+            (kind_col.accessor)(&deviation),
+            CellValue::Text("deviation".to_string())
+        );
         assert_eq!(
             (kind_col.accessor)(&unmapped),
             CellValue::Text("unspecified".to_string()),
@@ -10738,11 +11101,26 @@ mod render_tests {
         let mut vdom = VirtualDom::new(violated);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("kind-conflict-banner"), "alarm rendered; html=\n{html}");
-        assert!(html.contains("Pipeline bug"), "named as upstream; html=\n{html}");
-        assert!(html.contains("API-VERSIONING-1"), "the offending rule named; html=\n{html}");
-        assert!(html.contains("Queue"), "and the surfaces it reached; html=\n{html}");
-        assert!(html.contains("Conventions"), "and the surfaces it reached; html=\n{html}");
+        assert!(
+            html.contains("kind-conflict-banner"),
+            "alarm rendered; html=\n{html}"
+        );
+        assert!(
+            html.contains("Pipeline bug"),
+            "named as upstream; html=\n{html}"
+        );
+        assert!(
+            html.contains("API-VERSIONING-1"),
+            "the offending rule named; html=\n{html}"
+        );
+        assert!(
+            html.contains("Queue"),
+            "and the surfaces it reached; html=\n{html}"
+        );
+        assert!(
+            html.contains("Conventions"),
+            "and the surfaces it reached; html=\n{html}"
+        );
     }
 
     /// req_pass2_6: the Conventions panel lists each observed convention by its AUTHORED label
@@ -10769,7 +11147,10 @@ mod render_tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("API-VERSIONING-1"), "rule id; html=\n{html}");
-        assert!(html.contains("URI-versioned endpoints"), "authored label; html=\n{html}");
+        assert!(
+            html.contains("URI-versioned endpoints"),
+            "authored label; html=\n{html}"
+        );
         for forbidden in ["chorale-badge", "severity", "info", "critical", "Critical"] {
             assert!(
                 !html.contains(forbidden),
@@ -10804,8 +11185,14 @@ mod render_tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("ERROR-HANDLING-1"), "rule id; html=\n{html}");
-        assert!(html.contains("Result types (9 sites)"), "counted option; html=\n{html}");
-        assert!(html.contains("Panics"), "uncounted option still listed; html=\n{html}");
+        assert!(
+            html.contains("Result types (9 sites)"),
+            "counted option; html=\n{html}"
+        );
+        assert!(
+            html.contains("Panics"),
+            "uncounted option still listed; html=\n{html}"
+        );
         assert!(
             !html.contains("Panics (0 sites)") && !html.contains("Panics ("),
             "an uncounted option must never acquire a fabricated count; html=\n{html}"
@@ -10846,9 +11233,18 @@ mod render_tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("tool_failed"), "structured reason group; html=\n{html}");
-        assert!(html.contains("no_files_matched"), "structured reason group; html=\n{html}");
-        assert!(html.contains("eslint exited 2"), "producer detail; html=\n{html}");
+        assert!(
+            html.contains("tool_failed"),
+            "structured reason group; html=\n{html}"
+        );
+        assert!(
+            html.contains("no_files_matched"),
+            "structured reason group; html=\n{html}"
+        );
+        assert!(
+            html.contains("eslint exited 2"),
+            "producer detail; html=\n{html}"
+        );
         // EDITED for design §8 (exception (a)): this assertion was `!html.contains("<button")`.
         //
         // Design §3 says "NotAssessed gets no buttons … A disabled 're-run' would be exactly
@@ -10869,8 +11265,18 @@ mod render_tests {
             html.matches("rule-hub-link").count(),
             "every control on the Not assessed panel must be a rule-hub door; html=\n{html}"
         );
-        assert_eq!(buttons, 2, "one door per listed rule, and nothing else; html=\n{html}");
-        for forbidden in ["btn-run", "btn-restart", "btn-edit-sm", "Re-run", "Adopt", "Skip"] {
+        assert_eq!(
+            buttons, 2,
+            "one door per listed rule, and nothing else; html=\n{html}"
+        );
+        for forbidden in [
+            "btn-run",
+            "btn-restart",
+            "btn-edit-sm",
+            "Re-run",
+            "Adopt",
+            "Skip",
+        ] {
             assert!(
                 !html.contains(forbidden),
                 "NotAssessed needs no decision, so it must offer no {forbidden} affordance; \
@@ -10889,8 +11295,7 @@ mod render_tests {
         fn harness() -> Element {
             use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
             use_context_provider(|| Signal::new(None::<FindingView>));
-            let dispositions =
-                use_signal(std::collections::HashMap::<String, Disposition>::new);
+            let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
             rsx! {
                 FindingsTable {
                     findings: vec![
@@ -10936,7 +11341,10 @@ mod render_tests {
         // column header and one group header per rule, not the individual cells. That is
         // enough to prove the three things this test exists for; the chip renderer itself is
         // covered by the column-accessor test above.
-        assert!(html.contains(">Kind<"), "the Kind column header; html=\n{html}");
+        assert!(
+            html.contains(">Kind<"),
+            "the Kind column header; html=\n{html}"
+        );
         assert!(
             !html.contains("ALREADY-GOOD-1"),
             "an informational row must never reach the accusing queue; html=\n{html}"
@@ -11007,7 +11415,11 @@ mod render_tests {
     /// chorale) so a cleared sort is provably a return to THAT order.
     fn sortable_queue_rows() -> Vec<FindingView> {
         let raw = vec![
-            kinded_finding("B-LOW-DEFECT", "low", serde_json::json!({ "kind": "defect" })),
+            kinded_finding(
+                "B-LOW-DEFECT",
+                "low",
+                serde_json::json!({ "kind": "defect" }),
+            ),
             kinded_finding(
                 "A-MEDIUM-DEFECT",
                 "medium",
@@ -11018,7 +11430,11 @@ mod render_tests {
                 "critical",
                 serde_json::json!({ "kind": "defect" }),
             ),
-            kinded_finding("D-HIGH-DEFECT", "high", serde_json::json!({ "kind": "defect" })),
+            kinded_finding(
+                "D-HIGH-DEFECT",
+                "high",
+                serde_json::json!({ "kind": "defect" }),
+            ),
         ];
         TriageModel::new().visible(&raw)
     }
@@ -11156,9 +11572,15 @@ mod render_tests {
         assert!(!html.contains("queue-order-value manual"), "html=\n{html}");
 
         // Manual state: column, direction, accent, and the Default order button.
-        let html = bar(vec![SortState::new(ColumnId("severity"), SortDirection::Desc)]);
+        let html = bar(vec![SortState::new(
+            ColumnId("severity"),
+            SortDirection::Desc,
+        )]);
         assert!(html.contains("Severity"), "names the column; html=\n{html}");
-        assert!(html.contains('\u{2193}'), "names the direction; html=\n{html}");
+        assert!(
+            html.contains('\u{2193}'),
+            "names the direction; html=\n{html}"
+        );
         assert!(
             html.contains("queue-order-value manual"),
             "a manual cut reads differently from the default; html=\n{html}"
@@ -11282,7 +11704,11 @@ mod render_tests {
         // one. Severities are chosen so the severity cut interleaves the rules if grouping were
         // ignored — that is what makes this test able to fail.
         let findings = TriageModel::new().visible(&[
-            kinded_finding("RULE-B", "critical", serde_json::json!({ "kind": "defect" })),
+            kinded_finding(
+                "RULE-B",
+                "critical",
+                serde_json::json!({ "kind": "defect" }),
+            ),
             kinded_finding("RULE-A", "high", serde_json::json!({ "kind": "defect" })),
             kinded_finding("RULE-B", "low", serde_json::json!({ "kind": "defect" })),
             kinded_finding("RULE-A", "medium", serde_json::json!({ "kind": "defect" })),
@@ -11393,13 +11819,20 @@ mod render_tests {
             dev("A-UNKNOWN-RATIO", 3, serde_json::Value::Null),
             dev("B-COSTLY", 19, serde_json::json!(47)),
             dev("C-CHEAP", 2, serde_json::json!(47)),
-            kinded_finding("D-DEFECT", "medium", serde_json::json!({ "kind": "defect" })),
+            kinded_finding(
+                "D-DEFECT",
+                "medium",
+                serde_json::json!({ "kind": "defect" }),
+            ),
         ]);
         let state = queue_table_state(&findings);
 
         // Sanity: the default already orders them cheapest-first, unknown last.
         assert_eq!(
-            findings.iter().map(|f| f.rule_id.as_str()).collect::<Vec<_>>(),
+            findings
+                .iter()
+                .map(|f| f.rule_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["D-DEFECT", "C-CHEAP", "B-COSTLY", "A-UNKNOWN-RATIO"],
         );
 
@@ -11429,7 +11862,10 @@ mod render_tests {
 
         let one = [SortState::new(ColumnId("severity"), SortDirection::Desc)];
         let text = order_indicator_text(&one, &cols);
-        assert!(text.contains("Severity"), "names the column header; got {text}");
+        assert!(
+            text.contains("Severity"),
+            "names the column header; got {text}"
+        );
         assert!(text.contains('\u{2193}'), "names the direction; got {text}");
         assert!(
             text.contains("Camerata default order underneath"),
@@ -11448,7 +11884,10 @@ mod render_tests {
 
         // An id with no column (a column removed from the set) degrades to the raw id rather
         // than dropping the cut from the sentence and claiming an order that isn't showing.
-        let gone = [SortState::new(ColumnId("no-such-column"), SortDirection::Asc)];
+        let gone = [SortState::new(
+            ColumnId("no-such-column"),
+            SortDirection::Asc,
+        )];
         assert!(order_indicator_text(&gone, &cols).contains("no-such-column"));
     }
 
@@ -11596,7 +12035,10 @@ mod render_tests {
             ),
         ]);
         assert_eq!(
-            findings.iter().map(|f| f.rule_id.as_str()).collect::<Vec<_>>(),
+            findings
+                .iter()
+                .map(|f| f.rule_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["A-UNMAPPED", "B-DEFECT", "C-DEVIATION"],
             "the DEFAULT floats the kind-less alarm to the top of its severity band"
         );
@@ -11794,11 +12236,8 @@ mod render_tests {
         use chorale_core::{toggle_sort, visible_grouped_view, GroupedRow, SortAction};
 
         let findings = TriageModel::new().visible(&deviation_queue_rows());
-        let mut state = finding_table_state(
-            sort_rows(&findings),
-            vec!["me/api".to_string()],
-            false,
-        );
+        let mut state =
+            finding_table_state(sort_rows(&findings), vec!["me/api".to_string()], false);
         state.grouping = vec![RULE_GROUP_COLUMN];
         state.grouped_pagination = chorale_core::GroupedPaginationMode::Virtualized;
 
@@ -12270,7 +12709,10 @@ mod render_tests {
 
         // (1) Two rows nobody has decided: blocked, and the hint NAMES Confirm as an exit.
         // Before this step it offered only "Ignore or save as Tech debt".
-        let html = render(TriageCounts { unresolved: 2, ..Default::default() });
+        let html = render(TriageCounts {
+            unresolved: 2,
+            ..Default::default()
+        });
         assert!(html.contains("Resolve the 2 remaining"), "html=\n{html}");
         assert!(
             html.contains("Confirm"),
@@ -12281,7 +12723,10 @@ mod render_tests {
         // (2) Everything CONFIRMED: nothing outstanding, so the blocking hint is gone. The
         // button stays disabled because Confirmed commits nothing — and the gate says so
         // instead of leaving a dead control unexplained.
-        let html = render(TriageCounts { confirmed: 2, ..Default::default() });
+        let html = render(TriageCounts {
+            confirmed: 2,
+            ..Default::default()
+        });
         assert!(
             !html.contains("remaining Unresolved"),
             "a confirmed finding is decided, not outstanding; html=\n{html}"
@@ -12290,7 +12735,11 @@ mod render_tests {
         assert!(html.contains("disabled"), "html=\n{html}");
 
         // (3) Confirmed + ignored: nothing outstanding AND something to commit. Enabled.
-        let html = render(TriageCounts { confirmed: 1, ignored: 1, ..Default::default() });
+        let html = render(TriageCounts {
+            confirmed: 1,
+            ignored: 1,
+            ..Default::default()
+        });
         assert!(!html.contains("remaining Unresolved"), "html=\n{html}");
         assert!(!html.contains("Nothing to process"), "html=\n{html}");
         assert!(
@@ -12367,13 +12816,19 @@ mod render_tests {
 
         // And the replacement columns are present and carry the two facts the legend glossed.
         let cols = finding_columns(vec!["me/api".to_string()], false);
-        let sev = cols.iter().find(|c| c.id == ColumnId("severity")).expect("Severity column");
+        let sev = cols
+            .iter()
+            .find(|c| c.id == ColumnId("severity"))
+            .expect("Severity column");
         assert_eq!(
             (sev.accessor)(&crit),
             CellValue::Text(severity_sort_value("critical")),
             "the Severity column marks exactly the highlighted rows"
         );
-        let auth = cols.iter().find(|c| c.id == ColumnId("authority")).expect("Authority column");
+        let auth = cols
+            .iter()
+            .find(|c| c.id == ColumnId("authority"))
+            .expect("Authority column");
         let RenderKind::Badge(map) = &auth.render_kind else {
             panic!("Authority renders as a badge");
         };
@@ -12387,8 +12842,14 @@ mod render_tests {
                 "the Authority column, not a legend, is what separates deterministic from advisory"
             );
         }
-        assert!(html.contains(">Severity<"), "Severity header; html=\n{html}");
-        assert!(html.contains(">Authority<"), "Authority header; html=\n{html}");
+        assert!(
+            html.contains(">Severity<"),
+            "Severity header; html=\n{html}"
+        );
+        assert!(
+            html.contains(">Authority<"),
+            "Authority header; html=\n{html}"
+        );
     }
 
     /// req_pass2_13 (§9.1, the half that MOVED): the hub carries the Evaluated-against line
@@ -12412,10 +12873,7 @@ mod render_tests {
             }
         }
         let render = |hub: RuleHubView, alternatives: Option<AlternativeControlsRow>| {
-            let mut vdom = VirtualDom::new_with_props(
-                Harness,
-                HarnessProps { hub, alternatives },
-            );
+            let mut vdom = VirtualDom::new_with_props(Harness, HarnessProps { hub, alternatives });
             vdom.rebuild_in_place();
             dioxus_ssr::render(&vdom)
         };
@@ -12446,7 +12904,10 @@ mod render_tests {
         let rule = proposed_rule_with_options(
             "API-VERSIONING-1",
             "Version the API",
-            &[("versioned", "URI-versioned endpoints"), ("header", "Header-versioned")],
+            &[
+                ("versioned", "URI-versioned endpoints"),
+                ("header", "Header-versioned"),
+            ],
         );
         let rec = recommendation_with_evidence(
             "versioned",
@@ -12461,7 +12922,10 @@ mod render_tests {
             html.contains("URI-versioned endpoints"),
             "the authored LABEL, which is what the curator reads elsewhere; html=\n{html}"
         );
-        assert!(html.contains("AI recommended"), "the provenance badge; html=\n{html}");
+        assert!(
+            html.contains("AI recommended"),
+            "the provenance badge; html=\n{html}"
+        );
         assert!(html.contains("Evidence: src/routes.rs:12"), "html=\n{html}");
         assert!(
             html.contains("Thirty-one of forty-seven endpoints"),
@@ -12495,7 +12959,11 @@ mod render_tests {
     #[test]
     fn req_pass2_13_the_hub_cannot_reach_a_clean_multi_option_rule_so_the_panel_stays() {
         // A scan whose findings touch ONE rule, while the audit recommended on TWO.
-        let found = kinded_finding("API-VERSIONING-1", "medium", serde_json::json!({"kind": "defect"}));
+        let found = kinded_finding(
+            "API-VERSIONING-1",
+            "medium",
+            serde_json::json!({"kind": "defect"}),
+        );
         let findings = vec![found];
 
         assert!(
@@ -12505,9 +12973,9 @@ mod render_tests {
 
         fn harness() -> Element {
             use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
-            use_context_provider(|| {
-                Signal::new(std::collections::HashMap::<String, String>::new())
-            });
+            use_context_provider(
+                || Signal::new(std::collections::HashMap::<String, String>::new()),
+            );
             let audit = use_signal(|| Option::<ScanReportView>::None);
             let mut recs = std::collections::HashMap::new();
             recs.insert(
@@ -12552,7 +13020,10 @@ mod render_tests {
             "the CLEAN rule must still be listed and overridable — it is the one whose option \
              choice is least visible; html=\n{html}"
         );
-        assert!(html.contains("0 findings"), "and labelled honestly; html=\n{html}");
+        assert!(
+            html.contains("0 findings"),
+            "and labelled honestly; html=\n{html}"
+        );
         assert!(
             html.contains("Result types"),
             "with its Change select populated; html=\n{html}"
@@ -12577,13 +13048,17 @@ mod render_tests {
         let rule = proposed_rule_with_options(
             "API-VERSIONING-1",
             "Version the API",
-            &[("versioned", "URI-versioned endpoints"), ("header", "Header-versioned")],
+            &[
+                ("versioned", "URI-versioned endpoints"),
+                ("header", "Header-versioned"),
+            ],
         );
         let rec = recommendation("versioned", "most endpoints already do", false, false);
 
         // 1. A STAGED OVERRIDE wins everything: it is what the next rescan will use, and the
         //    curator has to see what he just picked.
-        let row = alternative_controls_row(&rule, &rec, 3, Some("versioned"), Some("header"), false);
+        let row =
+            alternative_controls_row(&rule, &rec, 3, Some("versioned"), Some("header"), false);
         assert_eq!(row.evaluated_option_id, "header");
         assert_eq!(row.evaluated_label, "Header-versioned");
         assert!(row.staged);
@@ -12649,43 +13124,80 @@ mod render_tests {
         let rule = proposed_rule_with_options(
             "API-VERSIONING-1",
             "Version the API",
-            &[("versioned", "URI-versioned endpoints"), ("header", "Header-versioned")],
+            &[
+                ("versioned", "URI-versioned endpoints"),
+                ("header", "Header-versioned"),
+            ],
         );
 
         // The resting state: the fact, the provenance, the Why? door, the Change select.
         let rec = recommendation("versioned", "most endpoints already do", false, false);
-        let html = render(alternative_controls_row(&rule, &rec, 3, Some("versioned"), None, false));
+        let html = render(alternative_controls_row(
+            &rule,
+            &rec,
+            3,
+            Some("versioned"),
+            None,
+            false,
+        ));
         assert!(html.contains("Evaluated against:"), "html=\n{html}");
-        assert!(html.contains("URI-versioned endpoints"), "the LABEL, not the id; html=\n{html}");
+        assert!(
+            html.contains("URI-versioned endpoints"),
+            "the LABEL, not the id; html=\n{html}"
+        );
         assert!(html.contains("AI recommended"), "html=\n{html}");
         assert!(html.contains("rec-why"), "the Why? door; html=\n{html}");
-        assert!(html.contains("rec-select"), "the Change select; html=\n{html}");
+        assert!(
+            html.contains("rec-select"),
+            "the Change select; html=\n{html}"
+        );
         assert!(html.contains("3 finding(s)"), "html=\n{html}");
         assert!(!html.contains("rec-badge-accepted"), "html=\n{html}");
         assert!(!html.contains("Not applicable"), "html=\n{html}");
 
         // STAGED — reachable through the panel only by driving a real <select> change, which
         // a Tier-1 SSR test cannot do. Props-only is what makes it assertable.
-        let html = render(alternative_controls_row(&rule, &rec, 3, Some("versioned"), Some("header"), false));
+        let html = render(alternative_controls_row(
+            &rule,
+            &rec,
+            3,
+            Some("versioned"),
+            Some("header"),
+            false,
+        ));
         assert!(html.contains("Override, pending rescan"), "html=\n{html}");
         assert!(html.contains("rec-badge-pending"), "html=\n{html}");
 
         // ACCEPTED — likewise reachable only after a successful server round trip.
-        let html = render(alternative_controls_row(&rule, &rec, 3, Some("versioned"), None, true));
+        let html = render(alternative_controls_row(
+            &rule,
+            &rec,
+            3,
+            Some("versioned"),
+            None,
+            true,
+        ));
         assert!(html.contains("rec-badge-accepted"), "html=\n{html}");
-        assert!(html.contains("AI recommended"), "both, not one; html=\n{html}");
+        assert!(
+            html.contains("AI recommended"),
+            "both, not one; html=\n{html}"
+        );
 
         // Evidence and the not-applicable marker, together.
-        let flagged = recommendation_with_evidence(
-            "versioned",
-            "r",
-            Some("src/routes.rs:12"),
-            false,
-        );
-        let html = render(alternative_controls_row(&rule, &flagged, 0, None, None, false));
+        let flagged =
+            recommendation_with_evidence("versioned", "r", Some("src/routes.rs:12"), false);
+        let html = render(alternative_controls_row(
+            &rule, &flagged, 0, None, None, false,
+        ));
         assert!(html.contains("Evidence: src/routes.rs:12"), "html=\n{html}");
-        assert!(html.contains("Not applicable to this repo"), "html=\n{html}");
-        assert!(html.contains("0 findings"), "a clean multi-option rule still renders; html=\n{html}");
+        assert!(
+            html.contains("Not applicable to this repo"),
+            "html=\n{html}"
+        );
+        assert!(
+            html.contains("0 findings"),
+            "a clean multi-option rule still renders; html=\n{html}"
+        );
     }
 
     /// A twelve-row deviation group, for the bulk prompt's heading. Twelve so the count in
@@ -12732,8 +13244,7 @@ mod render_tests {
             }
         }
         let render = |prompt: ToolbarReasonPrompt| {
-            let mut vdom =
-                VirtualDom::new_with_props(PromptHarness, PromptHarnessProps { prompt });
+            let mut vdom = VirtualDom::new_with_props(PromptHarness, PromptHarnessProps { prompt });
             vdom.rebuild_in_place();
             dioxus_ssr::render(&vdom)
         };
@@ -12750,11 +13261,26 @@ mod render_tests {
             html.contains(&bulk_reason_heading(TriageState::Ignored, 3)),
             "the heading core writes, not a second phrasing; html=\n{html}"
         );
-        assert!(html.contains("3 findings"), "it names the count; html=\n{html}");
-        assert!(html.contains("Ignored"), "and the disposition; html=\n{html}");
-        assert!(html.contains("required"), "and that the reason is required; html=\n{html}");
-        assert!(html.contains("queue-prompt-commit"), "a way to commit; html=\n{html}");
-        assert!(html.contains("queue-prompt-cancel"), "and a way out; html=\n{html}");
+        assert!(
+            html.contains("3 findings"),
+            "it names the count; html=\n{html}"
+        );
+        assert!(
+            html.contains("Ignored"),
+            "and the disposition; html=\n{html}"
+        );
+        assert!(
+            html.contains("required"),
+            "and that the reason is required; html=\n{html}"
+        );
+        assert!(
+            html.contains("queue-prompt-commit"),
+            "a way to commit; html=\n{html}"
+        );
+        assert!(
+            html.contains("queue-prompt-cancel"),
+            "and a way out; html=\n{html}"
+        );
 
         // The bulk shape: one deviation group of twelve, raised by "False positive all 12".
         // The textarea this replaces could not have said "12" — it had no idea which button
@@ -12763,8 +13289,14 @@ mod render_tests {
             state: TriageState::FalsePositive,
             target: ReasonTarget::Group(twelve_row_group()),
         });
-        assert!(html.contains("12 findings"), "the group's own count; html=\n{html}");
-        assert!(html.contains("False positive"), "the disposition; html=\n{html}");
+        assert!(
+            html.contains("12 findings"),
+            "the group's own count; html=\n{html}"
+        );
+        assert!(
+            html.contains("False positive"),
+            "the disposition; html=\n{html}"
+        );
 
         // Singular is singular. A prompt that says "1 findings" over a destructive act reads
         // as a template nobody checked.
@@ -12775,7 +13307,10 @@ mod render_tests {
                 rows: deviation_queue_rows().into_iter().take(1).collect(),
             },
         });
-        assert!(html.contains("1 finding \u{2014}") || html.contains("1 finding ("), "html=\n{html}");
+        assert!(
+            html.contains("1 finding \u{2014}") || html.contains("1 finding ("),
+            "html=\n{html}"
+        );
         assert!(!html.contains("1 findings"), "html=\n{html}");
 
         // AND THE COUNT IS THE ROW LIST, not a number travelling beside it. This is the
@@ -12896,7 +13431,10 @@ mod render_tests {
             model.bulk_false_positive(group, "   ").is_none(),
             "a blank reason must still be refused, wherever the box now lives"
         );
-        assert!(model.dispositions.is_empty(), "and must write nothing when it refuses");
+        assert!(
+            model.dispositions.is_empty(),
+            "and must write nothing when it refuses"
+        );
         assert_eq!(
             model.bulk_false_positive(group, "the parser mis-read all of these"),
             Some(group.rows.len()),
@@ -12938,7 +13476,10 @@ mod render_tests {
         let cases = [
             (serde_json::json!({"in_test": true}), "test"),
             (serde_json::json!({"needs_review": true}), "needs-review"),
-            (serde_json::json!({"confidence": "needs-review"}), "needs-review"),
+            (
+                serde_json::json!({"confidence": "needs-review"}),
+                "needs-review",
+            ),
             (serde_json::json!({"confidence": "high"}), "high"),
             (serde_json::json!({}), "unrated"),
         ];
@@ -12976,7 +13517,10 @@ mod render_tests {
 
         // Filter vocabulary from the same closed set as the cell (the Severity discipline).
         let FilterKind::MultiSelect { options } = &col.filter else {
-            panic!("Confidence keeps a multi-select filter, got {:?}", col.filter);
+            panic!(
+                "Confidence keeps a multi-select filter, got {:?}",
+                col.filter
+            );
         };
         assert_eq!(options, &confidence_tags());
         for (_, want) in &cases {
@@ -12995,7 +13539,10 @@ mod render_tests {
             let variant = map
                 .resolve(&tag)
                 .unwrap_or_else(|| panic!("{tag} must resolve to a badge variant"));
-            assert!(!variant.label.is_empty(), "{tag}: a chip with no label is a blank cell");
+            assert!(
+                !variant.label.is_empty(),
+                "{tag}: a chip with no label is a blank cell"
+            );
         }
         assert_ne!(
             map.resolve("high").expect("high").label,
@@ -13058,7 +13605,10 @@ mod render_tests {
         let mut vdom = VirtualDom::new(queue);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains(">Confidence<"), "the new header; html=\n{html}");
+        assert!(
+            html.contains(">Confidence<"),
+            "the new header; html=\n{html}"
+        );
         assert!(
             !html.contains(">Needs review<"),
             "the old column header is gone; html=\n{html}"
@@ -13148,11 +13698,22 @@ mod render_tests {
         // Each panel really did render its row, so the absence below is an absence of
         // severity and not an absence of output.
         for present in ["API-VERSIONING-1", "ERROR-HANDLING-1", "ESLINT-1"] {
-            assert!(html.contains(present), "{present} must render; html=\n{html}");
+            assert!(
+                html.contains(present),
+                "{present} must render; html=\n{html}"
+            );
         }
         for forbidden in [
-            "severity", "Severity", "critical", "Critical", "high", "High", "medium", "Medium",
-            "chorale-badge", "finding-row-critical",
+            "severity",
+            "Severity",
+            "critical",
+            "Critical",
+            "high",
+            "High",
+            "medium",
+            "Medium",
+            "chorale-badge",
+            "finding-row-critical",
         ] {
             assert!(
                 !html.contains(forbidden),
@@ -13176,8 +13737,7 @@ mod render_tests {
             }),
         )];
         let hub = rule_hub(&rows, "me/api", "API-VERSIONING-1").expect("the rule is in the scan");
-        let mut vdom =
-            VirtualDom::new_with_props(HubHarness, HubHarnessProps { hub });
+        let mut vdom = VirtualDom::new_with_props(HubHarness, HubHarnessProps { hub });
         vdom.rebuild_in_place();
         let hub_html = dioxus_ssr::render(&vdom);
         assert!(
@@ -13295,15 +13855,27 @@ mod pane_render_tests {
             12,
         );
         let html = render(Some(row), PaneFocus::Cursor, None, None);
-        assert!(html.contains("finding-pane"), "pane container; html=\n{html}");
+        assert!(
+            html.contains("finding-pane"),
+            "pane container; html=\n{html}"
+        );
         assert!(html.contains("SQL-INJECTION-1"), "rule id; html=\n{html}");
         assert!(html.contains("Defect"), "kind badge; html=\n{html}");
         assert!(html.contains("critical"), "severity; html=\n{html}");
-        assert!(html.contains("src/handlers.rs:88"), "location; html=\n{html}");
-        assert!(html.contains("Never interpolate into SQL"), "cited standard; html=\n{html}");
+        assert!(
+            html.contains("src/handlers.rs:88"),
+            "location; html=\n{html}"
+        );
+        assert!(
+            html.contains("Never interpolate into SQL"),
+            "cited standard; html=\n{html}"
+        );
         assert!(html.contains("Replace the format!"), "fix; html=\n{html}");
         assert!(html.contains("medium"), "effort estimate; html=\n{html}");
-        assert!(html.contains("1 of 12"), "position in the queue; html=\n{html}");
+        assert!(
+            html.contains("1 of 12"),
+            "position in the queue; html=\n{html}"
+        );
     }
 
     /// req_pass2_11 (design §6): a merged row's ABSORBED sites are listed, with consequence
@@ -13312,11 +13884,26 @@ mod pane_render_tests {
     fn req_pass2_11_the_pane_lists_every_absorbed_site() {
         let row = DetailPaneRow::from_finding(&sample(), None, None, 0, 1);
         let html = render(Some(row), PaneFocus::Cursor, None, None);
-        assert!(html.contains("Sites (3)"), "1 primary + 2 absorbed; html=\n{html}");
-        assert!(html.contains("src/export.rs:31"), "peer site; html=\n{html}");
-        assert!(html.contains("src/report.rs:4"), "consequence site; html=\n{html}");
-        assert!(html.contains("also affects"), "the consequence sub-label; html=\n{html}");
-        assert!(html.contains("DATA-EXFIL-1"), "the absorbed site's own rule id; html=\n{html}");
+        assert!(
+            html.contains("Sites (3)"),
+            "1 primary + 2 absorbed; html=\n{html}"
+        );
+        assert!(
+            html.contains("src/export.rs:31"),
+            "peer site; html=\n{html}"
+        );
+        assert!(
+            html.contains("src/report.rs:4"),
+            "consequence site; html=\n{html}"
+        );
+        assert!(
+            html.contains("also affects"),
+            "the consequence sub-label; html=\n{html}"
+        );
+        assert!(
+            html.contains("DATA-EXFIL-1"),
+            "the absorbed site's own rule id; html=\n{html}"
+        );
     }
 
     /// req_pass2_11: a single-site row says nothing about sites at all, rather than
@@ -13325,7 +13912,10 @@ mod pane_render_tests {
     fn req_pass2_11_an_unmerged_row_renders_no_sites_section() {
         let row = DetailPaneRow::from_finding(&deviation(), None, None, 0, 1);
         let html = render(Some(row), PaneFocus::Cursor, None, None);
-        assert!(!html.contains("Sites ("), "no sites section for one site; html=\n{html}");
+        assert!(
+            !html.contains("Sites ("),
+            "no sites section for one site; html=\n{html}"
+        );
     }
 
     /// req_pass2_11: a deviation's structured claim renders in the pane verbatim from
@@ -13350,9 +13940,15 @@ mod pane_render_tests {
         let row = || Some(DetailPaneRow::from_finding(&sample(), None, None, 0, 1));
 
         let armed = render(row(), PaneFocus::Cursor, None, None);
-        assert!(armed.contains("pane-keys armed"), "armed class; html=\n{armed}");
+        assert!(
+            armed.contains("pane-keys armed"),
+            "armed class; html=\n{armed}"
+        );
         for label in ["C confirm", "I ignore", "T tech debt", "F false positive"] {
-            assert!(armed.contains(label), "{label} must be named; html=\n{armed}");
+            assert!(
+                armed.contains(label),
+                "{label} must be named; html=\n{armed}"
+            );
         }
 
         // Typing a reason: the keys are OFF, and the pane says so in those words.
@@ -13362,7 +13958,10 @@ mod pane_render_tests {
             Some(TriageState::Ignored),
             None,
         );
-        assert!(typing.contains("pane-keys off"), "off class; html=\n{typing}");
+        assert!(
+            typing.contains("pane-keys off"),
+            "off class; html=\n{typing}"
+        );
         assert!(
             typing.contains("Keys are off while you type"),
             "and says why; html=\n{typing}"
@@ -13388,8 +13987,14 @@ mod pane_render_tests {
             None,
         );
         assert!(ignoring.contains("pane-reason-prompt"), "html=\n{ignoring}");
-        assert!(ignoring.contains("Ignored"), "names the disposition; html=\n{ignoring}");
-        assert!(ignoring.contains("required"), "states the invariant; html=\n{ignoring}");
+        assert!(
+            ignoring.contains("Ignored"),
+            "names the disposition; html=\n{ignoring}"
+        );
+        assert!(
+            ignoring.contains("required"),
+            "states the invariant; html=\n{ignoring}"
+        );
 
         let fp = render(
             row(),
@@ -13420,9 +14025,15 @@ mod pane_render_tests {
             }),
         );
         assert!(with_undo.contains("pane-undo"), "html=\n{with_undo}");
-        assert!(with_undo.contains("Confirmed 1 finding."), "html=\n{with_undo}");
+        assert!(
+            with_undo.contains("Confirmed 1 finding."),
+            "html=\n{with_undo}"
+        );
         assert!(with_undo.contains("Undo"), "html=\n{with_undo}");
-        assert!(with_undo.contains("4s"), "the countdown; html=\n{with_undo}");
+        assert!(
+            with_undo.contains("4s"),
+            "the countdown; html=\n{with_undo}"
+        );
 
         let without = render(row(), PaneFocus::Cursor, None, None);
         assert!(!without.contains("pane-undo"), "html=\n{without}");
@@ -13434,10 +14045,19 @@ mod pane_render_tests {
     #[test]
     fn req_pass2_11_an_unfocused_pane_offers_nothing_to_act_on() {
         let html = render(None, PaneFocus::Elsewhere, None, None);
-        assert!(html.contains("finding-pane"), "the pane still occupies its dock; html=\n{html}");
+        assert!(
+            html.contains("finding-pane"),
+            "the pane still occupies its dock; html=\n{html}"
+        );
         assert!(html.contains("pane-empty"), "html=\n{html}");
-        assert!(!html.contains("pane-dispose"), "no dead buttons; html=\n{html}");
-        assert!(!html.contains("pane-keys armed"), "and no armed keys; html=\n{html}");
+        assert!(
+            !html.contains("pane-dispose"),
+            "no dead buttons; html=\n{html}"
+        );
+        assert!(
+            !html.contains("pane-keys armed"),
+            "and no armed keys; html=\n{html}"
+        );
     }
 
     /// req_pass2_11: the pane IS a focusable region, with the id `focus_detail_pane` targets.
@@ -13452,7 +14072,10 @@ mod pane_render_tests {
     fn req_pass2_11_the_pane_is_the_focusable_region_the_scoping_names() {
         let row = DetailPaneRow::from_finding(&sample(), None, None, 0, 1);
         let html = render(Some(row), PaneFocus::Cursor, None, None);
-        assert!(html.contains("tabindex=\"0\""), "Tab must reach it; html=\n{html}");
+        assert!(
+            html.contains("tabindex=\"0\""),
+            "Tab must reach it; html=\n{html}"
+        );
         assert!(
             html.contains(&format!("id=\"{DETAIL_PANE_ID}\"")),
             "the id `focus_detail_pane` focuses; html=\n{html}"
@@ -13488,7 +14111,11 @@ mod pane_render_tests {
             TriageState::TechDebt,
             TriageState::FalsePositive,
         ] {
-            assert!(html.contains(s.label()), "{} button; html=\n{html}", s.label());
+            assert!(
+                html.contains(s.label()),
+                "{} button; html=\n{html}",
+                s.label()
+            );
         }
     }
 }
@@ -13556,8 +14183,14 @@ mod rule_hub_tests {
         let rows = deviation_rows();
         let hub = rule_hub(&rows, "me/api", "API-VERSIONING-1").expect("the rule is in the scan");
         let html = strip_html(hub);
-        assert!(html.contains("This rule in this scan"), "the strip names itself; html=\n{html}");
-        assert!(html.contains("API-VERSIONING-1"), "the rule id; html=\n{html}");
+        assert!(
+            html.contains("This rule in this scan"),
+            "the strip names itself; html=\n{html}"
+        );
+        assert!(
+            html.contains("API-VERSIONING-1"),
+            "the rule id; html=\n{html}"
+        );
         assert!(html.contains("Deviation"), "the kind chip; html=\n{html}");
         assert!(
             html.contains("2 of 47 sites deviate"),
@@ -13624,7 +14257,10 @@ mod rule_hub_tests {
         )];
         let hub = rule_hub(&rows, "me/api", "API-VERSIONING-1").expect("present");
         let html = strip_html(hub);
-        assert!(!html.contains("conform"), "no conformance claim; html=\n{html}");
+        assert!(
+            !html.contains("conform"),
+            "no conformance claim; html=\n{html}"
+        );
         assert!(
             html.contains("3 sites deviate"),
             "the numerator alone, as the group header renders it; html=\n{html}"
@@ -13666,7 +14302,12 @@ mod rule_hub_tests {
     #[test]
     fn req_pass2_12_the_hub_surfaces_a_cross_surface_conflict_and_is_quiet_otherwise() {
         let conflicted = vec![
-            row("me/api", "DUP-1", "src/a.rs", serde_json::json!({"kind": "defect"})),
+            row(
+                "me/api",
+                "DUP-1",
+                "src/a.rs",
+                serde_json::json!({"kind": "defect"}),
+            ),
             row(
                 "me/api",
                 "DUP-1",
@@ -13678,11 +14319,22 @@ mod rule_hub_tests {
             ),
         ];
         let html = strip_html(rule_hub(&conflicted, "me/api", "DUP-1").expect("present"));
-        assert!(html.contains("rule-hub-conflict"), "the conflict is rendered; html=\n{html}");
+        assert!(
+            html.contains("rule-hub-conflict"),
+            "the conflict is rendered; html=\n{html}"
+        );
         assert!(html.contains("Queue"), "names the surfaces; html=\n{html}");
-        assert!(html.contains("Conventions"), "names the surfaces; html=\n{html}");
+        assert!(
+            html.contains("Conventions"),
+            "names the surfaces; html=\n{html}"
+        );
 
-        let clean = vec![row("me/api", "OK-1", "src/a.rs", serde_json::json!({"kind": "defect"}))];
+        let clean = vec![row(
+            "me/api",
+            "OK-1",
+            "src/a.rs",
+            serde_json::json!({"kind": "defect"}),
+        )];
         let html = strip_html(rule_hub(&clean, "me/api", "OK-1").expect("present"));
         assert!(
             !html.contains("rule-hub-conflict"),
@@ -13697,12 +14349,18 @@ mod rule_hub_tests {
     fn req_pass2_12_the_hub_keeps_an_unmapped_row_an_alarm() {
         let rows = vec![row("me/api", "LEGACY-1", "src/a.rs", serde_json::json!({}))];
         let html = strip_html(rule_hub(&rows, "me/api", "LEGACY-1").expect("present"));
-        assert!(html.contains("Unspecified"), "the alarm chip; html=\n{html}");
+        assert!(
+            html.contains("Unspecified"),
+            "the alarm chip; html=\n{html}"
+        );
         assert!(
             html.contains("unmapped emission path"),
             "and the sentence says what it means; html=\n{html}"
         );
-        assert!(!html.contains("Defect"), "never dressed as a defect; html=\n{html}");
+        assert!(
+            !html.contains("Defect"),
+            "never dressed as a defect; html=\n{html}"
+        );
     }
 
     // ── REACHABILITY: §8's "from every surface that shows a rule id" ─────────
@@ -13788,7 +14446,12 @@ mod rule_hub_tests {
     /// the same click that focuses the row, so the hub is one further click from any row.
     #[test]
     fn req_pass2_12_the_detail_pane_is_how_a_queue_row_reaches_the_hub() {
-        let f = row("me/api", "SQL-INJECTION-1", "src/a.rs", serde_json::json!({"kind": "defect"}));
+        let f = row(
+            "me/api",
+            "SQL-INJECTION-1",
+            "src/a.rs",
+            serde_json::json!({"kind": "defect"}),
+        );
         let pane_row = DetailPaneRow::from_finding(&f, None, None, 0, 1);
         #[component]
         fn Harness(row: DetailPaneRow) -> Element {
@@ -13818,7 +14481,10 @@ mod rule_hub_tests {
             html.contains("rule-hub-link"),
             "the pane's rule id must be the hub's door; html=\n{html}"
         );
-        assert!(html.contains("SQL-INJECTION-1"), "naming the rule; html=\n{html}");
+        assert!(
+            html.contains("SQL-INJECTION-1"),
+            "naming the rule; html=\n{html}"
+        );
     }
 
     /// req_pass2_12: the DEVIATION BULK BAR's rule id is the hub's door — which is how a
@@ -13846,7 +14512,10 @@ mod rule_hub_tests {
             html.contains("rule-hub-link"),
             "the bar's rule id must be the hub's door; html=\n{html}"
         );
-        assert!(html.contains("API-VERSIONING-1"), "naming the rule; html=\n{html}");
+        assert!(
+            html.contains("API-VERSIONING-1"),
+            "naming the rule; html=\n{html}"
+        );
     }
 
     /// req_pass2_12: §8 names three navigation paths and says the rest are "a page of
@@ -13857,7 +14526,12 @@ mod rule_hub_tests {
     fn req_pass2_12_the_hub_builds_exactly_one_navigation_and_no_link_graph() {
         for rows in [
             deviation_rows(),
-            vec![row("me/api", "D-1", "src/a.rs", serde_json::json!({"kind": "defect"}))],
+            vec![row(
+                "me/api",
+                "D-1",
+                "src/a.rs",
+                serde_json::json!({"kind": "defect"}),
+            )],
             vec![row(
                 "me/api",
                 "C-1",
@@ -14016,7 +14690,11 @@ mod convention_commit_tests {
         ];
         let all = adoptable_conventions(&findings);
         let plan = CommitPlan::conventions(&all, &AdoptionModel::new(), "acme/payments-api");
-        assert_eq!(plan.adopted_count(), 1, "precondition: there is something to write");
+        assert_eq!(
+            plan.adopted_count(),
+            1,
+            "precondition: there is something to write"
+        );
 
         for wrong in [
             "",
@@ -14230,7 +14908,10 @@ mod convention_commit_tests {
         model.mark_opened(&adoption_key("me/api", "READ-ME-1"));
         let plan = CommitPlan::conventions(&all, &model, "me/api");
         let html = render_dialog(plan, "", false);
-        assert!(html.contains("READ-ME-1") && html.contains("UNREAD-1"), "html=\n{html}");
+        assert!(
+            html.contains("READ-ME-1") && html.contains("UNREAD-1"),
+            "html=\n{html}"
+        );
         assert_eq!(
             html.matches("adopt-unopened-flag").count(),
             1,
@@ -14253,12 +14934,18 @@ mod convention_commit_tests {
         let all = adoptable_conventions(&findings);
         let plan = CommitPlan::conventions(&all, &AdoptionModel::new(), "me/api");
         let html = render_dialog(plan, "", false);
-        assert!(html.contains("adopt-dialog-cancel") && html.contains("Cancel"), "html=\n{html}");
+        assert!(
+            html.contains("adopt-dialog-cancel") && html.contains("Cancel"),
+            "html=\n{html}"
+        );
         assert!(
             html.contains("adopt-dialog-review") && html.contains("Review the 2 not opened"),
             "the third exit, naming its size; html=\n{html}"
         );
-        assert!(html.contains("adopt-dialog-commit") && html.contains("Commit"), "html=\n{html}");
+        assert!(
+            html.contains("adopt-dialog-commit") && html.contains("Commit"),
+            "html=\n{html}"
+        );
     }
 
     /// req_pass2_14: the third exit is HIDDEN when everything was opened. A button that
@@ -14297,7 +14984,10 @@ mod convention_commit_tests {
             3,
             "all three pre-selected; html=\n{html}"
         );
-        assert!(html.contains("3 to write"), "the bar counts them; html=\n{html}");
+        assert!(
+            html.contains("3 to write"),
+            "the bar counts them; html=\n{html}"
+        );
         assert!(
             html.contains("Write 3 into me/api"),
             "and the button names the destination; html=\n{html}"
@@ -14311,8 +15001,14 @@ mod convention_commit_tests {
         model.set_adopted(&adoption_key("me/api", "R-2"), false);
         let html = render_conventions(findings, model, false);
         assert_eq!(html.matches("adopt-state on").count(), 2, "html=\n{html}");
-        assert!(html.contains("Skipped"), "the skipped row says so; html=\n{html}");
-        assert!(html.contains("2 to write") && html.contains("1 skipped"), "html=\n{html}");
+        assert!(
+            html.contains("Skipped"),
+            "the skipped row says so; html=\n{html}"
+        );
+        assert!(
+            html.contains("2 to write") && html.contains("1 skipped"),
+            "html=\n{html}"
+        );
     }
 
     /// req_pass2_14 (**DEVIATIONS DO NOT BLOCK ADOPTION, RENDERED**) — the owner's §13
@@ -14343,7 +15039,10 @@ mod convention_commit_tests {
         let html = render_conventions(vec![dev(12), dev(40)], AdoptionModel::new(), false);
 
         assert!(html.contains("API-VERSIONING-1"), "listed; html=\n{html}");
-        assert!(html.contains("URI-versioned endpoints"), "by its authored label; html=\n{html}");
+        assert!(
+            html.contains("URI-versioned endpoints"),
+            "by its authored label; html=\n{html}"
+        );
         assert!(
             html.contains("observed with 2 exceptions"),
             "\u{a7}13's exact phrase; html=\n{html}"
@@ -14387,7 +15086,10 @@ mod convention_commit_tests {
         let mut model = AdoptionModel::new();
         model.mark_opened(&adoption_key("me/api", "API-VERSIONING-1"));
         let html = render_conventions(vec![f], model, false);
-        assert!(html.contains("adopt-detail"), "the detail is open; html=\n{html}");
+        assert!(
+            html.contains("adopt-detail"),
+            "the detail is open; html=\n{html}"
+        );
         assert!(
             html.contains("does not gate this adoption"),
             "and it says so; html=\n{html}"
@@ -14409,7 +15111,10 @@ mod convention_commit_tests {
         let mut model = AdoptionModel::new();
         model.mark_opened(&adoption_key("me/api", "R-1"));
         let html = render_conventions(vec![convention("me/api", "R-1", "a", "A")], model, false);
-        assert!(html.contains("adopt-detail"), "the detail is open; html=\n{html}");
+        assert!(
+            html.contains("adopt-detail"),
+            "the detail is open; html=\n{html}"
+        );
         assert!(html.contains("observed, no exceptions"), "html=\n{html}");
         assert!(
             !html.contains("adopt-jump"),
@@ -14437,7 +15142,10 @@ mod convention_commit_tests {
         model.mark_opened(&adoption_key("me/api", "LOOSE-1"));
         let html = render_conventions(vec![f], model, false);
         assert!(html.contains("LOOSE-1"), "still listed; html=\n{html}");
-        assert!(html.contains("Cannot write"), "marked unwritable; html=\n{html}");
+        assert!(
+            html.contains("Cannot write"),
+            "marked unwritable; html=\n{html}"
+        );
         assert!(
             html.contains("No authored option matches"),
             "and told why; html=\n{html}"
@@ -14462,15 +15170,29 @@ mod convention_commit_tests {
             convention("me/api", "R-3", "c", "C"),
         ];
         let html = render_conventions(findings.clone(), AdoptionModel::new(), false);
-        assert_eq!(html.matches("adopt-unopened-flag").count(), 3, "html=\n{html}");
-        assert!(html.contains("3 not opened"), "the bar agrees; html=\n{html}");
+        assert_eq!(
+            html.matches("adopt-unopened-flag").count(),
+            3,
+            "html=\n{html}"
+        );
+        assert!(
+            html.contains("3 not opened"),
+            "the bar agrees; html=\n{html}"
+        );
 
         let mut model = AdoptionModel::new();
         model.mark_opened(&adoption_key("me/api", "R-2"));
         let html = render_conventions(findings, model, false);
-        assert_eq!(html.matches("adopt-unopened-flag").count(), 2, "html=\n{html}");
+        assert_eq!(
+            html.matches("adopt-unopened-flag").count(),
+            2,
+            "html=\n{html}"
+        );
         assert!(html.contains("2 not opened"), "html=\n{html}");
-        assert!(html.contains("Opened"), "and the opened row says so; html=\n{html}");
+        assert!(
+            html.contains("Opened"),
+            "and the opened row says so; html=\n{html}"
+        );
     }
 
     /// req_pass2_14: the dialog's third exit lands somewhere useful — the panel's
@@ -14486,7 +15208,10 @@ mod convention_commit_tests {
         model.mark_opened(&adoption_key("me/api", "OPENED-1"));
         model.set_adopted(&adoption_key("me/api", "SKIPPED-1"), false);
         let html = render_conventions(findings, model, true);
-        assert!(html.contains("UNREAD-1"), "the unopened one is shown; html=\n{html}");
+        assert!(
+            html.contains("UNREAD-1"),
+            "the unopened one is shown; html=\n{html}"
+        );
         assert!(
             !html.contains("OPENED-1"),
             "the opened one is not; html=\n{html}"
@@ -14495,7 +15220,10 @@ mod convention_commit_tests {
             !html.contains("SKIPPED-1"),
             "nor is a skipped one \u{2014} it is not being written; html=\n{html}"
         );
-        assert!(html.contains("adopt-filter-clear"), "and there is a way back; html=\n{html}");
+        assert!(
+            html.contains("adopt-filter-clear"),
+            "and there is a way back; html=\n{html}"
+        );
     }
 
     // ── THE NO-CONVENTION PICK (Q3) ──────────────────────────────────────────
@@ -14507,8 +15235,7 @@ mod convention_commit_tests {
                 NoConventionPanel { findings, model }
             }
         }
-        let mut vdom =
-            VirtualDom::new_with_props(Harness, HarnessProps { findings, model });
+        let mut vdom = VirtualDom::new_with_props(Harness, HarnessProps { findings, model });
         vdom.rebuild_in_place();
         dioxus_ssr::render(&vdom)
     }
@@ -14584,14 +15311,18 @@ mod convention_commit_tests {
 
         let plan = CommitPlan::recommendations(&split_rules(&findings), &model, "me/api");
         assert!(
-            plan.headline().contains("1 recommendation into a client repository"),
+            plan.headline()
+                .contains("1 recommendation into a client repository"),
             "{}",
             plan.headline()
         );
         let shut = render_dialog(plan.clone(), "me/web", false);
         assert!(commit_button(&shut).contains("disabled"), "html=\n{shut}");
         let armed = render_dialog(plan, "me/api", false);
-        assert!(!commit_button(&armed).contains("disabled"), "html=\n{armed}");
+        assert!(
+            !commit_button(&armed).contains("disabled"),
+            "html=\n{armed}"
+        );
     }
 
     // ── FOCUS: the dialog must not leave the pane's keys armed ───────────────
@@ -14611,7 +15342,9 @@ mod convention_commit_tests {
     fn req_pass2_14_typing_the_destination_cannot_reach_the_panes_disposition_keys() {
         let destination = "acme-fintech/api";
         assert!(
-            ['c', 'i', 't', 'f'].iter().all(|c| destination.contains(*c)),
+            ['c', 'i', 't', 'f']
+                .iter()
+                .all(|c| destination.contains(*c)),
             "precondition: the fixture destination contains every hotkey letter"
         );
         // The dialog's input is not the pane's cursor, whatever else is true.
@@ -14717,7 +15450,9 @@ mod convention_commit_tests {
                 "cross_repo": [],
                 "process": [],
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -14804,7 +15539,11 @@ mod convention_commit_tests {
         assert!(!ok);
         assert!(msg.contains("Nothing selected"), "{msg}");
         assert!(
-            server.received_requests().await.unwrap_or_default().is_empty(),
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
             "no request may be made for an empty commit"
         );
     }

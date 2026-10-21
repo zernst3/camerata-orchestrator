@@ -60,8 +60,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use camerata_liveness::HeartbeatFn;
 use camerata_core::{CheckOutcome, CheckRunner, Role, RuleId};
+use camerata_liveness::HeartbeatFn;
 
 use crate::diagnostics_for;
 use crate::subprocess::{run_command, CommandOutput};
@@ -258,8 +258,8 @@ impl JsCheckRunner {
         let manifest = worktree.join("package.json");
         let text = std::fs::read_to_string(&manifest)
             .with_context(|| format!("reading {}", manifest.display()))?;
-        let json: serde_json::Value =
-            serde_json::from_str(&text).with_context(|| format!("parsing {}", manifest.display()))?;
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .with_context(|| format!("parsing {}", manifest.display()))?;
         let scripts = json
             .get("scripts")
             .and_then(|s| s.as_object())
@@ -285,16 +285,18 @@ impl JsCheckRunner {
 
         // In tests, we allow the program to be overridden to a fake binary.
         #[cfg(test)]
-        let program = self
-            .install_program_override
-            .as_deref()
-            .unwrap_or(program);
+        let program = self.install_program_override.as_deref().unwrap_or(program);
         #[cfg(not(test))]
         let program = program;
 
-        let out = run_command(worktree, program, &args.iter().map(|s| *s).collect::<Vec<_>>(), self.on_progress.as_ref())
-            .await
-            .with_context(|| format!("running `{program} {}`", args.join(" ")))?;
+        let out = run_command(
+            worktree,
+            program,
+            &args.iter().map(|s| *s).collect::<Vec<_>>(),
+            self.on_progress.as_ref(),
+        )
+        .await
+        .with_context(|| format!("running `{program} {}`", args.join(" ")))?;
 
         if !out.success {
             anyhow::bail!(
@@ -457,16 +459,18 @@ impl PythonCheckRunner {
         }
 
         #[cfg(test)]
-        let python = self
-            .python_bin_override
-            .as_deref()
-            .unwrap_or("python3");
+        let python = self.python_bin_override.as_deref().unwrap_or("python3");
         #[cfg(not(test))]
         let python = "python3";
 
-        let out = run_command(worktree, python, &["-m", "venv", ".camerata-venv"], self.on_progress.as_ref())
-            .await
-            .with_context(|| format!("running `{python} -m venv .camerata-venv`"))?;
+        let out = run_command(
+            worktree,
+            python,
+            &["-m", "venv", ".camerata-venv"],
+            self.on_progress.as_ref(),
+        )
+        .await
+        .with_context(|| format!("running `{python} -m venv .camerata-venv`"))?;
 
         if !out.success {
             anyhow::bail!(
@@ -481,10 +485,7 @@ impl PythonCheckRunner {
     /// Install deps into the venv using the detected manifest.
     async fn install_deps(&self, worktree: &Path, manifest: &PythonManifest) -> anyhow::Result<()> {
         // The pip binary lives inside the venv we just created/verified.
-        let venv_pip = worktree
-            .join(".camerata-venv")
-            .join("bin")
-            .join("pip");
+        let venv_pip = worktree.join(".camerata-venv").join("bin").join("pip");
 
         #[cfg(test)]
         let pip = self
@@ -604,7 +605,9 @@ impl GoCheckRunner {
     /// Create a `GoCheckRunner` that fires `cb` on every stdout line from every
     /// subprocess it spawns (gofmt, go vet, go test). Use this inside a tracked dev run.
     pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
-        Self { on_progress: Some(cb) }
+        Self {
+            on_progress: Some(cb),
+        }
     }
 }
 
@@ -641,11 +644,20 @@ impl CheckRunner for GoCheckRunner {
         outcome.push_diagnostics(&diagnostics_for("go vet ./...", &vet.combined, &vet_hits));
         outcome.violated.extend(vet_hits);
 
-        let test = run_command(worktree, "go", &["test", "./..."], self.on_progress.as_ref())
-            .await
-            .context("running `go test ./...`")?;
+        let test = run_command(
+            worktree,
+            "go",
+            &["test", "./..."],
+            self.on_progress.as_ref(),
+        )
+        .await
+        .context("running `go test ./...`")?;
         let test_hits = map_command_to_rule(&test, go_checks_rule());
-        outcome.push_diagnostics(&diagnostics_for("go test ./...", &test.combined, &test_hits));
+        outcome.push_diagnostics(&diagnostics_for(
+            "go test ./...",
+            &test.combined,
+            &test_hits,
+        ));
         outcome.violated.extend(test_hits);
 
         outcome.violated.dedup_by(|a, b| a.0 == b.0);
@@ -792,9 +804,14 @@ impl CheckRunner for RubyCheckRunner {
         let mut outcome = CheckOutcome::clean();
 
         if has_rubocop {
-            let lint = run_command(worktree, &bundle, &["exec", "rubocop"], self.on_progress.as_ref())
-                .await
-                .with_context(|| format!("running `{bundle} exec rubocop`"))?;
+            let lint = run_command(
+                worktree,
+                &bundle,
+                &["exec", "rubocop"],
+                self.on_progress.as_ref(),
+            )
+            .await
+            .with_context(|| format!("running `{bundle} exec rubocop`"))?;
             let hits = map_command_to_rule(&lint, ruby_checks_rule());
             outcome.push_diagnostics(&diagnostics_for(
                 &format!("{bundle} exec rubocop"),
@@ -843,9 +860,7 @@ impl JavaBuildTool {
                 wrapper: worktree.join("mvnw").is_file(),
             });
         }
-        if worktree.join("build.gradle").is_file()
-            || worktree.join("build.gradle.kts").is_file()
-        {
+        if worktree.join("build.gradle").is_file() || worktree.join("build.gradle.kts").is_file() {
             return Some(Self::Gradle {
                 wrapper: worktree.join("gradlew").is_file(),
             });
@@ -1088,11 +1103,16 @@ impl CheckRunner for CSharpCheckRunner {
         let dotnet = self.dotnet_program();
         let mut outcome = CheckOutcome::clean();
 
-        let fmt = run_command(worktree, &dotnet, &["format", "--verify-no-changes"], self.on_progress.as_ref())
-            .await
-            .with_context(|| {
-                format!("running `{dotnet} format --verify-no-changes` (is dotnet installed?)")
-            })?;
+        let fmt = run_command(
+            worktree,
+            &dotnet,
+            &["format", "--verify-no-changes"],
+            self.on_progress.as_ref(),
+        )
+        .await
+        .with_context(|| {
+            format!("running `{dotnet} format --verify-no-changes` (is dotnet installed?)")
+        })?;
         let fmt_hits = map_command_to_rule(&fmt, csharp_checks_rule());
         outcome.push_diagnostics(&diagnostics_for(
             &format!("{dotnet} format --verify-no-changes"),
@@ -1274,7 +1294,10 @@ pub fn detect_languages(worktree: &Path) -> Vec<(WorktreeLanguage, PathBuf)> {
 
     // Dedup on (language, dir). Sort first so dedup collapses adjacents and the
     // output order is stable.
-    found.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| lang_ord(a.0).cmp(&lang_ord(b.0))));
+    found.sort_by(|a, b| {
+        a.1.cmp(&b.1)
+            .then_with(|| lang_ord(a.0).cmp(&lang_ord(b.0)))
+    });
     found.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
     found
 }
@@ -1551,11 +1574,17 @@ pub fn runner_for_worktree(worktree: &Path) -> Box<dyn CheckRunner> {
 /// seven languages. Use this at call sites where a
 /// [`camerata_server::run::RunStore`] run id is in scope (i.e. the
 /// `_and_activity` fleet functions).
-pub fn runner_for_worktree_with_heartbeat(worktree: &Path, cb: HeartbeatFn) -> Box<dyn CheckRunner> {
+pub fn runner_for_worktree_with_heartbeat(
+    worktree: &Path,
+    cb: HeartbeatFn,
+) -> Box<dyn CheckRunner> {
     runner_for_worktree_impl(worktree, Some(cb))
 }
 
-fn runner_for_worktree_impl(worktree: &Path, on_progress: Option<HeartbeatFn>) -> Box<dyn CheckRunner> {
+fn runner_for_worktree_impl(
+    worktree: &Path,
+    on_progress: Option<HeartbeatFn>,
+) -> Box<dyn CheckRunner> {
     let detected = detect_languages(worktree);
     let language: Box<dyn CheckRunner> = if detected.is_empty() {
         eprintln!(
@@ -1580,7 +1609,9 @@ fn runner_for_worktree_impl(worktree: &Path, on_progress: Option<HeartbeatFn>) -
                 .join(", ")
         );
         match on_progress {
-            Some(cb) => Box::new(PolyglotCheckRunner::from_detected_with_heartbeat(detected, cb)),
+            Some(cb) => Box::new(PolyglotCheckRunner::from_detected_with_heartbeat(
+                detected, cb,
+            )),
             None => Box::new(PolyglotCheckRunner::from_detected(detected)),
         }
     };
@@ -1588,7 +1619,11 @@ fn runner_for_worktree_impl(worktree: &Path, on_progress: Option<HeartbeatFn>) -
     let manifest = crate::manifest_runner::ManifestCheckRunner::load_from(worktree);
     let arch = crate::arch_check_runner::NativeArchCheckRunner::new();
 
-    Box::new(CombinedCheckRunner { language, manifest, arch })
+    Box::new(CombinedCheckRunner {
+        language,
+        manifest,
+        arch,
+    })
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────
@@ -1603,8 +1638,7 @@ mod tests {
     fn tmp() -> std::path::PathBuf {
         // Counter + PID makes each call unique even under parallel test threads
         // running at the same nanosecond (nanos alone can collide).
-        static COUNTER: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(0);
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
             "cam-checks-test-{}-{}-{}",
@@ -1724,7 +1758,11 @@ mod tests {
     #[test]
     fn detect_csharp_from_sln() {
         let dir = tmp();
-        fs::write(dir.join("App.sln"), "Microsoft Visual Studio Solution File\n").unwrap();
+        fs::write(
+            dir.join("App.sln"),
+            "Microsoft Visual Studio Solution File\n",
+        )
+        .unwrap();
         assert_eq!(detect_language(&dir), WorktreeLanguage::CSharp);
     }
 
@@ -1830,12 +1868,22 @@ mod tests {
 
         // The install logic should see node_modules and skip the fake pm.
         let result = runner.ensure_deps_installed(&dir).await;
-        assert!(result.is_ok(), "ensure_deps_installed should succeed: {result:?}");
-        assert_eq!(result.unwrap(), false, "should report skipped (false = not installed)");
+        assert!(
+            result.is_ok(),
+            "ensure_deps_installed should succeed: {result:?}"
+        );
+        assert_eq!(
+            result.unwrap(),
+            false,
+            "should report skipped (false = not installed)"
+        );
 
         // The marker file should NOT exist because the fake pm was never called.
         let marker = dir.join(".fake-fake-pm-called");
-        assert!(!marker.exists(), "install binary must NOT be called when node_modules is present");
+        assert!(
+            !marker.exists(),
+            "install binary must NOT be called when node_modules is present"
+        );
     }
 
     // ── JS: install invoked when node_modules absent ──────────────────────────
@@ -1861,11 +1909,18 @@ mod tests {
 
         let result = runner.ensure_deps_installed(&dir).await;
         assert!(result.is_ok(), "install should succeed: {result:?}");
-        assert_eq!(result.unwrap(), true, "should report installed (true = ran install)");
+        assert_eq!(
+            result.unwrap(),
+            true,
+            "should report installed (true = ran install)"
+        );
 
         // The marker file MUST exist: the fake binary was called.
         let marker = dir.join(".fake-fake-npm-ci-called");
-        assert!(marker.exists(), "install binary must be called when node_modules is absent");
+        assert!(
+            marker.exists(),
+            "install binary must be called when node_modules is absent"
+        );
     }
 
     // ── JS: install failure fails closed ─────────────────────────────────────
@@ -1888,9 +1943,15 @@ mod tests {
         };
 
         let result = runner.ensure_deps_installed(&dir).await;
-        assert!(result.is_err(), "install failure must propagate as Err (fail closed)");
         assert!(
-            result.unwrap_err().to_string().contains("dep install failed"),
+            result.is_err(),
+            "install failure must propagate as Err (fail closed)"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("dep install failed"),
             "error message must mention install failure"
         );
     }
@@ -1901,11 +1962,7 @@ mod tests {
     async fn js_no_lint_or_test_script_fails_closed() {
         let dir = tmp();
         // A package.json with scripts but neither `lint` nor `test`.
-        fs::write(
-            dir.join("package.json"),
-            r#"{"scripts":{"build":"tsc"}}"#,
-        )
-        .unwrap();
+        fs::write(dir.join("package.json"), r#"{"scripts":{"build":"tsc"}}"#).unwrap();
         let role = Role {
             name: "Frontend".into(),
             rule_subset: vec![],
@@ -1953,7 +2010,11 @@ mod tests {
     #[test]
     fn python_detects_setup_py() {
         let dir = tmp();
-        fs::write(dir.join("setup.py"), "from setuptools import setup\nsetup()\n").unwrap();
+        fs::write(
+            dir.join("setup.py"),
+            "from setuptools import setup\nsetup()\n",
+        )
+        .unwrap();
         let m = PythonCheckRunner::detect_manifest(&dir).unwrap();
         assert_eq!(m, PythonManifest::SetupPy);
     }
@@ -2001,8 +2062,7 @@ mod tests {
         let script_path = bin_dir.join("fake-python3");
         let script = format!(
             "#!/bin/sh\nmkdir -p '{}'\ntouch '{}/fake-venv-created'\nexit 0\n",
-            venv_str,
-            venv_str
+            venv_str, venv_str
         );
         fs::write(&script_path, script).unwrap();
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -2035,10 +2095,7 @@ mod tests {
         // A fake python3 that writes a marker — should NOT be called.
         let script_path = bin_dir.join("fake-python3-skip");
         let marker = dir.join(".fake-python3-called");
-        let script = format!(
-            "#!/bin/sh\ntouch '{}'\nexit 0\n",
-            marker.display()
-        );
+        let script = format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display());
         fs::write(&script_path, script).unwrap();
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
 
@@ -2050,7 +2107,10 @@ mod tests {
 
         runner.ensure_venv(&dir).await.unwrap();
 
-        assert!(!marker.exists(), "python3 must NOT be called when venv already exists");
+        assert!(
+            !marker.exists(),
+            "python3 must NOT be called when venv already exists"
+        );
     }
 
     // ── Python: pip install called with correct manifest ──────────────────────
@@ -2148,9 +2208,15 @@ mod tests {
         };
 
         let result = runner.ensure_venv(&dir).await;
-        assert!(result.is_err(), "venv creation failure must propagate as Err (fail closed)");
         assert!(
-            result.unwrap_err().to_string().contains("venv creation failed"),
+            result.is_err(),
+            "venv creation failure must propagate as Err (fail closed)"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("venv creation failed"),
             "error must mention venv creation failure"
         );
     }
@@ -2189,7 +2255,10 @@ mod tests {
         };
 
         let violations = runner.check(&role(), &dir).await.unwrap().violated;
-        assert!(violations.is_empty(), "clean bundle run -> no violations: {violations:?}");
+        assert!(
+            violations.is_empty(),
+            "clean bundle run -> no violations: {violations:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -2208,7 +2277,10 @@ mod tests {
         let runner = RubyCheckRunner {
             on_progress: None,
             bundle_bin_override: Some(
-                bin_dir.join("fake-bundle-fail").to_string_lossy().into_owned(),
+                bin_dir
+                    .join("fake-bundle-fail")
+                    .to_string_lossy()
+                    .into_owned(),
             ),
         };
 
@@ -2302,7 +2374,10 @@ mod tests {
             program_override: Some(bin_dir.join("fake-mvn").to_string_lossy().into_owned()),
         };
         let violations = runner.check(&role(), &dir).await.unwrap().violated;
-        assert!(violations.is_empty(), "clean build -> no violations: {violations:?}");
+        assert!(
+            violations.is_empty(),
+            "clean build -> no violations: {violations:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -2315,7 +2390,10 @@ mod tests {
         let runner = JavaCheckRunner {
             on_progress: None,
             program_override: Some(
-                bin_dir.join("fake-gradle-fail").to_string_lossy().into_owned(),
+                bin_dir
+                    .join("fake-gradle-fail")
+                    .to_string_lossy()
+                    .into_owned(),
             ),
         };
         let violations = runner.check(&role(), &dir).await.unwrap().violated;
@@ -2353,7 +2431,10 @@ mod tests {
             dotnet_bin_override: Some(bin_dir.join("fake-dotnet").to_string_lossy().into_owned()),
         };
         let violations = runner.check(&role(), &dir).await.unwrap().violated;
-        assert!(violations.is_empty(), "clean dotnet run -> no violations: {violations:?}");
+        assert!(
+            violations.is_empty(),
+            "clean dotnet run -> no violations: {violations:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -2367,7 +2448,10 @@ mod tests {
         let runner = CSharpCheckRunner {
             on_progress: None,
             dotnet_bin_override: Some(
-                bin_dir.join("fake-dotnet-fail").to_string_lossy().into_owned(),
+                bin_dir
+                    .join("fake-dotnet-fail")
+                    .to_string_lossy()
+                    .into_owned(),
             ),
         };
         let violations = runner.check(&role(), &dir).await.unwrap().violated;
@@ -2428,17 +2512,17 @@ mod tests {
         let dir = tmp();
         fs::write(dir.join("go.mod"), "module example.com/x\n\ngo 1.21\n").unwrap();
         // Deliberately unformatted Go (extra spaces gofmt will flag).
-        fs::write(
-            dir.join("main.go"),
-            "package main\nfunc  main()  {\n}\n",
-        )
-        .unwrap();
+        fs::write(dir.join("main.go"), "package main\nfunc  main()  {\n}\n").unwrap();
         let role = Role {
             name: "Backend".into(),
             rule_subset: vec![],
             allowed_paths: vec![],
         };
-        let violations = GoCheckRunner::new().check(&role, &dir).await.unwrap().violated;
+        let violations = GoCheckRunner::new()
+            .check(&role, &dir)
+            .await
+            .unwrap()
+            .violated;
         assert!(
             violations.contains(&go_checks_rule()),
             "unformatted Go should bounce, got: {violations:?}"
@@ -2515,7 +2599,11 @@ mod tests {
             .iter()
             .filter(|(l, _)| *l == WorktreeLanguage::Python)
             .collect();
-        assert_eq!(py.len(), 1, "two Python manifests in one dir -> one entry: {detected:?}");
+        assert_eq!(
+            py.len(),
+            1,
+            "two Python manifests in one dir -> one entry: {detected:?}"
+        );
         assert_eq!(py[0].1, dir);
     }
 
@@ -2545,8 +2633,15 @@ mod tests {
             .iter()
             .filter(|(l, _)| *l == WorktreeLanguage::JavaScript)
             .collect();
-        assert_eq!(js.len(), 1, "node_modules nested manifest must be pruned: {detected:?}");
-        assert_eq!(js[0].1, dir, "only the root package.json should be detected");
+        assert_eq!(
+            js.len(),
+            1,
+            "node_modules nested manifest must be pruned: {detected:?}"
+        );
+        assert_eq!(
+            js[0].1, dir,
+            "only the root package.json should be detected"
+        );
     }
 
     #[test]
@@ -2654,7 +2749,11 @@ mod tests {
             ),
         ]);
 
-        let violations = runner.check(&role(), Path::new("/work")).await.unwrap().violated;
+        let violations = runner
+            .check(&role(), Path::new("/work"))
+            .await
+            .unwrap()
+            .violated;
 
         // Union of all sub-runner violations.
         assert!(violations.contains(&js_checks_rule()));
@@ -2666,7 +2765,10 @@ mod tests {
         assert!(seen.contains(&ui));
         assert!(seen.contains(&api));
         assert!(seen.contains(&tool));
-        assert!(!seen.contains(&PathBuf::from("/work")), "must not run against root");
+        assert!(
+            !seen.contains(&PathBuf::from("/work")),
+            "must not run against root"
+        );
     }
 
     #[tokio::test]
@@ -2698,8 +2800,16 @@ mod tests {
 
         let outcome = runner.check(&role(), Path::new("/work")).await.unwrap();
         // Both sub-runners' verbatim diagnostics survive into the merged tail...
-        assert!(outcome.diagnostics.contains("TS2322"), "js diag missing: {:?}", outcome.diagnostics);
-        assert!(outcome.diagnostics.contains("F401 imported but unused"), "py diag missing: {:?}", outcome.diagnostics);
+        assert!(
+            outcome.diagnostics.contains("TS2322"),
+            "js diag missing: {:?}",
+            outcome.diagnostics
+        );
+        assert!(
+            outcome.diagnostics.contains("F401 imported but unused"),
+            "py diag missing: {:?}",
+            outcome.diagnostics
+        );
         // ...each attributed to its language so a polyglot bounce stays legible.
         assert!(outcome.diagnostics.contains("JavaScript"));
         assert!(outcome.diagnostics.contains("Python"));
@@ -2734,7 +2844,10 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("fail-closed"), "{msg}");
         assert!(msg.contains("Python"), "names the failing language: {msg}");
-        assert!(msg.contains("ruff not installed"), "carries the cause: {msg}");
+        assert!(
+            msg.contains("ruff not installed"),
+            "carries the cause: {msg}"
+        );
 
         // Critically: the OTHER sub-runners still ran (no abort-early).
         let seen = seen.lock().unwrap();
@@ -2759,7 +2872,11 @@ mod tests {
                 Box::new(FakeRunner::ok(vec![], seen.clone())),
             ),
         ]);
-        let violations = runner.check(&role(), Path::new("/")).await.unwrap().violated;
+        let violations = runner
+            .check(&role(), Path::new("/"))
+            .await
+            .unwrap()
+            .violated;
         assert!(violations.is_empty(), "{violations:?}");
     }
 
@@ -2793,7 +2910,11 @@ mod tests {
         let dir = tmp(); // no manifest anywhere
         let runner = runner_for_worktree(&dir);
         let violations = runner.check(&role(), &dir).await.unwrap().violated;
-        assert_eq!(violations, vec![], "noop reports clean for no-manifest tree");
+        assert_eq!(
+            violations,
+            vec![],
+            "noop reports clean for no-manifest tree"
+        );
     }
 
     // ── multilang heartbeat forwarding (Phase 1b) ─────────────────────────────
@@ -2863,13 +2984,20 @@ mod tests {
     #[tokio::test]
     async fn js_runner_new_passes_none_to_run_command() {
         let dir = tmp();
-        fs::write(dir.join("package.json"), r#"{"scripts":{"lint":"true","test":"true"}}"#).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"lint":"true","test":"true"}}"#,
+        )
+        .unwrap();
         fs::create_dir(dir.join("node_modules")).unwrap();
 
         // Runner with NO heartbeat — this simply asserts it compiles + runs clean.
         let runner = JsCheckRunner::new();
         let violations = runner.check(&role(), &dir).await.unwrap().violated;
-        assert!(violations.is_empty(), "no-heartbeat path should run clean: {violations:?}");
+        assert!(
+            violations.is_empty(),
+            "no-heartbeat path should run clean: {violations:?}"
+        );
     }
 
     /// `from_detected_with_heartbeat` wires the heartbeat into every non-Rust
@@ -2882,7 +3010,11 @@ mod tests {
         let dir = tmp();
         let js_dir = dir.join("ui");
         fs::create_dir_all(&js_dir).unwrap();
-        fs::write(js_dir.join("package.json"), r#"{"scripts":{"lint":"true","test":"true"}}"#).unwrap();
+        fs::write(
+            js_dir.join("package.json"),
+            r#"{"scripts":{"lint":"true","test":"true"}}"#,
+        )
+        .unwrap();
         fs::create_dir(js_dir.join("node_modules")).unwrap();
 
         let detected = detect_languages(&dir);
@@ -2911,13 +3043,20 @@ mod tests {
         let dir = tmp();
         let js_dir = dir.join("ui");
         fs::create_dir_all(&js_dir).unwrap();
-        fs::write(js_dir.join("package.json"), r#"{"scripts":{"lint":"true","test":"true"}}"#).unwrap();
+        fs::write(
+            js_dir.join("package.json"),
+            r#"{"scripts":{"lint":"true","test":"true"}}"#,
+        )
+        .unwrap();
         fs::create_dir(js_dir.join("node_modules")).unwrap();
 
         let detected = detect_languages(&dir);
         let composite = PolyglotCheckRunner::from_detected(detected);
         // Should run clean; no panic / no false stall.
         let violations = composite.check(&role(), &js_dir).await.unwrap().violated;
-        assert!(violations.is_empty(), "no-heartbeat polyglot should run clean: {violations:?}");
+        assert!(
+            violations.is_empty(),
+            "no-heartbeat polyglot should run clean: {violations:?}"
+        );
     }
 }

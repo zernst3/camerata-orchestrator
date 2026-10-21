@@ -358,7 +358,10 @@ impl std::fmt::Display for RefusalReason {
             }
             RefusalReason::IsSymlink => write!(f, "path is a symlink — never followed or deleted"),
             RefusalReason::ResolvesOutsideRoot => {
-                write!(f, "path resolves outside its expected root (possible symlink escape)")
+                write!(
+                    f,
+                    "path resolves outside its expected root (possible symlink escape)"
+                )
             }
             RefusalReason::NotGitignored => {
                 write!(f, "path is tracked or not gitignored — refusing to delete")
@@ -503,7 +506,10 @@ pub enum ReclaimOutcome {
     /// deletion.
     Reclaimed(ReclaimLogEntry),
     /// Skipped — one of the safety invariants refused this path. NEVER deleted.
-    Skipped { path: PathBuf, reason: RefusalReason },
+    Skipped {
+        path: PathBuf,
+        reason: RefusalReason,
+    },
 }
 
 /// Recursively compute the total size of everything under `path`, in bytes.
@@ -750,9 +756,15 @@ pub fn reclaim_zone_a_for_clone(
 
     let worktrees_root = clone.join(".camerata-worktrees");
     for orphan in list_orphan_worktree_dirs(clone) {
-        if let ReclaimOutcome::Reclaimed(entry) =
-            reclaim_dir(&orphan, &worktrees_root, &[], true, trigger, dry_run, &mut on_log)
-        {
+        if let ReclaimOutcome::Reclaimed(entry) = reclaim_dir(
+            &orphan,
+            &worktrees_root,
+            &[],
+            true,
+            trigger,
+            dry_run,
+            &mut on_log,
+        ) {
             total = total.saturating_add(entry.bytes);
         }
     }
@@ -887,10 +899,16 @@ pub enum HeadroomOutcome {
     /// Headroom was already sufficient; no reclaim was attempted.
     Sufficient { available: u64 },
     /// Headroom was short, Zone-A reclaim ran, and it's now sufficient.
-    ReclaimedSufficient { available: u64, reclaimed_bytes: u64 },
+    ReclaimedSufficient {
+        available: u64,
+        reclaimed_bytes: u64,
+    },
     /// Headroom was short, Zone-A reclaim ran, and it's STILL short — the caller
     /// should bail with an actionable message (Zone-B inventory).
-    StillInsufficient { available: u64, reclaimed_bytes: u64 },
+    StillInsufficient {
+        available: u64,
+        reclaimed_bytes: u64,
+    },
 }
 
 /// Pure orchestration of the T4 guard upgrade: query headroom, and ONLY if it's short,
@@ -973,7 +991,12 @@ pub fn parse_gb_env(raw: Option<&str>, default_gb: u64) -> u64 {
 
 /// `CAMERATA_SHARED_TARGET_MAX_GB` (default 30 GB) — the T2 shared-target size cap.
 pub fn shared_target_max_bytes() -> u64 {
-    parse_gb_env(std::env::var("CAMERATA_SHARED_TARGET_MAX_GB").ok().as_deref(), 30)
+    parse_gb_env(
+        std::env::var("CAMERATA_SHARED_TARGET_MAX_GB")
+            .ok()
+            .as_deref(),
+        30,
+    )
 }
 
 /// Parse a day-valued env var into a [`Duration`], defaulting to `default_days` when
@@ -987,7 +1010,12 @@ pub fn parse_days_env(raw: Option<&str>, default_days: u64) -> Duration {
 
 /// `CAMERATA_ARTIFACT_MAX_AGE_DAYS` (default 14 days) — the T2/T3 staleness cutoff.
 pub fn artifact_max_age() -> Duration {
-    parse_days_env(std::env::var("CAMERATA_ARTIFACT_MAX_AGE_DAYS").ok().as_deref(), 14)
+    parse_days_env(
+        std::env::var("CAMERATA_ARTIFACT_MAX_AGE_DAYS")
+            .ok()
+            .as_deref(),
+        14,
+    )
 }
 
 #[cfg(test)]
@@ -1154,7 +1182,10 @@ mod tests {
 
         let result = is_safe_to_reclaim(&link, &root);
         assert_eq!(result, Err(RefusalReason::IsSymlink));
-        assert!(real_elsewhere.exists(), "the symlink target must be untouched");
+        assert!(
+            real_elsewhere.exists(),
+            "the symlink target must be untouched"
+        );
     }
 
     #[test]
@@ -1175,7 +1206,10 @@ mod tests {
 
         let result = is_safe_to_reclaim(&candidate, &root);
         assert_eq!(result, Err(RefusalReason::ResolvesOutsideRoot));
-        assert!(outside_target.exists(), "the escaped target must be untouched");
+        assert!(
+            outside_target.exists(),
+            "the escaped target must be untouched"
+        );
     }
 
     #[test]
@@ -1198,8 +1232,14 @@ mod tests {
         });
 
         assert!(matches!(outcome, ReclaimOutcome::Skipped { .. }));
-        assert!(logged.is_empty(), "a refused path must never be logged as reclaimed");
-        assert!(victim.exists(), "the escaped directory must survive untouched");
+        assert!(
+            logged.is_empty(),
+            "a refused path must never be logged as reclaimed"
+        );
+        assert!(
+            victim.exists(),
+            "the escaped directory must survive untouched"
+        );
         assert!(victim.join("important.rs").exists());
     }
 
@@ -1214,7 +1254,10 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
 
         let result = evaluate_reclaim(&target, &root, &[], false);
-        assert!(result.is_ok(), "gitignored target/ must be reclaimable: {result:?}");
+        assert!(
+            result.is_ok(),
+            "gitignored target/ must be reclaimable: {result:?}"
+        );
     }
 
     #[test]
@@ -1257,7 +1300,10 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
         // Deliberately NOT a git repo.
         let result = evaluate_reclaim(&target, &root, &[], false);
-        assert!(matches!(result, Err(RefusalReason::CannotVerifyGitignore(_))));
+        assert!(matches!(
+            result,
+            Err(RefusalReason::CannotVerifyGitignore(_))
+        ));
     }
 
     #[test]
@@ -1267,7 +1313,10 @@ mod tests {
         fs::create_dir_all(&shared).unwrap();
         // No git repo at all here — infra paths must still be reclaimable.
         let result = evaluate_reclaim(&shared, &root, &[], true);
-        assert!(result.is_ok(), "camerata infra bypasses gitignore verification: {result:?}");
+        assert!(
+            result.is_ok(),
+            "camerata infra bypasses gitignore verification: {result:?}"
+        );
     }
 
     #[test]
@@ -1304,7 +1353,10 @@ mod tests {
 
         // The outer target/ must still be a valid, gitignored candidate.
         let result = evaluate_reclaim(&target, &root, &[], false);
-        assert!(result.is_ok(), "outer target/ must reclaim normally: {result:?}");
+        assert!(
+            result.is_ok(),
+            "outer target/ must reclaim normally: {result:?}"
+        );
 
         // The Zone-B scanner must never surface the NESTED .git as its own candidate.
         let candidates = scan_zone_b(&root, &[]);
@@ -1325,7 +1377,9 @@ mod tests {
         symlink(&real_cache, &link).unwrap();
 
         let mut logged = Vec::new();
-        let outcome = reclaim_dir(&link, &root, &[], false, "test", false, |e| logged.push(e.clone()));
+        let outcome = reclaim_dir(&link, &root, &[], false, "test", false, |e| {
+            logged.push(e.clone())
+        });
         assert!(matches!(outcome, ReclaimOutcome::Skipped { .. }));
         assert!(logged.is_empty());
         assert!(real_cache.join("do_not_delete.txt").exists());
@@ -1375,9 +1429,15 @@ mod tests {
             saw_path_exist_at_log_time = shared.exists();
         });
 
-        assert!(saw_path_exist_at_log_time, "on_log must fire while the path still exists");
+        assert!(
+            saw_path_exist_at_log_time,
+            "on_log must fire while the path still exists"
+        );
         assert!(matches!(outcome, ReclaimOutcome::Reclaimed(_)));
-        assert!(!shared.exists(), "the path must be gone after reclaim_dir returns");
+        assert!(
+            !shared.exists(),
+            "the path must be gone after reclaim_dir returns"
+        );
     }
 
     #[test]
@@ -1388,7 +1448,9 @@ mod tests {
         fs::write(shared.join("artifact.bin"), "deadbeef").unwrap();
 
         let mut logged = Vec::new();
-        let outcome = reclaim_dir(&shared, &root, &[], true, "test", true, |e| logged.push(e.clone()));
+        let outcome = reclaim_dir(&shared, &root, &[], true, "test", true, |e| {
+            logged.push(e.clone())
+        });
 
         assert_eq!(logged.len(), 1);
         assert!(logged[0].dry_run);
@@ -1424,9 +1486,21 @@ mod tests {
     #[test]
     fn should_prune_shared_target_true_when_stale_and_orphaned() {
         let max_age = Duration::from_secs(14 * 24 * 60 * 60);
-        assert!(shared_target_stale(max_age + Duration::from_secs(1), max_age, false));
-        assert!(!shared_target_stale(max_age - Duration::from_secs(1), max_age, false));
-        assert!(!shared_target_stale(max_age + Duration::from_secs(1), max_age, true));
+        assert!(shared_target_stale(
+            max_age + Duration::from_secs(1),
+            max_age,
+            false
+        ));
+        assert!(!shared_target_stale(
+            max_age - Duration::from_secs(1),
+            max_age,
+            false
+        ));
+        assert!(!shared_target_stale(
+            max_age + Duration::from_secs(1),
+            max_age,
+            true
+        ));
     }
 
     #[test]
@@ -1472,7 +1546,11 @@ mod tests {
                 worktrees.join("camerata-story-real").to_str().unwrap(),
             ],
         );
-        assert!(add.status.success(), "{}", String::from_utf8_lossy(&add.stderr));
+        assert!(
+            add.status.success(),
+            "{}",
+            String::from_utf8_lossy(&add.stderr)
+        );
         // A stray, unregistered directory left behind by a crash.
         fs::create_dir_all(worktrees.join("stray-crash-leftover")).unwrap();
 
@@ -1549,10 +1627,17 @@ mod tests {
         fs::write(shared.join("artifact.bin"), "0123456789").unwrap();
 
         let mut logged = Vec::new();
-        let total = reclaim_zone_a_for_clone(&root, true, "test", false, |e| logged.push(e.clone()));
+        let total =
+            reclaim_zone_a_for_clone(&root, true, "test", false, |e| logged.push(e.clone()));
 
-        assert!(!worktrees.join("stray").exists(), "orphan worktree must be removed");
-        assert!(!shared.exists(), "shared target must be pruned when prune_shared_target=true");
+        assert!(
+            !worktrees.join("stray").exists(),
+            "orphan worktree must be removed"
+        );
+        assert!(
+            !shared.exists(),
+            "shared target must be pruned when prune_shared_target=true"
+        );
         assert!(total > 0);
         assert_eq!(logged.len(), 2);
     }
@@ -1578,7 +1663,13 @@ mod tests {
             ],
         );
         assert!(add.status.success());
-        fs::write(worktrees.join("camerata-live-branch").join("in_progress.rs"), "// wip").unwrap();
+        fs::write(
+            worktrees
+                .join("camerata-live-branch")
+                .join("in_progress.rs"),
+            "// wip",
+        )
+        .unwrap();
 
         let mut logged = Vec::new();
         reclaim_zone_a_for_clone(&root, false, "test", false, |e| logged.push(e.clone()));
@@ -1668,8 +1759,16 @@ mod tests {
                 0
             },
         );
-        assert_eq!(outcome, HeadroomOutcome::Sufficient { available: 20 * 1024 * 1024 * 1024 });
-        assert_eq!(reclaim_calls, 0, "reclaim must never run when headroom is already sufficient");
+        assert_eq!(
+            outcome,
+            HeadroomOutcome::Sufficient {
+                available: 20 * 1024 * 1024 * 1024
+            }
+        );
+        assert_eq!(
+            reclaim_calls, 0,
+            "reclaim must never run when headroom is already sufficient"
+        );
     }
 
     #[test]
@@ -1739,14 +1838,26 @@ mod tests {
     fn parse_gb_env_defaults_and_parses() {
         assert_eq!(parse_gb_env(None, 30), 30 * 1024 * 1024 * 1024);
         assert_eq!(parse_gb_env(Some("5"), 30), 5 * 1024 * 1024 * 1024);
-        assert_eq!(parse_gb_env(Some("not-a-number"), 30), 30 * 1024 * 1024 * 1024);
+        assert_eq!(
+            parse_gb_env(Some("not-a-number"), 30),
+            30 * 1024 * 1024 * 1024
+        );
     }
 
     #[test]
     fn parse_days_env_defaults_and_parses() {
-        assert_eq!(parse_days_env(None, 14), Duration::from_secs(14 * 24 * 60 * 60));
-        assert_eq!(parse_days_env(Some("7"), 14), Duration::from_secs(7 * 24 * 60 * 60));
-        assert_eq!(parse_days_env(Some("nope"), 14), Duration::from_secs(14 * 24 * 60 * 60));
+        assert_eq!(
+            parse_days_env(None, 14),
+            Duration::from_secs(14 * 24 * 60 * 60)
+        );
+        assert_eq!(
+            parse_days_env(Some("7"), 14),
+            Duration::from_secs(7 * 24 * 60 * 60)
+        );
+        assert_eq!(
+            parse_days_env(Some("nope"), 14),
+            Duration::from_secs(14 * 24 * 60 * 60)
+        );
     }
 
     // ── format_zone_b_inventory ────────────────────────────────────────────────────

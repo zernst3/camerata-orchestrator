@@ -36,7 +36,9 @@ const RULE_API_DTOS: &str = "ARCH-API-DTOS-1";
 /// Copy `fixture_name` (under `tests/fixtures/`) into `dest`, then turn `dest` into a real
 /// one-commit git repo — mirrors `import_boundary_checker_e2e.rs`'s own helper.
 fn stage_fixture_as_git_repo(fixture_name: &str, dest: &Path) {
-    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture_name);
+    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(fixture_name);
     copy_dir_recursive(&fixture_root, dest);
 
     let g = |args: &[&str]| {
@@ -45,7 +47,11 @@ fn stage_fixture_as_git_repo(fixture_name: &str, dest: &Path) {
             .args(args)
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
-        assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "handler-no-db-e2e@camerata.local"]);
@@ -65,20 +71,26 @@ fn copy_dir_recursive(src: &Path, dest: &Path) {
         if ty.is_dir() {
             copy_dir_recursive(&from, &to);
         } else {
-            std::fs::copy(&from, &to).unwrap_or_else(|e| panic!("failed to copy fixture file {from:?} -> {to:?}: {e}"));
+            std::fs::copy(&from, &to)
+                .unwrap_or_else(|e| panic!("failed to copy fixture file {from:?} -> {to:?}: {e}"));
         }
     }
 }
 
 fn selected_rules() -> Vec<SelectedRule> {
-    [RULE_HANDLER_NO_DB, RULE_STRICT_LAYERING, RULE_NO_CROSS_BOUNDARY_IMPORTS, RULE_API_DTOS]
-        .into_iter()
-        .map(|id| SelectedRule {
-            id: id.to_string(),
-            directive: format!("handler-no-db / strict-layering-call e2e: {id}"),
-            repos: Vec::new(),
-        })
-        .collect()
+    [
+        RULE_HANDLER_NO_DB,
+        RULE_STRICT_LAYERING,
+        RULE_NO_CROSS_BOUNDARY_IMPORTS,
+        RULE_API_DTOS,
+    ]
+    .into_iter()
+    .map(|id| SelectedRule {
+        id: id.to_string(),
+        directive: format!("handler-no-db / strict-layering-call e2e: {id}"),
+        repos: Vec::new(),
+    })
+    .collect()
 }
 
 async fn run_fixture_scan(repo_dir: &Path, repo_spec: &str) -> onboard::ScanReport {
@@ -101,8 +113,8 @@ async fn run_fixture_scan(repo_dir: &Path, repo_spec: &str) -> onboard::ScanRepo
         true,  // run_deterministic
         None,
         camerata_server::llm::BackendResolution::Api, // backend gate: not under test here
-        None, // corpus
-        &std::collections::HashMap::new(), // chosen_options
+        None,                                         // corpus
+        &std::collections::HashMap::new(),            // chosen_options
     )
     .await;
     report
@@ -119,7 +131,11 @@ async fn configured_repo_fires_both_rule_ids_on_both_language_handlers() {
     assert_eq!(report.repos, vec![repo_spec.clone()]);
 
     for rule in [RULE_HANDLER_NO_DB, RULE_STRICT_LAYERING] {
-        let hits: Vec<&onboard::Finding> = report.findings.iter().filter(|f| f.rule_id == rule).collect();
+        let hits: Vec<&onboard::Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == rule)
+            .collect();
         assert_eq!(
             hits.len(),
             2,
@@ -128,29 +144,49 @@ async fn configured_repo_fires_both_rule_ids_on_both_language_handlers() {
             report.findings
         );
         for hit in &hits {
-            assert_eq!(hit.severity, "high", "{rule} deterministic mode must be high severity: {hit:?}");
-            assert!(!hit.detail.contains("[needs review"), "{rule} must not be needs-review: {}", hit.detail);
-            assert!(hit.preview, "an architectural finding uses the existing preview mechanism");
+            assert_eq!(
+                hit.severity, "high",
+                "{rule} deterministic mode must be high severity: {hit:?}"
+            );
+            assert!(
+                !hit.detail.contains("[needs review"),
+                "{rule} must not be needs-review: {}",
+                hit.detail
+            );
+            assert!(
+                hit.preview,
+                "an architectural finding uses the existing preview mechanism"
+            );
             assert_eq!(hit.preview_tool.as_deref(), Some("camerata-arch"));
         }
-        assert!(hits.iter().any(|f| f.path == "src/routes/orders.rs"), "{rule}: missing Rust hit: {hits:#?}");
-        assert!(hits.iter().any(|f| f.path == "src/routes/orders.ts"), "{rule}: missing TS hit: {hits:#?}");
+        assert!(
+            hits.iter().any(|f| f.path == "src/routes/orders.rs"),
+            "{rule}: missing Rust hit: {hits:#?}"
+        );
+        assert!(
+            hits.iter().any(|f| f.path == "src/routes/orders.ts"),
+            "{rule}: missing TS hit: {hits:#?}"
+        );
     }
 
     // The compliant files must never appear under either rule id.
-    for compliant_path in ["src/services/order_service.rs", "src/repositories/orders_repo.rs"] {
+    for compliant_path in [
+        "src/services/order_service.rs",
+        "src/repositories/orders_repo.rs",
+    ] {
         assert!(
-            report
-                .findings
-                .iter()
-                .all(|f| !(f.path == compliant_path && (f.rule_id == RULE_HANDLER_NO_DB || f.rule_id == RULE_STRICT_LAYERING))),
+            report.findings.iter().all(|f| !(f.path == compliant_path
+                && (f.rule_id == RULE_HANDLER_NO_DB || f.rule_id == RULE_STRICT_LAYERING))),
             "compliant file {compliant_path} must never be flagged under either rule: {:?}",
             report.findings
         );
     }
 
     assert!(!report.provenance.audited_refs.is_empty());
-    let sha = report.provenance.audited_refs[0].sha.as_deref().expect("a real one-commit git repo must yield a SHA");
+    let sha = report.provenance.audited_refs[0]
+        .sha
+        .as_deref()
+        .expect("a real one-commit git repo must yield a SHA");
     assert_eq!(sha.len(), 40);
 }
 
@@ -183,16 +219,27 @@ async fn checker_rule_ids_for_repo_is_config_aware_per_repo_for_both_checkers() 
     let unconfigured_dir = tempfile::tempdir().expect("tempdir");
     stage_fixture_as_git_repo("handler_no_db_unconfigured_repo", unconfigured_dir.path());
 
-    let ExtractedRepo { files: configured_files, .. } =
-        read_local_repo_files(configured_dir.path()).expect("read configured fixture");
-    let ExtractedRepo { files: unconfigured_files, .. } =
-        read_local_repo_files(unconfigured_dir.path()).expect("read unconfigured fixture");
+    let ExtractedRepo {
+        files: configured_files,
+        ..
+    } = read_local_repo_files(configured_dir.path()).expect("read configured fixture");
+    let ExtractedRepo {
+        files: unconfigured_files,
+        ..
+    } = read_local_repo_files(unconfigured_dir.path()).expect("read unconfigured fixture");
 
-    let configured_view = RepoView { spec: "e2e/configured", files: &configured_files };
-    let unconfigured_view = RepoView { spec: "e2e/unconfigured", files: &unconfigured_files };
+    let configured_view = RepoView {
+        spec: "e2e/configured",
+        files: &configured_files,
+    };
+    let unconfigured_view = RepoView {
+        spec: "e2e/unconfigured",
+        files: &unconfigured_files,
+    };
 
     let configured_ids = camerata_checks::arch_checker::checker_rule_ids_for_repo(&configured_view);
-    let unconfigured_ids = camerata_checks::arch_checker::checker_rule_ids_for_repo(&unconfigured_view);
+    let unconfigured_ids =
+        camerata_checks::arch_checker::checker_rule_ids_for_repo(&unconfigured_view);
 
     for rule in [RULE_HANDLER_NO_DB, RULE_STRICT_LAYERING] {
         assert!(

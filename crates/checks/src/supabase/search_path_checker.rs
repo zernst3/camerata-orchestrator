@@ -74,11 +74,17 @@ mod tests {
     use super::*;
 
     fn view<'a>(files: &'a [(String, String)]) -> RepoView<'a> {
-        RepoView { spec: "test/repo", files }
+        RepoView {
+            spec: "test/repo",
+            files,
+        }
     }
 
     fn files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
-        pairs.into_iter().map(|(p, c)| (p.to_string(), c.to_string())).collect()
+        pairs
+            .into_iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect()
     }
 
     #[test]
@@ -118,7 +124,10 @@ mod tests {
     #[test]
     fn no_supabase_files_never_applies() {
         let f = files(vec![("README.md", "hello")]);
-        assert!(!crate::arch_checker::checker_applies(&SupabaseFnSearchPathChecker, &f));
+        assert!(!crate::arch_checker::checker_applies(
+            &SupabaseFnSearchPathChecker,
+            &f
+        ));
     }
 
     // ── W1 breadth hardening: general Postgres, not just Supabase ──────────────────────
@@ -155,7 +164,11 @@ mod tests {
              create function public.grant_temporary_access() returns void security definer as $$ begin end; $$ language plpgsql;",
         )]);
         let vs = SupabaseFnSearchPathChecker.check(&view(&f));
-        assert_eq!(vs.len(), 1, "expected exactly the one guilty function: {vs:#?}");
+        assert_eq!(
+            vs.len(),
+            1,
+            "expected exactly the one guilty function: {vs:#?}"
+        );
         assert_eq!(
             vs[0].object.as_deref(),
             Some("public.grant_temporary_access"),
@@ -171,7 +184,10 @@ mod tests {
             "services/billing/sql/migrations/v3/0007_add_fn.sql",
             "create function public.f() returns void security definer as $$ begin end; $$ language plpgsql;",
         )]);
-        assert!(crate::arch_checker::checker_applies(&SupabaseFnSearchPathChecker, &f));
+        assert!(crate::arch_checker::checker_applies(
+            &SupabaseFnSearchPathChecker,
+            &f
+        ));
         let vs = SupabaseFnSearchPathChecker.check(&view(&f));
         assert_eq!(vs.len(), 1, "{vs:#?}");
     }

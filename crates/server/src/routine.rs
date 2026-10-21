@@ -20,8 +20,8 @@
 pub use camerata_app_core::routine::{
     builtin_templates, default_model, instantiate_from_template, resolve_model, scaffold_prompt,
     CreateRoutineReq, DraftPromptReq, DraftPromptResp, PathScope, Routine, RoutineRun,
-    RoutineScope, ROUTINE_RUN_HISTORY_CAP, RoutineRunSummary, RoutineStatus, RoutineTemplate,
-    RuleSubsetRef, RunTrigger, SetEnabledReq, WritePolicy, DEFAULT_ROUTINE_MODEL,
+    RoutineRunSummary, RoutineScope, RoutineStatus, RoutineTemplate, RuleSubsetRef, RunTrigger,
+    SetEnabledReq, WritePolicy, DEFAULT_ROUTINE_MODEL, ROUTINE_RUN_HISTORY_CAP,
 };
 
 use std::path::PathBuf;
@@ -351,9 +351,7 @@ impl RoutineStore {
             let r = guard.iter().find(|r| r.id == id)?;
             (r.scope.clone(), r.name.clone())
         };
-        Some(
-            crate::scope_registration::resolve_scope_registration(&scope, &name, worktree).await,
-        )
+        Some(crate::scope_registration::resolve_scope_registration(&scope, &name, worktree).await)
     }
 
     /// Run a routine now ON DEMAND ("Run now"): execute a governed run via the REAL gate script,

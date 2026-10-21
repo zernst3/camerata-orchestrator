@@ -34,10 +34,7 @@ pub(crate) fn leftover_placeholders(content: &str) -> Vec<String> {
     let bytes = content.as_bytes();
     let mut i = 0;
     while i + 1 < bytes.len() {
-        if bytes[i] == b'{'
-            && bytes[i + 1] == b'{'
-            && (i == 0 || bytes[i - 1] != b'$')
-        {
+        if bytes[i] == b'{' && bytes[i + 1] == b'{' && (i == 0 || bytes[i - 1] != b'$') {
             let key_start = i + 2;
             let mut j = key_start;
             while j < bytes.len()
@@ -76,10 +73,7 @@ mod tests {
 
     #[test]
     fn leftover_placeholders_finds_unfilled_tokens() {
-        assert_eq!(
-            leftover_placeholders("all filled in"),
-            Vec::<String>::new()
-        );
+        assert_eq!(leftover_placeholders("all filled in"), Vec::<String>::new());
         assert_eq!(
             leftover_placeholders("has {{ONE}} and {{TWO}} left"),
             vec!["{{ONE}}".to_string(), "{{TWO}}".to_string()]

@@ -175,7 +175,10 @@ async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
 
     let sources = vec![(repo_spec.clone(), repo_dir.path().to_path_buf())];
     let scan = camerata_server::onboard::scan_repos(&sources, Vec::new()).await;
-    assert!(!scan.gated, "a local-dir scan is not gated on a GitHub token");
+    assert!(
+        !scan.gated,
+        "a local-dir scan is not gated on a GitHub token"
+    );
     assert_eq!(scan.repos, vec![repo_spec.clone()]);
     assert!(scan.files_scanned > 0, "the scan read the repo's files");
     // The stack detector recognized this as a Rust repo (it has Cargo.toml + .rs files).
@@ -185,7 +188,10 @@ async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
         .find(|s| s.repo == repo_spec)
         .expect("the scanned repo has a detected stack");
     assert!(
-        stack.languages.iter().any(|l| l.eq_ignore_ascii_case("rust")),
+        stack
+            .languages
+            .iter()
+            .any(|l| l.eq_ignore_ascii_case("rust")),
         "Cargo.toml + .rs => the Rust stack is detected: {:?}",
         stack.languages
     );
@@ -253,14 +259,16 @@ async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
     assert!(agents.contains("### RUST-DOMAIN-1"));
     assert!(agents.contains("### UNIVERSAL-1"));
     let conv = &files.iter().find(|(p, _)| p == "CONVENTIONS.md").unwrap().1;
-    assert!(conv.contains("### RUST-FMT-1"), "mechanical rule in CONVENTIONS.md");
+    assert!(
+        conv.contains("### RUST-FMT-1"),
+        "mechanical rule in CONVENTIONS.md"
+    );
     assert!(
         !conv.contains("### RUST-DOMAIN-1"),
         "prose rules do NOT go into CONVENTIONS.md"
     );
     // The on-disk gate config round-trips: every applied id is recorded.
-    let gate_json =
-        std::fs::read_to_string(repo_dir.path().join(".camerata/rules.json")).unwrap();
+    let gate_json = std::fs::read_to_string(repo_dir.path().join(".camerata/rules.json")).unwrap();
     let gate: Vec<GateRule> = serde_json::from_str(&gate_json).unwrap();
     let gate_ids: Vec<&str> = gate.iter().map(|g| g.id.as_str()).collect();
     assert!(gate_ids.contains(&"RUST-DOMAIN-1"));

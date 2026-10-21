@@ -159,12 +159,21 @@ mod tests {
 
     #[test]
     fn retryable_statuses() {
-        assert!(should_retry(RetryReason::HttpStatus(429)), "429 rate limit must retry");
-        assert!(should_retry(RetryReason::HttpStatus(529)), "529 overloaded must retry");
+        assert!(
+            should_retry(RetryReason::HttpStatus(429)),
+            "429 rate limit must retry"
+        );
+        assert!(
+            should_retry(RetryReason::HttpStatus(529)),
+            "529 overloaded must retry"
+        );
         assert!(should_retry(RetryReason::HttpStatus(500)), "500 must retry");
         assert!(should_retry(RetryReason::HttpStatus(502)), "502 must retry");
         assert!(should_retry(RetryReason::HttpStatus(503)), "503 must retry");
-        assert!(should_retry(RetryReason::HttpStatus(599)), "boundary 599 must retry");
+        assert!(
+            should_retry(RetryReason::HttpStatus(599)),
+            "boundary 599 must retry"
+        );
     }
 
     #[test]
@@ -177,17 +186,29 @@ mod tests {
         assert!(!should_retry(RetryReason::HttpStatus(400)), "400 is fatal");
         assert!(!should_retry(RetryReason::HttpStatus(401)), "401 is fatal");
         assert!(!should_retry(RetryReason::HttpStatus(403)), "403 is fatal");
-        assert!(!should_retry(RetryReason::HttpStatus(404)), "404 is fatal (not in scope's list)");
-        assert!(!should_retry(RetryReason::HttpStatus(422)), "other 4xx is fatal");
+        assert!(
+            !should_retry(RetryReason::HttpStatus(404)),
+            "404 is fatal (not in scope's list)"
+        );
+        assert!(
+            !should_retry(RetryReason::HttpStatus(422)),
+            "other 4xx is fatal"
+        );
     }
 
     #[test]
     fn max_retries_caps_the_loop_regardless_of_reason() {
         // At attempt == MAX_RETRIES, even an inherently-retryable reason stops.
         assert!(should_retry_now(0, RetryReason::HttpStatus(429)));
-        assert!(should_retry_now(MAX_RETRIES - 1, RetryReason::HttpStatus(429)));
+        assert!(should_retry_now(
+            MAX_RETRIES - 1,
+            RetryReason::HttpStatus(429)
+        ));
         assert!(!should_retry_now(MAX_RETRIES, RetryReason::HttpStatus(429)));
-        assert!(!should_retry_now(MAX_RETRIES + 1, RetryReason::HttpStatus(429)));
+        assert!(!should_retry_now(
+            MAX_RETRIES + 1,
+            RetryReason::HttpStatus(429)
+        ));
         // A fatal reason never retries even at attempt 0.
         assert!(!should_retry_now(0, RetryReason::HttpStatus(401)));
     }
@@ -218,11 +239,17 @@ mod tests {
     #[test]
     fn parse_retry_after_secs_handles_delta_seconds_and_rejects_garbage() {
         assert_eq!(parse_retry_after_secs("5"), Some(Duration::from_secs(5)));
-        assert_eq!(parse_retry_after_secs("  30  "), Some(Duration::from_secs(30)));
+        assert_eq!(
+            parse_retry_after_secs("  30  "),
+            Some(Duration::from_secs(30))
+        );
         assert_eq!(parse_retry_after_secs("0"), Some(Duration::from_secs(0)));
         // HTTP-date form and garbage are not supported (fixed backoff is used instead) —
         // this must return None, not panic or misparse.
-        assert_eq!(parse_retry_after_secs("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        assert_eq!(
+            parse_retry_after_secs("Wed, 21 Oct 2026 07:28:00 GMT"),
+            None
+        );
         assert_eq!(parse_retry_after_secs(""), None);
         assert_eq!(parse_retry_after_secs("not-a-number"), None);
     }

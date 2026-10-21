@@ -104,7 +104,10 @@ impl std::fmt::Debug for GenericCliDriver {
             .field("base_args", &self.base_args)
             .field("task_flag", &self.task_flag)
             .field("worktree", &self.worktree)
-            .field("on_activity", &self.on_activity.as_ref().map(|_| "<callback>"))
+            .field(
+                "on_activity",
+                &self.on_activity.as_ref().map(|_| "<callback>"),
+            )
             .finish()
     }
 }
@@ -333,7 +336,10 @@ mod tests {
         let base = "/Users/me/ws/acme/api/.camerata-worktrees";
         let wt_a = PathBuf::from(base).join("story-a");
         let wt_b = PathBuf::from(base).join("story-b");
-        assert_eq!(derive_shared_target_dir(&wt_a), derive_shared_target_dir(&wt_b));
+        assert_eq!(
+            derive_shared_target_dir(&wt_a),
+            derive_shared_target_dir(&wt_b)
+        );
     }
 
     /// `build_command` injects CARGO_TARGET_DIR when a canonical worktree is set.
@@ -341,12 +347,14 @@ mod tests {
     #[test]
     fn build_command_injects_cargo_target_dir_for_canonical_worktree() {
         let wt = PathBuf::from("/tmp/clone/.camerata-worktrees/story-1");
-        let driver =
-            GenericCliDriver::new("my-agent", "-p", &[]).with_worktree(wt.clone());
+        let driver = GenericCliDriver::new("my-agent", "-p", &[]).with_worktree(wt.clone());
         // build_command is private; verify indirectly through the worktree field and
         // the derive function (which build_command calls).
         let expected_target = derive_shared_target_dir(&wt);
-        assert!(expected_target.is_some(), "canonical worktree must derive a target dir");
+        assert!(
+            expected_target.is_some(),
+            "canonical worktree must derive a target dir"
+        );
         assert_eq!(
             expected_target.unwrap(),
             PathBuf::from("/tmp/clone/.camerata-shared-target")

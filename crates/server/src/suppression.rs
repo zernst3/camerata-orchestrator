@@ -272,10 +272,7 @@ fn effective_reach(w: &InlineWaiver) -> usize {
 /// the marker's own line (trailing) or anywhere within the marker's reach below it — the
 /// contiguous block a reasoned waiver annotates, up to [`MAX_WAIVER_REACH`] lines.
 fn inline_applies(w: &InlineWaiver, f: &FindingRef) -> bool {
-    w.rule_id == f.rule_id
-        && w.path == f.path
-        && f.line >= w.line
-        && f.line <= effective_reach(w)
+    w.rule_id == f.rule_id && w.path == f.path && f.line >= w.line && f.line <= effective_reach(w)
 }
 
 /// Classify one finding against the inline waivers + baseline.
@@ -754,7 +751,8 @@ line3; // camerata:allow R2 -- reason two, GH-7\n";
         let finding = f("SEC-X", "a.rs", 5, "bad code");
         let status = classify_one(&finding, &waivers, &Baseline::default());
         assert_eq!(
-            status, Status::Active,
+            status,
+            Status::Active,
             "waiver without reason does NOT suppress"
         );
     }
@@ -942,10 +940,7 @@ line3; // camerata:allow R2 -- reason two, GH-7\n";
 
         // Finding on different rule is NOT suppressed.
         let finding = f("SEC-Y", "a.rs", 1, snippet);
-        assert_eq!(
-            classify_one(&finding, &[], &baseline),
-            Status::Active
-        );
+        assert_eq!(classify_one(&finding, &[], &baseline), Status::Active);
     }
 
     #[test]
@@ -983,7 +978,10 @@ create table t (\n\
         let src = "// camerata:allow R -- nothing below\n\ncode();\n";
         let w = parse_inline_waivers("a.rs", src);
         assert_eq!(w.len(), 1);
-        assert_eq!(w[0].reach_end, 1, "blank line terminates the run at the marker line");
+        assert_eq!(
+            w[0].reach_end, 1,
+            "blank line terminates the run at the marker line"
+        );
         // Legacy fallback still lets it reach the directly-below line (effective_reach).
         assert_eq!(
             classify_one(&f("R", "a.rs", 2, "x"), &w, &Baseline::default()),
@@ -1038,7 +1036,10 @@ create table t (\n\
         let w = parse_inline_waivers("a.rs", src);
         assert_eq!(w.len(), 1);
         assert!(w[0].reason.is_none());
-        assert!(w[0].reach_end >= 3, "block is computed regardless of reason");
+        assert!(
+            w[0].reach_end >= 3,
+            "block is computed regardless of reason"
+        );
         assert_eq!(
             classify_one(&f("R", "a.rs", 2, "x"), &w, &Baseline::default()),
             Status::Active,

@@ -28,7 +28,6 @@
 //! (e.g. a path-boundary check against the filesystem) drops in without an
 //! API break.
 
-
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -166,23 +165,37 @@ pub fn is_git_state_mutation(cmd: &str) -> bool {
         None => return false,
     };
     // Match state-mutating subcommands.
-    if rest.starts_with("stash") { return true; }
-    if rest.starts_with("rebase") { return true; }
-    if rest.starts_with("restore") { return true; }
-    if rest.starts_with("reset") && rest.contains("--hard") { return true; }
+    if rest.starts_with("stash") {
+        return true;
+    }
+    if rest.starts_with("rebase") {
+        return true;
+    }
+    if rest.starts_with("restore") {
+        return true;
+    }
+    if rest.starts_with("reset") && rest.contains("--hard") {
+        return true;
+    }
     if rest.starts_with("clean") {
         // Deny any `git clean` that has -f or -d flags (alone or combined: -fd, -df, -fdn, etc.)
         let flags = rest;
-        if flags.contains("-f") || flags.contains("-d") { return true; }
+        if flags.contains("-f") || flags.contains("-d") {
+            return true;
+        }
     }
     if rest.starts_with("checkout") {
         let after = rest["checkout".len()..].trim_start();
         // `git checkout -- <paths>` or `git checkout .`
-        if after.starts_with("-- ") || after.starts_with(".") { return true; }
+        if after.starts_with("-- ") || after.starts_with(".") {
+            return true;
+        }
     }
     if rest.starts_with("worktree") {
         let after = rest["worktree".len()..].trim_start();
-        if after.starts_with("remove") { return true; }
+        if after.starts_with("remove") {
+            return true;
+        }
     }
     false
 }
@@ -416,7 +429,9 @@ pub fn content_match_lines(rule_id: &str, content: &str) -> Vec<usize> {
                 let lineno = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
                 // Apply SafeLoader/FullLoader carve-out: skip yaml.load( matches on lines
                 // that also carry a safe-loader keyword.
-                if m.as_str().starts_with("yaml.load(") && yaml_load_is_safe(line_text(content, lineno)) {
+                if m.as_str().starts_with("yaml.load(")
+                    && yaml_load_is_safe(line_text(content, lineno))
+                {
                     return None;
                 }
                 Some(lineno)
@@ -556,9 +571,7 @@ pub fn is_test_or_fixture_path(path: &str) -> bool {
     let p = Path::new(path);
     let segments: Vec<String> = p
         .components()
-        .filter_map(|c| {
-            c.as_os_str().to_str().map(|s| s.to_ascii_lowercase())
-        })
+        .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_ascii_lowercase()))
         .collect();
 
     // Check every directory segment (all but the last, which is the filename).
@@ -748,7 +761,11 @@ pub fn test_scope_line_ranges(path: &str, content: &str) -> Vec<(usize, usize)> 
         if ch == '\'' {
             // Simple char literal `'x'` or `'\n'` — single-char (or escape).
             // If the next char is `\`, skip escape + closing quote; else skip char + closing quote.
-            if i + 2 < chars.len() && chars[i + 1] == '\\' && i + 3 < chars.len() && chars[i + 3] == '\'' {
+            if i + 2 < chars.len()
+                && chars[i + 1] == '\\'
+                && i + 3 < chars.len()
+                && chars[i + 3] == '\''
+            {
                 // '\x'
                 i += 4;
                 continue;
@@ -800,7 +817,9 @@ pub fn test_scope_line_ranges(path: &str, content: &str) -> Vec<(usize, usize)> 
 
 /// Returns `true` if `line` (1-based) falls in any of the given ranges (inclusive on both ends).
 pub fn is_in_test_scope(line: usize, ranges: &[(usize, usize)]) -> bool {
-    ranges.iter().any(|&(start, end)| line >= start && line <= end)
+    ranges
+        .iter()
+        .any(|&(start, end)| line >= start && line <= end)
 }
 
 /// The note appended to floor findings whose path is in test/fixture code.
@@ -1460,10 +1479,7 @@ fn byte_offset_to_line(content: &str, offset: usize) -> usize {
 
 /// Returns the text of line `lineno` (1-based) in `content`, or `""` if out of range.
 fn line_text(content: &str, lineno: usize) -> &str {
-    content
-        .lines()
-        .nth(lineno.saturating_sub(1))
-        .unwrap_or("")
+    content.lines().nth(lineno.saturating_sub(1)).unwrap_or("")
 }
 
 /// True when `line` (text of one source line) contains a safe-loader token that
@@ -1481,7 +1497,8 @@ fn arm_sec_no_unsafe_deserialization_1(_path: &str, content: &str) -> Result<(),
 
         // SafeLoader / FullLoader carve-out: if the matched token is `yaml.load(` and
         // the same line carries a safe-loader keyword, this particular call is safe — skip it.
-        if m.as_str().starts_with("yaml.load(") && yaml_load_is_safe(line_text(content, match_line)) {
+        if m.as_str().starts_with("yaml.load(") && yaml_load_is_safe(line_text(content, match_line))
+        {
             continue;
         }
 
@@ -2420,9 +2437,15 @@ mod tests {
         let ranges = test_scope_line_ranges("src/lib.rs", content);
         assert!(!ranges.is_empty(), "should detect #[cfg(test)] scope");
         // The secret on line 6 should be inside the test scope
-        assert!(is_in_test_scope(6, &ranges), "line 6 should be in test scope");
+        assert!(
+            is_in_test_scope(6, &ranges),
+            "line 6 should be in test scope"
+        );
         // Line 2 (production_code) should NOT be in test scope
-        assert!(!is_in_test_scope(2, &ranges), "line 2 should not be in test scope");
+        assert!(
+            !is_in_test_scope(2, &ranges),
+            "line 2 should not be in test scope"
+        );
     }
 
     #[test]
@@ -2438,14 +2461,20 @@ mod tests {
     #[test]
     fn test_scope_policy_waive_rules() {
         // GATE-F7: only SQL-concat is still path-waivable in test scope.
-        assert!(matches!(test_scope_policy("SEC-NO-RAW-SQL-CONCAT-1"), TestScopePolicy::Waive));
+        assert!(matches!(
+            test_scope_policy("SEC-NO-RAW-SQL-CONCAT-1"),
+            TestScopePolicy::Waive
+        ));
     }
 
     #[test]
     fn test_scope_policy_tls_and_deser_no_longer_waived() {
         // GATE-F7: disabled-TLS and unsafe-deserialization are downgraded (not waived)
         // by test scope; they require an explicit camerata:allow at write time.
-        assert!(matches!(test_scope_policy("SEC-NO-DISABLED-TLS-1"), TestScopePolicy::Downgrade));
+        assert!(matches!(
+            test_scope_policy("SEC-NO-DISABLED-TLS-1"),
+            TestScopePolicy::Downgrade
+        ));
         assert!(matches!(
             test_scope_policy("SEC-NO-UNSAFE-DESERIALIZATION-1"),
             TestScopePolicy::Downgrade
@@ -2454,12 +2483,30 @@ mod tests {
 
     #[test]
     fn test_scope_policy_downgrade_rules() {
-        assert!(matches!(test_scope_policy("SEC-NO-HARDCODED-SECRETS-1"), TestScopePolicy::Downgrade));
-        assert!(matches!(test_scope_policy("ARCH-NO-SECRETS-IN-URL-1"), TestScopePolicy::Downgrade));
-        assert!(matches!(test_scope_policy("SEC-NO-PRIVATE-KEY-1"), TestScopePolicy::Downgrade));
-        assert!(matches!(test_scope_policy("SEC-NO-VENDOR-TOKEN-1"), TestScopePolicy::Downgrade));
-        assert!(matches!(test_scope_policy("SEC-NO-SECRET-FILE-1"), TestScopePolicy::Downgrade));
-        assert!(matches!(test_scope_policy("UNKNOWN-RULE-99"), TestScopePolicy::Downgrade));
+        assert!(matches!(
+            test_scope_policy("SEC-NO-HARDCODED-SECRETS-1"),
+            TestScopePolicy::Downgrade
+        ));
+        assert!(matches!(
+            test_scope_policy("ARCH-NO-SECRETS-IN-URL-1"),
+            TestScopePolicy::Downgrade
+        ));
+        assert!(matches!(
+            test_scope_policy("SEC-NO-PRIVATE-KEY-1"),
+            TestScopePolicy::Downgrade
+        ));
+        assert!(matches!(
+            test_scope_policy("SEC-NO-VENDOR-TOKEN-1"),
+            TestScopePolicy::Downgrade
+        ));
+        assert!(matches!(
+            test_scope_policy("SEC-NO-SECRET-FILE-1"),
+            TestScopePolicy::Downgrade
+        ));
+        assert!(matches!(
+            test_scope_policy("UNKNOWN-RULE-99"),
+            TestScopePolicy::Downgrade
+        ));
     }
 
     // ── SEC-NO-PRIVATE-KEY-1 ─────────────────────────────────────────────────────
@@ -2478,7 +2525,8 @@ mod tests {
 
     #[test]
     fn private_key_detects_openssh() {
-        let content = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC\n-----END OPENSSH PRIVATE KEY-----";
+        let content =
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC\n-----END OPENSSH PRIVATE KEY-----";
         assert!(arm_sec_no_private_key_1("src/config.rs", content).is_err());
     }
 
@@ -2490,7 +2538,8 @@ mod tests {
 
     #[test]
     fn private_key_detects_pgp_block() {
-        let content = "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF...\n-----END PGP PRIVATE KEY BLOCK-----";
+        let content =
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF...\n-----END PGP PRIVATE KEY BLOCK-----";
         assert!(arm_sec_no_private_key_1("src/config.rs", content).is_err());
     }
 
@@ -2511,7 +2560,10 @@ mod tests {
         // Downgrade policy: still deny even in test scope
         let content = "\n#[cfg(test)]\nmod tests {\n    const KEY: &str = \"-----BEGIN RSA PRIVATE KEY-----\\nabc\\n-----END RSA PRIVATE KEY-----\";\n}\n";
         let result = arm_sec_no_private_key_1("src/lib.rs", content);
-        assert!(result.is_err(), "private key in test scope must still be denied (Downgrade policy)");
+        assert!(
+            result.is_err(),
+            "private key in test scope must still be denied (Downgrade policy)"
+        );
     }
 
     #[test]
@@ -2589,7 +2641,8 @@ mod tests {
     #[test]
     fn vendor_token_in_test_scope_still_denied() {
         // Downgrade policy
-        let content = "\n#[cfg(test)]\nmod tests {\n    const KEY: &str = \"AKIAIOSFODNN7EXAMPLE\";\n}\n";
+        let content =
+            "\n#[cfg(test)]\nmod tests {\n    const KEY: &str = \"AKIAIOSFODNN7EXAMPLE\";\n}\n";
         assert!(arm_sec_no_vendor_token_1("src/lib.rs", content).is_err());
     }
 
@@ -2631,7 +2684,10 @@ mod tests {
             "id_ed25519",
         ] {
             assert!(
-                matches!(evaluate_call(&subset, &write_call(p)), Decision::Deny { .. }),
+                matches!(
+                    evaluate_call(&subset, &write_call(p)),
+                    Decision::Deny { .. }
+                ),
                 "expected DENY for {p}"
             );
         }
@@ -2659,12 +2715,16 @@ mod tests {
 
     #[test]
     fn disabled_tls_detects_python_verify_false() {
-        assert!(arm_sec_no_disabled_tls_1("src/client.py", "requests.get(url, verify=False)").is_err());
+        assert!(
+            arm_sec_no_disabled_tls_1("src/client.py", "requests.get(url, verify=False)").is_err()
+        );
     }
 
     #[test]
     fn disabled_tls_detects_node_reject_unauthorized() {
-        assert!(arm_sec_no_disabled_tls_1("src/client.js", "{ rejectUnauthorized: false }").is_err());
+        assert!(
+            arm_sec_no_disabled_tls_1("src/client.js", "{ rejectUnauthorized: false }").is_err()
+        );
     }
 
     #[test]
@@ -2674,17 +2734,23 @@ mod tests {
 
     #[test]
     fn disabled_tls_detects_node_env_var() {
-        assert!(arm_sec_no_disabled_tls_1("src/config.js", "NODE_TLS_REJECT_UNAUTHORIZED=0").is_err());
+        assert!(
+            arm_sec_no_disabled_tls_1("src/config.js", "NODE_TLS_REJECT_UNAUTHORIZED=0").is_err()
+        );
     }
 
     #[test]
     fn disabled_tls_detects_curl_option() {
-        assert!(arm_sec_no_disabled_tls_1("src/client.php", "CURLOPT_SSL_VERIFYPEER, false").is_err());
+        assert!(
+            arm_sec_no_disabled_tls_1("src/client.php", "CURLOPT_SSL_VERIFYPEER, false").is_err()
+        );
     }
 
     #[test]
     fn disabled_tls_allows_verify_true() {
-        assert!(arm_sec_no_disabled_tls_1("src/client.py", "requests.get(url, verify=True)").is_ok());
+        assert!(
+            arm_sec_no_disabled_tls_1("src/client.py", "requests.get(url, verify=True)").is_ok()
+        );
     }
 
     #[test]
@@ -2751,37 +2817,54 @@ mod tests {
     #[test]
     fn unsafe_deser_detects_yaml_load_without_safeloader() {
         // Plain yaml.load( with no safe loader → must deny.
-        assert!(arm_sec_no_unsafe_deserialization_1("src/config.py", "data = yaml.load(f)").is_err());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("src/config.py", "data = yaml.load(f)").is_err()
+        );
     }
 
     #[test]
     fn unsafe_deser_detects_yaml_unsafe_load() {
-        assert!(arm_sec_no_unsafe_deserialization_1("src/parser.py", "out = yaml.unsafe_load(s)").is_err());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("src/parser.py", "out = yaml.unsafe_load(s)")
+                .is_err()
+        );
     }
 
     #[test]
     fn unsafe_deser_detects_pickle_loads() {
-        assert!(arm_sec_no_unsafe_deserialization_1("src/cache.py", "obj = pickle.loads(d)").is_err());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("src/cache.py", "obj = pickle.loads(d)").is_err()
+        );
     }
 
     #[test]
     fn unsafe_deser_detects_pickle_load() {
-        assert!(arm_sec_no_unsafe_deserialization_1("src/cache.py", "obj = pickle.load(f)").is_err());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("src/cache.py", "obj = pickle.load(f)").is_err()
+        );
     }
 
     #[test]
     fn unsafe_deser_detects_php_unserialize() {
-        assert!(arm_sec_no_unsafe_deserialization_1("src/handler.php", "$obj = unserialize($x);").is_err());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("src/handler.php", "$obj = unserialize($x);")
+                .is_err()
+        );
     }
 
     #[test]
     fn unsafe_deser_detects_ruby_marshal_load() {
-        assert!(arm_sec_no_unsafe_deserialization_1("lib/store.rb", "obj = Marshal.load(b)").is_err());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("lib/store.rb", "obj = Marshal.load(b)").is_err()
+        );
     }
 
     #[test]
     fn unsafe_deser_detects_ruby_marshal_restore() {
-        assert!(arm_sec_no_unsafe_deserialization_1("lib/store.rb", "obj = Marshal.restore(data)").is_err());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("lib/store.rb", "obj = Marshal.restore(data)")
+                .is_err()
+        );
     }
 
     #[test]
@@ -2789,7 +2872,8 @@ mod tests {
         assert!(arm_sec_no_unsafe_deserialization_1(
             "src/Serializer.cs",
             "var bf = new BinaryFormatter(); bf.Deserialize(s);"
-        ).is_err());
+        )
+        .is_err());
     }
 
     #[test]
@@ -2797,7 +2881,8 @@ mod tests {
         assert!(arm_sec_no_unsafe_deserialization_1(
             "src/Serializer.cs",
             "var s = new NetDataContractSerializer();"
-        ).is_err());
+        )
+        .is_err());
     }
 
     #[test]
@@ -2805,7 +2890,8 @@ mod tests {
         assert!(arm_sec_no_unsafe_deserialization_1(
             "src/ViewState.cs",
             "var lf = new LosFormatter(); lf.Serialize(ms, obj);"
-        ).is_err());
+        )
+        .is_err());
     }
 
     #[test]
@@ -2813,14 +2899,18 @@ mod tests {
         assert!(arm_sec_no_unsafe_deserialization_1(
             "src/ViewState.cs",
             "var osf = new ObjectStateFormatter();"
-        ).is_err());
+        )
+        .is_err());
     }
 
     // ── NEGATIVE tests (must ALLOW) ───────────────────────────────────────────────
 
     #[test]
     fn unsafe_deser_allows_yaml_safe_load() {
-        assert!(arm_sec_no_unsafe_deserialization_1("src/config.py", "data = yaml.safe_load(f)").is_ok());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("src/config.py", "data = yaml.safe_load(f)")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2829,7 +2919,8 @@ mod tests {
         assert!(arm_sec_no_unsafe_deserialization_1(
             "src/config.py",
             "data = yaml.load(f, Loader=yaml.SafeLoader)"
-        ).is_ok());
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2838,7 +2929,8 @@ mod tests {
         assert!(arm_sec_no_unsafe_deserialization_1(
             "src/config.py",
             "data = yaml.load(f, Loader=yaml.FullLoader)"
-        ).is_ok());
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2861,7 +2953,8 @@ mod tests {
     fn unsafe_deser_in_test_path_no_longer_waived() {
         // GATE-F7: a file under tests/ no longer path-waives an unsafe deser sink.
         assert!(
-            arm_sec_no_unsafe_deserialization_1("tests/fixtures/payload.py", "pickle.loads(d)").is_err(),
+            arm_sec_no_unsafe_deserialization_1("tests/fixtures/payload.py", "pickle.loads(d)")
+                .is_err(),
             "pickle.loads in a test path must now be DENIED without an explicit suppression"
         );
     }
@@ -2870,7 +2963,8 @@ mod tests {
     fn unsafe_deser_in_examples_dir_is_denied() {
         // GATE-F7: examples are shipped/executed code — no waive.
         assert!(
-            arm_sec_no_unsafe_deserialization_1("examples/load_cfg.py", "cfg = yaml.load(f)").is_err(),
+            arm_sec_no_unsafe_deserialization_1("examples/load_cfg.py", "cfg = yaml.load(f)")
+                .is_err(),
             "unsafe deser under examples/ must be DENIED"
         );
     }
@@ -2902,7 +2996,10 @@ mod tests {
         let result = arm_sec_no_unsafe_deserialization_1("src/legacy.py", "pickle.loads(buf)");
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("camerata:allow"), "denial must mention camerata:allow: {msg}");
+        assert!(
+            msg.contains("camerata:allow"),
+            "denial must mention camerata:allow: {msg}"
+        );
     }
 
     // ── registry coverage for new rules ──────────────────────────────────────────
@@ -2922,7 +3019,10 @@ mod tests {
         // SEC-NO-RAW-SQL-CONCAT-1 has Waive policy: test files writing raw SQL are allowed
         let content = "\n#[cfg(test)]\nmod tests {\n    fn setup() {\n        let q = format!(\"INSERT INTO test_table VALUES ('{}')\", val);\n    }\n}\n";
         let result = arm_sec_no_raw_sql_concat_1("src/repo.rs", content);
-        assert!(result.is_ok(), "SQL concat in test scope should be ALLOWED (Waive policy)");
+        assert!(
+            result.is_ok(),
+            "SQL concat in test scope should be ALLOWED (Waive policy)"
+        );
     }
 
     #[test]
@@ -3372,7 +3472,9 @@ mod adversarial {
     #[test]
     fn git_state_mutation_guard_denies_worktree_remove() {
         assert!(is_git_state_mutation("git worktree remove /path/to/wt"));
-        assert!(is_git_state_mutation("git worktree remove --force /path/to/wt"));
+        assert!(is_git_state_mutation(
+            "git worktree remove --force /path/to/wt"
+        ));
     }
 
     #[test]
@@ -3430,7 +3532,12 @@ mod adversarial {
 
     #[test]
     fn sec_no_git_state_mutation_rule_is_registered_in_registry() {
-        let found = RULE_REGISTRY.iter().any(|e| e.id == "SEC-NO-GIT-STATE-MUTATION-1");
-        assert!(found, "SEC-NO-GIT-STATE-MUTATION-1 must be in RULE_REGISTRY");
+        let found = RULE_REGISTRY
+            .iter()
+            .any(|e| e.id == "SEC-NO-GIT-STATE-MUTATION-1");
+        assert!(
+            found,
+            "SEC-NO-GIT-STATE-MUTATION-1 must be in RULE_REGISTRY"
+        );
     }
 }

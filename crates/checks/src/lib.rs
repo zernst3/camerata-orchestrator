@@ -153,9 +153,9 @@ pub use arch_check_runner::NativeArchCheckRunner;
 /// `docs/decisions/2026-06-22_layer2_ruby_java_csharp_runners.md`.
 pub mod multilang;
 pub use multilang::{
-    detect_language, runner_for_worktree, runner_for_worktree_with_heartbeat,
-    CombinedCheckRunner, CSharpCheckRunner, GoCheckRunner,
-    JavaCheckRunner, JsCheckRunner, PythonCheckRunner, RubyCheckRunner, WorktreeLanguage,
+    detect_language, runner_for_worktree, runner_for_worktree_with_heartbeat, CSharpCheckRunner,
+    CombinedCheckRunner, GoCheckRunner, JavaCheckRunner, JsCheckRunner, PythonCheckRunner,
+    RubyCheckRunner, WorktreeLanguage,
 };
 
 /// Single source of truth manifest (`.camerata/checks.toml`) — schema, loader,
@@ -207,8 +207,8 @@ pub mod verification_gate;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use camerata_liveness::HeartbeatFn;
 use camerata_core::{CheckOutcome, CheckRunner, Role, RuleId};
+use camerata_liveness::HeartbeatFn;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -310,7 +310,10 @@ fn check_build_disk_headroom(worktree: &Path) -> anyhow::Result<()> {
     // `<clone>/.camerata-worktrees/<branch>` layout). `None` for an out-of-band
     // worktree — reclaim is simply skipped in that case, same fail-open stance as
     // `derive_shared_target_dir`'s own doc comment.
-    let clone = worktree.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+    let clone = worktree
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf());
 
     let mut reclaimed_log: Vec<janitor::ReclaimLogEntry> = Vec::new();
     let outcome = janitor::check_headroom_with_reclaim(
@@ -337,7 +340,10 @@ fn check_build_disk_headroom(worktree: &Path) -> anyhow::Result<()> {
     match outcome {
         janitor::HeadroomOutcome::CannotQuery => Ok(()), // fail-open, unchanged
         janitor::HeadroomOutcome::Sufficient { .. } => Ok(()),
-        janitor::HeadroomOutcome::ReclaimedSufficient { reclaimed_bytes, available } => {
+        janitor::HeadroomOutcome::ReclaimedSufficient {
+            reclaimed_bytes,
+            available,
+        } => {
             let reclaimed_gb = reclaimed_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
             let available_gb = available as f64 / (1024.0 * 1024.0 * 1024.0);
             tracing::info!(
@@ -347,7 +353,10 @@ fn check_build_disk_headroom(worktree: &Path) -> anyhow::Result<()> {
             );
             Ok(())
         }
-        janitor::HeadroomOutcome::StillInsufficient { available, reclaimed_bytes } => {
+        janitor::HeadroomOutcome::StillInsufficient {
+            available,
+            reclaimed_bytes,
+        } => {
             let available_gb = available as f64 / (1024.0 * 1024.0 * 1024.0);
             let required_gb = min as f64 / (1024.0 * 1024.0 * 1024.0);
             let reclaimed_gb = reclaimed_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -418,7 +427,9 @@ impl FmtCheckRunner {
     /// the cargo subprocess. Use this at call sites where a `RunStore` run id
     /// is in scope (dev-cycle checks inside a tracked run).
     pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
-        Self { on_progress: Some(cb) }
+        Self {
+            on_progress: Some(cb),
+        }
     }
 }
 
@@ -434,9 +445,10 @@ impl CheckRunner for FmtCheckRunner {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
-        let output = subprocess::run_fmt_check(worktree, target_dir.as_deref(), self.on_progress.as_ref())
-            .await
-            .context("running cargo fmt --check")?;
+        let output =
+            subprocess::run_fmt_check(worktree, target_dir.as_deref(), self.on_progress.as_ref())
+                .await
+                .context("running cargo fmt --check")?;
 
         let violated = parse::map_fmt_output(&output);
         // Only carry the captured stdout/stderr when there IS a violation — a
@@ -465,7 +477,9 @@ impl ClippyCheckRunner {
 
     /// Create a `ClippyCheckRunner` that fires `cb` on every stdout line.
     pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
-        Self { on_progress: Some(cb) }
+        Self {
+            on_progress: Some(cb),
+        }
     }
 }
 
@@ -481,9 +495,10 @@ impl CheckRunner for ClippyCheckRunner {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
-        let output = subprocess::run_clippy(worktree, target_dir.as_deref(), self.on_progress.as_ref())
-            .await
-            .context("running cargo clippy")?;
+        let output =
+            subprocess::run_clippy(worktree, target_dir.as_deref(), self.on_progress.as_ref())
+                .await
+                .context("running cargo clippy")?;
 
         let violated = parse::map_clippy_output(&output);
         let diagnostics = diagnostics_for("cargo clippy", &output.combined, &violated);
@@ -510,7 +525,9 @@ impl TestCheckRunner {
 
     /// Create a `TestCheckRunner` that fires `cb` on every stdout line.
     pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
-        Self { on_progress: Some(cb) }
+        Self {
+            on_progress: Some(cb),
+        }
     }
 }
 
@@ -526,9 +543,10 @@ impl CheckRunner for TestCheckRunner {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
-        let output = subprocess::run_test(worktree, target_dir.as_deref(), self.on_progress.as_ref())
-            .await
-            .context("running cargo test")?;
+        let output =
+            subprocess::run_test(worktree, target_dir.as_deref(), self.on_progress.as_ref())
+                .await
+                .context("running cargo test")?;
 
         let violated = parse::map_test_output(&output);
         let diagnostics = diagnostics_for("cargo test", &output.combined, &violated);

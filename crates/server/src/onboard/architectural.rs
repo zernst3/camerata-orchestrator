@@ -33,11 +33,18 @@ pub const ARCH_PREVIEW_TOOL: &str = "camerata-arch";
 /// converting every violation into a `Finding`. A checker with zero files matching its own
 /// `interest_globs` is skipped entirely (never a false "clean" — see
 /// [`camerata_checks::arch_checker::checker_applies`]).
-pub fn audit_architectural(repo: &str, files: &[(String, String)], armed_rule_ids: &HashSet<&str>) -> Vec<Finding> {
+pub fn audit_architectural(
+    repo: &str,
+    files: &[(String, String)],
+    armed_rule_ids: &HashSet<&str>,
+) -> Vec<Finding> {
     let view = RepoView { spec: repo, files };
     let mut findings = Vec::new();
     for checker in all_checkers() {
-        let armed = checker.rule_ids().iter().any(|id| armed_rule_ids.contains(id));
+        let armed = checker
+            .rule_ids()
+            .iter()
+            .any(|id| armed_rule_ids.contains(id));
         if !armed {
             continue;
         }
@@ -103,9 +110,10 @@ fn bare_object_name(object: &str) -> String {
 /// generic "the affected table".
 pub fn arch_violation_to_finding(repo: &str, violation: &ArchViolation) -> Finding {
     let mut captures = std::collections::BTreeMap::new();
-    if let (Some(token), Some(object)) =
-        (capture_token_for(&violation.rule_id), violation.object.as_deref())
-    {
+    if let (Some(token), Some(object)) = (
+        capture_token_for(&violation.rule_id),
+        violation.object.as_deref(),
+    ) {
         captures.insert(token.to_string(), bare_object_name(object));
     }
     Finding {
@@ -130,7 +138,10 @@ mod tests {
     use super::*;
 
     fn files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
-        pairs.into_iter().map(|(p, c)| (p.to_string(), c.to_string())).collect()
+        pairs
+            .into_iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect()
     }
 
     #[test]
@@ -167,7 +178,10 @@ mod tests {
             severity: "critical",
         };
         let f = arch_violation_to_finding("acme/app", &v);
-        assert_eq!(f.captures.get("table").map(String::as_str), Some("profiles"));
+        assert_eq!(
+            f.captures.get("table").map(String::as_str),
+            Some("profiles")
+        );
     }
 
     #[test]
@@ -278,7 +292,10 @@ mod tests {
         )]);
         let armed: HashSet<&str> = HashSet::new(); // nothing armed
         let findings = audit_architectural("acme/app", &f, &armed);
-        assert!(findings.is_empty(), "no rule armed -> no findings, even though the file matches");
+        assert!(
+            findings.is_empty(),
+            "no rule armed -> no findings, even though the file matches"
+        );
     }
 
     #[test]
@@ -301,6 +318,9 @@ mod tests {
             .into_iter()
             .collect();
         let findings = audit_architectural("acme/app", &f, &armed);
-        assert!(findings.is_empty(), "no supabase/ files present -> no checker applies");
+        assert!(
+            findings.is_empty(),
+            "no supabase/ files present -> no checker applies"
+        );
     }
 }

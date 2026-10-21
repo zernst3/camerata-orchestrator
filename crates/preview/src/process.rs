@@ -56,7 +56,12 @@ pub struct PreviewLaunchConfig {
 impl PreviewLaunchConfig {
     /// The production default for `app_dir`/`port`: resolved `dx` binary, `--verbose` on.
     pub fn new(app_dir: impl Into<PathBuf>, port: u16) -> Self {
-        Self { app_dir: app_dir.into(), port, dx_bin: dx_bin(), verbose: true }
+        Self {
+            app_dir: app_dir.into(),
+            port,
+            dx_bin: dx_bin(),
+            verbose: true,
+        }
     }
 
     /// The URL this config's port maps to. `PreviewServer` uses THIS -- not a parsed
@@ -116,7 +121,9 @@ impl PreviewServer {
                 launch.app_dir.display()
             )
         })?;
-        let pid = child.id().ok_or_else(|| anyhow::anyhow!("dx serve child has no pid immediately after spawn"))?;
+        let pid = child
+            .id()
+            .ok_or_else(|| anyhow::anyhow!("dx serve child has no pid immediately after spawn"))?;
 
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take().expect("stderr is piped");
@@ -129,7 +136,13 @@ impl PreviewServer {
 
         spawn_watchdog(pid);
 
-        Ok(Self { launch, child: Mutex::new(Some(child)), pid, status_rx, events_tx })
+        Ok(Self {
+            launch,
+            child: Mutex::new(Some(child)),
+            pid,
+            status_rx,
+            events_tx,
+        })
     }
 
     /// The preview URL, constructed from the configured port (see
@@ -169,8 +182,11 @@ impl PreviewServer {
 /// Spawn a background task that reads `pipe` line-by-line, classifies each line via
 /// [`parse_dx_line`], publishes it on `events_tx` (best-effort -- a lagging/no-receiver
 /// broadcast channel never blocks or panics the reader), and folds it into `status_tx`.
-fn spawn_line_reader<R>(pipe: R, status_tx: watch::Sender<PreviewStatus>, events_tx: broadcast::Sender<PreviewEvent>)
-where
+fn spawn_line_reader<R>(
+    pipe: R,
+    status_tx: watch::Sender<PreviewStatus>,
+    events_tx: broadcast::Sender<PreviewEvent>,
+) where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
@@ -205,7 +221,11 @@ fn spawn_watchdog(child_pid: u32) {
          done; \
          kill -0 {parent_pid} 2>/dev/null || kill -TERM {child_pid} 2>/dev/null"
     );
-    match std::process::Command::new("sh").arg("-c").arg(script).spawn() {
+    match std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .spawn()
+    {
         Ok(_) => {}
         Err(e) => eprintln!(
             "[camerata-preview] could not start the dx-serve watchdog (pid {child_pid} may \
@@ -222,13 +242,20 @@ impl Drop for PreviewServer {
     /// trial to kill `dx serve` AND its live `cargo`/`rustc` children, freeing the port within
     /// ~2s, no orphans), then poll briefly, then SIGKILL as an escalation if it didn't exit.
     fn drop(&mut self) {
-        let Ok(mut guard) = self.child.lock() else { return };
-        let Some(mut child) = guard.take() else { return };
+        let Ok(mut guard) = self.child.lock() else {
+            return;
+        };
+        let Some(mut child) = guard.take() else {
+            return;
+        };
         drop(guard);
 
         #[cfg(unix)]
         {
-            let _ = std::process::Command::new("kill").arg("-TERM").arg(self.pid.to_string()).output();
+            let _ = std::process::Command::new("kill")
+                .arg("-TERM")
+                .arg(self.pid.to_string())
+                .output();
             let deadline = Instant::now() + Duration::from_millis(2000);
             while Instant::now() < deadline {
                 match child.try_wait() {

@@ -270,11 +270,7 @@ impl StoryDocEmitter {
                     DecisionOutcome::Pending => "Pending",
                     DecisionOutcome::Rejected { .. } => "Rejected",
                 };
-                out.push_str(&format!(
-                    "### Decision {}: {}\n\n",
-                    i + 1,
-                    d.label
-                ));
+                out.push_str(&format!("### Decision {}: {}\n\n", i + 1, d.label));
                 out.push_str(&format!("**State:** {state_badge}\n\n"));
                 out.push_str(&format!("**Question:** {}\n\n", d.question));
                 out.push_str(&format!("**Rationale:** {}\n\n", d.rationale));
@@ -410,19 +406,13 @@ impl PostStoryHook for StoryDocEmitter {
         // Assemble and write the technical doc.
         let tech_content = Self::assemble_technical(completion);
         std::fs::write(&tech_path, &tech_content).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to write technical doc {}: {e}",
-                tech_path.display()
-            )
+            anyhow::anyhow!("failed to write technical doc {}: {e}", tech_path.display())
         })?;
 
         // Assemble and write the user guide.
         let user_content = Self::assemble_user_guide(completion);
         std::fs::write(&user_path, &user_content).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to write user guide {}: {e}",
-                user_path.display()
-            )
+            anyhow::anyhow!("failed to write user guide {}: {e}", user_path.display())
         })?;
 
         Ok(vec![tech_path, user_path])
@@ -450,7 +440,9 @@ impl PostStoryHook for StoryDocEmitter {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use camerata_worktracker::investigation::{DecisionOutcome, DecisionRecord, RevisionProvenance, RevisionActor};
+    use camerata_worktracker::investigation::{
+        DecisionOutcome, DecisionRecord, RevisionActor, RevisionProvenance,
+    };
     use chrono::Utc;
 
     fn approved_decision(story: &str, slug: &str, label: &str, rationale: &str) -> DecisionRecord {
@@ -483,7 +475,12 @@ mod tests {
         StoryCompletion {
             story_id: story_id.to_string(),
             decisions: vec![
-                approved_decision(story_id, "auth", "JWT authentication", "Stateless, works across services"),
+                approved_decision(
+                    story_id,
+                    "auth",
+                    "JWT authentication",
+                    "Stateless, works across services",
+                ),
                 pending_decision(story_id, "pagination"),
             ],
             run_summary: format!("Run run-1 completed: 1 allow, 2 deny, 2 bounces."),
@@ -558,10 +555,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = completion_in(dir.path(), "CAM-10");
         let content = StoryDocEmitter::assemble_technical(&c);
-        assert!(content.contains("CAM-10"), "story id must appear in technical doc");
-        assert!(content.contains("JWT authentication"), "decision label must appear");
-        assert!(content.contains("Stateless, works across services"), "rationale must appear");
-        assert!(content.contains("Governed run summary"), "run summary section must be present");
+        assert!(
+            content.contains("CAM-10"),
+            "story id must appear in technical doc"
+        );
+        assert!(
+            content.contains("JWT authentication"),
+            "decision label must appear"
+        );
+        assert!(
+            content.contains("Stateless, works across services"),
+            "rationale must appear"
+        );
+        assert!(
+            content.contains("Governed run summary"),
+            "run summary section must be present"
+        );
         assert!(content.contains("DRAFT"), "file must be marked DRAFT");
     }
 
@@ -592,7 +601,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = completion_in(dir.path(), "CAM-13");
         let content = StoryDocEmitter::assemble_technical(&c);
-        assert!(content.contains("Alternative A"), "alternatives_considered must appear");
+        assert!(
+            content.contains("Alternative A"),
+            "alternatives_considered must appear"
+        );
     }
 
     #[test]
@@ -600,11 +612,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = completion_in(dir.path(), "CAM-20");
         let content = StoryDocEmitter::assemble_user_guide(&c);
-        assert!(content.contains("CAM-20"), "story id must appear in user guide");
+        assert!(
+            content.contains("CAM-20"),
+            "story id must appear in user guide"
+        );
         // Approved decision rationale is summarised in the user guide.
-        assert!(content.contains("Stateless, works across services"), "approved rationale in guide");
+        assert!(
+            content.contains("Stateless, works across services"),
+            "approved rationale in guide"
+        );
         assert!(content.contains("DRAFT"), "file must be marked DRAFT");
-        assert!(content.contains("What changed"), "what-changed section must be present");
+        assert!(
+            content.contains("What changed"),
+            "what-changed section must be present"
+        );
     }
 
     #[test]
@@ -613,8 +634,14 @@ mod tests {
         let c = completion_in(dir.path(), "CAM-21");
         let content = StoryDocEmitter::assemble_user_guide(&c);
         // Only approved decisions are surfaced to the user guide.
-        assert!(!content.contains("Pending choice"), "pending decisions must NOT appear in user guide");
-        assert!(content.contains("JWT authentication"), "approved decision label appears");
+        assert!(
+            !content.contains("Pending choice"),
+            "pending decisions must NOT appear in user guide"
+        );
+        assert!(
+            content.contains("JWT authentication"),
+            "approved decision label appears"
+        );
     }
 
     #[test]
@@ -632,7 +659,10 @@ mod tests {
         // Must not panic, and must produce a non-empty document.
         assert!(!tech.is_empty());
         assert!(!guide.is_empty());
-        assert!(tech.contains("No decision records"), "empty-decisions message in technical doc");
+        assert!(
+            tech.contains("No decision records"),
+            "empty-decisions message in technical doc"
+        );
     }
 
     // ── PostStoryHook::emit — per-story-docs (active path) ───────────────────
@@ -658,9 +688,8 @@ mod tests {
         let emitter = StoryDocEmitter::new(DocConvention::PerStoryDocs);
         let c = completion_in(dir.path(), "CAM-31");
         emitter.emit(&c).unwrap();
-        let tech_content = std::fs::read_to_string(
-            StoryDocEmitter::technical_path(dir.path(), "CAM-31")
-        ).unwrap();
+        let tech_content =
+            std::fs::read_to_string(StoryDocEmitter::technical_path(dir.path(), "CAM-31")).unwrap();
         assert!(tech_content.contains("JWT authentication"));
         assert!(tech_content.contains("Stateless, works across services"));
     }
@@ -675,9 +704,7 @@ mod tests {
         // Both calls succeed and return the same paths.
         assert_eq!(first, second, "re-emit must return the same paths");
         // Files still exist (overwritten, not errored).
-        assert!(
-            StoryDocEmitter::technical_path(dir.path(), "CAM-32").exists()
-        );
+        assert!(StoryDocEmitter::technical_path(dir.path(), "CAM-32").exists());
     }
 
     #[test]
@@ -687,9 +714,15 @@ mod tests {
         let c = completion_in(dir.path(), "PROJ-999");
         // The parent dirs do not exist yet — emit must create them.
         let tech = StoryDocEmitter::technical_path(dir.path(), "PROJ-999");
-        assert!(!tech.parent().unwrap().exists(), "setup: dir must not exist yet");
+        assert!(
+            !tech.parent().unwrap().exists(),
+            "setup: dir must not exist yet"
+        );
         emitter.emit(&c).unwrap();
-        assert!(tech.parent().unwrap().exists(), "emit must create the parent directory");
+        assert!(
+            tech.parent().unwrap().exists(),
+            "emit must create the parent directory"
+        );
     }
 
     // ── PostStoryHook::emit — no-op variants ─────────────────────────────────
@@ -702,9 +735,7 @@ mod tests {
         let written = emitter.emit(&c).unwrap();
         assert!(written.is_empty(), "living-central-docs must be a no-op");
         // No files created.
-        assert!(
-            !StoryDocEmitter::technical_path(dir.path(), "CAM-40").exists()
-        );
+        assert!(!StoryDocEmitter::technical_path(dir.path(), "CAM-40").exists());
     }
 
     #[test]

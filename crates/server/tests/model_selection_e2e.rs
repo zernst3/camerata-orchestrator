@@ -25,14 +25,12 @@ use async_trait::async_trait;
 
 use camerata_server::credentials::{CredentialStore, MemoryCredentialStore, OPENROUTER_API_KEY};
 use camerata_server::llm::{
-    build_completer, LlmPort, Llm, LlmRequest, LlmResponse, OpenRouterCompleter, DEFAULT_MODEL,
+    build_completer, Llm, LlmPort, LlmRequest, LlmResponse, OpenRouterCompleter, DEFAULT_MODEL,
 };
 use camerata_server::model_registry::{ModelRegistry, RegistryEntry};
 use camerata_server::model_tier::{CapabilityBand, TierMap};
+use camerata_server::project::{L3ReviewConfig, ModelProfile, ProjectStore, StepKind};
 use camerata_server::provider_policy::ProviderPolicy;
-use camerata_server::project::{
-    L3ReviewConfig, ModelProfile, ProjectStore, StepKind,
-};
 use camerata_server::rate_limit::ProviderRateLimiter;
 use camerata_server::{resolve_chat_model, step_model, step_model_or, AppState};
 
@@ -171,7 +169,10 @@ fn distinct_tier_map() -> TierMap {
 fn scope1_tier_each_taskkind_maps_to_its_bands_model() {
     let m = distinct_tier_map();
     // Test -> Fast, Database/Frontend -> Balanced, Backend -> Strongest.
-    assert_eq!(m.model_for_task(&plan_task(TaskKind::Test, "tests")), "FAST-id");
+    assert_eq!(
+        m.model_for_task(&plan_task(TaskKind::Test, "tests")),
+        "FAST-id"
+    );
     assert_eq!(
         m.model_for_task(&plan_task(TaskKind::Database, "schema")),
         "BALANCED-id"
@@ -211,8 +212,8 @@ fn scope1_orchestrator_lead_stage_is_the_first_strongest() {
     // therefore resolves to the `strongest` model. Delegate children resolve to the
     // lower bands (asserted in scope1_delegate_children_*).
     let tasks = vec![
-        plan_task(TaskKind::Test, "tests"),     // Fast
-        plan_task(TaskKind::Database, "schema"), // Balanced
+        plan_task(TaskKind::Test, "tests"),       // Fast
+        plan_task(TaskKind::Database, "schema"),  // Balanced
         plan_task(TaskKind::Backend, "domain A"), // Strongest <- lead
         plan_task(TaskKind::Backend, "domain B"), // Strongest
     ];
@@ -484,7 +485,10 @@ fn scope4_balanced_profile_overwrites_all_entries() {
     assert_eq!(p.model_profile, ModelProfile::Balanced);
     assert_eq!(p.tier_map.strongest, "claude-opus-5");
     assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5".to_string()]);
-    assert_eq!(p.tier_map.fast, vec!["claude-haiku-4-5-20251001".to_string()]);
+    assert_eq!(
+        p.tier_map.fast,
+        vec!["claude-haiku-4-5-20251001".to_string()]
+    );
     // Every step model overwritten to Haiku.
     for (kind, _) in ALL_STEPS {
         assert_eq!(
@@ -580,9 +584,15 @@ fn scope5_claude_model_routes_to_cli_backed_llm() {
     let registry = ModelRegistry::new(); // static registry has claude-sonnet-5 as `claude`.
     let creds = MemoryCredentialStore::new(); // no OpenRouter key needed for claude.
     let llm = cli_llm();
-    let completer =
-        build_completer("claude-sonnet-5", &registry, &creds, llm, limiter(), &default_policy())
-        .expect("claude model must build without an OpenRouter key");
+    let completer = build_completer(
+        "claude-sonnet-5",
+        &registry,
+        &creds,
+        llm,
+        limiter(),
+        &default_policy(),
+    )
+    .expect("claude model must build without an OpenRouter key");
     assert!(
         !completer.as_any().is::<OpenRouterCompleter>(),
         "claude model must NOT route to OpenRouter"
@@ -599,9 +609,15 @@ fn scope5_openrouter_model_routes_to_openrouter_completer() {
     let registry = registry_with_openrouter("vendor/some-model");
     let creds = creds_with_openrouter_key();
     let llm = cli_llm();
-    let completer =
-        build_completer("vendor/some-model", &registry, &creds, llm, limiter(), &default_policy())
-        .expect("openrouter model with a key must build");
+    let completer = build_completer(
+        "vendor/some-model",
+        &registry,
+        &creds,
+        llm,
+        limiter(),
+        &default_policy(),
+    )
+    .expect("openrouter model with a key must build");
     assert!(
         completer.as_any().is::<OpenRouterCompleter>(),
         "openrouter model routes to OpenRouterCompleter"
@@ -613,8 +629,14 @@ fn scope5_openrouter_model_without_key_errors_cleanly() {
     let registry = registry_with_openrouter("vendor/no-key-model");
     let creds = MemoryCredentialStore::new(); // NO key.
     let llm = cli_llm();
-    let result =
-        build_completer("vendor/no-key-model", &registry, &creds, llm, limiter(), &default_policy());
+    let result = build_completer(
+        "vendor/no-key-model",
+        &registry,
+        &creds,
+        llm,
+        limiter(),
+        &default_policy(),
+    );
     let msg = match result {
         Err(e) => e.to_string(),
         Ok(_) => panic!("build_completer must error for an openrouter model with no key"),
@@ -644,9 +666,9 @@ fn scope5_build_agent_driver_routes_by_provider() {
         false,
         limiter.clone(),
         None,
-        false, // escalation
-        None,  // on_activity heartbeat
-        None, // governance — no log wired in this unit test
+        false,                                     // escalation
+        None,                                      // on_activity heartbeat
+        None,                                      // governance — no log wired in this unit test
         camerata_server::llm::ProjectBackend::Cli, // this test asserts routing, not the compliance gate
     );
     assert!(claude.is_ok(), "claude driver builds without a key");
@@ -665,9 +687,9 @@ fn scope5_build_agent_driver_routes_by_provider() {
         false,
         limiter.clone(),
         None,
-        false, // escalation
-        None,  // on_activity heartbeat
-        None, // governance — no log wired in this unit test
+        false,                                     // escalation
+        None,                                      // on_activity heartbeat
+        None,                                      // governance — no log wired in this unit test
         camerata_server::llm::ProjectBackend::Cli, // irrelevant to the openrouter branch
     );
     assert!(or.is_ok(), "openrouter driver builds with a key");
@@ -685,16 +707,19 @@ fn scope5_build_agent_driver_routes_by_provider() {
         false,
         limiter,
         None,
-        false, // escalation
-        None,  // on_activity heartbeat
-        None, // governance — no log wired in this unit test
+        false,                                     // escalation
+        None,                                      // on_activity heartbeat
+        None,                                      // governance — no log wired in this unit test
         camerata_server::llm::ProjectBackend::Cli, // irrelevant to the openrouter branch
     );
     let msg = match err {
         Err(e) => e.to_string(),
         Ok(_) => panic!("openrouter agent driver must error without a key"),
     };
-    assert!(msg.contains("OPENROUTER_API_KEY"), "error names the key: {msg}");
+    assert!(
+        msg.contains("OPENROUTER_API_KEY"),
+        "error names the key: {msg}"
+    );
 }
 
 #[test]
@@ -704,8 +729,7 @@ fn scope5_cli_driver_carries_selected_model_in_with_model() {
     // construction the arm performs: the selected id lands in the public `model` field, which
     // is what becomes the `--model` CLI arg (agent::build_args). This is the CLI boundary
     // that we cannot exercise by spawning `claude`.
-    let driver =
-        camerata_agent::ClaudeCliDriver::new("/tmp/mcp.json").with_model("claude-opus-5");
+    let driver = camerata_agent::ClaudeCliDriver::new("/tmp/mcp.json").with_model("claude-opus-5");
     assert_eq!(
         driver.model.as_deref(),
         Some("claude-opus-5"),
@@ -727,7 +751,9 @@ async fn scope6_capturing_completer_records_app_level_chat_model() {
     // then drive a completion through a capturing completer with that model. The recorded
     // model must be the app-level id — closing the loop from setting to the model-call boundary.
     let state = AppState::seeded();
-    state.settings().set_chat_model(Some("app-chat-model".to_string()));
+    state
+        .settings()
+        .set_chat_model(Some("app-chat-model".to_string()));
 
     // The chat handler resolves: resolve_chat_model(req.model, settings.chat_model).
     // Case A: no request override -> the app-level chat model flows to the boundary.
@@ -749,10 +775,14 @@ async fn scope6_capturing_completer_records_chat_request_override() {
     // Case B: a per-request override beats the app-level chat model, and the OVERRIDE is what
     // reaches the boundary (req > app chat_model > default precedence, end to end).
     let state = AppState::seeded();
-    state.settings().set_chat_model(Some("app-chat-model".to_string()));
+    state
+        .settings()
+        .set_chat_model(Some("app-chat-model".to_string()));
 
-    let resolved =
-        resolve_chat_model(Some("ui-override-model"), state.settings().get().chat_model.as_deref());
+    let resolved = resolve_chat_model(
+        Some("ui-override-model"),
+        state.settings().get().chat_model.as_deref(),
+    );
     assert_eq!(resolved, "ui-override-model");
 
     let cap = CapturingCompleter::new("ok");
@@ -1030,8 +1060,10 @@ fn scope7_gate_lead_is_orchestrator_child_is_not() {
     // key requirement: only the orchestrator-config-carrying native build reaches the key check.
     let mut tier_map = TierMap::default();
     tier_map.strongest = "vendor/lead-model".to_string();
-    let lead_factory =
-        server_orch_factory(registry_with_openrouter("vendor/lead-model"), MemoryCredentialStore::new());
+    let lead_factory = server_orch_factory(
+        registry_with_openrouter("vendor/lead-model"),
+        MemoryCredentialStore::new(),
+    );
     let session = lead_session(&tier_map);
     let ctx = LeadBuildContext {
         strongest_model: &tier_map.strongest,
@@ -1041,7 +1073,11 @@ fn scope7_gate_lead_is_orchestrator_child_is_not() {
         vision_enabled: false,
         on_activity: None,
     };
-    let lead_err = lead_factory.build_lead(&ctx).err().map(|e| e.to_string()).unwrap_or_default();
+    let lead_err = lead_factory
+        .build_lead(&ctx)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
     assert!(
         lead_err.contains("OPENROUTER_API_KEY"),
         "the native LEAD build reaches the orchestrator path's key check (orchestrator-mode): {lead_err}"

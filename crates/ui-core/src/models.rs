@@ -27,10 +27,16 @@ pub struct ModelsResp {
 impl ModelsResp {
     /// Return models grouped by provider for `<optgroup>` rendering.
     pub fn grouped(&self) -> Vec<(&'static str, Vec<&ModelOption>)> {
-        let claude: Vec<&ModelOption> =
-            self.models.iter().filter(|m| m.provider == "claude").collect();
-        let openrouter: Vec<&ModelOption> =
-            self.models.iter().filter(|m| m.provider == "openrouter").collect();
+        let claude: Vec<&ModelOption> = self
+            .models
+            .iter()
+            .filter(|m| m.provider == "claude")
+            .collect();
+        let openrouter: Vec<&ModelOption> = self
+            .models
+            .iter()
+            .filter(|m| m.provider == "openrouter")
+            .collect();
         let mut groups = Vec::new();
         if !claude.is_empty() {
             groups.push(("Claude (subscription)", claude));
@@ -108,7 +114,10 @@ mod tests {
         // Resource None (still loading or fetch failed): the selector must still show the current
         // model, never render with zero options (which reads as "the selector disappeared").
         let groups = chat_model_groups(&None, "claude-opus-5");
-        assert!(total_options(&groups) >= 1, "selector must always have an option");
+        assert!(
+            total_options(&groups) >= 1,
+            "selector must always have an option"
+        );
         assert!(groups
             .iter()
             .any(|(_, o)| o.iter().any(|m| m.id == "claude-opus-5")));
@@ -123,7 +132,9 @@ mod tests {
         };
         let groups = chat_model_groups(&Some(empty), "sonnet-x");
         assert!(total_options(&groups) >= 1);
-        assert!(groups.iter().any(|(_, o)| o.iter().any(|m| m.id == "sonnet-x")));
+        assert!(groups
+            .iter()
+            .any(|(_, o)| o.iter().any(|m| m.id == "sonnet-x")));
     }
 
     #[test]
@@ -148,7 +159,10 @@ mod tests {
         assert!(ids.contains(&"claude-opus-5".to_string()));
         assert!(ids.contains(&"gpt-x".to_string()));
         // Two providers -> two groups (not the single "Current" fallback).
-        assert!(groups.len() >= 2, "registry models should be grouped by provider");
+        assert!(
+            groups.len() >= 2,
+            "registry models should be grouped by provider"
+        );
     }
 
     // ── ModelsResp::grouped: provider partitioning for <optgroup> ─────────────
@@ -170,7 +184,14 @@ mod tests {
         assert_eq!(groups.len(), 2);
         // Claude group comes first and holds both claude entries.
         assert_eq!(groups[0].0, "Claude (subscription)");
-        assert_eq!(groups[0].1.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["opus", "sonnet"]);
+        assert_eq!(
+            groups[0]
+                .1
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["opus", "sonnet"]
+        );
         // OpenRouter group second.
         assert_eq!(groups[1].0, "OpenRouter");
         assert_eq!(groups[1].1.len(), 1);
@@ -178,9 +199,8 @@ mod tests {
 
     #[test]
     fn grouped_omits_an_empty_provider_group() {
-        let resp = models_resp_from(
-            r#"{"models":[{"label":"Opus","id":"opus","provider":"claude"}]}"#,
-        );
+        let resp =
+            models_resp_from(r#"{"models":[{"label":"Opus","id":"opus","provider":"claude"}]}"#);
         let groups = resp.grouped();
         // Only the Claude group is present; no empty OpenRouter optgroup.
         assert_eq!(groups.len(), 1);
@@ -191,9 +211,7 @@ mod tests {
     fn grouped_falls_back_to_generic_header_when_provider_unset() {
         // Entries with no provider must still render under a generic "Models" header
         // rather than vanishing.
-        let resp = models_resp_from(
-            r#"{"models":[{"label":"Mystery","id":"m"}]}"#,
-        );
+        let resp = models_resp_from(r#"{"models":[{"label":"Mystery","id":"m"}]}"#);
         let groups = resp.grouped();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, "Models");

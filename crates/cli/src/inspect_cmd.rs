@@ -413,10 +413,12 @@ pub async fn build_product_export_bytes(
 
     // The per-dataset machine-readable tables (csv/*, json/*): same partition_rows pass as the
     // xlsx + findings.json, so the artifacts agree.
-    let csv_exports = camerata_server::xlsx_export::build_csv_exports(report, &dispositions, corpus, &options)
-        .map_err(|e| format!("could not build CSV exports: {e}"))?;
-    let json_exports = camerata_server::xlsx_export::build_json_exports(report, &dispositions, corpus, &options)
-        .map_err(|e| format!("could not build JSON exports: {e}"))?;
+    let csv_exports =
+        camerata_server::xlsx_export::build_csv_exports(report, &dispositions, corpus, &options)
+            .map_err(|e| format!("could not build CSV exports: {e}"))?;
+    let json_exports =
+        camerata_server::xlsx_export::build_json_exports(report, &dispositions, corpus, &options)
+            .map_err(|e| format!("could not build JSON exports: {e}"))?;
     let mut extra_files: Vec<(String, Vec<u8>)> = csv_exports;
     extra_files.extend(json_exports);
 
@@ -1119,8 +1121,7 @@ mod tests {
 
         let key = repo_state_key(&a);
         assert!(
-            key.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
             "key `{key}` must be filesystem-safe"
         );
         assert!(
@@ -1212,7 +1213,14 @@ mod tests {
     fn req_w13_the_unloaded_family_alarms_on_a_broken_rule_file_not_on_an_empty_bucket() {
         // Empty bucket: a positive disclosure, no alarm.
         let mut clean = ScanLedger::new();
-        clean.record_rule("SEC-NO-RAW-SQL-CONCAT-1", RuleTier::Deterministic, true, None, 4, 0);
+        clean.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            RuleTier::Deterministic,
+            true,
+            None,
+            4,
+            0,
+        );
         let clean_text = render_ledger_summary(&clean, &[], false);
         let clean_line = clean_text
             .lines()

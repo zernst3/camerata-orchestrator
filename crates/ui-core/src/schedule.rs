@@ -9,7 +9,13 @@ pub const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
 /// Serialize the structured schedule picker into the human-readable schedule string the BFF stores
 /// (e.g. `daily 09:00`, `weekly Mon,Wed 09:00`, `monthly day 15 09:00`, `once 2026-06-20 14:00`). The
 /// empty-field fallbacks keep the string well-formed even before every control is touched.
-pub fn build_schedule(freq: &str, time: &str, date: &str, weekdays: &[bool], monthday: u32) -> String {
+pub fn build_schedule(
+    freq: &str,
+    time: &str,
+    date: &str,
+    weekdays: &[bool],
+    monthday: u32,
+) -> String {
     let t = if time.is_empty() { "09:00" } else { time };
     match freq {
         "once" => {
