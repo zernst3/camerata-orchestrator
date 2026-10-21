@@ -1,5 +1,16 @@
 # Overnight autonomous run — decisions needed + progress log
 
+> ## ▶ RESUME HERE (2026-10-21)
+> Branch `feat/audit-report-export` is 100% green (5,864/0) and fully pushed. Docs are current
+> (`docs/OVERVIEW.md` is the new human map). **Next work, paramount: W29 detector verticals.**
+> Build `ARCH-ONE-IMPORT-PATH-1` FIRST (safe, uses the existing `resolver::build_import_graph`,
+> output is a verifiable fact). READ FIRST: `docs/design/2026-10-21_w29-detector-implementation.md`
+> — especially the "False-positive traps" section (the dead-code reachability-inversion trap, the
+> one-import-path relative-position guard). Build rule + detector + positive + safe-twin together,
+> each green-committed. Zach's standing directive: keep developing the next thing; nothing is ever
+> dropped; any defect found MUST be fixed; sequencing matters least.
+
+
 Started 2026-10-20 (Zach logged off; autonomous continuation of the master sequence).
 Zach reviews this in the morning. I commit locally; I cannot push unattended, so every
 commit sits on the branch ready for review + push.
