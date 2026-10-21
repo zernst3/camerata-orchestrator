@@ -1046,13 +1046,25 @@ pub fn is_in_repo_scope(repo_root: &Path, finding_path: &str) -> bool {
         repo_root.join(p)
     };
 
+    // Resolve symlinks on BOTH sides before the containment check. A tool (eslint, semgrep)
+    // canonicalizes the paths it reports, so on macOS it emits `/private/var/folders/…` while
+    // `repo_root` passed in is the symlinked `/var/folders/…` (the OS tempdir, and any repo under
+    // a symlinked mount). A raw textual `starts_with` then judges every finding "outside the
+    // repo" and drops ALL of them — silently zeroing a tool tier. Compare canonical forms,
+    // falling back to the raw path whenever canonicalization fails (a synthetic test path, or a
+    // file that no longer exists), so existing behaviour is preserved where there is no symlink.
+    let root_c = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    let abs_c = abs.canonicalize().unwrap_or_else(|_| abs.clone());
+
     // Rule 3: absolute path outside the repo → drop.
-    if !abs.starts_with(repo_root) {
+    if !abs_c.starts_with(&root_c) {
         return false;
     }
 
     // The remainder of the rules apply to the path RELATIVE to repo_root.
-    let rel = abs.strip_prefix(repo_root).unwrap_or(&abs);
+    let rel = abs_c.strip_prefix(&root_c).unwrap_or(&abs_c);
 
     // Rule 4: Cargo build output directory `target/`.
     if rel.starts_with("target") {
