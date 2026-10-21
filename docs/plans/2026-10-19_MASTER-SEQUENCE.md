@@ -169,6 +169,8 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
 
 > Turnkey build plan: `docs/plans/2026-10-21_w29-execution-plan.md` (per-rule detector+wiring+tests, build order; rule-8 eslint blocker CLEARED by the W30 fix).
 
+> **W24 reframed (2026-10-21):** the platform-owned-table item is the first instance of a NEW FINDING CLASS — real but not client-fixable. Design (pending Zach sign-off): a structured `ownership` axis + its own PDF section + budget exclusion, which SUPERSEDES the original severity-anchor idea (do not fake-cap severity; route by ownership). See `docs/design/2026-10-21_unfixable-findings-class.md`. (per-rule detector+wiring+tests, build order; rule-8 eslint blocker CLEARED by the W30 fix).
+
 17. **The nine consistency rules + clone detector + 18 safe-twin tests.** TWO hard
     dependencies, both now satisfiable: W19's gate must exist first, and the convention
     synthesiser must be fixed (done, `46984f9`) because source §83 wires all nine straight
