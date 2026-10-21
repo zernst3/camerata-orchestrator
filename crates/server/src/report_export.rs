@@ -3883,15 +3883,14 @@ pub fn build_report_json(
         // — matrix bucketing, curated findings, the scorecard — sees the ALREADY-downgraded
         // severity and can never independently re-derive the pre-downgrade one.
         let severity = downgrade_unlocated_above_informational(severity, f);
-        // E2: the rule's own `max_severity` ceiling, applied last so it wins over everything
-        // upstream (the model's own call, the D5 floor, the D6/D7 ceiling rules, and the
-        // unlocated-above-informational downgrade just above) — see
-        // `clamp_to_rule_max_severity`'s doc comment.
-        let severity = clamp_to_rule_max_severity(severity, &f.rule_id, corpus);
-        // A5.2: the deviation ceiling (default medium, per-rule authored escape hatch) —
-        // kind-gated, so a Defect under the same rule is untouched. See
-        // `clamp_deviation_severity`'s doc comment.
-        let severity = clamp_deviation_severity(severity, f, corpus);
+        // E2 + A5.2: the rule's own `max_severity` ceiling, then the deviation ceiling (default
+        // medium, per-rule authored escape hatch, kind-gated so a Defect under the same rule is
+        // untouched). Applied last so they win over everything upstream (the model's own call,
+        // the D5 floor, the D6/D7 ceiling rules, and the unlocated-above-informational
+        // downgrade just above) — see `clamp_to_rule_max_severity`'s and
+        // `clamp_deviation_severity`'s doc comments. One shared definition with the workbook
+        // and the live scan: `severity_bounds::apply_severity_ceilings`.
+        let severity = crate::severity_bounds::apply_severity_ceilings(severity, f, corpus);
         live.push((f, disposition, reason, severity));
     }
     let review_state = if auditor_touched_any_finding {

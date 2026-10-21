@@ -81,10 +81,9 @@ use serde::Serialize;
 use crate::dep_audit::DEP_AUDIT_RULE_ID;
 use crate::onboard::ScanReport;
 use crate::report_export::{
-    bucket_title, category_for, category_for_finding, citation_for_finding,
-    clamp_deviation_severity, clamp_to_rule_max_severity, classify, client_headline_and_detail,
-    disposition_label, effective_bucket, effort_hours_bounds, finding_key, hedge_confidence,
-    is_hedged, normalize_severity, provenance_tier_rank, raise_to_rule_min_severity,
+    bucket_title, category_for, category_for_finding, citation_for_finding, classify,
+    client_headline_and_detail, disposition_label, effective_bucket, effort_hours_bounds,
+    finding_key, hedge_confidence, is_hedged, normalize_severity, provenance_tier_rank,
     resolve_citation, resolve_effort, resolve_fix, sanitize_report_findings, title_for_finding,
     Disposition, DispositionWire, ReportOptions,
 };
@@ -337,24 +336,16 @@ fn partition_rows(
 
         let wire = dispositions.get(&finding_key(f));
         let is_fp = wire.map(|d| d.state.as_str()) == Some("FalsePositive");
-        // E2: the rule's own `max_severity` ceiling — applied here too so the xlsx/findings.json
-        // artifacts can never disagree with the PDF on a capped rule (see
-        // `clamp_to_rule_max_severity`'s doc comment; `report_export::build_report_json` applies
-        // the SAME clamp to the SAME vocabulary over the SAME corpus).
-        // W8 (W5-Q2, "Floor, it's the minimum rating"): the rule's own `min_severity` FLOOR —
-        // applied here too, and FIRST, so the xlsx/findings.json artifacts can never disagree
-        // with the PDF on a floored rule. Exactly the relative position
-        // `report_export::build_report_json`'s partition uses: floor first, every ceiling
-        // after. See `raise_to_rule_min_severity`'s doc comment for the kind/location
-        // preconditions (the location one is why this is safe here even though this partition
-        // does not apply the C4-R1 unlocated downgrade).
-        let severity = raise_to_rule_min_severity(normalize_severity(&f.severity), f, corpus);
-        let severity = clamp_to_rule_max_severity(severity, &f.rule_id, corpus);
-        // A5.2: the deviation ceiling (default medium, per-rule authored escape hatch) —
-        // the SAME clamp `report_export::build_report_json` applies at its partition, so the
-        // xlsx/findings.json artifacts can never disagree with the PDF on a deviation's
-        // severity. Kind-gated; a Defect under the same rule is untouched.
-        let severity = clamp_deviation_severity(severity, f, corpus);
+        // E2 / W8 (W5-Q2) / A5.2: every corpus-authored severity bound (the `min_severity`
+        // FLOOR first, then the `max_severity` and deviation ceilings) — applied here too so
+        // the xlsx/findings.json artifacts can never disagree with the PDF on a bounded rule
+        // (`report_export::build_report_json` applies the SAME bounds, in the SAME relative
+        // order, over the SAME corpus), nor with the live scan, which applies them to the
+        // findings themselves (`severity_bounds::apply_corpus_severity_bounds`). All three
+        // share `bounded_severity`; see its doc comment and `raise_to_rule_min_severity`'s for
+        // the kind/location preconditions (the location one is why the floor is safe here even
+        // though this partition does not apply the C4-R1 unlocated downgrade).
+        let severity = crate::severity_bounds::bounded_severity(f, corpus);
         // C4-P2: `category_for_finding`/`title_for_finding` (not the bare rule-id-only
         // `category_for` / a raw corpus-or-rule_id join) — an AI-tier finding with no corpus
         // entry of its own gets its real semantic category and, when the P3 class fallback

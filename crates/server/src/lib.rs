@@ -85,6 +85,7 @@ pub mod scan_cache;
 pub mod scan_routing;
 pub mod scan_tools;
 pub mod scope_registration;
+pub mod severity_bounds;
 pub mod stall_sweep;
 /// Excel workbook export (product-export, Pass C): `build_workbook`, the Excel sibling of
 /// `report_export::build_report_json`. See the module doc comment and
@@ -5667,6 +5668,9 @@ async fn onboard_audit(
         // caller — this IS the "row set is final" point for this scan. See
         // `report_export::apply_evidence_gate`'s doc comment.
         crate::report_export::apply_evidence_gate(&mut report);
+        // Corpus severity bounds over the FINAL row set — see the block comment on the async
+        // path below and `severity_bounds`.
+        crate::severity_bounds::apply_scan_severity_bounds(&mut report.findings, corpus.as_ref());
 
         // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ─────
         // After a scan completes, write one floor/catch record for each ACTIVE floor
@@ -6803,6 +6807,16 @@ async fn onboard_audit_start(
             // `report_export::apply_evidence_gate`'s doc comment. Must run before `report` is
             // written into `last_scan`/`recent_scan` or handed to `body_jobs.finish` below.
             crate::report_export::apply_evidence_gate(&mut report);
+            // Corpus-authored severity bounds (`min_severity` floor, `max_severity` ceiling,
+            // `deviation_ceiling`) over the FINAL row set. `audit_repos` already bounded the
+            // floor/architectural/AI rows, but the preview-linter merge, the dependency audit
+            // and the evidence gate all append rows AFTER it; without this the cockpit would
+            // show those at the producer's raw severity while the PDF/xlsx bound them. The
+            // call is idempotent, so the rows `audit_repos` already bounded are unchanged.
+            crate::severity_bounds::apply_scan_severity_bounds(
+                &mut report.findings,
+                corpus.as_ref(),
+            );
 
             // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──
             // (The job path is async; ledger capture lives in the synchronous `onboard_audit`

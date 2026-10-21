@@ -623,6 +623,12 @@ pub async fn run_inspect_with_key_presence(
     // run before the ledger summary below (so a fired gate's stage shows up in it) and before
     // `report` is sealed.
     camerata_server::report_export::apply_evidence_gate(&mut report);
+    // Corpus severity bounds over the FINAL row set (preview, dep-audit and evidence-gate rows
+    // are appended after `audit_repos`' own bounding) — mirrors `onboard_audit`'s call site.
+    camerata_server::severity_bounds::apply_scan_severity_bounds(
+        &mut report.findings,
+        corpus.as_ref(),
+    );
 
     // The ledger summary is rendered from `report.ledger`/`report.failed_passes` AS THEY STAND
     // right here — after `audit_repos` (Phase 3), `merge_scan_preview` (Phase 4, which runs

@@ -1999,6 +1999,13 @@ pub async fn audit_repos(
                 let acc = account_location_merge(&pre_merge_findings, &repo_findings);
                 pipeline_ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
                 classify_repo_findings(&mut repo_findings, spec, &files);
+                // Corpus-authored severity bounds (`min_severity` floor, `max_severity` ceiling,
+                // `deviation_ceiling`), applied to the LIVE findings so the triage view shows
+                // the same severity the PDF/xlsx will bill. Before this, the bounds ran only at
+                // export, so the two disagreed on every bounded rule. No corpus loaded still
+                // gets the deviation ceiling's `medium` default, exactly as the exporters apply
+                // it, which `apply_scan_severity_bounds` preserves. See `severity_bounds`.
+                crate::severity_bounds::apply_scan_severity_bounds(&mut repo_findings, corpus);
                 // P2: generate a codebase-specific `fix_specific` for every finding in this
                 // repo (deterministic floor + architectural + AI alike — see the design
                 // doc's "for EVERY curated finding"). This is itself a model call over
