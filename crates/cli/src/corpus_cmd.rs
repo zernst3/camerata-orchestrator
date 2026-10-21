@@ -20,11 +20,6 @@ use camerata_rules::{
 };
 use chrono::Datelike;
 
-/// Top-level domain (the part before any `:`), the pack granularity the watermark tracks.
-fn top_level(domain: &str) -> String {
-    domain.split(':').next().unwrap_or(domain).to_string()
-}
-
 /// The distinct top-level domains the live corpus contains, sorted.
 async fn corpus_domains() -> Vec<String> {
     let (corpus, errors) = load_corpus_lenient(&corpus_path()).await;
@@ -34,42 +29,57 @@ async fn corpus_domains() -> Vec<String> {
             errors.len()
         );
     }
-    let mut domains: Vec<String> = corpus.iter().map(|r| top_level(&r.domain)).collect();
-    domains.sort();
-    domains.dedup();
-    domains
+    corpus.top_level_domains()
 }
 
-/// `corpus check`: print the staleness nag (overdue + never-confirmed), or a clean-bill line.
-pub async fn run_corpus_check() -> Result<()> {
-    let domains = corpus_domains().await;
-
-    let Some(freshness) =
-        CorpusFreshness::load(&corpus_freshness_path()).context("parsing CORPUS_FRESHNESS.toml")?
-    else {
-        println!(
+/// What `corpus check` prints for `freshness` (`None` when the watermark file is absent) as of
+/// `today` over a corpus containing `domains`: up to three labelled groups (OVERDUE, DUE SOON
+/// with days remaining, NEVER CONFIRMED), or a clean-bill line. Pure, so the output is tested
+/// without a clock or a filesystem.
+fn render_corpus_check(
+    freshness: Option<&CorpusFreshness>,
+    today: (i64, u32, u32),
+    domains: &[String],
+) -> String {
+    let Some(freshness) = freshness else {
+        return format!(
             "No CORPUS_FRESHNESS.toml found. Every domain is unconfirmed:\n  {}",
             domains.join(", ")
         );
-        return Ok(());
     };
+    match format_staleness_nag(&freshness.report(today, domains)) {
+        Some(msg) => msg,
+        None => "Corpus is fresh: every domain confirmed, none due within its warning window."
+            .to_string(),
+    }
+}
 
-    let unparseable = freshness.unparseable();
-    if !unparseable.is_empty() {
-        eprintln!(
-            "warning: CORPUS_FRESHNESS.toml has unparseable dates for: {}",
-            unparseable.join(", ")
-        );
+/// `corpus check`: print the staleness nag (overdue, due soon, never confirmed), or a clean-bill
+/// line. Read-only and never blocks anything.
+pub async fn run_corpus_check() -> Result<()> {
+    let domains = corpus_domains().await;
+
+    let freshness =
+        CorpusFreshness::load(&corpus_freshness_path()).context("parsing CORPUS_FRESHNESS.toml")?;
+    if let Some(f) = &freshness {
+        let unparseable = f.unparseable();
+        if !unparseable.is_empty() {
+            eprintln!(
+                "warning: CORPUS_FRESHNESS.toml has unparseable dates for: {}",
+                unparseable.join(", ")
+            );
+        }
     }
 
     let today = chrono::Utc::now().date_naive();
-    let overdue = freshness.overdue((today.year() as i64, today.month(), today.day()));
-    let never = freshness.never_confirmed(&domains);
-
-    match format_staleness_nag(&overdue, &never) {
-        Some(msg) => println!("{msg}"),
-        None => println!("Corpus is fresh: every domain confirmed within its staleness window."),
-    }
+    println!(
+        "{}",
+        render_corpus_check(
+            freshness.as_ref(),
+            (today.year() as i64, today.month(), today.day()),
+            &domains
+        )
+    );
     Ok(())
 }
 
@@ -199,18 +209,13 @@ pub async fn lock_corpus_at(corpus_dir: &Path, lock_path: &Path) -> Result<LockS
     Ok(summary)
 }
 
-/// Minimal `YYYY-MM-DD` shape check (4-digit year, month 1-12, day 1-31).
+/// Strict `YYYY-MM-DD` check: the same parser the watermark file and the per-rule
+/// `last_reviewed` gate use, so `corpus confirm` cannot record a date (`2026-02-30`) that the
+/// rest of the system would call unparseable.
 fn is_ymd(s: &str) -> bool {
-    let mut parts = s.split('-');
-    let (Some(y), Some(m), Some(d), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return false;
-    };
-    y.len() == 4
-        && y.chars().all(|c| c.is_ascii_digit())
-        && matches!(m.parse::<u32>(), Ok(1..=12))
-        && matches!(d.parse::<u32>(), Ok(1..=31))
+    // `parse_ymd` tolerates surrounding whitespace when READING; a value we are about to WRITE
+    // must not carry any.
+    s.trim() == s && camerata_rules::parse_ymd(s).is_some()
 }
 
 #[cfg(test)]
@@ -227,6 +232,62 @@ mod tests {
         assert!(!is_ymd("2026/10/20")); // wrong separator
         assert!(!is_ymd("last tuesday"));
         assert!(!is_ymd("2026-10-20-1")); // trailing
+        assert!(!is_ymd("2026-02-30")); // shape-valid but not a real day
+        assert!(!is_ymd("2026-02-29")); // 2026 is not a leap year
+        assert!(is_ymd("2024-02-29")); // 2024 is
+        assert!(!is_ymd(" 2026-10-20")); // never write padding into the file
+        assert!(!is_ymd("2026-1-5")); // unpadded
+    }
+
+    // ── corpus check output ─────────────────────────────────────────────────
+
+    fn freshness(toml_src: &str) -> CorpusFreshness {
+        CorpusFreshness::parse(toml_src).expect("fixture parses")
+    }
+
+    fn names(ds: &[&str]) -> Vec<String> {
+        ds.iter().map(|d| d.to_string()).collect()
+    }
+
+    #[test]
+    fn check_prints_overdue_due_soon_and_never_confirmed_groups() {
+        let f = freshness(
+            "[confirmed]\ngo = \"2026-01-01\"\njavascript = \"2025-06-01\"\nrust = \"2026-03-01\"\n",
+        );
+        // 2026-04-01: go is 90 days (due today), javascript is far past 90, rust is fresh.
+        let out = render_corpus_check(
+            Some(&f),
+            (2026, 4, 1),
+            &names(&["go", "javascript", "python", "rust"]),
+        );
+        assert!(out.contains("OVERDUE"), "{out}");
+        assert!(
+            out.contains("javascript: last confirmed 2025-06-01"),
+            "{out}"
+        );
+        assert!(out.contains("DUE SOON"), "{out}");
+        assert!(out.contains("go: last confirmed 2026-01-01"), "{out}");
+        assert!(out.contains("Due today"), "days remaining shown: {out}");
+        assert!(out.contains("NEVER CONFIRMED"), "{out}");
+        assert!(out.contains("python"), "{out}");
+        assert!(
+            !out.contains("rust:"),
+            "a fresh domain is not listed: {out}"
+        );
+    }
+
+    #[test]
+    fn check_says_so_when_everything_is_fresh() {
+        let f = freshness("[confirmed]\ngo = \"2026-03-30\"\n");
+        let out = render_corpus_check(Some(&f), (2026, 4, 1), &names(&["go"]));
+        assert!(out.starts_with("Corpus is fresh"), "{out}");
+    }
+
+    #[test]
+    fn check_without_a_watermark_file_lists_every_domain_as_unconfirmed() {
+        let out = render_corpus_check(None, (2026, 4, 1), &names(&["go", "rust"]));
+        assert!(out.contains("No CORPUS_FRESHNESS.toml found"), "{out}");
+        assert!(out.contains("go, rust"), "{out}");
     }
 
     // ── corpus lock ─────────────────────────────────────────────────────────
@@ -434,12 +495,5 @@ why = "Fixture."
         ]);
         assert!(lock_corpus_at(&f.corpus(), &f.lock()).await.is_err());
         assert!(!f.lock().exists());
-    }
-
-    #[test]
-    fn top_level_strips_subdomain() {
-        assert_eq!(top_level("rust:seaorm"), "rust");
-        assert_eq!(top_level("supabase:auth"), "supabase");
-        assert_eq!(top_level("universal"), "universal");
     }
 }

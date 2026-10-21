@@ -28,7 +28,8 @@ pub use lock::{
 mod freshness;
 pub use freshness::{
     confirm_domain, confirm_in_text, corpus_freshness_path, days_from_civil, effective_review_date,
-    format_staleness_nag, parse_ymd, CorpusFreshness, FreshnessEditError, OverdueDomain,
+    format_staleness_nag, parse_ymd, CorpusFreshness, DueSoonDomain, FreshnessEditError,
+    FreshnessReport, OverdueDomain, OPERATOR_ONLY_MARKERS,
 };
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1437,6 +1438,18 @@ impl RuleSet {
     /// All distinct domain strings present in the set.
     pub fn domains(&self) -> impl Iterator<Item = &str> {
         self.by_domain.keys().map(String::as_str)
+    }
+
+    /// The distinct TOP-LEVEL domains (the part before any `:`, so `rust:seaorm` is `rust`),
+    /// sorted. This is the pack granularity the corpus-freshness watermark tracks.
+    pub fn top_level_domains(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .domains()
+            .map(|d| d.split(':').next().unwrap_or(d).to_string())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Add a rule into this set, indexing it by id and domain. Public so downstream crates
@@ -4101,6 +4114,29 @@ mod tests {
         );
         // The real corpus should be clean.
         assert!(errors.is_empty(), "unexpected parse errors: {errors:#?}");
+    }
+
+    #[test]
+    fn top_level_domains_strips_subdomains_dedups_and_sorts() {
+        let mut set = RuleSet::default();
+        for (id, domain) in [
+            ("A-1", "rust:seaorm"),
+            ("B-1", "rust"),
+            ("C-1", "supabase:auth"),
+            ("D-1", "supabase:rls"),
+            ("E-1", "universal"),
+        ] {
+            set.push(bare_rule(id, domain));
+        }
+        assert_eq!(
+            set.top_level_domains(),
+            vec![
+                "rust".to_string(),
+                "supabase".to_string(),
+                "universal".to_string()
+            ]
+        );
+        assert!(RuleSet::default().top_level_domains().is_empty());
     }
 
     #[tokio::test]

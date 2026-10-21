@@ -16,11 +16,22 @@
 # Default staleness window, in days (quarterly). A confirmed domain older than this is "overdue".
 warn_after_days = 90
 
+# How many days BEFORE a domain's window lapses it starts showing as "due soon", so the warning
+# arrives while there is still time to schedule a sweep. A confirmed domain with this many days
+# or fewer left (and not yet past its window) is "due soon"; past the window it is "overdue".
+# (Top-level keys must stay above the first [table] header below.)
+warn_lead_days = 14
+
 # Per-domain overrides for packs that move faster or slower than the default. Example:
 # [warn_after_days_overrides]
 # javascript = 30   # a fast-churning ecosystem; look again sooner
 # universal  = 365  # security/primitive rules age slowly
 [warn_after_days_overrides]
+
+# Per-domain overrides of the lead, like the window overrides above. Example:
+# [warn_lead_days_overrides]
+# universal = 60    # a one-year window deserves more than two weeks of notice
+[warn_lead_days_overrides]
 
 # domain = "YYYY-MM-DD"  -- populated by the confirm step after a reviewed sweep. Empty until then.
 [confirmed]

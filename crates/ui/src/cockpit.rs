@@ -3191,61 +3191,77 @@ struct AppReleaseView {
 }
 
 /// Top-level `GET /api/updates/check` envelope. `app` is `null` when the GitHub
-/// release check fails (no token or network error).
-#[derive(serde::Deserialize)]
+/// release check fails (no token or network error). `corpus_freshness` is the
+/// operator-only corpus-freshness report, `null` when the server cannot tell.
+#[derive(Clone, serde::Deserialize)]
 struct UpdatesCheckView {
     #[serde(default)]
     app: Option<AppReleaseView>,
+    #[serde(default)]
+    corpus_freshness: Option<freshness::CorpusFreshnessView>,
 }
 
-async fn fetch_app_release() -> Option<AppReleaseView> {
+async fn fetch_updates_check() -> Option<UpdatesCheckView> {
     reqwest::get(format!("{}/api/updates/check", crate::bff_base()))
         .await
         .ok()?
         .json::<UpdatesCheckView>()
         .await
-        .ok()?
-        .app
+        .ok()
 }
 
-/// App-update banner. Shown across the top of every cockpit tab when the server
-/// reports a newer release. Dismissible within the session (not persisted).
+/// Update banner. Shown across the top of every cockpit tab: the app-update strip when the
+/// server reports a newer release, and the corpus-freshness line when any rule pack is overdue
+/// or due soon (or, quietly, never confirmed). Each is dismissible within the session (not
+/// persisted) and independent of the other.
 #[component]
 fn AppUpdateBanner() -> Element {
-    let release_res = use_resource(fetch_app_release);
+    let updates_res = use_resource(fetch_updates_check);
     let mut dismissed = use_signal(|| false);
 
-    let Some(rel) = release_res.read().clone().flatten() else {
+    let Some(updates) = updates_res.read().clone().flatten() else {
         return rsx! {};
     };
-    if !rel.update_available || dismissed() {
-        return rsx! {};
-    }
-    let latest = rel.latest_version.clone();
-    let current = rel.current_version.clone();
-    let release_url = if rel.release_url.is_empty() {
-        "https://github.com/zernst3/camerata-orchestrator/releases".to_string()
-    } else {
-        rel.release_url.clone()
-    };
-    rsx! {
-        div { class: "app-update-banner",
-            span { class: "app-update-icon", "\u{2B06}" }
-            span { class: "app-update-text",
-                "Camerata {latest} is available (you are running {current}). "
-            }
-            a {
-                class: "app-update-link",
-                href: "{release_url}",
-                target: "_blank",
-                "View release"
-            }
-            button {
-                class: "app-update-dismiss",
-                onclick: move |_| dismissed.set(true),
-                "\u{00D7}"
+    let freshness_line = updates.corpus_freshness.clone().map(|view| {
+        rsx! {
+            freshness::CorpusFreshnessLine { view }
+        }
+    });
+    let release = updates
+        .app
+        .clone()
+        .filter(|rel| rel.update_available && !dismissed());
+    let release_strip = release.map(|rel| {
+        let latest = rel.latest_version.clone();
+        let current = rel.current_version.clone();
+        let release_url = if rel.release_url.is_empty() {
+            "https://github.com/zernst3/camerata-orchestrator/releases".to_string()
+        } else {
+            rel.release_url.clone()
+        };
+        rsx! {
+            div { class: "app-update-banner",
+                span { class: "app-update-icon", "\u{2B06}" }
+                span { class: "app-update-text",
+                    "Camerata {latest} is available (you are running {current}). "
+                }
+                a {
+                    class: "app-update-link",
+                    href: "{release_url}",
+                    target: "_blank",
+                    "View release"
+                }
+                button {
+                    class: "app-update-dismiss",
+                    onclick: move |_| dismissed.set(true),
+                    "\u{00D7}"
+                }
             }
         }
+    });
+    rsx! {
+        {release_strip}
+        {freshness_line}
     }
 }
 
@@ -3291,6 +3307,7 @@ fn DocsView() -> Element {
     }
 }
 
+mod freshness;
 pub mod live_run;
 pub mod rules;
 pub mod scan;
@@ -5120,11 +5137,11 @@ mod tests {
         assert!(r.layer2_clean);
     }
 
-    /// `fetch_app_release` GETs /api/updates/check and parses the nested `app`
+    /// `fetch_updates_check` GETs /api/updates/check and parses the nested `app`
     /// update info, matching the real server envelope shape.
     #[tokio::test]
     #[serial_test::serial(bff_env)]
-    async fn fetch_app_release_parses_update_info() {
+    async fn fetch_updates_check_parses_update_info() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -5145,7 +5162,7 @@ mod tests {
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let rel = super::fetch_app_release().await;
+        let rel = super::fetch_updates_check().await.and_then(|u| u.app);
         std::env::remove_var("CAMERATA_BFF_URL");
 
         let rel = rel.expect("release parses");
@@ -5158,11 +5175,57 @@ mod tests {
         );
     }
 
+    /// `fetch_updates_check` carries the operator-only `corpus_freshness` object through; a
+    /// server that predates it (key absent) or cannot tell (`null`) yields `None`, never a
+    /// fabricated "all clear" or "all unconfirmed".
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_updates_check_parses_corpus_freshness_and_tolerates_its_absence() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/updates/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "app": serde_json::Value::Null,
+                "rule_drift": [],
+                "corpus_freshness": {
+                    "overdue": [{ "domain": "go", "days_since": 111, "threshold_days": 90 }],
+                    "due_soon": [{ "domain": "rust", "days_remaining": 3 }],
+                    "never_confirmed_count": 2
+                }
+            })))
+            .mount(&server)
+            .await;
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let got = super::fetch_updates_check().await.expect("parses");
+        std::env::remove_var("CAMERATA_BFF_URL");
+        let cf = got.corpus_freshness.expect("corpus_freshness present");
+        assert_eq!(cf.overdue[0].domain, "go");
+        assert_eq!(cf.due_soon[0].days_remaining, 3);
+        assert_eq!(cf.never_confirmed_count, 2);
+
+        let older = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/updates/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true, "app": serde_json::Value::Null, "rule_drift": []
+            })))
+            .mount(&older)
+            .await;
+        std::env::set_var("CAMERATA_BFF_URL", older.uri());
+        let got = super::fetch_updates_check().await.expect("parses");
+        std::env::remove_var("CAMERATA_BFF_URL");
+        assert!(got.corpus_freshness.is_none());
+    }
+
     /// A failing GitHub check surfaces `app: null`; the fetcher yields `None`
     /// rather than a bogus update banner.
     #[tokio::test]
     #[serial_test::serial(bff_env)]
-    async fn fetch_app_release_none_when_app_null() {
+    async fn fetch_updates_check_app_none_when_app_null() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -5178,7 +5241,7 @@ mod tests {
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let rel = super::fetch_app_release().await;
+        let rel = super::fetch_updates_check().await.and_then(|u| u.app);
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(rel.is_none());

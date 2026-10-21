@@ -39,6 +39,7 @@ pub mod checkpoint;
 pub mod clarify;
 pub mod clarify_resume;
 pub mod connections;
+mod corpus_freshness;
 /// `POST /api/apps` (Part 2 of the Rust-fullstack scaffolder): drives
 /// `camerata-scaffold`, creates + pushes the GitHub repo, and registers the
 /// resulting Camerata project. See the module doc comment for the full flow.
@@ -1478,6 +1479,11 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // the block above `serve()` and `docs/design/2026-08-27_backend-safety-and-live-
     // models.md`. Graceful when no Anthropic key is configured (no-op, no HTTP call).
     spawn_startup_anthropic_refresh(&state);
+
+    // Corpus freshness: ONE non-fatal log line if any rule domain is overdue, due soon, or has
+    // never been confirmed by a sweep (design: docs/design/2026-10-20_corpus-staleness-check.md).
+    // Spawned so it never delays binding the port; operator-only, never on a scan/export path.
+    tokio::spawn(crate::corpus_freshness::log_at_startup());
 
     // Background event-ingest pollers (tracker events -> notification feed -> UI
     // toasts). Cadences are env-configurable; see crate::notify. Spawned here, not
@@ -15505,9 +15511,18 @@ async fn development_context(State(state): State<AppState>) -> Json<serde_json::
 ///       "applied_version": 2,
 ///       "current_version": 4
 ///     }
-///   ]
+///   ],
+///   "corpus_freshness": {
+///     "overdue":  [{ "domain": "go", "last_confirmed": "2026-01-01", "days_since": 111, "threshold_days": 90 }],
+///     "due_soon": [{ "domain": "rust", "last_confirmed": "2026-07-25", "days_since": 87, "threshold_days": 90, "days_remaining": 3 }],
+///     "never_confirmed_count": 4
+///   }
 /// }
 /// ```
+///
+/// `corpus_freshness` is operator-only (it never reaches a client artifact) and is `null` when
+/// freshness is unknown: no corpus loaded, or the watermark file absent or unparseable. See
+/// [`crate::corpus_freshness`].
 ///
 /// `app` is `null` when the GitHub release check fails (no token or network
 /// error). `rule_drift` lists the rules whose baseline no longer matches the
@@ -15523,17 +15538,41 @@ async fn development_context(State(state): State<AppState>) -> Json<serde_json::
 /// canonical serialization of the whole rule. [`accept_rule_drift`] stores it (and the
 /// rule's `version`) on the selection; the drift check compares it to the corpus.
 async fn updates_check(State(state): State<AppState>) -> Json<serde_json::Value> {
-    // ── App-version check ─────────────────────────────────────────────────────
+    // ── App-version check (the only part that touches the network) ────────────
     let app_update = check_github_release().await;
+    Json(updates_payload(&state, app_update.unwrap_or(serde_json::Value::Null)).await)
+}
+
+/// The `GET /api/updates/check` body for an already-resolved `app` value. Split from the handler
+/// so everything except the GitHub call is testable offline. The corpus is loaded ONCE and
+/// shared by the drift check and the freshness report.
+async fn updates_payload(state: &AppState, app_update: serde_json::Value) -> serde_json::Value {
+    let corpus_path = camerata_rules::corpus_path();
+    let corpus = if corpus_path.exists() {
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+    } else {
+        None
+    };
 
     // ── Applied-rule drift (global: all projects) ─────────────────────────────
-    let drift = compute_rule_drift(&state, None).await;
+    let drift = match &corpus {
+        Some(c) => drift_for_projects(&state.projects.list(), None, c),
+        None => Vec::new(),
+    };
 
-    Json(serde_json::json!({
+    // ── Corpus freshness (operator-only; `null` when unknown) ─────────────────
+    let corpus_freshness = crate::corpus_freshness::updates_value(
+        corpus.as_ref(),
+        &camerata_rules::corpus_freshness_path(),
+        crate::corpus_freshness::today_utc(),
+    );
+
+    serde_json::json!({
         "ok": true,
         "app": app_update,
         "rule_drift": drift,
-    }))
+        "corpus_freshness": corpus_freshness,
+    })
 }
 
 /// Check the latest Camerata release on GitHub and return a JSON object with
@@ -16332,7 +16371,9 @@ async fn export_product(
     }
 
     // `rules_last_reviewed` is honestly None until the first confirmed corpus sweep populates
-    // CORPUS_FRESHNESS.toml; the manifest field is present either way.
+    // the corpus watermark file; the manifest field is present either way. (Operator-facing
+    // maintenance text is deliberately NOT sourced here: see the client-artifact gate in the
+    // lib.rs tests.)
     let provenance = ManifestProvenance {
         repos: json.cover.repos.clone(),
         generated_at: json.cover.generated_at.clone(),
@@ -25604,6 +25645,248 @@ mod tests {
         );
     }
 
+    // ── Corpus freshness is operator-only (design amendment 2026-10-21, part 4) ──
+    //
+    // The corpus-freshness nag, banner and `corpus_freshness` JSON are for the operator who
+    // maintains the corpus. They must never reach a client artifact: a paying client's report
+    // saying "javascript pack OVERDUE for a staleness sweep" would be both a leak of our
+    // maintenance state and, worse, an unprompted claim about the quality of the guidance in
+    // their deliverable. The client-visible `rules_last_reviewed` manifest date is a separate,
+    // deliberate field and is NOT in the marker list.
+
+    /// Operator-only markers present in `text` (empty means clean).
+    fn operator_markers_in(text: &str) -> Vec<&'static str> {
+        camerata_rules::OPERATOR_ONLY_MARKERS
+            .iter()
+            .copied()
+            .filter(|m| text.contains(m))
+            .collect()
+    }
+
+    /// Every file in a zip as `(path, lossy text)`, recursing into nested zip containers (the
+    /// xlsx inside the product zip is itself a zip of XML parts, and its strings live in there).
+    fn artifact_texts(zip_bytes: &[u8], prefix: &str, out: &mut Vec<(String, String)>) {
+        use std::io::Read;
+        let Ok(mut archive) = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes.to_vec())) else {
+            return;
+        };
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).expect("zip entry");
+            let path = format!("{prefix}{}", entry.name());
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).expect("read entry");
+            if bytes.starts_with(b"PK") {
+                artifact_texts(&bytes, &format!("{path}!"), out);
+            }
+            out.push((path, String::from_utf8_lossy(&bytes).into_owned()));
+        }
+    }
+
+    /// The scanner is only worth anything if it can fail: plant a marker in a README and in a
+    /// nested container and prove both are caught.
+    #[test]
+    fn the_freshness_scanner_catches_a_planted_marker_at_any_depth() {
+        use std::io::Write;
+        let mut inner = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default();
+        inner.start_file("xl/sharedStrings.xml", opts).unwrap();
+        inner.write_all(b"<si>DUE SOON: javascript</si>").unwrap();
+        let inner_bytes = inner.finish().unwrap().into_inner();
+
+        let zip_bytes = build_product_zip(
+            "acme",
+            b"%PDF",
+            &inner_bytes,
+            b"{}",
+            "CORPUS STALENESS: go is overdue",
+            &[],
+            &ManifestProvenance::default(),
+        )
+        .expect("zip assembles");
+
+        let mut texts = Vec::new();
+        artifact_texts(&zip_bytes, "", &mut texts);
+        let flagged: Vec<&str> = texts
+            .iter()
+            .filter(|(_, t)| !operator_markers_in(t).is_empty())
+            .map(|(p, _)| p.as_str())
+            .collect();
+        assert!(flagged.contains(&"README.txt"), "{flagged:?}");
+        assert!(
+            flagged.contains(&"acme-findings.xlsx!xl/sharedStrings.xml"),
+            "nested container scanned: {flagged:?}"
+        );
+    }
+
+    /// THE GATE. Builds every client artifact through the same builders the product export
+    /// uses (PDF input data, xlsx, findings.json, csv/*, json/*, README, manifest, the zip
+    /// itself) and asserts none contains operator-only freshness text. Also scans the SOURCE of
+    /// the export builders for freshness identifiers, so a future wiring is caught at the
+    /// import, before it ever produces output.
+    #[tokio::test]
+    async fn no_corpus_freshness_text_reaches_any_client_artifact() {
+        // ── Anti-vacuity: the operator surfaces really do carry the markers ──────────────
+        let operator_json = updates_payload(
+            &AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())),
+            serde_json::Value::Null,
+        )
+        .await
+        .to_string();
+        assert!(
+            operator_json.contains("corpus_freshness"),
+            "the operator payload names the field the gate looks for: {operator_json}"
+        );
+
+        // ── Build every artifact from one sealed fixture report ──────────────────────────
+        let report = make_scan_report("SEC-NO-HARDCODED-SECRETS-1").seal();
+        let dispositions = std::collections::HashMap::new();
+        let options = crate::report_export::ReportOptions::default();
+        let chosen = std::collections::HashMap::new();
+        let corpus_path = camerata_rules::corpus_path();
+        let corpus = if corpus_path.exists() {
+            Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+        } else {
+            None
+        };
+
+        let json = crate::report_export::build_report_json(
+            &report,
+            &dispositions,
+            corpus.as_ref(),
+            &options,
+        );
+        // The PDF is rendered from exactly this data (plus a static template).
+        let pdf_input = serde_json::to_string(&json).expect("report json serializes");
+
+        let xlsx =
+            crate::xlsx_export::build_workbook(&report, &dispositions, corpus.as_ref(), &options)
+                .expect("workbook builds");
+        let findings = crate::xlsx_export::build_findings_export(
+            &report,
+            &dispositions,
+            corpus.as_ref(),
+            &json,
+            &chosen,
+        );
+        let findings_bytes = serde_json::to_vec_pretty(&findings).expect("findings serialize");
+        let mut extra: Vec<(String, Vec<u8>)> = Vec::new();
+        extra.extend(
+            crate::xlsx_export::build_csv_exports(
+                &report,
+                &dispositions,
+                corpus.as_ref(),
+                &options,
+            )
+            .expect("csv builds"),
+        );
+        extra.extend(
+            crate::xlsx_export::build_json_exports(
+                &report,
+                &dispositions,
+                corpus.as_ref(),
+                &options,
+            )
+            .expect("json builds"),
+        );
+        let stem = report_filename_stem(&report);
+        let readme = product_export_readme(&stem, &json);
+        let zip_bytes = build_product_zip(
+            &stem,
+            b"%PDF-1.7 stand-in",
+            &xlsx,
+            &findings_bytes,
+            &readme,
+            &extra,
+            &ManifestProvenance::default(),
+        )
+        .expect("zip assembles");
+
+        let mut texts: Vec<(String, String)> = vec![("<pdf input json>".to_string(), pdf_input)];
+        artifact_texts(&zip_bytes, "", &mut texts);
+        assert!(
+            texts.len() > 8,
+            "the scan covered the pdf input, readme, findings, csv/json tables, xlsx parts and \
+             manifest: {:?}",
+            texts.iter().map(|(p, _)| p).collect::<Vec<_>>()
+        );
+
+        // When typst is installed, also run the REAL handler end to end and scan its zip.
+        if typst_on_path() {
+            let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+            let project = state
+                .projects
+                .create("Acme", vec!["owner/repo".to_string()])
+                .expect("project created");
+            state.set_last_scan(
+                project.id.clone(),
+                make_scan_report("SEC-NO-HARDCODED-SECRETS-1"),
+            );
+            let resp = export_product(
+                axum::extract::State(state),
+                axum::extract::Path(project.id.clone()),
+                axum::Json(AuditReportReq {
+                    dispositions: std::collections::HashMap::new(),
+                    options: crate::report_export::ReportOptions::default(),
+                }),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            artifact_texts(&bytes, "handler:", &mut texts);
+        }
+
+        let leaks: Vec<String> = texts
+            .iter()
+            .filter_map(|(path, text)| {
+                let found = operator_markers_in(text);
+                (!found.is_empty()).then(|| format!("{path}: {found:?}"))
+            })
+            .collect();
+        assert!(
+            leaks.is_empty(),
+            "operator-only corpus-freshness text reached a client artifact:\n  {}",
+            leaks.join("\n  ")
+        );
+
+        // ── Source-level: the export builders do not even reference the freshness code ────
+        const FRESHNESS_IDENTIFIERS: &[&str] = &[
+            "CorpusFreshness",
+            "FreshnessReport",
+            "format_staleness_nag",
+            "OPERATOR_ONLY_MARKERS",
+            "corpus_freshness",
+            "CORPUS_FRESHNESS",
+            "due_soon",
+        ];
+        let lib_src = include_str!("lib.rs");
+        let start = lib_src
+            .find("async fn export_product(")
+            .expect("export_product exists");
+        let end = lib_src[start..]
+            .find("// ── error type")
+            .map(|i| start + i)
+            .expect("end of the export section");
+        let export_section = &lib_src[start..end];
+        for (name, src) in [
+            ("report_export.rs", include_str!("report_export.rs")),
+            ("xlsx_export.rs", include_str!("xlsx_export.rs")),
+            (
+                "lib.rs (export_product .. build_product_zip)",
+                export_section,
+            ),
+        ] {
+            let found: Vec<&&str> = FRESHNESS_IDENTIFIERS
+                .iter()
+                .filter(|id| src.contains(**id))
+                .collect();
+            assert!(
+                found.is_empty(),
+                "{name} references corpus-freshness code {found:?}; freshness is operator-only \
+                 and must not be wired into a client-artifact builder"
+            );
+        }
+    }
+
     /// Regression for the zip-crate-default-timestamp bug: with `SimpleFileOptions::default()`
     /// left alone, every entry's `last_modified()` reads 1980-01-01 00:00:00 (the DOS/zip
     /// epoch `zip` falls back to when no timestamp is set, since this workspace doesn't enable
@@ -28399,6 +28682,31 @@ mod tests {
         assert!(post.is_empty(), "accept cleared the drift; got {post:?}");
     }
 
+    // ── /api/updates/check payload (the network-free part of the handler) ────────
+
+    #[tokio::test]
+    async fn updates_payload_carries_app_rule_drift_and_corpus_freshness() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let payload =
+            updates_payload(&state, serde_json::json!({ "update_available": false })).await;
+
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["app"]["update_available"], false);
+        assert!(payload["rule_drift"].is_array(), "{payload}");
+        // The bundled corpus + watermark are present in a checkout, so freshness is reported;
+        // when they are not (a packaged binary), it must be an explicit null, never absent.
+        assert!(
+            payload.get("corpus_freshness").is_some(),
+            "the key is always present: {payload}"
+        );
+        let cf = &payload["corpus_freshness"];
+        if !cf.is_null() {
+            assert!(cf["overdue"].is_array(), "{cf}");
+            assert!(cf["due_soon"].is_array(), "{cf}");
+            assert!(cf["never_confirmed_count"].is_number(), "{cf}");
+        }
+    }
+
     // ── Drift detection: content hash, legacy baselines, versions ────────────────
 
     /// A one-rule synthetic corpus whose single option carries `directive`, so a test can
@@ -28498,7 +28806,7 @@ mod tests {
 
         // Same rule, same title/summary/enforcement; ONLY the option's directive moved.
         let after = drift_corpus("Do the thing the new way.", Some(2));
-        let drift = drift_for_projects(&[project.clone()], None, &after);
+        let drift = drift_for_projects(std::slice::from_ref(&project), None, &after);
 
         assert_eq!(drift.len(), 1, "the changed directive must be reported");
         assert_eq!(drift[0]["changed"], true);
