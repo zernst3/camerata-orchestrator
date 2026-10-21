@@ -1,4 +1,5 @@
 id = "PYTHON-SERVICE-LAYER-1"
+version = 1
 title = "Business logic lives in a service layer, not in views or route handlers"
 domain = "python"
 layer = "language"

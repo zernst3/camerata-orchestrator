@@ -48,6 +48,9 @@ hold (`docs/plans/2026-10-09_rule-kind-classification.md`). The `kind` distribut
   - [3.17 `deviation_ceiling`](#317-deviation_ceiling)
   - [3.18 `layer` (INERT) and `tag` (DELETED)](#318-layer-inert-and-tag-deleted)
   - [3.19 `[[emits]]` (INERT)](#319-emits-inert)
+  - [3.20 `version`](#320-version)
+  - [3.21 `last_reviewed`](#321-last_reviewed)
+  - [3.22 `superseded_since` and `current_recommendation`](#322-superseded_since-and-current_recommendation)
 - [4. The `[decision]` block](#4-the-decision-block)
 - [5. `[[option]]` fields](#5-option-fields)
   - [5.1 `id`](#51-id)
@@ -196,7 +199,8 @@ fastest way to predict what changing it does.
 
 - **Blank-string scrubbing.** `load_one` filters empty/whitespace-only strings to `None` for
   option `remediation`/`finding_headline`/`finding_detail`/`effort` (`lib.rs:1664-1668`) and
-  for rule `max_severity`/`min_severity`/`deviation_ceiling` (`lib.rs:1702-1704`). Authoring
+  for rule `max_severity`/`min_severity`/`deviation_ceiling` (`lib.rs:1702-1704`) and
+`last_reviewed` (section 3.21). Authoring
   `remediation = ""` is exactly equivalent to omitting the field.
 
 - **File discovery.** Only `*.toml` files are read, recursively, sorted for deterministic load
@@ -952,6 +956,53 @@ format. Like `layer`, these are now DECLARED on `RuleToml` as accepted-but-uncon
 would assert a contract this workspace does not honour, and would make a future key inside the
 block a parse error for a block nothing reads. The live emit partitioning is done by `arm.rs`
 from `enforcement` (section 3.3).
+
+### 3.20 `version`
+
+`version = 1` (an integer, REQUIRED on every corpus rule, placed beside `id`). The rule's
+revision number: bumped by the author whenever anything about the rule changes (a directive, an
+option, a source, a flag, the title).
+
+Same lenient-parse / strict-gate split as `kind` and `inspectable`. `RuleToml::version` is
+`Option<u32>` with a bare `#[serde(default)]`, so a TOML that omits it still parses (fixture
+corpora in other crates do not declare it), and the BUILD is what refuses it:
+`rules_missing_version` (absent) and `rules_with_invalid_version` (`0`), asserted empty against
+the real corpus by `req_every_corpus_rule_declares_a_version_of_at_least_one`
+(`crates/rules/tests/rule_version_review_fields.rs`). There is deliberately no default: a
+version that silently defaulted to `1` would let a rule enter the lock without anyone deciding
+what its revision is. A negative or non-integer value fails the TOML parse itself.
+
+It reaches no client artifact.
+
+### 3.21 `last_reviewed`
+
+`last_reviewed = "2026-09-01"` (a quoted `YYYY-MM-DD` string, optional). The date this ONE rule
+was individually confirmed current, between full domain sweeps. Absent means "no individual
+review"; a blank string is scrubbed to absent at load.
+
+A rule's EFFECTIVE review date is the later of its own `last_reviewed` and its top-level
+domain's `[confirmed]` watermark in `CORPUS_FRESHNESS.toml` (`effective_review_date`, which
+ignores an unparseable date on either side so a typo can only make a rule look less fresh).
+
+Gate: `rules_with_invalid_last_reviewed(set, today)` fails the build on a value that is not a
+real calendar date (the parser checks days-in-month, so `2026-02-30` and a non-leap
+`2026-02-29` are rejected rather than rolled into March) or that is later than today. It
+takes `today` as an argument so the gate is a pure function; the real-corpus test reads the
+clock. A review is not a change to the rule, so it never forces a `version` bump. It reaches
+no client artifact.
+
+### 3.22 `superseded_since` and `current_recommendation`
+
+Both optional strings, authored together or not at all. `superseded_since = "2021"` is the
+year the ecosystem moved off the pattern the rule describes; `current_recommendation` is a
+pointer (URL or short phrase) to what replaced it. They were added by W32 part (a) and stay
+unused by every rule until a CONFIRMED sweep finding sets them (the sweep is the process that
+decides a pattern aged out; see `docs/design/2026-10-20_corpus-staleness-check.md`).
+
+Gates: `rules_with_malformed_credibility_metadata` (year is exactly four digits) and
+`rules_with_unpaired_supersession` (setting exactly one of the two fails the build; a
+whitespace-only half counts as absent). A year with no replacement is half a claim, and a
+replacement with no year cannot say how stale the rule is.
 
 ---
 
@@ -1861,6 +1912,9 @@ gates, never runtime refusals (a scan must never refuse to run over corpus state
 |---|---|---|
 | `rules_missing_kind` (`lib.rs:1726`) + `req_a5_1_...` | any rule has no `kind` | an unclassified rule must not silently behave permissively (section 3.6) |
 | `rules_missing_inspectable` (`lib.rs:1756`) + `req_w16_every_corpus_rule_declares_inspectable` | any rule has no `inspectable` | guessing `true` ships an unassessable rule as "verified clean"; guessing `false` silently stops a real check (section 3.6a) |
+| `rules_missing_version` / `rules_with_invalid_version` + `req_every_corpus_rule_declares_a_version_of_at_least_one` (`crates/rules/tests/rule_version_review_fields.rs`) | any rule has no `version`, or `version = 0` | the revision number the lock gate keys on; no default, so a bump is always a deliberate act (section 3.20) |
+| `rules_with_invalid_last_reviewed` + `req_every_authored_last_reviewed_is_a_real_past_or_present_date` (same file) | `last_reviewed` is not a real `YYYY-MM-DD` date, or is in the future | a future or impossible review date would make a rule look fresher than anyone has verified (section 3.21) |
+| `rules_with_unpaired_supersession` + `req_no_corpus_rule_has_half_a_supersession_claim` (same file) | exactly one of `superseded_since` / `current_recommendation` is set | a year with no replacement, or a replacement with no year, is half a claim (section 3.22) |
 | `options_with_rejected_prose_but_no_violates_flag` (`lib.rs:1916`) + `req_w14_every_rejected_option_is_flagged_violates` | an option's `why` opens with `Rejected:` but carries no `violates = true`, on any kind that permits the flag | the audit's single best-performing authoring signal, made mechanical (section 10.4) |
 | `decision_kind_rules_with_violates_flag` (`lib.rs:2007`) + `req_w14_no_decision_kind_rule_carries_a_violates_flag` | a `decision`-kind rule carries any `violates` option | the flag is live at runtime regardless of kind, so a stray one manufactures a high-severity defect on an equal-weight rule (gotcha 3) |
 | `corpus_files_with_unknown_fields` (`lib.rs:2208`) + `req_w14_no_corpus_rule_carries_an_unknown_field` | any TOML key outside the declared vocabulary, at seven nesting levels | `deny_unknown_fields` is off by design; this is the stronger replacement (gotcha 9) |
@@ -1881,8 +1935,8 @@ gates, never runtime refusals (a scan must never refuse to run over corpus state
 
 Checklist when authoring or editing a rule:
 
-1. Pick the `kind` honestly (section 3.6) from the FOUR values, and declare `inspectable`
-   (section 3.6a). Set `default` to whether the rule genuinely ships an adopted default -
+1. Pick the `kind` honestly (section 3.6) from the FOUR values, declare `inspectable`
+   (section 3.6a), and give the rule a `version` (section 3.20; `1` for a new rule). Set `default` to whether the rule genuinely ships an adopted default -
    that question is independent of `kind` (gotcha 2).
 2. Set `verification` to an arming value (`grounded`/`verified`/`policy`) with real external
    `[[sources]]` when claiming grounded.

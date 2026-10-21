@@ -1,4 +1,5 @@
 id = "ORCH-CONTEXT-OVERRIDE-1"
+version = 1
 title = "Rule overrides driven by project context require explicit human sign-off"
 domain = "agentic"
 layer = "universal"

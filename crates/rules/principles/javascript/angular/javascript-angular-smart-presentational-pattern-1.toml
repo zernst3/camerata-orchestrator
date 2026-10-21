@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-SMART-PRESENTATIONAL-PATTERN-1"
+version = 1
 title = "Components follow the smart (container) vs. presentational pattern"
 domain = "javascript:angular"
 layer = "framework"

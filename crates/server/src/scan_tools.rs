@@ -1686,6 +1686,8 @@ mod tests {
             asvs: Vec::new(),
             superseded_since: None,
             current_recommendation: None,
+            version: None,
+            last_reviewed: None,
             verification: Verification::Grounded,
             sources: linters
                 .iter()

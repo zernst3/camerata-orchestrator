@@ -1,4 +1,5 @@
 id = "AGENTIC-NO-TEST-TAMPER-1"
+version = 1
 title = "Do not modify existing tests without human review"
 domain = "agentic"
 layer = "universal"

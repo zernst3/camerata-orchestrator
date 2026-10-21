@@ -1,4 +1,5 @@
 id = "CSHARP-ASPNETCORE-ASYNC-ACTIONS-1"
+version = 1
 title = "All I/O-bound controller actions and endpoint handlers are async; no sync-over-async blocking"
 domain = "csharp:aspnetcore"
 layer = "framework"

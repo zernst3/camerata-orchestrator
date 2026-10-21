@@ -1,4 +1,5 @@
 id = "ARCH-SERVER-AUTHZ-1"
+version = 1
 title = "Authorization on the server; UI renders permission hints"
 domain = "permissions"
 layer = "universal"

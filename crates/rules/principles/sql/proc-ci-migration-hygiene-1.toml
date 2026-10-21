@@ -1,4 +1,5 @@
 id = "PROC-CI-MIGRATION-HYGIENE-1"
+version = 1
 title = "CI hygiene — enforce migration idempotency + safety at the gate"
 domain = "sql"
 layer = "universal"

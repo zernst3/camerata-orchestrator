@@ -1,4 +1,5 @@
 id = "ORCH-NO-NATURAL-BREAK-1"
+version = 1
 title = "Never stop on a \"natural break\""
 domain = "agentic"
 layer = "universal"

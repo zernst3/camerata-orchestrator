@@ -1,4 +1,5 @@
 id = "RUST-ENTITIES-1"
+version = 1
 title = "Use the DeriveEntityModel macro path"
 domain = "rust:seaorm"
 layer = "library"

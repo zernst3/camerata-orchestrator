@@ -1,4 +1,5 @@
 id = "RUBY-TESTING-FACTORIES-OVER-FIXTURES-1"
+version = 1
 title = "Use FactoryBot factories for test data; avoid Rails fixtures and bare ActiveRecord.create calls in specs"
 domain = "ruby:testing"
 layer = "language"

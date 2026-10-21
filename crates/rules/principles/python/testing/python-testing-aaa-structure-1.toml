@@ -1,4 +1,5 @@
 id = "PYTHON-TESTING-AAA-STRUCTURE-1"
+version = 1
 title = "Each test follows Arrange-Act-Assert: one act, one assertion focus"
 domain = "python:testing"
 layer = "language"

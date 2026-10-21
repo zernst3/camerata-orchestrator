@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-TYPESCRIPT-STRICT-MODE-1"
+version = 1
 title = "The compiler runs in strict mode"
 domain = "javascript:typescript"
 layer = "language"

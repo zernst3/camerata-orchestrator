@@ -1,4 +1,5 @@
 id = "ORCH-TRAINING-CUTOFF-1"
+version = 1
 title = "Training-data-limited decisions route to human review by category, not by confidence"
 domain = "agentic"
 layer = "universal"

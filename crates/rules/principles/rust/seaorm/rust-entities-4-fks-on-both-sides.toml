@@ -1,4 +1,5 @@
 id = "RUST-ENTITIES-4"
+version = 1
 title = "FK relations declared on BOTH sides"
 domain = "rust:seaorm"
 layer = "library"

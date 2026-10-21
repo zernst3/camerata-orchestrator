@@ -1,4 +1,5 @@
 id = "UI-UTC-DATES-1"
+version = 1
 title = "Store timestamps in UTC, centralize rendering in one helper, and display in the user's local timezone"
 domain = "ui"
 layer = "universal"

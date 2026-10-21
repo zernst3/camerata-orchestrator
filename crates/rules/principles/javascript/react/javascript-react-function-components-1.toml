@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-REACT-FUNCTION-COMPONENTS-1"
+version = 1
 title = "React component style: function components with hooks, or class components"
 domain = "javascript:react"
 layer = "framework"

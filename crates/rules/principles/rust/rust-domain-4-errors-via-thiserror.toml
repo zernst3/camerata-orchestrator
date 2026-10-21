@@ -1,4 +1,5 @@
 id = "RUST-DOMAIN-4"
+version = 1
 title = "Errors via thiserror enums per crate"
 domain = "rust"
 layer = "language"

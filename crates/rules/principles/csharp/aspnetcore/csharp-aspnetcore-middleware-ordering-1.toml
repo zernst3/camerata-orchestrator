@@ -1,4 +1,5 @@
 id = "CSHARP-ASPNETCORE-MIDDLEWARE-ORDERING-1"
+version = 1
 title = "Middleware is registered in the canonical ASP.NET Core order; auth always follows routing and precedes endpoint execution"
 domain = "csharp:aspnetcore"
 layer = "framework"

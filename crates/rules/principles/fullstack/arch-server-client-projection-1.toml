@@ -1,4 +1,5 @@
 id = "ARCH-SERVER-CLIENT-PROJECTION-1"
+version = 1
 title = "Server-rendered output and hydration payloads carry only the client-facing projected fields, never a full raw row, internal id, or token"
 domain = "fullstack"
 layer = "universal"

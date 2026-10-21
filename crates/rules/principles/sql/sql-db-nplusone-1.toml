@@ -1,4 +1,5 @@
 id = "SQL-DB-NPLUSONE-1"
+version = 1
 title = "No N+1 query patterns"
 domain = "sql"
 layer = "universal"

@@ -1,4 +1,5 @@
 id = "PROC-MIGRATION-ROLE-GRANTS-1"
+version = 1
 title = "Adding a permission seeds its role grants in the same migration"
 domain = "permissions"
 layer = "universal"

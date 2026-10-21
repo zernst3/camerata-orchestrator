@@ -1,4 +1,5 @@
 id = "JAVA-TESTING-ASSERTIONS-ASSERTJ-1"
+version = 1
 title = "Assertions use AssertJ's assertThat() fluent API; JUnit's assertEquals/assertTrue/assertNull are not used in new test code"
 domain = "java:testing"
 layer = "language"

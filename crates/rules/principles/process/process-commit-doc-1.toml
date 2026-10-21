@@ -1,4 +1,5 @@
 id = "PROCESS-COMMIT-DOC-1"
+version = 1
 title = "Commits carry a substantive body documenting the change"
 domain = "process"
 layer = "universal"

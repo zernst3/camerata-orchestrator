@@ -1,4 +1,5 @@
 id = "CICD-LEAST-PRIVILEGE-TOKEN-1"
+version = 1
 title = "The CI job token's default permissions are scoped to least privilege explicitly, never left at the platform's broad default"
 domain = "ci-cd"
 layer = "universal"

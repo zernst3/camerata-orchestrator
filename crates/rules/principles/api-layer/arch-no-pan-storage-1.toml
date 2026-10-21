@@ -1,4 +1,5 @@
 id = "ARCH-NO-PAN-STORAGE-1"
+version = 1
 title = "Full card numbers (PAN), CVV/CVC, and raw magnetic-stripe/track data are never stored, logged, or persisted by the application"
 domain = "api-layer"
 layer = "universal"

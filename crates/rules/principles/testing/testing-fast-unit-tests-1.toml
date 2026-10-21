@@ -1,4 +1,5 @@
 id = "TESTING-FAST-UNIT-TESTS-1"
+version = 1
 title = "Unit tests complete in milliseconds and require no external process or I/O"
 domain = "testing"
 layer = "universal"

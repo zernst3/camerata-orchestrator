@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-VUE-NO-DIRECT-DOM-1"
+version = 1
 title = "Do not manipulate the DOM directly; declare the desired state and let Vue render it"
 domain = "javascript:vue"
 layer = "framework"

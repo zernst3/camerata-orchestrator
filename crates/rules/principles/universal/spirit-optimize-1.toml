@@ -1,4 +1,5 @@
 id = "SPIRIT-OPTIMIZE-1"
+version = 1
 title = "Optimization by default"
 domain = "universal"
 layer = "universal"

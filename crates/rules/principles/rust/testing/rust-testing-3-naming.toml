@@ -1,4 +1,5 @@
 id = "RUST-TESTING-3"
+version = 1
 title = "Test functions use snake_case names that read as sentences describing the scenario"
 domain = "rust:testing"
 layer = "language"

@@ -1,4 +1,5 @@
 id = "JAVA-EXCEPTION-HANDLING-1"
+version = 1
 title = "Exceptions are never silently swallowed; every catch block either re-throws, logs, or transforms the exception with context"
 domain = "java"
 layer = "language"

@@ -1,4 +1,5 @@
 id = "SQL-AUDIT-COLUMNS-1"
+version = 1
 title = "Three audit-column strategies; pick by table semantics"
 domain = "sql"
 layer = "universal"

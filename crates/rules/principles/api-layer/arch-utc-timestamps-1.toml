@@ -1,4 +1,5 @@
 id = "ARCH-UTC-TIMESTAMPS-1"
+version = 1
 title = "Domain timestamps are anchored to UTC; mappers normalize at the persistence boundary"
 domain = "api-layer"
 layer = "universal"

@@ -1,4 +1,5 @@
 id = "PYTHON-TYPE-HINTS-1"
+version = 1
 title = "Public functions carry type hints and a type checker runs in CI"
 domain = "python"
 layer = "language"

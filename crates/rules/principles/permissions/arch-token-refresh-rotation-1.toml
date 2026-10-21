@@ -1,4 +1,5 @@
 id = "ARCH-TOKEN-REFRESH-ROTATION-1"
+version = 1
 title = "Access tokens are short-lived; a long-lived session is maintained by a rotating refresh token whose reuse is detected and revokes the whole token family"
 domain = "permissions"
 layer = "universal"

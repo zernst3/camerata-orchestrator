@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-TESTING-INTEGRATION-LOCATION-1"
+version = 1
 title = "Integration tests live in a dedicated __tests__/integration/ or tests/integration/ directory, not co-located"
 domain = "javascript:testing"
 layer = "language"

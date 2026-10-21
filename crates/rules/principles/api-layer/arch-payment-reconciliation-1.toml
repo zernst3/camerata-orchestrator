@@ -1,4 +1,5 @@
 id = "ARCH-PAYMENT-RECONCILIATION-1"
+version = 1
 title = "Local order/payment state is kept in sync with the provider's own record via webhook-driven updates or a periodic reconciliation pass, not assumed from a single synchronous response"
 domain = "api-layer"
 layer = "universal"

@@ -1,4 +1,5 @@
 id = "SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1"
+version = 1
 title = "A service_role-backed client used in a user-reachable request handler must re-implement authorization explicitly"
 domain = "supabase:auth"
 layer = "platform"

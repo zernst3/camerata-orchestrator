@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-VUE-PROPS-DOWN-EVENTS-UP-1"
+version = 1
 title = "Props flow down; events flow up; avoid direct parent-to-child method calls and shared mutable state"
 domain = "javascript:vue"
 layer = "framework"

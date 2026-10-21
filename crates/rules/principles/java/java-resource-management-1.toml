@@ -1,4 +1,5 @@
 id = "JAVA-RESOURCE-MANAGEMENT-1"
+version = 1
 title = "Resources (connections, streams, readers) are closed via try-with-resources or finally; never left to garbage collection"
 domain = "java"
 layer = "language"

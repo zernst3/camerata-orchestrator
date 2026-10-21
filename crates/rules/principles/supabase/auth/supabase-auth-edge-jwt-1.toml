@@ -1,4 +1,5 @@
 id = "SUPABASE-AUTH-EDGE-JWT-1"
+version = 1
 title = "An Edge Function with JWT verification disabled must have a compensating auth check in the function body"
 domain = "supabase:auth"
 layer = "platform"

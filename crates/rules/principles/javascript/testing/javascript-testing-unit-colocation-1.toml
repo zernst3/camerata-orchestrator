@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-TESTING-UNIT-COLOCATION-1"
+version = 1
 title = "Unit test files live next to the source file they test, named <module>.test.ts"
 domain = "javascript:testing"
 layer = "language"

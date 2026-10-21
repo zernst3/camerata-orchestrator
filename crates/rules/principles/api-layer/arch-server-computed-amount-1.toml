@@ -1,4 +1,5 @@
 id = "ARCH-SERVER-COMPUTED-AMOUNT-1"
+version = 1
 title = "A charge's price, quantity, and discount are computed server-side from the merchant's own records; the client supplies only a selection, never an amount"
 domain = "api-layer"
 layer = "universal"

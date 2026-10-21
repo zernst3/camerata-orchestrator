@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-EXPRESS-THIN-CONTROLLERS-1"
+version = 1
 title = "Route handlers stay thin; business logic and data access live in a service layer"
 domain = "javascript:express"
 layer = "framework"

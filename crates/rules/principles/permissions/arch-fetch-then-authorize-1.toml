@@ -1,4 +1,5 @@
 id = "ARCH-FETCH-THEN-AUTHORIZE-1"
+version = 1
 title = "Authorization reads the fetched resource and produces an authorized-typed value"
 domain = "permissions"
 layer = "universal"

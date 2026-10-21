@@ -11,6 +11,7 @@
 //! over its inputs - no clock read, no `chrono`, so the whole module is trivially testable and
 //! never flaky.
 
+use crate::Rule;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -30,15 +31,44 @@ pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146097 + doe - 719468
 }
 
-/// Parse a `"YYYY-MM-DD"` string into `(year, month, day)`. Returns `None` on any shape error -
-/// a malformed date in the watermark file must never panic the nag; it is simply skipped (and
-/// surfaced as unparseable by [`CorpusFreshness::overdue`]'s caller if it cares).
-fn parse_ymd(s: &str) -> Option<(i64, u32, u32)> {
+/// Days in `month` (1..=12) of `year`, honouring the Gregorian leap-year rule. Pure.
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+    }
+}
+
+/// Parse a strict `"YYYY-MM-DD"` string into `(year, month, day)`. Returns `None` on any shape
+/// error: a 4-digit year, 2-digit month and day, and a day that EXISTS in that month (so
+/// `2026-02-30` and the non-leap `2026-02-29` are rejected, not silently rolled into March).
+/// A malformed date in the watermark file must never panic the nag; it is simply skipped (and
+/// surfaced as unparseable by [`CorpusFreshness::unparseable`]), and the same parser backs the
+/// per-rule `last_reviewed` gate, so the two date fields agree on what a date is.
+pub fn parse_ymd(s: &str) -> Option<(i64, u32, u32)> {
     let mut parts = s.trim().split('-');
-    let y = parts.next()?.parse::<i64>().ok()?;
-    let m = parts.next()?.parse::<u32>().ok()?;
-    let d = parts.next()?.parse::<u32>().ok()?;
-    if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    let (ys, ms, ds) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() || ys.len() != 4 || ms.len() != 2 || ds.len() != 2 {
+        return None;
+    }
+    if ![ys, ms, ds]
+        .iter()
+        .all(|p| p.chars().all(|c| c.is_ascii_digit()))
+    {
+        return None;
+    }
+    let y = ys.parse::<i64>().ok()?;
+    let m = ms.parse::<u32>().ok()?;
+    let d = ds.parse::<u32>().ok()?;
+    if !(1..=12).contains(&m) || d < 1 || d > days_in_month(y, m) {
         return None;
     }
     Some((y, m, d))
@@ -167,6 +197,25 @@ impl CorpusFreshness {
         out.sort();
         out
     }
+}
+
+/// A rule's EFFECTIVE review date: the later of its own `last_reviewed` and its domain's
+/// `[confirmed]` watermark, as a `"YYYY-MM-DD"` string. `None` when neither exists (or neither
+/// parses): the rule has never been reviewed, individually or as part of a confirmed sweep.
+///
+/// The domain is the rule's TOP-LEVEL domain (`rust:seaorm` -> `rust`), the granularity the
+/// watermark tracks. An unparseable date on either side is ignored rather than trusted, so a
+/// typo can only make a rule look LESS fresh, never more. Pure.
+pub fn effective_review_date(rule: &Rule, freshness: &CorpusFreshness) -> Option<String> {
+    let top_level = rule.domain.split(':').next().unwrap_or(&rule.domain);
+    let own = rule.last_reviewed.as_deref();
+    let domain = freshness.confirmed.get(top_level).map(String::as_str);
+    [own, domain]
+        .into_iter()
+        .flatten()
+        .filter_map(|d| parse_ymd(d).map(|ymd| (ymd, d)))
+        .max_by_key(|(ymd, _)| *ymd)
+        .map(|(_, d)| d.trim().to_string())
 }
 
 /// Advance (or insert) one domain's confirmation date inside the TEXT of a
@@ -451,6 +500,69 @@ mod tests {
     fn confirm_errors_without_a_confirmed_table() {
         let err = confirm_in_text("warn_after_days = 90\n", "go", "2026-10-20");
         assert!(matches!(err, Err(FreshnessEditError::NoConfirmedTable)));
+    }
+
+    #[test]
+    fn parse_ymd_is_strict_about_shape_and_calendar() {
+        assert_eq!(parse_ymd("2026-10-21"), Some((2026, 10, 21)));
+        assert_eq!(parse_ymd(" 2026-10-21 "), Some((2026, 10, 21))); // trimmed, as before
+        assert_eq!(parse_ymd("2024-02-29"), Some((2024, 2, 29))); // leap day
+        assert_eq!(parse_ymd("2000-02-29"), Some((2000, 2, 29))); // 400-year leap
+        assert_eq!(parse_ymd("1900-02-29"), None); // 100-year non-leap
+        assert_eq!(parse_ymd("2026-02-29"), None);
+        assert_eq!(parse_ymd("2026-02-30"), None);
+        assert_eq!(parse_ymd("2026-04-31"), None);
+        assert_eq!(parse_ymd("2026-13-01"), None);
+        assert_eq!(parse_ymd("2026-00-10"), None);
+        assert_eq!(parse_ymd("2026-10-00"), None);
+        assert_eq!(parse_ymd("26-10-21"), None); // short year
+        assert_eq!(parse_ymd("2026-1-5"), None); // unpadded
+        assert_eq!(parse_ymd("2026-10-21-1"), None);
+        assert_eq!(parse_ymd("+026-10-21"), None); // sign is not a digit
+        assert_eq!(parse_ymd("last tuesday"), None);
+    }
+
+    fn rule_in(domain: &str, last_reviewed: Option<&str>) -> Rule {
+        let mut r = crate::bare_rule("FIX-1", domain);
+        r.last_reviewed = last_reviewed.map(str::to_string);
+        r
+    }
+
+    #[test]
+    fn effective_review_date_is_the_later_of_rule_and_domain() {
+        let f: CorpusFreshness = toml::from_str("[confirmed]\nrust = \"2026-08-15\"\n").unwrap();
+        // The rule was individually reviewed AFTER the domain sweep.
+        assert_eq!(
+            effective_review_date(&rule_in("rust", Some("2026-10-01")), &f).as_deref(),
+            Some("2026-10-01")
+        );
+        // The domain sweep is more recent than the rule's own review.
+        assert_eq!(
+            effective_review_date(&rule_in("rust", Some("2026-03-01")), &f).as_deref(),
+            Some("2026-08-15")
+        );
+        // No individual review: the watermark carries it. A sub-domain resolves to its pack.
+        assert_eq!(
+            effective_review_date(&rule_in("rust:seaorm", None), &f).as_deref(),
+            Some("2026-08-15")
+        );
+    }
+
+    #[test]
+    fn effective_review_date_is_none_when_never_reviewed_and_ignores_bad_dates() {
+        let f: CorpusFreshness = toml::from_str("[confirmed]\nrust = \"not a date\"\n").unwrap();
+        // Nothing confirmed for `go`, nothing authored on the rule.
+        assert_eq!(effective_review_date(&rule_in("go", None), &f), None);
+        // A garbage watermark is ignored, not trusted: only the rule's own date remains.
+        assert_eq!(
+            effective_review_date(&rule_in("rust", Some("2026-05-05")), &f).as_deref(),
+            Some("2026-05-05")
+        );
+        // A garbage rule date with no watermark: nothing parses, so nothing is claimed.
+        assert_eq!(
+            effective_review_date(&rule_in("go", Some("2026-02-30")), &f),
+            None
+        );
     }
 
     #[test]

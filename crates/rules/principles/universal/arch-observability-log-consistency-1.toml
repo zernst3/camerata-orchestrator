@@ -1,4 +1,5 @@
 id = "ARCH-OBSERVABILITY-LOG-CONSISTENCY-1"
+version = 1
 title = "Once a repo has adopted a structured logger, every log call site goes through it; bare print/console-style calls do not sit alongside it"
 domain = "universal"
 layer = "universal"

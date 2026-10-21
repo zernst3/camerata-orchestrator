@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-TESTING-NAMING-1"
+version = 1
 title = "Test names describe observable behaviour in plain language; no duplicate titles within a suite"
 domain = "javascript:testing"
 layer = "language"

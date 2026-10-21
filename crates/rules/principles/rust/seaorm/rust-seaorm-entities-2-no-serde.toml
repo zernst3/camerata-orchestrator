@@ -1,4 +1,5 @@
 id = "RUST-ENTITIES-2"
+version = 1
 title = "No serde derives on the SeaORM Model (load-bearing)"
 domain = "rust:seaorm"
 layer = "library"

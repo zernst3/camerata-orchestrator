@@ -22,8 +22,8 @@ use thiserror::Error;
 
 mod freshness;
 pub use freshness::{
-    confirm_domain, confirm_in_text, corpus_freshness_path, days_from_civil, format_staleness_nag,
-    CorpusFreshness, FreshnessEditError, OverdueDomain,
+    confirm_domain, confirm_in_text, corpus_freshness_path, days_from_civil, effective_review_date,
+    format_staleness_nag, parse_ymd, CorpusFreshness, FreshnessEditError, OverdueDomain,
 };
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -720,6 +720,19 @@ struct RuleToml {
     /// is marked superseded. See [`Rule::current_recommendation`].
     #[serde(default)]
     current_recommendation: Option<String>,
+    /// The rule's revision number: an integer >= 1, bumped whenever anything about the rule
+    /// changes. REQUIRED on every corpus rule, with the same lenient-parse / strict-gate split
+    /// `kind` and `inspectable` use: `Option<u32>` with a bare `#[serde(default)]` so a TOML
+    /// lacking the key still parses (fixture corpora in other crates do not declare it), while
+    /// [`rules_missing_version`] and [`rules_with_invalid_version`] fail the BUILD on the real
+    /// corpus. The bump itself is made mechanical, not a convention, by the lock gate
+    /// (`CORPUS_LOCK.toml`). See [`Rule::version`].
+    #[serde(default)]
+    version: Option<u32>,
+    /// `"YYYY-MM-DD"`: the date this ONE rule was individually confirmed current, between full
+    /// domain sweeps. Optional. See [`Rule::last_reviewed`].
+    #[serde(default)]
+    last_reviewed: Option<String>,
     /// W17 (gotcha 8, half resolved): `tag` is GONE. It was authored on all 417 corpus rules,
     /// read by nothing, and W14 declared it here as accepted-but-unconsumed so
     /// [`corpus_files_with_unknown_fields`] could treat every OTHER unrecognized rule-level key
@@ -1121,6 +1134,18 @@ pub struct Rule {
     /// W32: pointer to the guidance that replaced a superseded pattern (URL or short phrase).
     /// `None` unless [`Rule::superseded_since`] is set.
     pub current_recommendation: Option<String>,
+    /// The rule's revision number, an integer >= 1 bumped whenever anything about the rule
+    /// changes. `None` only on a fixture / in-progress rule: [`rules_missing_version`] fails the
+    /// build on any real corpus rule that omits it. The bump is enforced mechanically: the lock
+    /// gate compares [`Rule::content_hash`] (which EXCLUDES this field) against
+    /// `CORPUS_LOCK.toml` and fails a rule whose content changed while its version did not.
+    pub version: Option<u32>,
+    /// `"YYYY-MM-DD"`: when this one rule was individually confirmed current (a single-rule
+    /// review between full domain sweeps). `None` when never individually reviewed. Together with
+    /// the domain's `[confirmed]` watermark it gives the rule's effective review date (the later
+    /// of the two, see [`effective_review_date`]). Excluded from [`Rule::content_hash`]: a review
+    /// is not a change to the rule.
+    pub last_reviewed: Option<String>,
 }
 
 /// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`): a GENERAL mechanism for a
@@ -1461,6 +1486,8 @@ pub fn bare_rule(id: &str, domain: &str) -> Rule {
         asvs: Vec::new(),
         superseded_since: None,
         current_recommendation: None,
+        version: None,
+        last_reviewed: None,
     }
 }
 
@@ -1521,6 +1548,8 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         asvs: Vec::new(),
         superseded_since: None,
         current_recommendation: None,
+        version: None,
+        last_reviewed: None,
     };
     let mut set = RuleSet::default();
     set.push(rule);
@@ -1788,6 +1817,8 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
         asvs: raw.asvs,
         superseded_since: raw.superseded_since.filter(|s| !s.trim().is_empty()),
         current_recommendation: raw.current_recommendation.filter(|s| !s.trim().is_empty()),
+        version: raw.version,
+        last_reviewed: raw.last_reviewed.filter(|s| !s.trim().is_empty()),
     })
 }
 
@@ -2181,6 +2212,10 @@ const RULE_LEVEL_FIELDS: &[&str] = &[
     "asvs",
     "superseded_since",
     "current_recommendation",
+    // Per-rule freshness schema (design amendment 2026-10-21): the revision number and the
+    // per-rule review date.
+    "version",
+    "last_reviewed",
     // Accepted, unconsumed (gotcha 8), established 2026-10-11. `tag` was here too until W17
     // deleted it from the schema AND from all 417 files; do not re-add it.
     "layer",
@@ -2943,6 +2978,97 @@ pub fn rules_with_malformed_credibility_metadata(set: &RuleSet) -> Vec<String> {
     found
 }
 
+/// Every rule in `set` that does NOT declare [`Rule::version`], as a sorted list of ids.
+/// `req_every_corpus_rule_declares_a_version_of_at_least_one` asserts this is EMPTY for the real
+/// shipped corpus.
+///
+/// Same lenient-parse / strict-gate split as [`rules_missing_kind`] and
+/// [`rules_missing_inspectable`], for the same reason: there is deliberately no default. A
+/// version that silently defaulted to `1` would let a rule enter the lock without anyone having
+/// decided what its revision is, and the whole point of the field is that a change to a rule is
+/// a deliberate, visible act.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn rules_missing_version(set: &RuleSet) -> Vec<String> {
+    let mut offenders: Vec<String> = set
+        .iter()
+        .filter(|r| r.version.is_none())
+        .map(|r| r.id.0.clone())
+        .collect();
+    offenders.sort();
+    offenders
+}
+
+/// Every rule whose declared [`Rule::version`] is below 1, as `"<id>: version 0 (must be an
+/// integer >= 1)"`, sorted. An ABSENT version is [`rules_missing_version`]'s finding, not this
+/// one's, so one defect produces one message. (A negative or non-integer value never reaches
+/// this gate: it fails the TOML parse, which every corpus-loading test already asserts empty.)
+pub fn rules_with_invalid_version(set: &RuleSet) -> Vec<String> {
+    let mut found: Vec<String> = set
+        .iter()
+        .filter(|r| r.version == Some(0))
+        .map(|r| format!("{}: version 0 (must be an integer >= 1)", r.id.0))
+        .collect();
+    found.sort();
+    found
+}
+
+/// Every rule whose authored [`Rule::last_reviewed`] is not a real `YYYY-MM-DD` calendar date,
+/// or is later than `today`, as `"<id>: last_reviewed \"<value>\" (<reason>)"`, sorted. A rule
+/// with no `last_reviewed` is fine (the field is optional).
+///
+/// `today` is passed in by the caller as `(year, month, day)`, so this gate is a pure function
+/// and its tests never read a clock. A future date is rejected because it would assert a review
+/// that has not happened yet, and an effective-review-date computation ([`effective_review_date`])
+/// that trusted it would report the rule as fresher than anyone has verified.
+pub fn rules_with_invalid_last_reviewed(set: &RuleSet, today: (i64, u32, u32)) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for rule in set.iter() {
+        let Some(raw) = rule.last_reviewed.as_deref() else {
+            continue;
+        };
+        match parse_ymd(raw) {
+            None => found.push(format!(
+                "{}: last_reviewed {:?} (not a real YYYY-MM-DD date)",
+                rule.id.0, raw
+            )),
+            Some(date) if date > today => found.push(format!(
+                "{}: last_reviewed {:?} (in the future; today is {:04}-{:02}-{:02})",
+                rule.id.0, raw, today.0, today.1, today.2
+            )),
+            Some(_) => {}
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Every rule that sets exactly one of `superseded_since` / `current_recommendation`, as
+/// `"<id>: <what is missing>"`, sorted. The two travel together: "the ecosystem moved off this
+/// pattern in 2021" with no pointer to what replaced it is half a claim, and a recommendation
+/// with no year cannot say how stale the rule is. Blank values are scrubbed to absent at load,
+/// so a whitespace-only half does not satisfy the pair.
+pub fn rules_with_unpaired_supersession(set: &RuleSet) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for rule in set.iter() {
+        match (
+            rule.superseded_since.is_some(),
+            rule.current_recommendation.is_some(),
+        ) {
+            (true, false) => found.push(format!(
+                "{}: superseded_since is set but current_recommendation is not",
+                rule.id.0
+            )),
+            (false, true) => found.push(format!(
+                "{}: current_recommendation is set but superseded_since is not",
+                rule.id.0
+            )),
+            _ => {}
+        }
+    }
+    found.sort();
+    found
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Rule-subset selection (pure — RUST-PURE-STATE-TRANSITIONS-1)
 // ────────────────────────────────────────────────────────────────────────────
@@ -3193,6 +3319,8 @@ mod tests {
             asvs: Vec::new(),
             superseded_since: None,
             current_recommendation: None,
+            version: None,
+            last_reviewed: None,
         }
     }
 
@@ -3281,6 +3409,8 @@ mod tests {
             asvs: raw.asvs,
             superseded_since: raw.superseded_since.filter(|s| !s.trim().is_empty()),
             current_recommendation: raw.current_recommendation.filter(|s| !s.trim().is_empty()),
+            version: raw.version,
+            last_reviewed: raw.last_reviewed.filter(|s| !s.trim().is_empty()),
         }
     }
 

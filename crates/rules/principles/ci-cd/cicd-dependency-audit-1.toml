@@ -1,4 +1,5 @@
 id = "CICD-DEPENDENCY-AUDIT-1"
+version = 1
 title = "Scan dependencies for known vulnerabilities (osv-scanner)"
 domain = "ci-cd"
 layer = "universal"

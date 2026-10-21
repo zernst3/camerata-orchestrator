@@ -1,4 +1,5 @@
 id = "PYTHON-FLASK-AUTH-ON-PROTECTED-ROUTES-1"
+version = 1
 title = "Protected routes declare their authentication requirement explicitly via a decorator or Blueprint before_request hook"
 domain = "python:flask"
 layer = "framework"

@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-NEST-INTERCEPTORS-CROSS-CUTTING-1"
+version = 1
 title = "Use interceptors for cross-cutting concerns like logging, tracing, and response transformation"
 domain = "javascript:nest"
 layer = "framework"

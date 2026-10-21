@@ -1,4 +1,5 @@
 id = "CSHARP-EFCORE-ASNOTRACKING-1"
+version = 1
 title = "Read-only queries use AsNoTracking; change tracking is reserved for entities that will be mutated"
 domain = "csharp:efcore"
 layer = "library"

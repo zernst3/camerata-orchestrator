@@ -1,4 +1,5 @@
 id = "RUST-ENTITIES-6"
+version = 1
 title = "Module-level doc comment citing the schema source"
 domain = "rust:seaorm"
 layer = "library"

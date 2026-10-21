@@ -1,4 +1,5 @@
 id = "TESTING-DETERMINISTIC-1"
+version = 1
 title = "Tests are deterministic: same code always produces the same pass/fail outcome"
 domain = "testing"
 layer = "universal"

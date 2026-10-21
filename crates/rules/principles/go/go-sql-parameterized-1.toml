@@ -1,4 +1,5 @@
 id = "GO-SQL-PARAMETERIZED-1"
+version = 1
 title = "SQL is parameterized via prepared statements or ORM query builders; query strings are never built from interpolated values"
 domain = "go"
 layer = "language"

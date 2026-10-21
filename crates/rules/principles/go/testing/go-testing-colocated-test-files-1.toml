@@ -1,4 +1,5 @@
 id = "GO-TESTING-COLOCATED-TEST-FILES-1"
+version = 1
 title = "Unit test files are co-located with the source they test, named with the _test.go suffix"
 domain = "go:testing"
 layer = "testing"

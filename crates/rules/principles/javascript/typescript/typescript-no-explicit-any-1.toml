@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-TYPESCRIPT-NO-EXPLICIT-ANY-1"
+version = 1
 title = "any is forbidden; unknown is the typed escape hatch at boundaries"
 domain = "javascript:typescript"
 layer = "language"

@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-EXPRESS-SECURITY-HEADERS-1"
+version = 1
 title = "A security-headers middleware is mounted app-wide"
 domain = "javascript:express"
 layer = "framework"

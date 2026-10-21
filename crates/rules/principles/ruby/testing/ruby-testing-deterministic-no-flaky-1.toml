@@ -1,4 +1,5 @@
 id = "RUBY-TESTING-DETERMINISTIC-NO-FLAKY-1"
+version = 1
 title = "Tests run in random order with --order random and pass on any seed; no time, sequence, or state leakage"
 domain = "ruby:testing"
 layer = "language"

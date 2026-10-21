@@ -1,4 +1,5 @@
 id = "RUBY-RAILS-SCOPES-1"
+version = 1
 title = "Reusable query conditions are named scopes on the model, not ad-hoc where chains at call sites"
 domain = "ruby:rails"
 layer = "framework"

@@ -1,4 +1,5 @@
 id = "GO-TESTING-HELPER-T-HELPER-1"
+version = 1
 title = "Test helper functions call t.Helper() as their first statement so failures are attributed to the caller"
 domain = "go:testing"
 layer = "testing"

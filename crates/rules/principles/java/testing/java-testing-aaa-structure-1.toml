@@ -1,4 +1,5 @@
 id = "JAVA-TESTING-AAA-STRUCTURE-1"
+version = 1
 title = "Every test method follows Arrange-Act-Assert: set up preconditions, invoke the single behavior under test, then assert the outcome; each test covers exactly one behavior"
 domain = "java:testing"
 layer = "language"

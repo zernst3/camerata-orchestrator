@@ -1,4 +1,5 @@
 id = "PYTHON-DJANGO-CSRF-AUTH-1"
+version = 1
 title = "Protected views use the login_required decorator or LoginRequiredMixin; CSRF middleware stays enabled globally"
 domain = "python:django"
 layer = "framework"

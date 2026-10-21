@@ -1,4 +1,5 @@
 id = "RUBY-SMALL-METHODS-1"
+version = 1
 title = "Methods are kept small and focused; complex logic is extracted into smaller private methods or separate classes"
 domain = "ruby"
 layer = "language"

@@ -1,4 +1,5 @@
 id = "RUST-MAPPER-1"
+version = 1
 title = "Where domain↔entity mappers live: a dedicated mapper crate, the entity crate, or the domain crate"
 domain = "rust"
 layer = "language"

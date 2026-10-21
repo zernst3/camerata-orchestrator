@@ -1,4 +1,5 @@
 id = "PYTHON-FLASK-CONFIG-FROM-ENV-1"
+version = 1
 title = "Flask configuration is loaded from environment variables or config objects; no secrets appear in source files"
 domain = "python:flask"
 layer = "framework"

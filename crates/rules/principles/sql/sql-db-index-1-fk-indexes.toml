@@ -1,4 +1,5 @@
 id = "SQL-DB-INDEX-1"
+version = 1
 title = "Every foreign-key column gets an index in the same migration"
 domain = "sql"
 layer = "universal"

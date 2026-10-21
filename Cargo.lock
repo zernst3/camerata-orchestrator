@@ -988,6 +988,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "camerata-core",
+ "chrono",
  "serde",
  "serde_json",
  "tempfile",

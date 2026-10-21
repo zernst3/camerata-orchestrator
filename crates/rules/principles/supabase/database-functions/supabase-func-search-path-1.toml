@@ -1,4 +1,5 @@
 id = "SUPABASE-FUNC-SEARCH-PATH-1"
+version = 1
 title = "A SECURITY DEFINER function must set search_path explicitly to prevent search-path hijacking"
 domain = "supabase:database-functions"
 # General Postgres, not just Supabase: a SECURITY DEFINER function without a pinned search_path is

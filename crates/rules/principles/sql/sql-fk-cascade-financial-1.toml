@@ -1,4 +1,5 @@
 id = "SQL-FK-CASCADE-FINANCIAL-1"
+version = 1
 title = "A foreign key from a mutable user table into a financial, audit, or historical record never cascades deletes onto that record"
 domain = "sql"
 layer = "universal"

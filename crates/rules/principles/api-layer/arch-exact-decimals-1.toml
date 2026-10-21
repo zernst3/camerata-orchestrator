@@ -1,4 +1,5 @@
 id = "ARCH-EXACT-DECIMALS-1"
+version = 1
 title = "Monetary and quantity values use exact decimal types in code; never floats"
 domain = "api-layer"
 layer = "universal"

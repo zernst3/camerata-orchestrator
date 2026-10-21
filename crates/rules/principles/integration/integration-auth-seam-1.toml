@@ -1,4 +1,5 @@
 id = "INTEGRATION-AUTH-SEAM-1"
+version = 1
 title = "Every UI-gated affordance maps to a guarded endpoint"
 domain = "integration"
 layer = "universal"

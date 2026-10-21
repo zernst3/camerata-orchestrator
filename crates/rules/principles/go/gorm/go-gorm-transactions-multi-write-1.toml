@@ -1,4 +1,5 @@
 id = "GO-GORM-TRANSACTIONS-MULTI-WRITE-1"
+version = 1
 title = "Multiple write operations to different tables are wrapped in a transaction; consistency is enforced at the database level"
 domain = "go:gorm"
 layer = "library"

@@ -1,4 +1,5 @@
 id = "RUBY-RAILS-BACKGROUND-JOBS-1"
+version = 1
 title = "Slow or external work is offloaded to background jobs, not performed inline in a request"
 domain = "ruby:rails"
 layer = "framework"

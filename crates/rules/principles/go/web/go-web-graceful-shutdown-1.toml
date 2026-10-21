@@ -1,4 +1,5 @@
 id = "GO-WEB-GRACEFUL-SHUTDOWN-1"
+version = 1
 title = "Server shutdown is graceful: in-flight requests are allowed to complete; new requests are rejected after shutdown is signaled"
 domain = "go:web"
 layer = "framework"

@@ -1,4 +1,5 @@
 id = "ARCH-HOT-READ-CACHE-1"
+version = 1
 title = "Hot reads sit behind a TTL cache with explicit write-side invalidation"
 domain = "api-layer"
 layer = "universal"

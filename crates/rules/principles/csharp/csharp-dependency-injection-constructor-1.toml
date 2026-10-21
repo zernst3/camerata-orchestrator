@@ -1,4 +1,5 @@
 id = "CSHARP-DEPENDENCY-INJECTION-CONSTRUCTOR-1"
+version = 1
 title = "Dependencies are injected via constructor parameters (including C# 12 primary constructors), not [Inject]/[Service] property injection or a service locator"
 domain = "csharp"
 layer = "language"

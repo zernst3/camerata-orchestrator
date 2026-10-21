@@ -1,4 +1,5 @@
 id = "CSHARP-IENUMERABLE-COLLECTIONS-1"
+version = 1
 title = "Methods return IEnumerable<T> or ICollection<T> instead of arrays or List<T>; callers should not couple to concrete collection types"
 domain = "csharp"
 layer = "language"

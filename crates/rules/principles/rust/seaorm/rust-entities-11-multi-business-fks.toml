@@ -1,4 +1,5 @@
 id = "RUST-ENTITIES-11"
+version = 1
 title = "Two or more business FKs to the same parent: both belongs_to + role-named reverse has_many; one impl Related on the primary direction"
 domain = "rust:seaorm"
 layer = "library"

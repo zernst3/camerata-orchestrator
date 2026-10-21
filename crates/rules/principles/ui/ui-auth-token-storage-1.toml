@@ -1,4 +1,5 @@
 id = "UI-AUTH-TOKEN-STORAGE-1"
+version = 1
 title = "Session and auth tokens never live in JS-accessible storage (localStorage, sessionStorage, IndexedDB, a non-HttpOnly cookie); they live in an HttpOnly, Secure, SameSite cookie"
 domain = "ui"
 layer = "universal"

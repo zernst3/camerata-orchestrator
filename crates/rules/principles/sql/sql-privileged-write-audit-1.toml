@@ -1,4 +1,5 @@
 id = "SQL-PRIVILEGED-WRITE-AUDIT-1"
+version = 1
 title = "A privileged write (a role grant, a permission change, a financial adjustment, an admin override) leaves an append-only audit-log entry, not just the mutated row"
 domain = "sql"
 layer = "universal"

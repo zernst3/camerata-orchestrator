@@ -1,4 +1,5 @@
 id = "ORCH-CONFLICTING-ROBUSTNESS-1"
+version = 1
 title = "Conflicting robustness is a real tradeoff, not a clear winner"
 domain = "agentic"
 layer = "universal"

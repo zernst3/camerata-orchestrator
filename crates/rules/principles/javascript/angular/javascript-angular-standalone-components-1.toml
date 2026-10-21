@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-STANDALONE-COMPONENTS-1"
+version = 1
 title = "Angular component organization: standalone components, or NgModule declarations"
 domain = "javascript:angular"
 layer = "framework"

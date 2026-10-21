@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-ROUTE-GUARDS-1"
+version = 1
 title = "Protected routes are guarded by canActivate guards, not checked in component ngOnInit"
 domain = "javascript:angular"
 layer = "framework"

@@ -1,4 +1,5 @@
 id = "PYTHON-TESTING-FIXTURES-CONFTEST-1"
+version = 1
 title = "Shared test setup lives in conftest.py fixtures, not in setUp helpers or module-level globals"
 domain = "python:testing"
 layer = "language"

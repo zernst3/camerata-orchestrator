@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-CONST-DEFAULT-1"
+version = 1
 title = "const is the default binding; let only when the binding is reassigned"
 domain = "javascript"
 layer = "language"

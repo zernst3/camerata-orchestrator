@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-NEST-THIN-CONTROLLERS-DELEGATE-1"
+version = 1
 title = "Controllers stay thin; business logic and data access live in services"
 domain = "javascript:nest"
 layer = "framework"

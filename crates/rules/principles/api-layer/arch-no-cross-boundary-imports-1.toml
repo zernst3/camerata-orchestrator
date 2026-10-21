@@ -1,4 +1,5 @@
 id = "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1"
+version = 1
 title = "No cross-boundary imports — modules import only their declared dependencies"
 domain = "api-layer"
 layer = "universal"

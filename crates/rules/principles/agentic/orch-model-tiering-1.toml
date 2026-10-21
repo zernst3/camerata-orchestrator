@@ -1,4 +1,5 @@
 id = "ORCH-MODEL-TIERING-1"
+version = 1
 title = "Model tiering — cheap for bulk, top-tier for decisions"
 domain = "agentic"
 layer = "universal"

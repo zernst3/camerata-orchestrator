@@ -1,4 +1,5 @@
 id = "ARCH-PARALLEL-INDEPENDENT-1"
+version = 1
 title = "Independent concurrent calls in any code path run in parallel, not sequentially"
 domain = "fullstack"
 layer = "universal"

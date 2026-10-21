@@ -1,4 +1,5 @@
 id = "SUPABASE-STORAGE-KEY-SANITIZATION-1"
+version = 1
 title = "Storage object keys must never be built directly from a client-supplied filename or path segment"
 domain = "supabase:storage"
 layer = "platform"

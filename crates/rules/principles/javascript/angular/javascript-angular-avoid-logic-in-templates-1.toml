@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-AVOID-LOGIC-IN-TEMPLATES-1"
+version = 1
 title = "Templates are simple and logic-free; complex conditions and computations live in the component"
 domain = "javascript:angular"
 layer = "framework"

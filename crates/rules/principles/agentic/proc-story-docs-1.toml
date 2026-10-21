@@ -1,4 +1,5 @@
 id = "PROC-STORY-DOCS-1"
+version = 1
 title = "Per-story durable documentation keyed by story id"
 domain = "agentic"
 layer = "universal"

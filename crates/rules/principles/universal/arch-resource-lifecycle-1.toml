@@ -1,4 +1,5 @@
 id = "ARCH-RESOURCE-LIFECYCLE-1"
+version = 1
 title = "The app reaps every subprocess it spawns and cleans every temp artifact it writes"
 domain = "universal"
 layer = "universal"

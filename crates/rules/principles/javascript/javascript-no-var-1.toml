@@ -1,4 +1,5 @@
 id = "JAVASCRIPT-NO-VAR-1"
+version = 1
 title = "Bindings are declared with const or let; var is forbidden"
 domain = "javascript"
 layer = "language"

@@ -1,4 +1,5 @@
 id = "JAVA-TESTING-UNIT-TEST-LOCATION-1"
+version = 1
 title = "Unit tests live in src/test/java mirroring the production package hierarchy; every test class sits in the same package as the class under test"
 domain = "java:testing"
 layer = "language"

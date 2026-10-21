@@ -1,4 +1,5 @@
 id = "JAVA-TESTING-DETERMINISTIC-1"
+version = 1
 title = "Tests are deterministic: no Thread.sleep(), no wall-clock time (use injected Clock), no uncontrolled randomness, no ordering dependencies between test methods"
 domain = "java:testing"
 layer = "language"

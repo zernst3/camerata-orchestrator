@@ -1,4 +1,5 @@
 id = "ORCH-ONE-WAY-DOOR-1"
+version = 1
 title = "One-way-door routing — blast radius gates autonomy"
 domain = "agentic"
 layer = "universal"

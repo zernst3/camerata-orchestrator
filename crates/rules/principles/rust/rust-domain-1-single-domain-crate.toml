@@ -1,4 +1,5 @@
 id = "RUST-DOMAIN-1"
+version = 1
 title = "How the domain is crated: one crate with modules by context, a crate per context, or one flat crate"
 domain = "rust"
 layer = "language"

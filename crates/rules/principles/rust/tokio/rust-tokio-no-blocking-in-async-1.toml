@@ -1,4 +1,5 @@
 id = "RUST-TOKIO-NO-BLOCKING-IN-ASYNC-1"
+version = 1
 title = "Do not call blocking operations directly in async code; use tokio::task::spawn_blocking"
 domain = "rust:tokio"
 layer = "framework"

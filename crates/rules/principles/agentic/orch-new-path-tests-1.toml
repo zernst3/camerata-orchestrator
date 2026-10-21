@@ -1,4 +1,5 @@
 id = "ORCH-NEW-PATH-TESTS-1"
+version = 1
 title = "AI-authored code paths carry tests, not just a passing existing suite"
 domain = "agentic"
 layer = "universal"
