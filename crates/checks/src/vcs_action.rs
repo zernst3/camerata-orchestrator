@@ -1916,12 +1916,12 @@ mod tests {
 
     // ── BUG-1: IdLocation is honoured by build_rules ──────────────────────────
 
-    /// BUG-1 regression: before the fix, `id_location` was stored in
-    /// `CommitDocConfig` but never read by `build_rules`. The story-id was ALWAYS
-    /// checked in the commit body/PR body, regardless of what the project configured.
-    /// A commit with the story-id in the subject only would be rejected even when
-    /// `id_location = Subject` or `id_location = Either`.  These tests fail before
-    /// the fix and pass after.
+    // BUG-1 regression: before the fix, `id_location` was stored in
+    // `CommitDocConfig` but never read by `build_rules`. The story-id was ALWAYS
+    // checked in the commit body/PR body, regardless of what the project configured.
+    // A commit with the story-id in the subject only would be rejected even when
+    // `id_location = Subject` or `id_location = Either`.  These tests fail before
+    // the fix and pass after.
 
     fn make_commit_doc_config_with_location(loc: IdLocation) -> ProcessRuleConfig {
         ProcessRuleConfig {

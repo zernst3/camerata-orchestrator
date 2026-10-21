@@ -21,17 +21,12 @@ use camerata_liveness::LivenessTracker;
 
 /// Whether a run is interactive (watched by the architect) or autonomous (walk-away/routine).
 /// Determines which stall threshold and policy apply.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RunKind {
+    #[default]
     Watched,
     Autonomous,
-}
-
-impl Default for RunKind {
-    fn default() -> Self {
-        RunKind::Watched
-    }
 }
 
 impl RunKind {
@@ -44,19 +39,14 @@ impl RunKind {
 }
 
 /// What the server does when a run stalls (exceeds its idle threshold).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StallPolicy {
     /// Surface a stall alert to the UI; do NOT cancel the run.
+    #[default]
     Alert,
     /// Automatically cancel the run when the stall threshold is exceeded.
     Cancel,
-}
-
-impl Default for StallPolicy {
-    fn default() -> Self {
-        StallPolicy::Alert
-    }
 }
 
 /// The lifecycle status of a run, in Camerata's vocabulary.

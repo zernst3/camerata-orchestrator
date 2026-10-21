@@ -18,7 +18,7 @@
 use camerata_agent::allowed_tools_for_role;
 use camerata_core::{
     AgentDriver, AgentOutcome, CheckOutcome, CheckRunner, Decision, GovernanceGateway, Role,
-    RuleId, SessionId, ToolCall,
+    SessionId, ToolCall,
 };
 use camerata_gateway::{enforced_gate_rules, GovernedGateway};
 use std::path::Path;

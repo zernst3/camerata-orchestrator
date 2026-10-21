@@ -483,7 +483,7 @@ mod tests {
                 ),
                 pending_decision(story_id, "pagination"),
             ],
-            run_summary: format!("Run run-1 completed: 1 allow, 2 deny, 2 bounces."),
+            run_summary: "Run run-1 completed: 1 allow, 2 deny, 2 bounces.".to_string(),
             workspace_root: dir.to_path_buf(),
             signed_off_at: "2026-06-20T12:00:00Z".to_string(),
         }

@@ -925,7 +925,6 @@ impl Gateway {
 
         let result = delegate::run_delegated(config, (*self.rule_subset).clone(), &subtask, &tier)
             .await
-            .map(|output| output)
             .unwrap_or_else(|e| e.to_string());
 
         // Observability: record the return. A child that could not finish above its

@@ -72,7 +72,7 @@ pub enum ProjectBackend {
 /// Default: off, using the project's `balanced` tier model when enabled.
 /// Serialises with `serde(default)` so projects written before this field existed
 /// deserialise to the disabled default without migration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct L3ReviewConfig {
     /// Whether L3 is enabled for this project.
     #[serde(default)]
@@ -80,15 +80,6 @@ pub struct L3ReviewConfig {
     /// The model id that runs the L3 reviewer. Empty = use the project's `balanced` tier model.
     #[serde(default)]
     pub model: String,
-}
-
-impl Default for L3ReviewConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            model: String::new(),
-        }
-    }
 }
 
 /// Per-project stall detection thresholds, split by context (watched = interactive,

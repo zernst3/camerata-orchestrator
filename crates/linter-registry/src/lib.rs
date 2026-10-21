@@ -64,11 +64,11 @@ pub use report::generate_report;
 ///
 /// # Arguments
 ///
-/// * `tool`    — The tool key (case-insensitive). See the table in the crate
-///               docs for accepted keys.
+/// * `tool` — The tool key (case-insensitive). See the table in the crate
+///   docs for accepted keys.
 /// * `rule_id` — The rule identifier within that tool. Compared
-///               case-insensitively after normalisation (leading/trailing
-///               whitespace stripped).
+///   case-insensitively after normalisation (leading/trailing
+///   whitespace stripped).
 ///
 /// # Returns
 ///

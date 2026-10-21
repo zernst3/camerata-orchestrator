@@ -3395,7 +3395,7 @@ malformed line, not json
             "HTTP 429: rate_limit exceeded for primary-model"
         ));
         // And the second model would be tried.
-        let chain = vec!["primary-model".to_string(), "fallback-model".to_string()];
+        let chain = ["primary-model".to_string(), "fallback-model".to_string()];
         assert_eq!(chain[0], "primary-model");
         assert_eq!(chain[1], "fallback-model");
     }

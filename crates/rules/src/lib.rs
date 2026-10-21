@@ -4477,7 +4477,7 @@ mod tests {
                 .any(|o| o.id == "semgrep-appsec-platform-pro"));
             // The opt_in_only rule, though grounded, must never be auto-recommended.
             assert!(
-                !(rule.is_auto_recommended() && !rule.is_opt_in_only()),
+                !rule.is_auto_recommended() || rule.is_opt_in_only(),
                 "Semgrep rule must never be pre-checked"
             );
         }
@@ -4513,7 +4513,7 @@ mod tests {
             "it stays grounded — opt-in only changes recommendation, not provenance"
         );
         assert!(
-            !(route_placement.is_auto_recommended() && !route_placement.is_opt_in_only()),
+            !route_placement.is_auto_recommended() || route_placement.is_opt_in_only(),
             "the route-placement rule must never be auto-recommended despite being grounded"
         );
     }
@@ -5165,7 +5165,7 @@ mod tests {
         );
         assert_eq!(provenance.options.len(), 2, "two options: attest, or don't");
         assert!(
-            !(provenance.is_auto_recommended() && !provenance.is_opt_in_only()),
+            !provenance.is_auto_recommended() || provenance.is_opt_in_only(),
             "CICD-BUILD-PROVENANCE-1 must never be auto-recommended"
         );
         assert_ids_unique_in_corpus(&set, &["CICD-BUILD-PROVENANCE-1"]);
