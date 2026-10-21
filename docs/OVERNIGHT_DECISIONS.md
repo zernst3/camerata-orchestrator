@@ -7,8 +7,8 @@
 > reconciled against the commit log. Full follow-up ledger: `docs/plans/2026-10-19_MASTER-SEQUENCE.md`
 > section 2b (item 21). **Next work: W29 detector verticals, `ARCH-ONE-IMPORT-PATH-1` first**, using
 > the CORRECTED algorithm in `docs/design/2026-10-21_w29-detector-implementation.md` (canonical
-> symbol through re-export edges; barrel-internal + test-file + aliased-re-export guards). Detector
-> code + tests can be built now; **corpus TOMLs wait for Zach's recorded go** (work order §91).
+> symbol through re-export edges; barrel-internal + test-file + aliased-re-export guards). Zach gave
+> the corpus go for all nine rules (2026-10-21); register + TOML each rule with its detector.
 > Zach's standing directive: keep developing the next thing; nothing is ever dropped; any defect
 > found MUST be fixed; sequencing matters least.
 
@@ -19,7 +19,22 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS NEEDED (Zach)
 
-(none yet)
+- W32 part (b) (`superseded_since` / `current_recommendation`: per-rule fields saying "the
+  ecosystem moved off this pattern in year X; current guidance is <link>"). The earlier "dropped"
+  ruling was inferred from Zach asking for more context, not stated by him. Zach asked for a
+  plain-language re-explanation before deciding (2026-10-21). Until then: status UNDECIDED, not
+  dropped. Note the corpus staleness sweep design already routes confirmed-stale findings into
+  these fields, so (b) as a standalone chore and (b) as sweep output are separate questions.
+
+## DECISIONS MADE
+
+- 2026-10-21: **Zach's go for all nine W29 corpus rules** (work order §91 protected area). Each
+  rule's TOML lands with its detector, registration, positive + safe-twin tests, homed per the
+  design doc's "Domain home per rule" table.
+- 2026-10-21: `stash@{0}` (09-28 dead-P1 partial) dropped on Zach's OK after verifying every
+  symbol and test it added already exists at HEAD.
+- 2026-10-21: Camerata memory to be decoupled out of the agora-mono project memory dir (Zach:
+  it should never have been there).
 
 ## PROGRESS (newest first)
 

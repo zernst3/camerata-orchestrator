@@ -378,12 +378,12 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
 - **`is_in_repo_scope` symlink fix** has no direct unit test with a real symlinked root.
 - **Ownership:** `Generated`/`Vendored` have no producer; `PlatformManaged` dormant by design.
 - **C5-6** is tracked only in an `#[ignore]` reason (`report_export.rs`); give it a ledger line.
-- **W29 corpus rules need Zach's go** (work order §91, protected area).
+- ~~W29 corpus rules need Zach's go~~ GIVEN 2026-10-21 (all nine).
 - **`domain_to_glob("ui")` excludes `.jsx`**; fix with the first `ui` W29 rule.
 - **Memory location:** Camerata memory lives under the agora-mono project dir, so a session
   started in this repo does not auto-load it.
 - **`stash@{0}`** (09-28 dead-P1 partial): checked 2026-10-21, fully superseded (every function
-  and test it adds exists at HEAD; the rest is clippy --fix churn). Safe to drop on Zach's OK.
+  and test it adds exists at HEAD; the rest is clippy --fix churn). DROPPED 2026-10-21 on Zach's OK.
 
 ## 3. Explicitly NOT doing
 
