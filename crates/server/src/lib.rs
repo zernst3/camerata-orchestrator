@@ -18417,7 +18417,7 @@ mod tests {
             .projects
             .create("Acme", vec![])
             .expect("project created");
-        add_memory(
+        let added = add_memory(
             axum::extract::State(state.clone()),
             axum::extract::Path(p.id.clone()),
             axum::Json(AddMemoryReq {
@@ -18426,9 +18426,14 @@ mod tests {
             }),
         )
         .await;
+        assert_eq!(
+            added.0["ok"], true,
+            "add_memory reports success: {}",
+            added.0
+        );
         let eid = state.projects.active().unwrap().memory[0].id.clone();
         // Edit text + kind (what the modal Save does).
-        patch_memory(
+        let patched = patch_memory(
             axum::extract::State(state.clone()),
             axum::extract::Path((p.id.clone(), eid)),
             axum::Json(PatchMemoryReq {
@@ -18438,6 +18443,11 @@ mod tests {
             }),
         )
         .await;
+        assert_eq!(
+            patched.0["ok"], true,
+            "patch_memory reports success: {}",
+            patched.0
+        );
         let m = state.projects.active().unwrap().memory[0].clone();
         assert_eq!(m.text, "edited learning", "text edited + trimmed");
         assert_eq!(m.kind, crate::project::MemoryKind::Gotcha, "kind edited");

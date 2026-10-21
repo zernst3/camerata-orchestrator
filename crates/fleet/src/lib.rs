@@ -1340,7 +1340,7 @@ mod tests {
             bin: &std::path::Path,
         ) {
             // Both should accept the same event type.
-            let _: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
+            let _signature_check: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
                 Box::pin(build_from_plan_with_model(plan, root, bin, None, &|_| {}));
         }
         fn _check_some_compiles(
@@ -1348,9 +1348,14 @@ mod tests {
             root: &std::path::Path,
             bin: &std::path::Path,
         ) {
-            let _: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> = Box::pin(
-                build_from_plan_with_model(plan, root, bin, Some("claude-sonnet-5"), &|_| {}),
-            );
+            let _signature_check: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
+                Box::pin(build_from_plan_with_model(
+                    plan,
+                    root,
+                    bin,
+                    Some("claude-sonnet-5"),
+                    &|_| {},
+                ));
         }
         // This test proves the API compiles with both None and Some; the _ suffix
         // functions are never called, so no I/O or infra is required.
@@ -1371,9 +1376,15 @@ mod tests {
             bin: &std::path::Path,
         ) {
             let tier_map = crate::tier::TierMap::default();
-            let _: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> = Box::pin(
-                build_from_plan_with_tier_map(plan, root, bin, &tier_map, 1, &|_| {}),
-            );
+            let _signature_check: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
+                Box::pin(build_from_plan_with_tier_map(
+                    plan,
+                    root,
+                    bin,
+                    &tier_map,
+                    1,
+                    &|_| {},
+                ));
         }
         let _ = _check_signature as fn(_, _, _);
     }
