@@ -135,8 +135,8 @@ pub mod query_grammar_injection_checker;
 /// `ARCH-ONE-IMPORT-PATH-1` (W29, `docs/design/2026-10-21_w29-detector-implementation.md`):
 /// a symbol with a re-export is imported by outside code through two different paths (its
 /// origin file AND a barrel). Canonicalizes every named/default import through the re-export
-/// graph to its `(origin_file, name)` before grouping. NOT yet registered in
-/// [`arch_checker::all_checkers`] (registration lands with the corpus rule).
+/// graph to its `(origin_file, name)` before grouping. See
+/// `crates/rules/principles/javascript/arch-one-import-path-1.toml`.
 pub mod one_import_path_checker;
 
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s

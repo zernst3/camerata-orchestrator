@@ -4,8 +4,8 @@
 //! canonical-symbol algorithm and its traps"); this module implements that version, not the
 //! older "symbol to paths" idea.
 //!
-//! **Not registered yet.** Registration in [`crate::arch_checker::all_checkers`] and the
-//! corpus rule (`javascript` domain) land together once the owner approves the rule.
+//! Registered in [`crate::arch_checker::all_checkers`] together with the corpus rule
+//! `crates/rules/principles/javascript/arch-one-import-path-1.toml` (`javascript` domain).
 //!
 //! # How it decides
 //!

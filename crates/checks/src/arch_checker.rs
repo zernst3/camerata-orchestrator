@@ -241,6 +241,7 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
         Box::new(crate::resource_lifecycle_checker::ResourceLifecycleChecker),
         Box::new(crate::weak_randomness_checker::WeakTokenRandomnessChecker),
         Box::new(crate::query_grammar_injection_checker::QueryGrammarInjectionChecker),
+        Box::new(crate::one_import_path_checker::OneImportPathChecker),
     ]
 }
 
@@ -421,6 +422,7 @@ mod tests {
             "UI-UTC-DATES-1",
             "SEC-NO-WEAK-TOKEN-RANDOMNESS-1",
             "SEC-NO-QUERY-GRAMMAR-INJECTION-1",
+            "ARCH-ONE-IMPORT-PATH-1",
         ] {
             assert!(
                 ids.contains(expected),
