@@ -4556,6 +4556,12 @@ async fn rescan_alternatives_handler(
         }
     }
 
+    // A rescan builds Findings without going through `audit_repos`, so it must apply the
+    // corpus-authored severity bounds itself: the findings returned below AND the ones folded
+    // into the stored scan are what the triage view shows, and they must carry the same
+    // severity the PDF/xlsx will bill. See `severity_bounds`.
+    crate::severity_bounds::apply_corpus_severity_bounds(&mut all_findings, &corpus);
+
     // Merge into the project's stored last_scan so an immediate accept-alternatives call
     // (or a UI reload) sees the operator's override without any client round-trip.
     if let Some(mut report) = state.get_last_scan(&id) {
