@@ -202,7 +202,7 @@ pub struct FindingRow {
 
 /// One row of the `Dependencies` sheet — the `DEP_AUDIT_RULE_ID` carve-out, same as the
 /// PDF's own dependency-snapshot section.
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 struct DepRow {
     package: String,
     advisory: String,
@@ -212,6 +212,7 @@ struct DepRow {
 
 /// One row of the `Coverage` sheet: an audited rule id, uncapped (the PDF's what's-healthy
 /// section caps at 10; the workbook doesn't need to).
+#[derive(Serialize)]
 struct CoverageRow {
     rule_id: String,
     title: String,
@@ -226,6 +227,7 @@ struct CoverageRow {
 /// alternative for, so a WRONG pick costs a glance at this table rather than a false finding
 /// buried in the report. Built from `ScanReport::recommendations` — see
 /// [`build_rules_applied_rows`].
+#[derive(Serialize)]
 struct RulesAppliedRow {
     rule_id: String,
     /// The human label of the chosen option (resolved against the corpus when available,
@@ -692,6 +694,7 @@ fn site_locations(row: &FindingRow) -> Vec<String> {
 /// two numbers down N rows and still leaves the reader to work out that they are the same
 /// group. At rule grain the owner's canonical sentence — "2 of 47 sites deviate from
 /// URI-versioned endpoints" — is three adjacent columns, with no prose to parse.
+#[derive(Serialize)]
 struct DeviationGroupRow {
     category: String,
     rule_title: String,
@@ -786,9 +789,11 @@ fn build_deviation_groups(
 /// deliverable: the audit derives the client's conventions and this is the sheet those
 /// conventions are read off, so it answers "what does our codebase already do well and
 /// consistently" and "where have we never decided" in the same table.
+#[derive(Serialize)]
 struct ConventionRow {
     /// 0 = a convention IS followed consistently, 1 = none adopted. Sorts the "doing well"
     /// block first, because that is this sheet's headline job.
+    #[serde(skip)]
     rank: u8,
     category: String,
     rule_title: String,
@@ -874,6 +879,7 @@ fn build_convention_rows(
 /// One row of the Coverage sheet's "could not complete" section — a [`FindingKind::
 /// NotAssessed`] row. Honesty, not a finding: a rule that was armed and could not be
 /// evaluated must be distinguishable from one that was assessed and found clean.
+#[derive(Serialize)]
 struct NotAssessedRow {
     rule_title: String,
     rule_id: String,
@@ -2315,6 +2321,58 @@ pub fn build_findings_export(
     }
 }
 
+/// Build the per-dataset JSON exports that ride in the product ZIP under `json/`. Each file is
+/// a second SERIALIZER over the SAME typed row structs the xlsx sheets are built from (the exact
+/// `partition_rows` + `build_*` outputs [`build_workbook`] uses, called here identically), never
+/// an independent walk of the scan - so `json/`, the xlsx, and `findings.json` can never
+/// disagree. Returns `(archive_path, pretty-JSON bytes)` pairs.
+///
+/// `json/all-findings.json` is the flat sibling of `findings.json`'s `findings` array (the whole
+/// non-FP set); the other files are the partitioned sheet tables, each its own one-table file.
+pub fn build_json_exports(
+    report: &crate::onboard::SealedReport,
+    dispositions: &HashMap<String, DispositionWire>,
+    corpus: Option<&camerata_rules::RuleSet>,
+    opts: &ReportOptions,
+) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    let (rows, dep_rows) = partition_rows(report, dispositions, corpus, &opts.chosen_options);
+    let live_rows: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
+    let fp_rows: Vec<&FindingRow> = rows.iter().filter(|r| r.is_fp).collect();
+    let findings_rows: Vec<&FindingRow> = live_rows
+        .iter()
+        .copied()
+        .filter(|r| kind_sheet(r) == KindSheet::Findings)
+        .collect();
+    let convention_sheet_rows: Vec<&FindingRow> = live_rows
+        .iter()
+        .copied()
+        .filter(|r| kind_sheet(r) == KindSheet::Conventions)
+        .collect();
+    let coverage_kind_rows: Vec<&FindingRow> = live_rows
+        .iter()
+        .copied()
+        .filter(|r| kind_sheet(r) == KindSheet::Coverage)
+        .collect();
+
+    let deviation_groups = build_deviation_groups(&findings_rows, corpus);
+    let convention_rows = build_convention_rows(&convention_sheet_rows, corpus);
+    let not_assessed_rows = build_not_assessed_rows(&coverage_kind_rows, corpus);
+    let coverage_rows = build_coverage_rows(report, &rows, corpus);
+    let rules_applied_rows = build_rules_applied_rows(report, corpus);
+
+    // One (path, bytes) per table; pretty-printed for a diffable, human-skimmable file.
+    Ok(vec![
+        ("json/all-findings.json".to_string(), serde_json::to_vec_pretty(&live_rows)?),
+        ("json/deviations.json".to_string(), serde_json::to_vec_pretty(&deviation_groups)?),
+        ("json/conventions.json".to_string(), serde_json::to_vec_pretty(&convention_rows)?),
+        ("json/not-assessed.json".to_string(), serde_json::to_vec_pretty(&not_assessed_rows)?),
+        ("json/dependencies.json".to_string(), serde_json::to_vec_pretty(&dep_rows)?),
+        ("json/false-positives.json".to_string(), serde_json::to_vec_pretty(&fp_rows)?),
+        ("json/coverage.json".to_string(), serde_json::to_vec_pretty(&coverage_rows)?),
+        ("json/rules-applied.json".to_string(), serde_json::to_vec_pretty(&rules_applied_rows)?),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2605,6 +2663,71 @@ mod tests {
             .expect("build_workbook must succeed");
         assert!(!bytes.is_empty());
         assert_eq!(&bytes[0..2], b"PK", "xlsx must start with the zip magic bytes");
+    }
+
+    #[test]
+    fn json_exports_cover_every_table_and_parse() {
+        let critical = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "critical");
+        let mut dep = finding(DEP_AUDIT_RULE_ID, "Cargo.lock", 0, "high");
+        dep.snippet = "foo@1.0.0".to_string();
+        let report = report_with(vec![critical, dep], vec!["SUPABASE-RLS-ENABLED-1"]);
+        let sealed = report.clone().seal();
+
+        let exports = build_json_exports(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let names: Vec<&str> = exports.iter().map(|(n, _)| n.as_str()).collect();
+        for expected in [
+            "json/all-findings.json",
+            "json/deviations.json",
+            "json/conventions.json",
+            "json/not-assessed.json",
+            "json/dependencies.json",
+            "json/false-positives.json",
+            "json/coverage.json",
+            "json/rules-applied.json",
+        ] {
+            assert!(names.contains(&expected), "missing {expected} in {names:?}");
+        }
+        assert_eq!(exports.len(), 8, "exactly the eight data tables");
+        // Every file is valid, parseable JSON (an array).
+        for (name, bytes) in &exports {
+            let v: serde_json::Value = serde_json::from_slice(bytes)
+                .unwrap_or_else(|e| panic!("{name} is not valid JSON: {e}"));
+            assert!(v.is_array(), "{name} must be a JSON array of rows");
+        }
+    }
+
+    #[tokio::test]
+    async fn json_all_findings_matches_findings_json_rows() {
+        // The load-bearing parity gate: json/all-findings.json is byte-for-byte the same data
+        // as findings.json's `findings` array, because both serialize the SAME non-FP FindingRow
+        // set from the SAME partition_rows pass. If they ever diverge, the artifacts disagree.
+        let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "a.rs", 1, "high");
+        let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
+        let sealed = report.clone().seal();
+
+        let report_json =
+            crate::report_export::build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+        let fe = build_findings_export(
+            &sealed,
+            &HashMap::new(),
+            None,
+            &report_json,
+            &HashMap::new(),
+        );
+        let expected = serde_json::to_value(&fe.findings).unwrap();
+
+        let exports = build_json_exports(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let all_findings = &exports
+            .iter()
+            .find(|(n, _)| n == "json/all-findings.json")
+            .expect("all-findings present")
+            .1;
+        let got: serde_json::Value = serde_json::from_slice(all_findings).unwrap();
+
+        assert_eq!(
+            got, expected,
+            "json/all-findings.json must equal findings.json's findings array"
+        );
     }
 
     #[test]

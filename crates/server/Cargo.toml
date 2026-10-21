@@ -115,6 +115,8 @@ glob = "0.3"
 regex = "1"
 rust_xlsxwriter = "0.96.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+csv = "1"
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
