@@ -65,13 +65,54 @@ A non-`client-owned` finding MUST carry a reason AND a realistic action — neve
 fix this." (Same discipline as W26's "no high+ row without a fix": here it is "no unfixable row
 without a reason + a client action.")
 
+## Dependency findings — the fixability split (folded in 2026-10-21)
+
+**We already run a dependabot-class scan.** `crates/server/src/dep_audit.rs` runs
+**`osv-scanner`** (Google's OSV: npm, cargo, pip, go, maven, …) over the repo's lockfiles,
+emits a `DEP-AUDIT-1` defect per known-vulnerable package, and routes them into the inspection
+output already — the Dependencies sheet, `dependency_snapshot`, the `dependency_advisories`
+reconciliation count, and findings.json. So the SCAN exists and is wired; it is not unique to us
+(OSV is the shared public DB behind Dependabot too), but it is correctly part of the product.
+
+**The gap (and the hook for this class):** `parse_osv_json` does NOT extract the **fixed/patched
+version** from OSV's `affected[].ranges[].events[].fixed`. So today a dep finding says "pkg@ver
+has CVE-X" but not "upgrade to >= Y." Extracting the fixed version is the enhancement that makes
+the dependency finding ACTIONABLE and, crucially, lets `ownership` be **data-driven**:
+
+- **A patched version exists** (OSV reports a `fixed`) → the CVE IS fixable → `ownership =
+  client-owned`, action = **"upgrade `<pkg>` to >= `<fixed>`"**. This is a normal actionable
+  finding, in the action tiers and the remediation budget.
+- **No patched version exists** (no `fixed` event for a range covering the installed version) →
+  genuinely not-yet-fixable → `ownership = external-dependency` (THIS class), action = **"no
+  patch is available yet; monitor the advisory, accept the risk, or replace the dependency."**
+  Routed to the "outside your direct control" section, excluded from the budget, true severity
+  kept.
+
+So "external dependency" is not one bucket — it is split deterministically by whether OSV carries
+a fix. That resolves open sub-decision #2 below: include dependency findings in this class ONLY
+when no fix is available; a fixable CVE stays client-owned with an upgrade action.
+
+**Merely-outdated (no CVE)** — packages behind latest with no advisory — is a DIFFERENT scan
+(`cargo-outdated`/`npm outdated`) and is deliberately OUT of scope for the inspection: it is
+noise (everything is eventually "a minor behind"), it is a maintenance-dashboard concern rather
+than a security/quality inspection finding, and flagging it would spend client attention on
+non-findings. (A future, low-priority option: flag only EOL or severely-stale MAJOR versions,
+never every minor. Noted, not planned.)
+
+### Dependency-findings build (added to the build outline)
+- Extend `parse_osv_json` to pull the smallest `fixed` version >= the installed version from the
+  matching `affected` range; carry it on the finding.
+- Derive `ownership` from it: `fixed` present → client-owned + "upgrade to >= `<fixed>`";
+  absent → `external-dependency` + "no patch available".
+- Tests: positive (a CVE WITH a fix → client-owned, upgrade action, in the budget), and the
+  twin (a CVE with NO fix → external-dependency, in the "outside your control" section, out of
+  the budget). This is the dependency arm of the class's positive/safe-twin pair.
+
 ## Open sub-decisions for Zach
 1. **Axis name**: `ownership` vs `actionability` vs `locus`. (Recommend `ownership`.)
-2. **Does `external-dependency` even belong here**, given it is usually fixable by upgrade? Option:
-   keep it client-owned (an upgrade IS a fix) and reserve this axis for the truly-unfixable
-   (platform-managed / generated / vendored-without-upstream-access). Leaning: include it but with
-   the "upgrade when available" action, because a dependency with NO patched version is genuinely
-   not-yet-fixable and belongs in the same section.
+2. ~~Does `external-dependency` belong here?~~ **RESOLVED (2026-10-21):** split it by OSV fix
+   data — a CVE WITH a patched version is `client-owned` (action: upgrade); a CVE with NO patch
+   is `external-dependency` (this class). See the "Dependency findings" section above.
 3. **Build scope**: the axis + the RLS platform-schema detector (the W24 instance) first, then
    extend to the dependency/generated reasons; or all reasons at once.
 
