@@ -181,6 +181,22 @@ pub struct ExportSurface {
     pub star_re_exports: Vec<StarReExport>,
 }
 
+/// A load whose target the import graph cannot follow: `import(name)`, `require(name)`,
+/// `require.context('./dir')`, `import.meta.glob('./dir/*.ts')`, Python `importlib.import_module(name)`
+/// / `pkgutil.iter_modules(..)`, Rust `include_dir!("dir")`. A checker that flags on
+/// UN-reachability (dead code) must treat the files such a load could reach as alive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputedLoad {
+    /// The literal head of the loaded path: the text before the first `${`, `+`, `*`, `{`,
+    /// `[` or `?` of the first argument (a template literal's first quasi, the leftmost string
+    /// operand of a `+` chain, a glob's literal head). A directory argument
+    /// (`require.context('./icons')`, `include_dir!("assets")`) gets a trailing `/`. The
+    /// directory the load can reach is this text cut at its last `/`. `None` when the argument
+    /// carries no literal at all (`require(name)`): the load could name anything.
+    pub prefix: Option<String>,
+    pub line: usize,
+}
+
 /// Extract every import/use declaration from `source`, dispatching to the per-language
 /// parser. Never panics: a parse failure yields an empty vec (fewer findings, never a crash
 /// — see module docs).
@@ -191,6 +207,18 @@ pub fn imports(lang: SourceLang, source: &str) -> Vec<Import> {
         SourceLang::Tsx => ecma::imports(ecma::EcmaDialect::Tsx, source),
         SourceLang::JavaScript => ecma::imports(ecma::EcmaDialect::JavaScript, source),
         SourceLang::Python => python::imports(source),
+    }
+}
+
+/// Extract every load the import graph cannot follow (see [`ComputedLoad`]). Never panics
+/// (same contract as [`imports`]).
+pub fn computed_loads(lang: SourceLang, source: &str) -> Vec<ComputedLoad> {
+    match lang {
+        SourceLang::Rust => rust_syn::computed_loads(source),
+        SourceLang::TypeScript => ecma::computed_loads(ecma::EcmaDialect::TypeScript, source),
+        SourceLang::Tsx => ecma::computed_loads(ecma::EcmaDialect::Tsx, source),
+        SourceLang::JavaScript => ecma::computed_loads(ecma::EcmaDialect::JavaScript, source),
+        SourceLang::Python => python::computed_loads(source),
     }
 }
 
@@ -264,6 +292,7 @@ mod tests {
             assert!(imports(lang, "").is_empty());
             assert!(functions(lang, "").is_empty());
             assert!(method_calls(lang, "").is_empty());
+            assert!(computed_loads(lang, "").is_empty());
             assert_eq!(exports(lang, ""), ExportSurface::default());
         }
     }

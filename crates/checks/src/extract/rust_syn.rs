@@ -17,7 +17,7 @@
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
-use super::{FunctionSpan, Import, ImportKind, MethodCall};
+use super::{ComputedLoad, FunctionSpan, Import, ImportKind, MethodCall};
 
 /// Extract every `use` (and `extern crate`) declaration. See module docs for the
 /// specifier/names convention: `specifier` is the module-path PREFIX, `names` the LEAF
@@ -219,6 +219,63 @@ impl<'s, 'ast> Visit<'ast> for FnVisitor<'s> {
             });
         }
         syn::visit::visit_trait_item_fn(self, node);
+    }
+}
+
+// ─── computed loads ──────────────────────────────────────────────────────────────────────
+
+/// Every directory-embedding macro that loads files the `mod` tree never names:
+/// `include_dir!("dir")` (any path ending in `include_dir`) and `automod::dir!("dir")`. The
+/// first string literal in the macro body is the directory (`prefix`, with a trailing `/`);
+/// `None` when the body has no literal. See [`ComputedLoad`].
+pub fn computed_loads(source: &str) -> Vec<ComputedLoad> {
+    let Ok(file) = syn::parse_file(source) else {
+        return Vec::new();
+    };
+    let mut visitor = LoadVisitor { out: Vec::new() };
+    visitor.visit_file(&file);
+    visitor.out
+}
+
+struct LoadVisitor {
+    out: Vec<ComputedLoad>,
+}
+
+impl<'ast> Visit<'ast> for LoadVisitor {
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        let segments: Vec<String> = node
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        let is_dir_macro = match segments.as_slice() {
+            [.., last] if last == "include_dir" => true,
+            [.., owner, last] => owner == "automod" && last == "dir",
+            _ => false,
+        };
+        if is_dir_macro {
+            let literal = node.tokens.clone().into_iter().find_map(|tt| match tt {
+                proc_macro2::TokenTree::Literal(l) => {
+                    match syn::parse_str::<syn::LitStr>(&l.to_string()) {
+                        Ok(s) => Some(s.value()),
+                        Err(_) => None,
+                    }
+                }
+                _ => None,
+            });
+            self.out.push(ComputedLoad {
+                prefix: literal.map(|dir| {
+                    if dir.ends_with('/') {
+                        dir
+                    } else {
+                        format!("{dir}/")
+                    }
+                }),
+                line: node.path.span().start().line,
+            });
+        }
+        syn::visit::visit_macro(self, node);
     }
 }
 
@@ -585,6 +642,55 @@ pub(super) mod c;
         assert!(mod_decls("mod ").is_empty());
         assert!(mod_decls("\u{0}\u{1}\u{FFFD} not rust").is_empty());
         assert!(mod_decls("fn f() { let x = ; ").is_empty());
+    }
+
+    // ── computed loads ────────────────────────────────────────────────────────
+
+    fn rust_loads(src: &str) -> Vec<(Option<String>, usize)> {
+        computed_loads(src)
+            .into_iter()
+            .map(|l| (l.prefix, l.line))
+            .collect()
+    }
+
+    #[test]
+    fn include_dir_macro_names_a_directory() {
+        assert_eq!(
+            rust_loads("static D: Dir = include_dir!(\"assets\");\n"),
+            vec![(Some("assets/".to_string()), 1)]
+        );
+        assert_eq!(
+            rust_loads("static D: Dir = include_dir::include_dir!(\"$CARGO_MANIFEST_DIR/a/\");\n"),
+            vec![(Some("$CARGO_MANIFEST_DIR/a/".to_string()), 1)]
+        );
+    }
+
+    #[test]
+    fn automod_dir_macro_names_a_directory_even_with_a_visibility() {
+        assert_eq!(
+            rust_loads("\nautomod::dir!(\"src/plugins\");\n"),
+            vec![(Some("src/plugins/".to_string()), 2)]
+        );
+        assert_eq!(
+            rust_loads("automod::dir!(pub \"src/plugins\");\n"),
+            vec![(Some("src/plugins/".to_string()), 1)]
+        );
+    }
+
+    #[test]
+    fn a_directory_macro_with_no_literal_has_no_prefix() {
+        assert_eq!(rust_loads("include_dir!(DIR_NAME);\n"), vec![(None, 1)]);
+    }
+
+    #[test]
+    fn other_macros_and_other_dir_macros_are_not_loads() {
+        assert!(rust_loads("println!(\"assets\");\nother::dir!(\"x\");\nvec![1];\n").is_empty());
+    }
+
+    #[test]
+    fn rust_computed_loads_never_panic() {
+        assert!(computed_loads("").is_empty());
+        assert!(computed_loads("include_dir!(").is_empty());
     }
 
     // ── adversarial: malformed / truncated input must never panic ────────────
