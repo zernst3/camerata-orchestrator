@@ -1,0 +1,55 @@
+id = "ARCH-ONE-IMPORT-PATH-1"
+title = "A symbol has one import path — code outside a barrel imports it from one home, not from both the barrel and the file that defines it"
+domain = "javascript"
+layer = "language"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+# Severity ceiling, transcribed from the rule's own framing: a split import path is a consistency
+# problem that makes later moves and renames harder, not a live fault in current behavior. The
+# deterministic check emits at medium (a checker never emits low directly); this ceiling brings
+# the exported finding down to low.
+max_severity = "low"
+default = true
+# `policy`, not `grounded`: the convention that a symbol has one import path is deliberate project
+# policy, and no external authority states it. Related controls (not citations, and deliberately
+# not in `[[sources]]`): MDN Web Docs "export" (re-exporting / aggregating modules) establishes the
+# mechanism only, that an export-from gives a binding a second import path; eslint-plugin-import
+# `no-internal-modules` limits reaching into a module by path pattern but does not compare the
+# paths used for one symbol across files. Only the owner sets `verified`.
+verification = "policy"
+qualifies = "Deterministically checkable from the repository's module graph, with no judgment involved: the check follows every named and default import through the re-exports (including aliased and star re-exports) to the file that actually defines the symbol, then reports a symbol only when code outside the re-exporting module's own folder reaches it through two or more different files. An index barrel is a barrel like any other: a split between the defining file and an index file's re-export is exactly what this rule reports, and being an index file earns no exemption. Files inside a barrel's folder, and siblings of the defining file, importing directly; test, fixture, mock, end-to-end and story files; two spellings of the same file (a relative path versus a configured path alias); compiled output sitting beside its source; and names that a type-only re-export covers are not splits and are never reported. Namespace imports, dynamic imports and require calls are not followed, and a symbol whose re-export chain is ambiguous or circular is skipped, so a split they hide goes unreported rather than guessed at. A re-export that sits in the repository's root folder covers the whole repository and so suppresses the check for that symbol. No off-the-shelf linter rule detects a symbol reachable by two paths: rules that restrict which folders may be imported from limit reaching into a module, but do not compare the paths used for one symbol across files."
+
+[[sources]]
+url = "docs/design/2026-10-21_w29-detector-implementation.md"
+title = "Design: the W29 detector layer — ARCH-ONE-IMPORT-PATH-1, the canonical-symbol algorithm and its traps"
+
+[[sources]]
+url = "CORPUS_WORK_ORDER_CONSISTENCY_RULES.md"
+title = "Corpus work order: consistency rules, section 7 — a symbol has one import path"
+
+[[sources]]
+url = "docs/OVERNIGHT_DECISIONS.md"
+title = "Decisions log — DECISIONS MADE, 2026-10-21: a split between a symbol's origin file and an index barrel is a violation"
+
+[decision]
+question = "When a symbol is both defined in one file and re-exported from a barrel, including an index file, which import path does the code outside that barrel's folder use for it?"
+default = "one-import-home-per-symbol"
+why = "A symbol that outside code imports from two different files has two public addresses. A rename, a move or a split of the symbol must then be chased through both paths, callers drift to whichever path they last copied, and the barrel stops being the public surface because other code reaches around it. An index barrel is no exception: a split between the defining file and an index file's re-export is exactly this problem. Files inside the barrel's own folder importing their siblings directly is the normal way to avoid import cycles and is not part of it; the problem is outside callers disagreeing with each other about where a symbol lives."
+
+[[option]]
+id = "one-import-home-per-symbol"
+label = "Code outside a barrel's folder imports each symbol from one home, either the file that defines it or the barrel, never both"
+directive = "Import each symbol from one home: either the file that defines it or a single barrel that re-exports it. An index barrel is no exception to this. Code outside a barrel's own folder uses the same path for a given symbol everywhere, while files inside the barrel's folder may import their siblings directly. When a symbol is reachable by both its defining file and a barrel, choose one home: if it is the barrel, route every outside importer through it; if it is the defining file, remove the re-export."
+remediation = """
+Pick one home for the symbol: the file that defines it, or one barrel. If you choose the barrel, change every import of the symbol from outside that folder to go through it. If you choose the defining file, remove the barrel's re-export of the symbol and import it from the file. Verify by confirming every import of the symbol from outside the barrel's folder now names the same file, and that the project still builds and its tests pass.
+"""
+effort = "low"
+why = "The fix is a mechanical edit of import lines or a one-line removal, so the cost is small and the result is a single address for the symbol that later renames and moves can follow."
+
+[[option]]
+id = "a-symbol-is-imported-from-both-its-barrel-and-its-defining-file"
+violates = true
+label = "A symbol is imported from both a barrel that re-exports it and the file that defines it"
+directive = "Callers outside a barrel's folder may import a re-exported symbol from either the barrel or the file that defines it, whichever they prefer."
+why = "Two import paths to one symbol mean a rename, move or split of that symbol has to be chased through both, and a path left unchanged breaks only the callers that happened to use it. The barrel stops being the public surface because other code reaches around it, and each new caller copies whichever path it saw last, so the split widens over time."

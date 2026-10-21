@@ -90,6 +90,7 @@ impl<'ast> Visit<'ast> for ImportVisitor {
             names: Vec::new(),
             kind: ImportKind::SideEffect,
             line: node.span().start().line,
+            type_only: false,
         });
     }
 }
@@ -120,6 +121,7 @@ fn walk_use_tree(
                     names: Vec::new(),
                     kind: ImportKind::Namespace,
                     line,
+                    type_only: false,
                 });
             } else {
                 out.push(Import {
@@ -127,6 +129,7 @@ fn walk_use_tree(
                     names: vec![name],
                     kind: ImportKind::Named,
                     line,
+                    type_only: false,
                 });
             }
         }
@@ -137,6 +140,7 @@ fn walk_use_tree(
                 names: vec![r.ident.to_string()],
                 kind: ImportKind::Named,
                 line,
+                type_only: false,
             });
         }
         syn::UseTree::Glob(_) => {
@@ -145,6 +149,7 @@ fn walk_use_tree(
                 names: Vec::new(),
                 kind: ImportKind::Namespace,
                 line,
+                type_only: false,
             });
         }
         syn::UseTree::Group(g) => {

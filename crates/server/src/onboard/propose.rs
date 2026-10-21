@@ -1387,6 +1387,46 @@ mod tests {
         );
     }
 
+    /// `ARCH-ONE-IMPORT-PATH-1` lives in the `javascript` domain, which a TypeScript repo
+    /// reaches via `javascript:typescript` and a plain JavaScript repo reaches directly. No
+    /// new wiring is needed; this proves it rather than assuming it. Also pins the negative:
+    /// a Python-only repo must not be handed an ES-module re-export rule.
+    #[tokio::test]
+    async fn arch_one_import_path_is_proposed_for_typescript_and_javascript_stacks() {
+        const ID: &str = "ARCH-ONE-IMPORT-PATH-1";
+        for (repo, path) in [("acme/ts-app", "src/app.ts"), ("acme/js-app", "src/app.js")] {
+            let repo_files = files(&[(path, "export const a = 1;")]);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            assert!(
+                domains.contains(&"javascript".to_string()),
+                "{repo}: {domains:?}"
+            );
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            let rule = proposed
+                .iter()
+                .find(|r| r.id == ID)
+                .unwrap_or_else(|| panic!("{ID} must be proposed for {repo}"));
+            assert_eq!(rule.domain, "javascript");
+            assert!(rule.recommended, "{repo}: suggested, not merely available");
+            assert!(
+                rule.is_auto_recommended,
+                "{repo}: a policy rule is still auto-recommended (pre-checked)"
+            );
+            assert_eq!(rule.repos, vec![repo.to_string()]);
+        }
+
+        let py_files = files(&[("app/main.py", "print('hi')")]);
+        let stack = detect_stack("acme/py-app", &py_files);
+        let domains = domains_for_stack(&stack);
+        let proposed = propose_corpus_rules(&[("acme/py-app".to_string(), domains)]).await;
+        let rule = proposed.iter().find(|r| r.id == ID);
+        assert!(
+            rule.is_none_or(|r| !r.recommended),
+            "a Python-only repo must not have {ID} suggested: {rule:?}"
+        );
+    }
+
     /// req_a6: a plain Rust + Axum + Tokio + sqlx service must arm `rust:axum`, `rust:tokio`
     /// and `rust:sqlx` — the three Rust families the audit named, 15 rules between them.
     #[test]

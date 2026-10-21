@@ -125,6 +125,7 @@ fn collect_plain_import(node: Node, source: &str, out: &mut Vec<Import>) {
                 names: Vec::new(),
                 kind: ImportKind::Namespace,
                 line,
+                type_only: false,
             });
         }
     }
@@ -162,6 +163,7 @@ fn collect_from_import(node: Node, source: &str, out: &mut Vec<Import>) {
             names: Vec::new(),
             kind: ImportKind::Namespace,
             line,
+            type_only: false,
         });
         return;
     }
@@ -180,6 +182,7 @@ fn collect_from_import(node: Node, source: &str, out: &mut Vec<Import>) {
                 names: vec![name],
                 kind: ImportKind::Named,
                 line,
+                type_only: false,
             });
         }
     }
@@ -216,6 +219,7 @@ fn collect_import_module_call(node: Node, source: &str, out: &mut Vec<Import>) {
         names: Vec::new(),
         kind: ImportKind::Dynamic,
         line: start_line(node),
+        type_only: false,
     });
 }
 

@@ -114,6 +114,10 @@ pub struct Import {
     pub names: Vec<String>,
     pub kind: ImportKind,
     pub line: usize,
+    /// TS `import type { A }` / inline `import { type A }` (and the `export type` /
+    /// `export { type A }` re-export equivalents): the binding exists only at the type level
+    /// and is erased at runtime. Always `false` for Rust and Python.
+    pub type_only: bool,
 }
 
 /// One function/method/handler definition with its body span (1-based, inclusive lines).
@@ -141,6 +145,41 @@ pub struct MethodCall {
     pub line: usize,
 }
 
+/// One named re-export: `export { origin as exported } from 'specifier'`. `origin` is the
+/// name as the SOURCE module exports it (`"default"` for `export { default } from`);
+/// `exported` is the name THIS module exposes it under (the alias when there is one). The
+/// plain [`Import`] a `ReExport` produces keeps only `origin`, which is why an aliased
+/// re-export is indistinguishable from an unaliased one there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedReExport {
+    pub specifier: String,
+    pub origin: String,
+    pub exported: String,
+    pub line: usize,
+    /// `export type { A } from` or `export { type A } from`: the barrel exposes only the
+    /// TYPE meaning of the name, so a same-named value is not reachable through it.
+    pub type_only: bool,
+}
+
+/// One star re-export: `export * from 'specifier'`. (`export * as ns from` is NOT one of
+/// these: it exposes a single namespace binding, so it is recorded as an own export `ns`.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StarReExport {
+    pub specifier: String,
+    pub line: usize,
+}
+
+/// A JS/TS file's export surface: what other modules can import from it, and which of that is
+/// merely forwarded from elsewhere. Only the ECMAScript dialects have one; see [`exports`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExportSurface {
+    /// Names this module exports itself (declarations, `default`, a local `export { a, b as c }`
+    /// with no source, and `export * as ns from`).
+    pub own: Vec<String>,
+    pub named_re_exports: Vec<NamedReExport>,
+    pub star_re_exports: Vec<StarReExport>,
+}
+
 /// Extract every import/use declaration from `source`, dispatching to the per-language
 /// parser. Never panics: a parse failure yields an empty vec (fewer findings, never a crash
 /// — see module docs).
@@ -151,6 +190,18 @@ pub fn imports(lang: SourceLang, source: &str) -> Vec<Import> {
         SourceLang::Tsx => ecma::imports(ecma::EcmaDialect::Tsx, source),
         SourceLang::JavaScript => ecma::imports(ecma::EcmaDialect::JavaScript, source),
         SourceLang::Python => python::imports(source),
+    }
+}
+
+/// Extract a file's export surface. Only TypeScript / TSX / JavaScript have one; Rust and
+/// Python return an empty surface (their visibility models are not re-export barrels in the
+/// ES-module sense). Never panics (same contract as [`imports`]).
+pub fn exports(lang: SourceLang, source: &str) -> ExportSurface {
+    match lang {
+        SourceLang::TypeScript => ecma::exports(ecma::EcmaDialect::TypeScript, source),
+        SourceLang::Tsx => ecma::exports(ecma::EcmaDialect::Tsx, source),
+        SourceLang::JavaScript => ecma::exports(ecma::EcmaDialect::JavaScript, source),
+        SourceLang::Rust | SourceLang::Python => ExportSurface::default(),
     }
 }
 
@@ -212,6 +263,23 @@ mod tests {
             assert!(imports(lang, "").is_empty());
             assert!(functions(lang, "").is_empty());
             assert!(method_calls(lang, "").is_empty());
+            assert_eq!(exports(lang, ""), ExportSurface::default());
         }
+    }
+
+    #[test]
+    fn exports_dispatch_reads_ecma_and_leaves_other_languages_empty() {
+        let src = "export const a = 1;\n";
+        assert_eq!(exports(SourceLang::TypeScript, src).own, ["a"]);
+        assert_eq!(exports(SourceLang::Tsx, src).own, ["a"]);
+        assert_eq!(exports(SourceLang::JavaScript, src).own, ["a"]);
+        assert_eq!(
+            exports(SourceLang::Rust, "pub fn a() {}"),
+            ExportSurface::default()
+        );
+        assert_eq!(
+            exports(SourceLang::Python, "def a(): pass"),
+            ExportSurface::default()
+        );
     }
 }
