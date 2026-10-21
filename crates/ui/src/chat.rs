@@ -324,11 +324,7 @@ async fn fetch_project_context_sections() -> (
         match reqwest::get(format!("{}/api/projects/active/context", crate::bff_base()))
             .await
             .ok()
-            .and_then(|r| {
-                // reqwest::Response::json is async; block via a small sync parse.
-                // We're already inside an async context so we just await below.
-                Some(r)
-            }) {
+        {
             Some(r) => match r.json::<ProjectContextLite>().await {
                 Ok(v) => v,
                 Err(_) => return (None, None, None, None),
@@ -344,13 +340,6 @@ async fn fetch_project_context_sections() -> (
         ctx.selected_rules_section.filter(|s| !s.trim().is_empty()),
         ctx.ruleset_summary.filter(|s| !s.trim().is_empty()),
     )
-}
-
-/// Fetch only the scan-results section (Layer 3c). Kept for use in unit tests
-/// that predate the selected-rules section.
-#[cfg(test)]
-async fn fetch_project_scan_section() -> Option<String> {
-    fetch_project_context_sections().await.1
 }
 
 // ── Layer 4: focused finding ──────────────────────────────────────────────────
@@ -416,6 +405,9 @@ pub(crate) const UNIFIED_NOT_COVERED_PHRASE: &str =
 /// Anthropic's automatic system-prompt caching a large stable prefix.
 /// Layers 3, 3b, and 3c are appended after the stable prefix so they don't
 /// disturb the cached portion.
+// too_many_arguments: one optional context layer per parameter, assembled in a fixed order; a
+// struct of eight `Option<&str>` layers would just rename the same call-site arguments.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn unified_system_prompt(
     rules_catalog: &str,
     uow_section: &str,
@@ -490,7 +482,7 @@ pub(crate) fn unified_system_prompt(
         }
     }
     p.push_str(uow_section);
-    p.push_str("\n");
+    p.push('\n');
 
     // ── Layer 3b: pulled issue spine (optional) ───────────────────────────────
     // Present when the architect has pulled issues from GitHub this session.
@@ -503,7 +495,7 @@ pub(crate) fn unified_system_prompt(
                 "=== LAYER 3b: PULLED ISSUES (open GitHub issues pulled this session) ===\n",
             );
             p.push_str(sec);
-            p.push_str("\n");
+            p.push('\n');
         }
     }
 
@@ -523,7 +515,7 @@ pub(crate) fn unified_system_prompt(
              findings). Do NOT infer or invent any findings.\n",
         ),
     }
-    p.push_str("\n");
+    p.push('\n');
 
     // ── Layer 3d: selected rules & options (optional) ────────────────────────
     // Present as soon as the user has selected rules in the onboarding draft —
@@ -552,7 +544,7 @@ pub(crate) fn unified_system_prompt(
              rules are selected, state plainly that none are currently selected.\n",
         ),
     }
-    p.push_str("\n");
+    p.push('\n');
 
     // ── Layer 3e: project committed ruleset (optional) ───────────────────────
     // The project's APPLIED/governing ruleset (post-onboard), distinct from the
@@ -568,7 +560,7 @@ pub(crate) fn unified_system_prompt(
              rules applied). Do NOT infer the governing rules from the Layer 2 catalog.\n",
         ),
     }
-    p.push_str("\n");
+    p.push('\n');
 
     // ── Layer 4: focused finding (optional) ───────────────────────────────────
     if let Some(f) = finding {

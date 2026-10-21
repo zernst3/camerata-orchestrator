@@ -1408,7 +1408,10 @@ impl AuditModelsResp {
     }
 
     /// Return only vision-capable models, grouped by provider.
-    /// Used to populate the Designer (vision) band model selector.
+    // dead_code: the Designer (vision) band selector now lists ALL models (06003633), so the
+    // vision-only grouping is unwired; kept (with its tests) because
+    // docs/plans/2026-07-01_ui-core-extraction.md lists it among the pure logic to extract.
+    #[allow(dead_code)]
     pub fn vision_grouped(&self) -> Vec<(&'static str, Vec<&AuditModelOption>)> {
         let claude: Vec<&AuditModelOption> = self
             .models
@@ -1517,6 +1520,10 @@ pub(super) struct JobStatusEnvelope {
     #[serde(default)]
     pub idle_ms: Option<u128>,
     /// True if a cancel has been requested for this job.
+    // dead_code: part of the documented `GET .../job/:id` wire contract, deserialized "for
+    // future use" (docs/decisions/2026-06-23_stall_ui_warn_stop_thresholds.md); the UI does
+    // not yet surface a "cancelling" state. Only tests read it today.
+    #[allow(dead_code)]
     #[serde(default)]
     pub cancel_requested: bool,
 }
@@ -1745,9 +1752,6 @@ pub(super) fn DeterministicProgress(progress: DetProgressView) -> Element {
         }
     }
 }
-
-/// Friendly label for a deterministic tool name. `floor` is the always-on security scanner;
-/// the rest are the scan-preview linters; `unrouted` collects rules with no driveable tool.
 
 /// The Queue's GROUP-BY column: invisible, and the reason the deviation sentence appears on
 /// the group header at all.
@@ -4414,7 +4418,7 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
     let gf_name = use_signal(String::new);
     let gf_path = use_signal(String::new);
     // Set of corpus rule ids the user selected to bake into the new repo.
-    let gf_selected_ids = use_signal(|| std::collections::BTreeSet::<String>::new());
+    let gf_selected_ids = use_signal(std::collections::BTreeSet::<String>::new);
     let gf_scaffolding = use_signal(|| false);
     let gf_result = use_signal(|| Option::<GreenfieldScaffoldResult>::None);
     // Load corpus rules for the greenfield picker (the full library, no scan needed).

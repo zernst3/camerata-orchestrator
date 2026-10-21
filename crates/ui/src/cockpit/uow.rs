@@ -655,6 +655,10 @@ pub(super) async fn cancel_audit_job(job_id: &str) -> bool {
 /// Critical-finding 409 (issue #53) so the UI can prompt the architect to waive with a
 /// justification instead of collapsing it into a dead-end "Could not sign off" toast.
 pub(super) enum SignOffOutcome {
+    // dead_code (the payload): the caller refreshes via `uow_refresh` instead of reading the
+    // returned UoW, but parsing it is what distinguishes a real 2xx from a garbage body
+    // (-> `Failed`), and tests assert on it.
+    #[allow(dead_code)]
     Ok(Box<UowView>),
     /// A Critical scoped-scan finding blocks sign-off until a non-empty `waive_reason`
     /// is supplied. Carries the server's human-readable reason.
@@ -1322,15 +1326,12 @@ pub(super) fn render_pulled_issues_for_chat(items: &[WorkItem]) -> String {
         }
     }
 
-    // Roots: items with no parent in the pulled set.
+    // Roots: items with no parent at all. (An item whose parent was not pulled is an orphan,
+    // rendered separately below.)
     let roots: Vec<&WorkItem> = {
         let mut v: Vec<&WorkItem> = items
             .iter()
-            .filter(|it| {
-                it.parent_number
-                    .map_or(true, |pn| !by_number.contains_key(&pn))
-                    && it.parent_number.is_none()
-            })
+            .filter(|it| it.parent_number.is_none())
             .collect();
         v.sort_by_key(|it| it.number);
         v
@@ -2025,21 +2026,16 @@ pub(super) struct InvestigationNoteView {
 
 /// A decision record's approval outcome. The wire form is an internally-tagged enum
 /// (`{ "state": "pending" | "approved" | "rejected", "reason"? }`).
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(super) enum DecisionOutcomeView {
+    #[default]
     Pending,
     Approved,
     Rejected {
         #[serde(default)]
         reason: String,
     },
-}
-
-impl Default for DecisionOutcomeView {
-    fn default() -> Self {
-        DecisionOutcomeView::Pending
-    }
 }
 
 impl DecisionOutcomeView {
@@ -2620,6 +2616,10 @@ pub(super) fn work_item_columns(
     cols
 }
 
+/// What `WorkItemTable` builds once per item list: the keyed rows, the hierarchy depth, and the
+/// distinct repo / state values feeding the multi-select filters.
+type WorkItemTableData = (Vec<(RowId, WorkItemRow)>, usize, Vec<String>, Vec<String>);
+
 /// A provider-agnostic Chorale table of `WorkItem`s with N-level hierarchy grouping.
 /// Columns: one hidden `lvlN` column per ancestor depth (grouping), then Repo, #,
 /// Title, State, Labels as visible data columns.
@@ -2629,12 +2629,7 @@ pub(super) fn work_item_columns(
 pub(super) fn WorkItemTable(items: Vec<WorkItem>, on_open: EventHandler<String>) -> Element {
     // Build rows and derive max_depth from the same item list so the column set
     // and the grouping call are always in sync.
-    let (rows, max_depth, repo_options, state_options): (
-        Vec<(RowId, WorkItemRow)>,
-        usize,
-        Vec<String>,
-        Vec<String>,
-    ) = use_hook({
+    let (rows, max_depth, repo_options, state_options): WorkItemTableData = use_hook({
         let items = items.clone();
         move || {
             let built = build_work_item_rows(&items);
@@ -3965,6 +3960,9 @@ pub(super) enum OversightMode {
     #[default]
     Interactive,
     /// Dialogs are emitted to a triage backlog; answered later (routines).
+    // dead_code: the routines follow-on (docs/plans/2026-06-25_uow-3phase-redesign.md section 8)
+    // is not built yet; phases already take an `OversightMode` so it can be wired in.
+    #[allow(dead_code)]
     Batched,
 }
 
@@ -4113,7 +4111,7 @@ pub(super) fn IntakePhaseView(
                     }
                 }
             } else {
-                for repo in selected_repos().iter().cloned().collect::<Vec<_>>() {
+                for repo in selected_repos() {
                     UowUpdateBranchControl {
                         key: "{repo}",
                         story_id: story_id.clone(),

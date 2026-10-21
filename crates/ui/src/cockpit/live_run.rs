@@ -222,7 +222,7 @@ pub(super) fn UowReviewPanel(
     let mut chat_input = use_signal(String::new);
     let mut chatting = use_signal(|| false);
     // The app-wide chat-assistant model (the lead engineer the review chats with).
-    let chat_model = use_resource(|| super::fetch_app_chat_model());
+    let chat_model = use_resource(super::fetch_app_chat_model);
     // Local, throwaway targets for the resumed-run poll loop (see `submit_uow_review`). This
     // panel is story-agnostic (rendered from the app-wide NEEDS YOU queue, not a specific UoW
     // page), so it doesn't feed a persistent UoW view — it exists solely so the Bombe loading

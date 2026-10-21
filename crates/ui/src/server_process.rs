@@ -258,6 +258,7 @@ impl Drop for ServerGuard {
 ///   - server exits first (the guard's own Drop killed it) → watchdog just exits;
 ///   - cockpit exits first (normal quit, `process::exit`, even SIGKILL) → watchdog
 ///     SIGTERMs the server (its shutdown hook reaps in-flight `claude` children).
+///
 /// Best-effort by design: if the watchdog can't spawn, the next cockpit launch still
 /// reuses/reclaims whatever is on the port.
 #[cfg(unix)]

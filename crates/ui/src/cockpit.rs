@@ -1762,7 +1762,8 @@ async fn export_project_json(id: &str, name: &str) -> ExportOutcome {
 #[derive(Clone, PartialEq)]
 enum ImportResult {
     /// The project was created or silently overwritten; the returned project is active.
-    Imported(ProjectView),
+    /// Boxed: `ProjectView` is far larger than every other variant.
+    Imported(Box<ProjectView>),
     /// A project with the same name already exists; the user must confirm before we overwrite.
     /// Holds the name for display and the raw JSON body to re-POST with `overwrite: true`.
     Conflict { name: String, payload: String },
@@ -1853,7 +1854,7 @@ async fn import_project_payload(payload: &str, overwrite: bool) -> ImportResult 
         }
     } else if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
         match serde_json::from_value::<ProjectView>(v.get("project").cloned().unwrap_or_default()) {
-            Ok(p) => ImportResult::Imported(p),
+            Ok(p) => ImportResult::Imported(Box::new(p)),
             Err(_) => ImportResult::Failed,
         }
     } else {
@@ -2399,6 +2400,10 @@ fn UsageMeter() -> Element {
 }
 
 /// The `/api/gate-probe` result (#14): the end-to-end gate-loop go/no-go.
+// dead_code: the `GateSelfCheck` box was unmounted from the UoW view by the 3-phase redesign
+// (docs/plans/2026-06-25_uow-3phase-redesign.md section 10: "UI affordance only"); the
+// component, this view and the fetch are deliberately preserved (see `UowDevControls`).
+#[allow(dead_code)]
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct GateProbeView {
     #[serde(default)]
@@ -2415,6 +2420,8 @@ struct GateProbeView {
     layer2_clean: bool,
 }
 
+// dead_code: only caller is the unmounted `GateSelfCheck` (see `GateProbeView`).
+#[allow(dead_code)]
 async fn fetch_gate_probe() -> Option<GateProbeView> {
     reqwest::Client::new()
         .post(format!("{}/api/gate-probe", crate::bff_base()))
@@ -2574,7 +2581,7 @@ fn LoopGuardControl() -> Element {
                                 crate::toast::push_toast(
                                     toasts,
                                     crate::toast::ToastKind::Info,
-                                    &format!("Loop guard set to {n} iteration(s)."),
+                                    format!("Loop guard set to {n} iteration(s)."),
                                 );
                             } else {
                                 crate::toast::push_toast(
@@ -2688,13 +2695,11 @@ pub fn CockpitApp() -> Element {
         if modal_auto_inited() {
             return;
         }
-        if let Some(r) = &*readiness_res.read() {
-            if let Some(r) = r {
-                if crate::readiness_gate::action_gated(r.state) {
-                    modal_open.set(true);
-                }
-                modal_auto_inited.set(true);
+        if let Some(Some(r)) = &*readiness_res.read() {
+            if crate::readiness_gate::action_gated(r.state) {
+                modal_open.set(true);
             }
+            modal_auto_inited.set(true);
         }
     });
 
@@ -2845,13 +2850,6 @@ pub fn CockpitApp() -> Element {
     }
 }
 
-/// The consolidated Settings page.
-///
-/// Two explicit sections:
-///   1. "Cross-project" — credentials + Bombe. Tokens/keys span all projects.
-///   2. "This project"  — loop guard, model profile, tier map, step models,
-///                        stall thresholds, L3 review. All scoped to the
-///                        active project.
 /// The subset of `GET /api/settings` this control needs: the app-level chat model.
 #[derive(serde::Deserialize)]
 struct ChatModelSettingLite {
@@ -2957,6 +2955,12 @@ fn ChatModelSetting() -> Element {
     }
 }
 
+/// The consolidated Settings page.
+///
+/// Two explicit sections:
+///   1. "Cross-project" — credentials + Bombe. Tokens/keys span all projects.
+///   2. "This project" — loop guard, model profile, tier map, step models,
+///      stall thresholds, L3 review. All scoped to the active project.
 #[component]
 fn SettingsView(global_only: bool) -> Element {
     let refresh = use_signal(|| 0u32);
@@ -4266,7 +4270,7 @@ mod tests {
         assert_eq!(authority_label(&ai), "advisory");
     }
 
-    /// Pure: idle duration formatting from milliseconds.
+    // Pure: idle duration formatting from milliseconds.
     // (format_idle test moved to camerata-ui-core::run.)
 
     /// `RunView` deserializes with back-compat defaults when stall fields are absent.
