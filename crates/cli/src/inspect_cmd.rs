@@ -422,14 +422,10 @@ pub async fn build_product_export_bytes(
     let mut extra_files: Vec<(String, Vec<u8>)> = csv_exports;
     extra_files.extend(json_exports);
 
-    let provenance = camerata_server::ManifestProvenance {
-        repos: json.cover.repos.clone(),
-        generated_at: json.cover.generated_at.clone(),
-        ..Default::default()
-    };
+    let provenance = camerata_server::ManifestProvenance::from_cover(&json.cover);
 
     let stem = camerata_server::report_filename_stem(report);
-    let readme = camerata_server::product_export_readme(&stem, &json);
+    let readme = camerata_server::product_export_readme(&stem, &provenance);
     let zip_bytes = camerata_server::build_product_zip(
         &stem,
         &pdf_bytes,
@@ -623,6 +619,12 @@ pub async fn run_inspect_with_key_presence(
     // run before the ledger summary below (so a fired gate's stage shows up in it) and before
     // `report` is sealed.
     camerata_server::report_export::apply_evidence_gate(&mut report);
+    // Corpus severity bounds over the FINAL row set (preview, dep-audit and evidence-gate rows
+    // are appended after `audit_repos`' own bounding) — mirrors `onboard_audit`'s call site.
+    camerata_server::severity_bounds::apply_scan_severity_bounds(
+        &mut report.findings,
+        corpus.as_ref(),
+    );
 
     // The ledger summary is rendered from `report.ledger`/`report.failed_passes` AS THEY STAND
     // right here — after `audit_repos` (Phase 3), `merge_scan_preview` (Phase 4, which runs
