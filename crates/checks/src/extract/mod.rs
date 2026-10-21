@@ -26,6 +26,7 @@
 
 pub mod ecma;
 pub mod enclosing;
+pub mod paths;
 pub mod python;
 pub mod resolver;
 pub mod rust_syn;

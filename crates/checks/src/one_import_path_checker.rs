@@ -62,7 +62,7 @@
 //! declares `max_severity = "low"`, which the report export clamps down to (see
 //! `report_export::clamp_to_rule_max_severity`).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_MEDIUM};
 use crate::extract::resolver::EcmaResolver;
@@ -179,7 +179,7 @@ struct Model {
 
 impl Model {
     fn build(files: &[(String, String)], resolver: &EcmaResolver<'_>) -> Self {
-        let emitted = emitted_js_paths(files);
+        let emitted = crate::extract::paths::emitted_js_paths(files);
         let mut modules = HashMap::new();
         for (path, content) in files {
             let Some(lang) = ecma_lang(path) else {
@@ -332,7 +332,7 @@ impl Model {
     ) -> BTreeMap<(String, String), Vec<Usage>> {
         let mut groups: BTreeMap<(String, String), Vec<Usage>> = BTreeMap::new();
         let mut memo = Memo::new();
-        let emitted = emitted_js_paths(files);
+        let emitted = crate::extract::paths::emitted_js_paths(files);
         for (importer, content) in files {
             let Some(lang) = ecma_lang(importer) else {
                 continue;
@@ -401,7 +401,7 @@ fn judge_group(origin_file: &str, name: &str, group: &[Usage]) -> Option<ArchVio
 
     let counted: Vec<&Usage> = group
         .iter()
-        .filter(|u| !is_test_path(&u.importer))
+        .filter(|u| !crate::extract::paths::is_test_path(&u.importer))
         .filter(|u| {
             !barrel_dirs
                 .iter()
@@ -486,58 +486,6 @@ fn directory_of(path: &str) -> &str {
 /// Whether `path` lies in `dir`'s subtree. The empty dir is the repo root, i.e. everything.
 fn is_inside_dir(path: &str, dir: &str) -> bool {
     dir.is_empty() || path.strip_prefix(dir).is_some_and(|r| r.starts_with('/'))
-}
-
-/// Test, fixture, mock, end-to-end and story locations, which reach internals directly by
-/// design. Mirrors the gateway's `is_test_or_fixture_path` (`camerata-checks` cannot depend on
-/// the gateway crate, and no helper exists here) and adds the JS/TS ecosystem's mock, e2e,
-/// Cypress and Storybook conventions.
-fn is_test_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    let mut segs: Vec<&str> = lower.split('/').collect();
-    let Some(file) = segs.pop() else {
-        return false;
-    };
-    if segs.iter().any(|s| {
-        matches!(
-            *s,
-            "tests"
-                | "test"
-                | "__tests__"
-                | "testdata"
-                | "fixtures"
-                | "benches"
-                | "__mocks__"
-                | "e2e"
-                | "cypress"
-                | "stories"
-        )
-    }) {
-        return true;
-    }
-    file.rfind('.').is_some_and(|dot| {
-        let stem = &file[..dot];
-        [".test", ".spec", "_test", ".cy", ".stories"]
-            .iter()
-            .any(|suffix| stem.ends_with(suffix))
-    })
-}
-
-/// A committed `X.js` that sits beside `X.ts` or `X.tsx` in the same folder is build output
-/// (tsc emit), a copy of the source rather than a second module. It must not count as an
-/// importer or as a module, or the copy's imports would register as extra paths.
-fn emitted_js_paths(files: &[(String, String)]) -> HashSet<&str> {
-    let all: HashSet<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
-    files
-        .iter()
-        .map(|(p, _)| p.as_str())
-        .filter(|p| {
-            p.strip_suffix(".js").is_some_and(|stem| {
-                all.contains(format!("{stem}.ts").as_str())
-                    || all.contains(format!("{stem}.tsx").as_str())
-            })
-        })
-        .collect()
 }
 
 #[cfg(test)]
