@@ -208,6 +208,13 @@ struct DepRow {
     advisory: String,
     severity: String,
     repo: String,
+    /// W33: the patched version OSV reports, if any. `None` ⇒ no fix is available yet.
+    fixed_version: Option<String>,
+    /// W33 ownership tag: `client_owned` when a patch exists (upgrade is the fix) or
+    /// `external_dependency` when none does (not-yet-fixable — the "outside your control" class).
+    ownership: String,
+    /// W33: the realistic action when the CVE is not yet fixable; empty when it is (upgrade).
+    action: String,
 }
 
 /// One row of the `Coverage` sheet: an audited rule id, uncapped (the PDF's what's-healthy
@@ -313,11 +320,17 @@ fn partition_rows(
 
     for f in &report.findings {
         if f.rule_id == DEP_AUDIT_RULE_ID {
+            let ownership = crate::ownership::ownership_of(&f.rule_id, &f.captures);
             dep_rows.push(DepRow {
                 package: f.snippet.clone(),
                 advisory: f.detail.clone(),
                 severity: normalize_severity(&f.severity),
                 repo: f.repo.clone(),
+                fixed_version: f.captures.get("osv_fixed_version").cloned(),
+                ownership: ownership.tag().to_string(),
+                action: crate::ownership::ownership_action(ownership)
+                    .unwrap_or("")
+                    .to_string(),
             });
             continue;
         }
@@ -1274,12 +1287,12 @@ fn write_dependencies_sheet(
     ws.set_name(name)?;
     let _ = ws.set_tab_color(Color::from("#6B7280"));
 
-    let headers = ["Package", "Advisory", "Severity", "Repo"];
+    let headers = ["Package", "Advisory", "Severity", "Repo", "Fixed in", "Recommended action"];
     for (c, h) in headers.iter().enumerate() {
         ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
     }
     ws.set_row_height(0, 28)?;
-    for (c, w) in [30.0, 60.0, 12.0, 18.0].iter().enumerate() {
+    for (c, w) in [30.0, 60.0, 12.0, 18.0, 14.0, 48.0].iter().enumerate() {
         ws.set_column_width(c as u16, *w)?;
     }
 
@@ -1296,10 +1309,23 @@ fn write_dependencies_sheet(
         ws.write_string_with_format(r, 1, &row.advisory, &fmts.cell(None, true, false))?;
         ws.write_string_with_format(r, 2, title_case(&row.severity), &fmts.severity_cell(&row.severity))?;
         ws.write_string_with_format(r, 3, &row.repo, &fmts.cell(None, false, false))?;
+        // W33: "Fixed in" is the upgrade target when a patch exists; the action spells out what
+        // to do when it does not (monitor / accept / replace) — the ownership split, made visible.
+        let fixed = row.fixed_version.as_deref().unwrap_or("(no patch yet)");
+        ws.write_string_with_format(r, 4, fixed, &fmts.cell(None, false, false))?;
+        let action = if row.action.is_empty() {
+            row.fixed_version
+                .as_deref()
+                .map(|v| format!("Upgrade to >= {v}."))
+                .unwrap_or_default()
+        } else {
+            row.action.clone()
+        };
+        ws.write_string_with_format(r, 5, &action, &fmts.cell(None, true, false))?;
     }
 
     let last_row = sorted.len() as u32;
-    ws.autofilter(0, 0, last_row, 3)?;
+    ws.autofilter(0, 0, last_row, 5)?;
     ws.set_freeze_panes(1, 0)?;
 
     let mut r = last_row + 2;
