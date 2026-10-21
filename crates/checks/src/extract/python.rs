@@ -18,7 +18,10 @@
 
 use tree_sitter::{Node, Tree};
 
-use super::{FunctionSpan, Import, ImportKind, Literal, MethodCall};
+use super::{
+    canonical_number, FunctionSpan, Import, ImportKind, Literal, LiteralCtx, LiteralKind,
+    MethodCall, ModuleConst,
+};
 
 fn parse(source: &str) -> Option<Tree> {
     let mut parser = tree_sitter::Parser::new();
@@ -310,9 +313,402 @@ fn render_attribute_path(node: Node, source: &str) -> String {
 
 // ─── literals ────────────────────────────────────────────────────────────────────────────
 
+/// Node kinds the nearest-call walk passes through on its way up from a literal.
+/// A `lambda` is deliberately absent: its body is not an argument of the call that receives it.
+const CALLEE_PASS_THROUGH: &[&str] = &[
+    "list",
+    "tuple",
+    "set",
+    "dictionary",
+    "pair",
+    "parenthesized_expression",
+    "list_splat",
+    "dictionary_splat",
+    "keyword_argument",
+    "conditional_expression",
+    "binary_operator",
+    "boolean_operator",
+    "not_operator",
+    "await",
+    "interpolation",
+    "string",
+    "expression_list",
+];
+
+/// Wrappers `value_of_key` looks through between a literal and the `pair` it is the value of.
+const VALUE_WRAPPERS: &[&str] = &[
+    "parenthesized_expression",
+    "conditional_expression",
+    "boolean_operator",
+    "binary_operator",
+    "list",
+    "tuple",
+    "set",
+];
+
+/// Wrappers a module-level initializer may pass through and still be "the constant".
+const INITIALIZER_WRAPPERS: &[&str] = &[
+    "dictionary",
+    "list",
+    "tuple",
+    "set",
+    "parenthesized_expression",
+    "expression_list",
+];
+
+/// Base classes whose body assignments are enum members.
+const ENUM_BASES: &[&str] = &["Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "ReprEnum"];
+
+/// Extract every string and number literal with its [`LiteralCtx`]. See
+/// [`super::literals`] for what counts as a literal.
 pub fn literals(source: &str) -> Vec<Literal> {
-    let _ = source;
-    Vec::new()
+    let Some(tree) = parse(source) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    // Explicit stack: a pathologically nested file must not overflow the call stack.
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            // Adjacent literals (`'a' 'b'`) concatenate at compile time; neither half is the
+            // constant, and the joined text is not worth guessing.
+            "concatenated_string" => continue,
+            _ => {
+                if let Some(literal) = literal_at(node, source) {
+                    out.push(literal);
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev());
+    }
+    out
+}
+
+fn literal_at(node: Node, source: &str) -> Option<Literal> {
+    let (value, kind) = match node.kind() {
+        "string" => (string_value(node, source)?, LiteralKind::Str),
+        "integer" | "float" => (canonical_number(text(node, source))?, LiteralKind::Number),
+        _ => return None,
+    };
+    Some(Literal {
+        value,
+        kind,
+        line: start_line(node),
+        ctx: literal_ctx(node, source),
+    })
+}
+
+/// A plain string literal's content: not a byte string, not interpolated. Raw strings keep
+/// their backslashes; every other string has its escapes resolved.
+fn string_value(node: Node, source: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.children(&mut cursor).collect();
+    if children.iter().any(|c| c.kind() == "interpolation") {
+        return None;
+    }
+    let start = children.iter().find(|c| c.kind() == "string_start")?;
+    let end = children.iter().rev().find(|c| c.kind() == "string_end")?;
+    let prefix: String = text(*start, source)
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if prefix.contains('b') {
+        return None;
+    }
+    let content = source.get(start.end_byte()..end.start_byte())?;
+    Some(if prefix.contains('r') {
+        content.to_string()
+    } else {
+        unescape_python(content)
+    })
+}
+
+/// Resolve Python string escapes. An unknown escape keeps its backslash, as Python does;
+/// a line continuation vanishes; `\N{..}` names are kept verbatim (never guessed).
+fn unescape_python(raw: &str) -> String {
+    if !raw.contains('\\') {
+        return raw.to_string();
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let Some(next) = chars.next() else {
+            out.push('\\');
+            break;
+        };
+        let simple = match next {
+            'n' => Some('\n'),
+            't' => Some('\t'),
+            'r' => Some('\r'),
+            'a' => Some('\u{7}'),
+            'b' => Some('\u{8}'),
+            'f' => Some('\u{c}'),
+            'v' => Some('\u{b}'),
+            '0' => Some('\0'),
+            '\\' | '\'' | '"' => Some(next),
+            _ => None,
+        };
+        if let Some(ch) = simple {
+            out.push(ch);
+            continue;
+        }
+        let digits = match next {
+            'x' => 2,
+            'u' => 4,
+            'U' => 8,
+            '\n' => continue,
+            _ => {
+                out.push('\\');
+                out.push(next);
+                continue;
+            }
+        };
+        let hex: String = (0..digits)
+            .filter_map(|_| chars.next_if(char::is_ascii_hexdigit))
+            .collect();
+        match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+            Some(ch) if hex.len() == digits => out.push(ch),
+            _ => {
+                out.push('\\');
+                out.push(next);
+                out.push_str(&hex);
+            }
+        }
+    }
+    out
+}
+
+fn literal_ctx(node: Node, source: &str) -> LiteralCtx {
+    let mut ctx = LiteralCtx::default();
+    apply_call_context(node, source, &mut ctx);
+    apply_key_context(node, source, &mut ctx);
+    ctx.type_position = in_type_position(node, source);
+    ctx.attribute = has_ancestor(node, "decorator");
+    ctx.arithmetic = in_arithmetic_position(node, source);
+    ctx.module_const = module_const_of(node, source);
+    ctx
+}
+
+fn has_ancestor(node: Node, kind: &str) -> bool {
+    let mut cur = node.parent();
+    while let Some(p) = cur {
+        if p.kind() == kind {
+            return true;
+        }
+        cur = p.parent();
+    }
+    false
+}
+
+/// Whether `child` is `parent`'s `field` child.
+fn is_field_of(parent: Node, field: &str, child: Node) -> bool {
+    parent
+        .child_by_field_name(field)
+        .is_some_and(|n| n.id() == child.id())
+}
+
+/// Fill `import_specifier`, `callee` and `callee_chain` from the nearest enclosing call, found
+/// by walking up through [`CALLEE_PASS_THROUGH`] nodes.
+fn apply_call_context(node: Node, source: &str, ctx: &mut LiteralCtx) {
+    let mut cur = node;
+    while let Some(parent) = cur.parent() {
+        match parent.kind() {
+            "argument_list" => {
+                let Some(call) = parent.parent().filter(|c| c.kind() == "call") else {
+                    return;
+                };
+                let Some(func) = call.child_by_field_name("function") else {
+                    return;
+                };
+                let name = match func.kind() {
+                    "identifier" => Some(text(func, source).to_string()),
+                    "attribute" => func
+                        .child_by_field_name("attribute")
+                        .map(|a| text(a, source).to_string()),
+                    _ => None,
+                };
+                if let Some(name) = name.filter(|n| !n.is_empty()) {
+                    let first = parent.named_child(0).is_some_and(|c| c.id() == cur.id());
+                    ctx.import_specifier = first
+                        && cur.id() == node.id()
+                        && matches!(name.as_str(), "import_module" | "__import__");
+                    ctx.callee_chain = Some(
+                        text(func, source)
+                            .chars()
+                            .filter(|c| !c.is_whitespace())
+                            .collect(),
+                    );
+                    ctx.callee = Some(name);
+                }
+                return;
+            }
+            kind if CALLEE_PASS_THROUGH.contains(&kind) => cur = parent,
+            _ => return,
+        }
+    }
+}
+
+/// Fill `object_key`, `value_of_key`, `subscript` and `subscript_receiver`.
+fn apply_key_context(node: Node, source: &str, ctx: &mut LiteralCtx) {
+    let Some(parent) = node.parent() else {
+        return;
+    };
+    match parent.kind() {
+        "pair" => ctx.object_key = is_field_of(parent, "key", node),
+        "subscript" => {
+            ctx.subscript = is_field_of(parent, "subscript", node);
+            if ctx.subscript {
+                ctx.subscript_receiver = parent
+                    .child_by_field_name("value")
+                    .map(|v| text(v, source).to_string());
+            }
+        }
+        _ => {}
+    }
+    if ctx.object_key {
+        return;
+    }
+    let mut cur = node;
+    while let Some(p) = cur.parent() {
+        if p.kind() == "pair" {
+            if is_field_of(p, "value", cur) {
+                ctx.value_of_key = p
+                    .child_by_field_name("key")
+                    .and_then(|k| key_text(k, source));
+            }
+            return;
+        }
+        if VALUE_WRAPPERS.contains(&p.kind()) {
+            cur = p;
+        } else {
+            return;
+        }
+    }
+}
+
+fn key_text(key: Node, source: &str) -> Option<String> {
+    match key.kind() {
+        "identifier" | "integer" => Some(text(key, source).to_string()),
+        "string" => string_value(key, source),
+        _ => None,
+    }
+}
+
+/// Inside `Literal[...]` or on the right of an assignment in an `Enum` class body.
+fn in_type_position(node: Node, source: &str) -> bool {
+    let mut cur = node.parent();
+    while let Some(p) = cur {
+        // `Literal[..]` is a `subscript` in an expression and a `generic_type` in an annotation.
+        let subject = match p.kind() {
+            "subscript" => p.child_by_field_name("value"),
+            "generic_type" => p.named_child(0),
+            _ => None,
+        };
+        if subject.is_some_and(|v| last_segment(text(v, source)) == "Literal") {
+            return true;
+        }
+        cur = p.parent();
+    }
+    in_enum_body(node, source)
+}
+
+fn last_segment(path: &str) -> &str {
+    path.rsplit('.').next().unwrap_or(path).trim()
+}
+
+fn in_enum_body(node: Node, source: &str) -> bool {
+    let mut cur = node;
+    // The initializer: the literal itself or inside a tuple/parenthesized value.
+    while let Some(p) = cur.parent() {
+        if INITIALIZER_WRAPPERS.contains(&p.kind()) {
+            cur = p;
+        } else {
+            break;
+        }
+    }
+    let Some(assignment) = cur
+        .parent()
+        .filter(|a| a.kind() == "assignment" && is_field_of(*a, "right", cur))
+    else {
+        return false;
+    };
+    let class = assignment
+        .parent()
+        .filter(|s| s.kind() == "expression_statement")
+        .and_then(|s| s.parent())
+        .filter(|b| b.kind() == "block")
+        .and_then(|b| b.parent())
+        .filter(|c| c.kind() == "class_definition");
+    let Some(bases) = class.and_then(|c| c.child_by_field_name("superclasses")) else {
+        return false;
+    };
+    let mut cursor = bases.walk();
+    let found = bases
+        .named_children(&mut cursor)
+        .any(|b| ENUM_BASES.contains(&last_segment(text(b, source))));
+    found
+}
+
+fn in_arithmetic_position(node: Node, source: &str) -> bool {
+    let mut cur = node;
+    while let Some(p) = cur
+        .parent()
+        .filter(|p| p.kind() == "parenthesized_expression")
+    {
+        cur = p;
+    }
+    let Some(parent) = cur.parent() else {
+        return false;
+    };
+    let operator = parent
+        .child_by_field_name("operator")
+        .map(|o| text(o, source))
+        .unwrap_or_default();
+    match parent.kind() {
+        "binary_operator" => matches!(operator, "+" | "-" | "*" | "/" | "%" | "//"),
+        "augmented_assignment" => {
+            matches!(operator, "+=" | "-=" | "*=" | "/=" | "%=" | "//=")
+                && is_field_of(parent, "right", cur)
+        }
+        _ => false,
+    }
+}
+
+/// The module-level `NAME = ...` / `NAME: T = ...` whose value is, or contains (through
+/// [`INITIALIZER_WRAPPERS`] only), this literal.
+fn module_const_of(node: Node, source: &str) -> Option<ModuleConst> {
+    let mut cur = node;
+    let assignment = loop {
+        let parent = cur.parent()?;
+        match parent.kind() {
+            "assignment" if is_field_of(parent, "right", cur) => break parent,
+            "assignment" => return None,
+            "pair" if is_field_of(parent, "value", cur) => cur = parent,
+            "pair" => return None,
+            kind if INITIALIZER_WRAPPERS.contains(&kind) => cur = parent,
+            _ => return None,
+        }
+    };
+    let name = assignment.child_by_field_name("left")?;
+    if name.kind() != "identifier" || assignment.has_error() {
+        return None;
+    }
+    let statement = assignment.parent()?;
+    if statement.kind() != "expression_statement" || statement.parent()?.kind() != "module" {
+        return None;
+    }
+    let name = text(name, source).to_string();
+    Some(ModuleConst {
+        exported: !name.starts_with('_'),
+        name,
+    })
 }
 
 #[cfg(test)]
@@ -475,5 +871,408 @@ mod tests {
         src.push_str("self.a.b()\n");
         let cs = method_calls(&src);
         assert!(cs.iter().any(|c| c.method == "b"));
+    }
+
+    // ── literals ──────────────────────────────────────────────────────────────
+
+    use crate::extract::{Literal, LiteralCtx, LiteralKind, ModuleConst};
+
+    fn lits(src: &str) -> Vec<Literal> {
+        literals(src)
+    }
+
+    /// The single literal whose value is `value`; panics when there is not exactly one.
+    fn lit(src: &str, value: &str) -> Literal {
+        let all = lits(src);
+        let mut hits: Vec<Literal> = all.iter().filter(|l| l.value == value).cloned().collect();
+        assert_eq!(hits.len(), 1, "{value:?} in {all:#?}");
+        hits.remove(0)
+    }
+
+    fn ctx(src: &str, value: &str) -> LiteralCtx {
+        lit(src, value).ctx
+    }
+
+    #[test]
+    fn literal_strings_carry_value_kind_and_line() {
+        let all = lits("a = 'orders-high'\n\nfoo(\"x:y\")\n");
+        assert_eq!(all.len(), 2, "{all:#?}");
+        assert_eq!(all[0].value, "orders-high");
+        assert_eq!(all[0].kind, LiteralKind::Str);
+        assert_eq!(all[0].line, 1);
+        assert_eq!(all[1].value, "x:y");
+        assert_eq!(all[1].line, 3);
+    }
+
+    #[test]
+    fn literal_escapes_are_resolved_and_raw_strings_are_not() {
+        let src = "f('a\\nb', 'it\\'s', r'a\\nb', 'tab\\there', '\\x41\\u0042', 'back\\\\slash', '\\d')\n";
+        let values: Vec<String> = lits(src).into_iter().map(|l| l.value).collect();
+        assert_eq!(
+            values,
+            [
+                "a\nb",
+                "it's",
+                "a\\nb",
+                "tab\there",
+                "AB",
+                "back\\slash",
+                "\\d"
+            ]
+        );
+    }
+
+    #[test]
+    fn literal_triple_quoted_and_empty_strings() {
+        let all = lits("f('', \"\"\"orders-high\"\"\")\n");
+        let values: Vec<&str> = all.iter().map(|l| l.value.as_str()).collect();
+        assert_eq!(values, ["", "orders-high"]);
+    }
+
+    #[test]
+    fn literal_interpolated_f_strings_are_skipped_but_plain_ones_are_not() {
+        let all = lits("a = f'/api/{v}'\nb = f'orders-high'\nc = f\"{d['x-y']}\"\n");
+        let values: Vec<&str> = all.iter().map(|l| l.value.as_str()).collect();
+        assert_eq!(values, ["orders-high", "x-y"], "{all:#?}");
+    }
+
+    #[test]
+    fn literal_byte_strings_and_adjacent_concatenations_are_skipped() {
+        let all = lits("a = b'orders-high'\nb = 'orders-' 'high'\nc = ('orders-'\n     'high')\n");
+        assert!(all.is_empty(), "{all:#?}");
+    }
+
+    #[test]
+    fn literal_numbers_are_canonical_and_non_decimal_spellings_are_skipped() {
+        let src = "a(.12, 0.120, 1.2e-1, 1_0, 0x1F, 0o17, 0b11, 3j)\n";
+        let values: Vec<(String, LiteralKind)> =
+            lits(src).into_iter().map(|l| (l.value, l.kind)).collect();
+        let n = LiteralKind::Number;
+        assert_eq!(
+            values,
+            [
+                ("0.12".to_string(), n),
+                ("0.12".to_string(), n),
+                ("0.12".to_string(), n),
+                ("10".to_string(), n)
+            ]
+        );
+    }
+
+    // ctx.import_specifier
+
+    #[test]
+    fn ctx_import_specifier_import_module_first_argument() {
+        for src in [
+            "x = importlib.import_module('app.orders')\n",
+            "x = import_module('app.orders')\n",
+            "x = __import__('app.orders')\n",
+        ] {
+            assert!(ctx(src, "app.orders").import_specifier, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_import_specifier_is_false_for_other_calls_and_later_arguments() {
+        assert!(!ctx("x = load('app.orders')\n", "app.orders").import_specifier);
+        assert!(!ctx("x = import_module('a', 'app.orders')\n", "app.orders").import_specifier);
+        assert!(!ctx("x = 'app.orders'\n", "app.orders").import_specifier);
+    }
+
+    // ctx.callee, ctx.callee_chain
+
+    #[test]
+    fn ctx_callee_and_chain() {
+        let c = ctx("x = os.environ.get('X_Y')\n", "X_Y");
+        assert_eq!(c.callee.as_deref(), Some("get"));
+        assert_eq!(c.callee_chain.as_deref(), Some("os.environ.get"));
+        let c = ctx("log = logging.getLogger('svc-orders')\n", "svc-orders");
+        assert_eq!(c.callee.as_deref(), Some("getLogger"));
+        let c = ctx("x = _('errors-required')\n", "errors-required");
+        assert_eq!(c.callee.as_deref(), Some("_"));
+        assert_eq!(c.callee_chain.as_deref(), Some("_"));
+    }
+
+    #[test]
+    fn ctx_callee_walks_up_through_containers_keywords_and_operators() {
+        for src in [
+            "cn(['items-center'])\n",
+            "cn(('items-center',))\n",
+            "cn({'a': 'items-center'})\n",
+            "cn(k='items-center')\n",
+            "cn(*['items-center'])\n",
+            "cn(**{'k': 'items-center'})\n",
+            "cn('x-y' if c else 'items-center')\n",
+            "cn(c and 'items-center')\n",
+            "cn(c or 'items-center')\n",
+            "cn(('items-center'))\n",
+            "cn(f\"{'items-center'}\")\n",
+            "cn({'items-center'})\n",
+        ] {
+            assert_eq!(
+                ctx(src, "items-center").callee.as_deref(),
+                Some("cn"),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn ctx_callee_is_the_nearest_call_and_stops_at_a_lambda() {
+        let c = ctx("outer(inner('svc-orders'))\n", "svc-orders");
+        assert_eq!(c.callee.as_deref(), Some("inner"));
+        assert_eq!(
+            ctx("foo(lambda: 'svc-orders')\n", "svc-orders").callee,
+            None
+        );
+    }
+
+    #[test]
+    fn ctx_callee_is_none_outside_any_call_and_for_computed_callees() {
+        assert_eq!(ctx("a = 'svc-orders'\n", "svc-orders").callee, None);
+        let c = ctx("get_thing()('svc-orders')\n", "svc-orders");
+        assert_eq!(c.callee, None);
+        assert_eq!(c.callee_chain, None);
+    }
+
+    #[test]
+    fn ctx_callee_ignores_a_class_base_list() {
+        let c = ctx("class A('svc-orders'):\n    pass\n", "svc-orders");
+        assert_eq!(c.callee, None);
+    }
+
+    // ctx.subscript
+
+    #[test]
+    fn ctx_subscript_with_receiver() {
+        let c = ctx("x = os.environ['X_Y']\n", "X_Y");
+        assert!(c.subscript);
+        assert_eq!(c.subscript_receiver.as_deref(), Some("os.environ"));
+        let c = ctx("x = row[\"a-b\"]\n", "a-b");
+        assert_eq!(c.subscript_receiver.as_deref(), Some("row"));
+    }
+
+    #[test]
+    fn ctx_subscript_is_false_for_lists_and_the_receiver_position() {
+        assert!(!ctx("x = ['a-b']\n", "a-b").subscript);
+        assert!(!ctx("x = foo['a-b'.upper()]\n", "a-b").subscript);
+    }
+
+    // ctx.object_key, ctx.value_of_key
+
+    #[test]
+    fn ctx_object_key_for_dict_keys() {
+        let c = ctx("d = {'x-tenant': 1}\n", "x-tenant");
+        assert!(c.object_key);
+        assert_eq!(c.value_of_key, None);
+    }
+
+    #[test]
+    fn ctx_value_of_key_names_the_key() {
+        let c = ctx("d = {'justify': 'space-between'}\n", "space-between");
+        assert_eq!(c.value_of_key.as_deref(), Some("justify"));
+        assert!(!c.object_key);
+        let c = ctx("d = {env: 'A_B'}\n", "A_B");
+        assert_eq!(c.value_of_key.as_deref(), Some("env"));
+        let c = ctx("d = {'env': 'a-b' if c else 'c-d'}\n", "a-b");
+        assert_eq!(c.value_of_key.as_deref(), Some("env"));
+        let c = ctx("d = {'env': ['a-b']}\n", "a-b");
+        assert_eq!(c.value_of_key.as_deref(), Some("env"));
+    }
+
+    #[test]
+    fn ctx_value_of_key_does_not_cross_a_call_or_a_lambda() {
+        assert_eq!(ctx("d = {'env': f('a-b')}\n", "a-b").value_of_key, None);
+        assert_eq!(
+            ctx("d = {'env': lambda: 'a-b'}\n", "a-b").value_of_key,
+            None
+        );
+    }
+
+    // ctx.type_position
+
+    #[test]
+    fn ctx_type_position_literal_subscripts() {
+        for src in [
+            "Status = Literal['IN_PROGRESS']\n",
+            "Status = typing.Literal['IN_PROGRESS', 'DONE']\n",
+            "def f(s: Literal['IN_PROGRESS']) -> None: ...\n",
+            "def f() -> Literal['IN_PROGRESS', 'DONE']: ...\n",
+            "x: Optional[Literal['IN_PROGRESS']] = None\n",
+            "x: t.Literal['IN_PROGRESS'] = 'DONE'\n",
+        ] {
+            assert!(ctx(src, "IN_PROGRESS").type_position, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_type_position_enum_class_bodies() {
+        for base in [
+            "Enum",
+            "enum.Enum",
+            "IntEnum",
+            "StrEnum",
+            "Flag",
+            "str, Enum",
+        ] {
+            let src = format!("class Status({base}):\n    IN_PROGRESS = 'IN_PROGRESS'\n");
+            assert!(
+                lits(&src)
+                    .iter()
+                    .any(|l| l.value == "IN_PROGRESS" && l.ctx.type_position),
+                "{src}"
+            );
+        }
+        let src =
+            "class Status(Enum):\n    IN_PROGRESS = ('IN_PROGRESS', 1)\n    DONE: str = 'DONE'\n";
+        assert!(ctx(src, "IN_PROGRESS").type_position);
+        assert!(ctx(src, "DONE").type_position);
+    }
+
+    #[test]
+    fn ctx_type_position_is_false_for_value_uses_and_ordinary_classes() {
+        for src in [
+            "if s == 'IN_PROGRESS':\n    pass\n",
+            "x = 'IN_PROGRESS'\n",
+            "class Status:\n    IN_PROGRESS = 'IN_PROGRESS'\n",
+            "class Status(Base):\n    IN_PROGRESS = 'IN_PROGRESS'\n",
+            "class Status(Enum):\n    def f(self):\n        return 'IN_PROGRESS'\n",
+        ] {
+            assert!(!ctx(src, "IN_PROGRESS").type_position, "{src}");
+        }
+    }
+
+    // ctx.attribute
+
+    #[test]
+    fn ctx_attribute_for_decorator_expressions_only() {
+        let src = "@app.route('/api/v1/orders')\ndef f():\n    return '/api/v1/orders2'\n";
+        assert!(ctx(src, "/api/v1/orders").attribute);
+        assert!(!ctx(src, "/api/v1/orders2").attribute);
+        let src = "@pytest.mark.skipif(sys.platform == 'win-32', reason='x')\ndef f(): pass\n";
+        assert!(ctx(src, "win-32").attribute);
+        assert!(!ctx("x = f('win-32')\n", "win-32").attribute);
+    }
+
+    // ctx.arithmetic
+
+    #[test]
+    fn ctx_arithmetic_for_binary_operators_and_compound_assignment() {
+        for src in [
+            "x = total * 0.12\n",
+            "x = 0.12 * total\n",
+            "x = total / 0.12\n",
+            "x = total + 0.12\n",
+            "x = total - 0.12\n",
+            "x = total % 0.12\n",
+            "x = total // 0.12\n",
+            "x = total * (0.12)\n",
+            "x += 0.12\n",
+            "x -= 0.12\n",
+            "x *= 0.12\n",
+            "x /= 0.12\n",
+            "x //= 0.12\n",
+            "x %= 0.12\n",
+        ] {
+            assert!(ctx(src, "0.12").arithmetic, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_arithmetic_is_false_elsewhere() {
+        for src in [
+            "x < 0.12\n",
+            "x == 0.12\n",
+            "foo(0.12)\n",
+            "x = 0.12\n",
+            "d = {'opacity': 0.12}\n",
+            "x = [0.12]\n",
+            "x = total ** 0.12\n",
+            "x = -0.12\n",
+        ] {
+            assert!(!ctx(src, "0.12").arithmetic, "{src}");
+        }
+    }
+
+    // ctx.module_const
+
+    fn mc(name: &str, exported: bool) -> Option<ModuleConst> {
+        Some(ModuleConst {
+            name: name.to_string(),
+            exported,
+        })
+    }
+
+    #[test]
+    fn ctx_module_const_plain_final_and_annotated_assignments() {
+        assert_eq!(
+            ctx("Q = 'orders-high'\n", "orders-high").module_const,
+            mc("Q", true)
+        );
+        assert_eq!(
+            ctx("Q: Final = 'orders-high'\n", "orders-high").module_const,
+            mc("Q", true)
+        );
+        assert_eq!(
+            ctx("Q: Final[str] = 'orders-high'\n", "orders-high").module_const,
+            mc("Q", true)
+        );
+        assert_eq!(
+            ctx("_Q = 'orders-high'\n", "orders-high").module_const,
+            mc("_Q", false)
+        );
+    }
+
+    #[test]
+    fn ctx_module_const_through_containers() {
+        assert_eq!(
+            ctx("ROUTES = {'orders': '/api/orders'}\n", "/api/orders").module_const,
+            mc("ROUTES", true)
+        );
+        assert_eq!(
+            ctx("QUEUES = ['orders-high', 'orders-low']\n", "orders-high").module_const,
+            mc("QUEUES", true)
+        );
+        assert_eq!(
+            ctx("QUEUES = ('orders-high',)\n", "orders-high").module_const,
+            mc("QUEUES", true)
+        );
+        assert_eq!(
+            ctx("Q = ('orders-high')\n", "orders-high").module_const,
+            mc("Q", true)
+        );
+    }
+
+    #[test]
+    fn ctx_module_const_is_none_behind_a_call_or_when_not_module_level() {
+        for src in [
+            "Q = f('orders-high')\n",
+            "Q = {'a': g('orders-high')}\n",
+            "Q = lambda: 'orders-high'\n",
+            "def f():\n    Q = 'orders-high'\n",
+            "class A:\n    Q = 'orders-high'\n",
+            "if x:\n    Q = 'orders-high'\n",
+            "a = b = 'orders-high'\n",
+            "a, b = 'orders-high', 'x'\n",
+            "self.q = 'orders-high'\n",
+            "q['k'] = 'orders-high'\n",
+        ] {
+            assert_eq!(ctx(src, "orders-high").module_const, None, "{src}");
+        }
+    }
+
+    #[test]
+    fn literal_malformed_input_does_not_panic() {
+        for src in [
+            "a = '",
+            "a = f'{",
+            "def (:\n  x = 'a-b'",
+            "\u{0}\u{1}\u{2}",
+            "class A(:\n",
+            "x = 1_",
+            "",
+        ] {
+            let _ = lits(src);
+        }
     }
 }
