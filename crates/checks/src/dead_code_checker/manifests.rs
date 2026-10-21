@@ -58,7 +58,7 @@ impl Packages {
         self.list.iter().find(|p| is_inside(path, &p.dir))
     }
 
-    fn iter(&self) -> impl Iterator<Item = &Package> {
+    pub(super) fn iter(&self) -> impl Iterator<Item = &Package> {
         self.list.iter()
     }
 }
@@ -72,7 +72,7 @@ impl Package {
         self.json.contains_key("exports")
     }
 
-    fn depends_on(&self, matches: impl Fn(&str) -> bool) -> bool {
+    pub(super) fn depends_on(&self, matches: impl Fn(&str) -> bool) -> bool {
         [
             "dependencies",
             "devDependencies",

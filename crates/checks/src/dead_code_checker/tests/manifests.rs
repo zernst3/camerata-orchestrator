@@ -294,16 +294,22 @@ fn twin_python_main_guard_and_shebang_are_entry_points() {
 }
 
 #[test]
+fn positive_sibling_the_same_script_without_a_guard_is_flagged() {
+    let f = files(vec![("jobs/runit.py", "def f(): pass\n")]);
+    assert_flags_only(&f, "jobs/runit.py");
+}
+
+#[test]
 fn positive_sibling_a_main_guard_far_from_the_name_check_does_not_count() {
     let mut body = String::from("if __name__ == name_of_thing:\n");
     body.push_str(&" ".repeat(60));
     body.push_str("pass  # \"__main__\"\n");
     let f = files(vec![
-        ("tools/pkg_init.py", "x = 1\n"),
-        ("tools/far.py", body.as_str()),
+        ("jobs/pkg_init.py", "x = 1\n"),
+        ("jobs/far.py", body.as_str()),
     ]);
     let got = flagged(&f);
-    assert!(got.contains(&"tools/far.py".to_string()), "{got:?}");
+    assert!(got.contains(&"jobs/far.py".to_string()), "{got:?}");
 }
 
 // ── G19: Vue, Svelte, Astro and MDX importers are invisible to the graph ───────

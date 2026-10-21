@@ -55,6 +55,7 @@ use crate::arch_checker::{ArchChecker, ArchViolation, RepoView};
 use crate::extract::{self, SourceLang};
 
 mod analysis;
+mod conventions;
 mod emit;
 mod exclusions;
 mod manifests;
