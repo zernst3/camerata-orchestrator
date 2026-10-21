@@ -33,6 +33,12 @@ is never proposed (orphaned). For EACH inspectable rule, wire all of:
 4. `domain_to_glob`;
 5. a proposed-rules test asserting the rule is actually proposed for its stack.
 
+Amended 2026-10-21: every W29 rule is homed in an existing, already-mapped domain (table in
+`docs/design/2026-10-21_w29-detector-implementation.md` "Domain home per rule"; there is no
+`arch`/`style` domain), so steps 3-4 should need no edit. Step 5 is what proves it. The
+ONE-IMPORT-PATH algorithm in this plan ("symbol->path index") is superseded by the design doc's
+canonical-symbol algorithm.
+
 ## Build order (source §86-91) and per-rule deliverables
 
 ### Wave A — deterministic, small, highest signal per token
