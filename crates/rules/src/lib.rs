@@ -20,6 +20,11 @@ use camerata_core::RuleId;
 use serde::Deserialize;
 use thiserror::Error;
 
+mod lock;
+pub use lock::{
+    check_lock, corpus_lock_path, CorpusLock, LockEntry, LockError, LockProblem, RULE_HASH_PREFIX,
+};
+
 mod freshness;
 pub use freshness::{
     confirm_domain, confirm_in_text, corpus_freshness_path, days_from_civil, effective_review_date,

@@ -51,6 +51,7 @@ hold (`docs/plans/2026-10-09_rule-kind-classification.md`). The `kind` distribut
   - [3.20 `version`](#320-version)
   - [3.21 `last_reviewed`](#321-last_reviewed)
   - [3.22 `superseded_since` and `current_recommendation`](#322-superseded_since-and-current_recommendation)
+  - [3.23 The rule content hash and `CORPUS_LOCK.toml`](#323-the-rule-content-hash-and-corpus_locktoml)
 - [4. The `[decision]` block](#4-the-decision-block)
 - [5. `[[option]]` fields](#5-option-fields)
   - [5.1 `id`](#51-id)
@@ -1004,6 +1005,48 @@ Gates: `rules_with_malformed_credibility_metadata` (year is exactly four digits)
 whitespace-only half counts as absent). A year with no replacement is half a claim, and a
 replacement with no year cannot say how stale the rule is.
 
+### 3.23 The rule content hash and `CORPUS_LOCK.toml`
+
+`version` is only worth having if a change to a rule cannot ship without it. Two pieces make
+that mechanical.
+
+**`Rule::content_hash()`** (`crates/rules/src/lock.rs`) is `sha256:<64 lowercase hex>` over a
+canonical serialization of the WHOLE rule: every field, every option (including `directive`,
+`why`, `remediation`, `violates`, `escalation`), every source, `[verified]`, every
+`[[stack_exception]]`, the severity bounds, and the supersession fields. It EXCLUDES `version`
+and `last_reviewed`, so bumping a version or recording a review does not move it. The
+serialization is canonical JSON with keys sorted at every level by the module's own renderer,
+no insignificant whitespace, hand-written string escaping (identical to `json.dumps(...,
+ensure_ascii=False)`), and every `None`/empty/`false` field omitted. The preimage is prefixed
+`camerata-rule-hash/v1\n`; that tag is the format version. Nothing is delegated to a library
+that does not promise stability, so the same rule hashes identically across builds, platforms
+and dependency upgrades. `the_canonical_form_and_hash_match_the_independent_oracle`
+(`crates/rules/tests/corpus_lock.rs`) pins the bytes against a Python oracle. `Rule::
+canonical_form()` destructures `Rule` with no `..`, so adding a field to `Rule` is a compile
+error until its hash treatment is decided. Not covered: `layer` and `[[emits]]`, which are
+parsed but not carried onto `Rule`; comments and formatting.
+
+**`crates/rules/CORPUS_LOCK.toml`** records `"<ID>" = { version = N, hash = "sha256:..." }` for
+every rule, sorted by id. It is GENERATED, never hand-edited, and the lock never moves on its
+own. The gate (`check_lock`, asserted by `req_the_bundled_lock_matches_the_bundled_corpus`)
+fails, naming the rule and the command to run, when:
+
+| Disagreement | Message |
+|---|---|
+| same `version`, different hash | `rule changed but version is still N; bump version, then run camerata corpus lock` |
+| `version` above the lock's | `run camerata corpus lock` (the lock must be regenerated, even for a bump that changed nothing) |
+| `version` below the lock's | `versions only move forward` |
+| rule missing from the lock | `run camerata corpus lock` |
+| lock names a rule that no longer exists | `run camerata corpus lock` |
+| rule has no `version`, or two rules share an id | cannot be locked |
+
+`camerata corpus lock` (`crates/cli/src/corpus_cmd.rs`) is the only writer. It loads the
+bundled corpus strictly (a file that fails to parse is an error, never a silent removal),
+refuses when any rule changed without a bump, went backwards, has no version or has a
+duplicate id (writing nothing), and otherwise records new rules, bumps and removals. It also
+refuses to regenerate over a lock it cannot parse. Workflow for editing a rule: edit it, bump
+`version`, run `camerata corpus lock`, commit the rule and the lock together.
+
 ---
 
 ## 4. The `[decision]` block
@@ -1915,6 +1958,7 @@ gates, never runtime refusals (a scan must never refuse to run over corpus state
 | `rules_missing_version` / `rules_with_invalid_version` + `req_every_corpus_rule_declares_a_version_of_at_least_one` (`crates/rules/tests/rule_version_review_fields.rs`) | any rule has no `version`, or `version = 0` | the revision number the lock gate keys on; no default, so a bump is always a deliberate act (section 3.20) |
 | `rules_with_invalid_last_reviewed` + `req_every_authored_last_reviewed_is_a_real_past_or_present_date` (same file) | `last_reviewed` is not a real `YYYY-MM-DD` date, or is in the future | a future or impossible review date would make a rule look fresher than anyone has verified (section 3.21) |
 | `rules_with_unpaired_supersession` + `req_no_corpus_rule_has_half_a_supersession_claim` (same file) | exactly one of `superseded_since` / `current_recommendation` is set | a year with no replacement, or a replacement with no year, is half a claim (section 3.22) |
+| `check_lock` + `req_the_bundled_lock_matches_the_bundled_corpus` (`crates/rules/tests/corpus_lock.rs`) | a rule's content changed without a `version` bump, or `CORPUS_LOCK.toml` is stale, missing a rule, or names a removed one | a version nobody is forced to bump rots; the lock makes the bump mechanical (section 3.23) |
 | `options_with_rejected_prose_but_no_violates_flag` (`lib.rs:1916`) + `req_w14_every_rejected_option_is_flagged_violates` | an option's `why` opens with `Rejected:` but carries no `violates = true`, on any kind that permits the flag | the audit's single best-performing authoring signal, made mechanical (section 10.4) |
 | `decision_kind_rules_with_violates_flag` (`lib.rs:2007`) + `req_w14_no_decision_kind_rule_carries_a_violates_flag` | a `decision`-kind rule carries any `violates` option | the flag is live at runtime regardless of kind, so a stray one manufactures a high-severity defect on an equal-weight rule (gotcha 3) |
 | `corpus_files_with_unknown_fields` (`lib.rs:2208`) + `req_w14_no_corpus_rule_carries_an_unknown_field` | any TOML key outside the declared vocabulary, at seven nesting levels | `deny_unknown_fields` is off by design; this is the stronger replacement (gotcha 9) |
@@ -1951,7 +1995,9 @@ Checklist when authoring or editing a rule:
    than X" -> `max_severity`; "inconsistency here is expensive" -> `deviation_ceiling`.
 7. If this is a new stack/folder, wire detection + `domains_for_stack` + `domain_to_glob`
    and add a proposed-rules test (gotcha 5).
-8. Run the camerata-rules test suite (and the server corpus tests) before considering the
+8. After any edit to an existing rule: bump its `version` (section 3.20), then run
+   `camerata corpus lock` and commit the lock with the rule (section 3.23).
+9. Run the camerata-rules test suite (and the server corpus tests) before considering the
    edit done - the gates above are the only thing standing between a typo and a silent
    no-op.
 

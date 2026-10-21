@@ -94,6 +94,15 @@ current_recommendation = "…"   # W32, optional, REQUIRED WITH superseded_since
   or comment edits do not change the rule, so they need no bump. `rules_missing_version` and
   `rules_with_invalid_version` fail the build on an absent or zero value. There is deliberately
   no default, for the same reason there is none on `kind`.
+
+  **The bump is enforced, not trusted.** `crates/rules/CORPUS_LOCK.toml` records each rule's
+  `version` and a content hash (`Rule::content_hash()`: the whole rule, `version` and
+  `last_reviewed` excluded). The lock gate fails the build when a rule's content changed but its
+  `version` did not. The workflow for any edit to an existing rule is: edit it, bump `version`,
+  run `camerata corpus lock`, commit the rule and the lock together. `camerata corpus lock`
+  refuses (writing nothing) if a rule changed without a bump, so it cannot be used to make a
+  missed bump go away; never hand-edit the lock to silence the gate. A new rule needs
+  `version = 1` and a `camerata corpus lock` run to enter the lock.
 - **`last_reviewed` is optional and is NOT a change.** Set it when you personally confirm this one
   rule is still current best practice between full domain sweeps. It must be a real `YYYY-MM-DD`
   date that is not in the future (`rules_with_invalid_last_reviewed`). Setting or advancing it
@@ -739,11 +748,16 @@ specifically "a human decides."
 7. **Tests:** a gated rule needs a detector test; an escalation rule's option-scoping is covered by the
    generic `selected_escalation` test, but add a rule-specific one if it has a backstop.
 
+8. **Lock:** run `camerata corpus lock` and commit `crates/rules/CORPUS_LOCK.toml` with the
+   rule. Without it the lock gate fails (a new rule is not in the lock; an edited one has a
+   stale entry).
+
 ## Where the moving parts live (quick map)
 
 | Concern | Location |
 |---|---|
 | Rule TOML | `crates/rules/principles/<domain>/<id>.toml` |
+| Rule content hash, version lock, `camerata corpus lock` | `crates/rules/src/lock.rs`, `crates/rules/CORPUS_LOCK.toml`, `crates/cli/src/corpus_cmd.rs` |
 | Rule struct / loader / `selected_escalation` | `crates/rules/src/lib.rs` |
 | Layer-1 gate (deny) detectors | `crates/gateway/src/` |
 | Layer-2 checks | `crates/checks/` (`runner_for_worktree`) |
