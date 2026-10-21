@@ -139,6 +139,14 @@ pub mod query_grammar_injection_checker;
 /// `crates/rules/principles/javascript/arch-one-import-path-1.toml`.
 pub mod one_import_path_checker;
 
+/// `ARCH-DEAD-CODE-1` (W29, `docs/design/2026-10-21_w29-detector-implementation.md`): a source
+/// file nothing reaches. File-level in v1 (unused individual exports are a separate future
+/// rule). Flags only when the file is unreachable from every entry point AND its name appears
+/// in no live file AND no framework, manifest or marker convention explains it; Rust files by
+/// the `mod` declaration closure. See
+/// `crates/rules/principles/universal/arch-dead-code-1.toml`.
+pub mod dead_code_checker;
+
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
 /// checker registry — "Plug point B" in
 /// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.3. Composed into
