@@ -6,6 +6,9 @@ This file translates it into the build order + the per-rule deliverables, ground
 current tree. W29 is a multi-detector build (tree-sitter passes + a cross-file clone detector),
 so it is sequenced as its own focused effort, not folded into a tail-of-session.
 
+> **Actual detector implementation design:** `docs/design/2026-10-21_w29-detector-implementation.md`
+> (what exists to reuse vs the missing literal-extractor + clone-detector + per-rule checkers).
+
 ## Dependencies — both now satisfied
 - The convention synthesiser fix (`46984f9`) must precede W29 (source §83 wires each consistency
   rule's inferred convention — "money flows through one helper in 9 of 11 places" — into the
