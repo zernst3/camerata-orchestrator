@@ -282,9 +282,20 @@ pub async fn eslint_is_provisioned(workspace: &Path) -> bool {
 /// its directory, so a half-removed package reads as absent.
 fn eslint_packages_installed(workspace: &Path) -> bool {
     let node_modules = workspace.join("node_modules");
-    ESLINT_NPM_PACKAGES
-        .iter()
-        .all(|pkg| node_modules.join(pkg).join("package.json").exists())
+    ESLINT_NPM_PACKAGES.iter().all(|spec| {
+        let name = npm_package_name(spec);
+        if !node_modules.join(name).join("package.json").exists() {
+            return false;
+        }
+        // W30: a present-but-WRONG-MAJOR package (a workspace that drifted to eslint 10 /
+        // react-hooks 7 under the old unpinned list) must re-provision, not read as installed —
+        // otherwise the presence-only probe would leave the drifted, finding-zeroing workspace
+        // in place forever. A spec with no pin imposes no version constraint.
+        match npm_pinned_major(spec) {
+            Some(want) => installed_major(&node_modules, name) == Some(want),
+            None => true,
+        }
+    })
 }
 
 /// `true` when the workspace's copy of the flat config is byte-identical to the
@@ -331,15 +342,54 @@ fn eslint_config_is_current(workspace: &Path) -> bool {
 /// Every package here must also be REGISTERED in the bundled flat config
 /// (`assets/eslint/camerata.config.mjs`'s `plugins` field) — installing a plugin
 /// without registering it leaves `--rule` unable to resolve its namespace. And
-/// every package here is checked for PRESENCE by [`eslint_is_provisioned`], so
-/// adding one to this list is enough to make existing workspaces re-provision.
+/// every package here is checked for PRESENCE AND MAJOR VERSION by
+/// [`eslint_is_provisioned`], so adding one, or bumping a pin, makes existing
+/// workspaces re-provision.
+///
+/// W30: each entry is VERSION-PINNED to a major compatible with the bundled flat
+/// config. Before this, the entries were bare names, so `npm install` pulled
+/// LATEST — which drifted to eslint 10 + eslint-plugin-react-hooks 7, majors the
+/// bundled config cannot register (`--rule react-hooks/exhaustive-deps` → "could
+/// not find plugin react-hooks"), silently zeroing every plugin-backed preview
+/// finding on a freshly-provisioned machine. eslint 9 + react-hooks 5 (verified to
+/// produce the finding) and their eslint-9-line companions are the correct pins.
+/// Bump these deliberately, in lockstep with the bundled config, never by letting
+/// `npm` choose.
 const ESLINT_NPM_PACKAGES: &[&str] = &[
-    "eslint",
-    "@typescript-eslint/parser",
-    "@typescript-eslint/eslint-plugin",
-    "eslint-plugin-react-hooks",
-    "eslint-plugin-jest",
+    "eslint@^9",
+    "@typescript-eslint/parser@^8",
+    "@typescript-eslint/eslint-plugin@^8",
+    "eslint-plugin-react-hooks@^5",
+    "eslint-plugin-jest@^28",
 ];
+
+/// The bare npm package name from an [`ESLINT_NPM_PACKAGES`] spec, dropping any
+/// `@<range>` version suffix. Handles scoped names: the scope `@` at index 0 is not
+/// a version separator, so `@typescript-eslint/parser@^8` → `@typescript-eslint/parser`
+/// while `eslint@^9` → `eslint` and a bare `eslint` → `eslint`.
+fn npm_package_name(spec: &str) -> &str {
+    match spec.rfind('@') {
+        Some(i) if i > 0 => &spec[..i],
+        _ => spec,
+    }
+}
+
+/// The pinned MAJOR version from a spec (e.g. `eslint@^9` → `Some(9)`), or `None`
+/// when the spec carries no version. Tolerates a leading `^`/`~`/`>=` range marker.
+fn npm_pinned_major(spec: &str) -> Option<u32> {
+    let i = spec.rfind('@').filter(|&i| i > 0)?;
+    let ver = spec[i + 1..].trim_start_matches(['^', '~', '>', '=', ' ']);
+    ver.split('.').next()?.parse::<u32>().ok()
+}
+
+/// The installed MAJOR version of a package in `node_modules`, read from its
+/// `package.json` `version` field. `None` if absent or unparseable.
+fn installed_major(node_modules: &Path, name: &str) -> Option<u32> {
+    let pkg_json = std::fs::read_to_string(node_modules.join(name).join("package.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&pkg_json).ok()?;
+    let ver = v.get("version")?.as_str()?;
+    ver.split('.').next()?.parse::<u32>().ok()
+}
 
 /// Ensure eslint (and its companion packages) are provisioned in the tooling
 /// workspace.
@@ -746,6 +796,61 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // ── W30 eslint version-pin parsing (pure) ─────────────────────────────────
+
+    #[test]
+    fn npm_package_name_strips_version_and_respects_scopes() {
+        assert_eq!(npm_package_name("eslint@^9"), "eslint");
+        assert_eq!(npm_package_name("eslint"), "eslint");
+        assert_eq!(
+            npm_package_name("@typescript-eslint/parser@^8"),
+            "@typescript-eslint/parser"
+        );
+        // scoped, no version: the leading `@` is a scope, not a separator.
+        assert_eq!(
+            npm_package_name("@typescript-eslint/parser"),
+            "@typescript-eslint/parser"
+        );
+    }
+
+    #[test]
+    fn npm_pinned_major_parses_the_range() {
+        assert_eq!(npm_pinned_major("eslint@^9"), Some(9));
+        assert_eq!(npm_pinned_major("eslint-plugin-react-hooks@^5"), Some(5));
+        assert_eq!(npm_pinned_major("@typescript-eslint/parser@^8"), Some(8));
+        assert_eq!(npm_pinned_major("eslint-plugin-jest@^28"), Some(28));
+        assert_eq!(npm_pinned_major("eslint"), None); // unpinned
+        assert_eq!(npm_pinned_major("@scope/pkg"), None); // scoped, unpinned
+    }
+
+    #[test]
+    fn every_bundled_eslint_pin_has_a_major() {
+        // The shipped list must stay pinned — the whole W30 fix is that none drifts to latest.
+        for spec in ESLINT_NPM_PACKAGES {
+            assert!(
+                npm_pinned_major(spec).is_some(),
+                "ESLINT_NPM_PACKAGES entry {spec:?} is unpinned; it would drift to npm 'latest'"
+            );
+        }
+    }
+
+    #[test]
+    fn installed_major_reads_package_json_and_forces_reprovision_on_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let nm = tmp.path().join("node_modules");
+        std::fs::create_dir_all(nm.join("eslint")).unwrap();
+        std::fs::write(
+            nm.join("eslint").join("package.json"),
+            r#"{"name":"eslint","version":"10.12.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(installed_major(&nm, "eslint"), Some(10));
+        // The drifted major (10) does not equal the pinned major (9) → not "installed".
+        assert_ne!(installed_major(&nm, "eslint"), npm_pinned_major("eslint@^9"));
+        // A package with no package.json reads as absent.
+        assert_eq!(installed_major(&nm, "nope"), None);
+    }
+
     // ── path resolution (pure) ────────────────────────────────────────────────
 
     #[test]
@@ -800,10 +905,16 @@ mod tests {
     fn fully_provisioned_workspace() -> TempDir {
         let tmp = TempDir::new().unwrap();
         let ws = tmp.path();
-        for pkg in ESLINT_NPM_PACKAGES {
-            let dir = ws.join("node_modules").join(pkg);
+        for spec in ESLINT_NPM_PACKAGES {
+            let name = npm_package_name(spec);
+            let dir = ws.join("node_modules").join(name);
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("package.json"), "{}").unwrap();
+            let major = npm_pinned_major(spec).unwrap_or(0);
+            std::fs::write(
+                dir.join("package.json"),
+                format!("{{\"version\":\"{major}.0.0\"}}"),
+            )
+            .unwrap();
         }
         let asset = std::fs::read(bundled_eslint_config_src()).unwrap();
         std::fs::write(eslint_config_path(ws), asset).unwrap();
@@ -826,10 +937,11 @@ mod tests {
     fn req_c11_a_workspace_missing_one_required_package_must_reprovision() {
         for missing in ESLINT_NPM_PACKAGES {
             let tmp = fully_provisioned_workspace();
-            std::fs::remove_dir_all(tmp.path().join("node_modules").join(missing)).unwrap();
+            let name = npm_package_name(missing);
+            std::fs::remove_dir_all(tmp.path().join("node_modules").join(name)).unwrap();
             assert!(
                 !eslint_packages_installed(tmp.path()),
-                "a workspace missing `{missing}` must not read as provisioned — that is how \
+                "a workspace missing `{name}` must not read as provisioned — that is how \
                  three plugin packages stayed missing for months and zeroed the whole pass"
             );
         }
@@ -840,7 +952,10 @@ mod tests {
     #[test]
     fn req_c11_a_package_dir_without_a_manifest_counts_as_absent() {
         let tmp = fully_provisioned_workspace();
-        let dir = tmp.path().join("node_modules").join(ESLINT_NPM_PACKAGES[0]);
+        let dir = tmp
+            .path()
+            .join("node_modules")
+            .join(npm_package_name(ESLINT_NPM_PACKAGES[0]));
         std::fs::remove_file(dir.join("package.json")).unwrap();
         assert!(!eslint_packages_installed(tmp.path()));
     }
@@ -940,10 +1055,19 @@ mod tests {
     /// proof of provisioning — see its doc comment for the write-once defect that
     /// change closes.
     fn stub_eslint_packages_and_config(ws: &Path) {
-        for pkg in ESLINT_NPM_PACKAGES {
-            let dir = ws.join("node_modules").join(pkg);
+        for spec in ESLINT_NPM_PACKAGES {
+            // Use the BARE package name for the directory (the probe looks there), and write a
+            // version matching the pinned major so the W30 version-aware probe reads the stub as
+            // correctly provisioned.
+            let name = npm_package_name(spec);
+            let dir = ws.join("node_modules").join(name);
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("package.json"), "{}").unwrap();
+            let major = npm_pinned_major(spec).unwrap_or(0);
+            std::fs::write(
+                dir.join("package.json"),
+                format!("{{\"version\":\"{major}.0.0\"}}"),
+            )
+            .unwrap();
         }
         let asset = std::fs::read(bundled_eslint_config_src()).unwrap();
         std::fs::write(eslint_config_path(ws), asset).unwrap();
