@@ -286,10 +286,12 @@ fn refinement1_machine_commit_without_story_id_hard_blocks() {
 /// `AB#<id>` in the subject). The generated message passes that project's exact gate.
 #[test]
 fn refinement1_generated_commit_passes_ado_subject_id_config() {
-    let mut cfg = ProcessRuleConfig::default();
-    cfg.ado_link = AdoLinkConfig {
-        enabled: true,
-        prefix: "AB".to_string(),
+    let mut cfg = ProcessRuleConfig {
+        ado_link: AdoLinkConfig {
+            enabled: true,
+            prefix: "AB".to_string(),
+        },
+        ..ProcessRuleConfig::default()
     };
     cfg.commit_doc.id_location = IdLocation::Subject;
     cfg.commit_doc.story_id_format = StoryIdFormat {
@@ -345,14 +347,16 @@ fn refinement2_uow_pr_open_with_violating_body_is_gated() {
 /// chokepoint and allows a conforming one.
 #[test]
 fn refinement3_branch_gate_enforces_when_rule_active() {
-    let mut cfg = ProcessRuleConfig::default();
-    cfg.branch_naming = BranchNamingConfig {
-        enabled: true,
-        prefixes: vec![
-            "feature/".to_string(),
-            "release/".to_string(),
-            "hotfix/".to_string(),
-        ],
+    let cfg = ProcessRuleConfig {
+        branch_naming: BranchNamingConfig {
+            enabled: true,
+            prefixes: vec![
+                "feature/".to_string(),
+                "release/".to_string(),
+                "hotfix/".to_string(),
+            ],
+        },
+        ..ProcessRuleConfig::default()
     };
 
     let err = gated_branch(&cfg, "camerata/acme-widgets-42")

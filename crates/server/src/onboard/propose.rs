@@ -336,6 +336,7 @@ pub(crate) const ALWAYS_ON_DOMAINS: &[&str] = &["testing", "process", "concurren
 ///
 /// [`emittable_domains`] includes these so the H1 gate measures "can this rule ever be
 /// selected" rather than the narrower "does `domains_for_stack` name it".
+#[cfg(test)]
 pub(crate) const PIPELINE_SELECTED_DOMAINS: &[&str] = &["universal", "agentic"];
 
 /// Corpus domains implied by the presence of `api-layer` — i.e. any repo with a backend API
@@ -497,6 +498,7 @@ fn expand_parent_domains(domains: &mut std::collections::BTreeSet<&'static str>)
 /// — the A6 defect class. Derived from the SAME tables `domains_for_stack` reads, so the two
 /// can never drift; the gate is still load-bearing because the thing it compares against (the
 /// corpus folder layout) is independent data this file knows nothing about.
+#[cfg(test)]
 pub(crate) fn emittable_domains() -> std::collections::BTreeSet<&'static str> {
     let mut domains: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
     domains.extend(ALWAYS_ON_DOMAINS.iter().copied());
@@ -521,6 +523,7 @@ pub(crate) fn emittable_domains() -> std::collections::BTreeSet<&'static str> {
 /// Every framework label [`FRAMEWORK_DOMAINS`] maps. Used by the witness gate to assert each
 /// one is actually producible by [`detect_frameworks`] — a mapping row for a label nothing
 /// detects would make `emittable_domains` claim reachability it does not have.
+#[cfg(test)]
 pub(crate) fn mapped_framework_labels() -> Vec<&'static str> {
     FRAMEWORK_DOMAINS.iter().map(|(fw, _)| *fw).collect()
 }

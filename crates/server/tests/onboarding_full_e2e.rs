@@ -277,7 +277,9 @@ async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
     // ── MARK the repo onboarded on the project (the apply step's final act).
     state
         .projects()
-        .update(&project.id, |p| p.mark_onboarded(&[repo_spec.clone()]))
+        .update(&project.id, |p| {
+            p.mark_onboarded(std::slice::from_ref(&repo_spec))
+        })
         .expect("mark the repo onboarded");
 
     // ── The development gate now SEES the repo as onboarded: a re-onboard is blocked and the

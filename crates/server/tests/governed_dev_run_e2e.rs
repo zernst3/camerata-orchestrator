@@ -161,7 +161,9 @@ fn scope1_project_setup_onboard_repo_and_create_uow_from_workitem() {
     // Onboard the repo (the apply step marks it onboarded on the project).
     state
         .projects()
-        .update(&project.id, |p| p.mark_onboarded(&[repo.clone()]))
+        .update(&project.id, |p| {
+            p.mark_onboarded(std::slice::from_ref(&repo))
+        })
         .expect("mark the repo onboarded");
     let onboarded = state
         .projects()

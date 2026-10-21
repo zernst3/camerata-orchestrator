@@ -81,7 +81,7 @@ pub fn corpus_texts_from_ruleset(set: &camerata_rules::RuleSet) -> Vec<String> {
 /// Only findings already marked `active` are touched; inline/baseline suppressions are
 /// already classified and must not be downgraded.
 pub fn suppress_self_referential(
-    findings: &mut Vec<Finding>,
+    findings: &mut [Finding],
     files: &[(String, String)],
     corpus_texts: &[String],
 ) {

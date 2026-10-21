@@ -910,8 +910,10 @@ fn server_orch_factory(
 /// (A native/OpenRouter lead would require the key — see the next test.)
 #[test]
 fn scope7_claude_strongest_routes_to_cli_orchestrator() {
-    let mut tier_map = TierMap::default();
-    tier_map.strongest = "claude-opus-5".to_string(); // claude provider in the static registry
+    let tier_map = TierMap {
+        strongest: "claude-opus-5".to_string(), // claude provider in the static registry
+        ..TierMap::default()
+    };
     let factory = server_orch_factory(ModelRegistry::new(), MemoryCredentialStore::new());
     let session = lead_session(&tier_map);
     let ctx = LeadBuildContext {
@@ -936,8 +938,10 @@ fn scope7_claude_strongest_routes_to_cli_orchestrator() {
 /// key it builds. This is the publicly-observable proof the provider follows the model.
 #[test]
 fn scope7_openrouter_strongest_routes_to_native_orchestrator() {
-    let mut tier_map = TierMap::default();
-    tier_map.strongest = "vendor/lead-model".to_string();
+    let tier_map = TierMap {
+        strongest: "vendor/lead-model".to_string(),
+        ..TierMap::default()
+    };
     let registry = registry_with_openrouter("vendor/lead-model");
 
     // No key -> the NATIVE path errors naming OPENROUTER_API_KEY (the CLI path would NOT).
@@ -1059,8 +1063,10 @@ fn scope7_gate_lead_is_orchestrator_child_is_not() {
     // The LEAD, by contrast, is built in orchestrator mode by the orchestrator factory.
     // We prove it took the ORCHESTRATOR branch (not the worker branch) via the native path's
     // key requirement: only the orchestrator-config-carrying native build reaches the key check.
-    let mut tier_map = TierMap::default();
-    tier_map.strongest = "vendor/lead-model".to_string();
+    let tier_map = TierMap {
+        strongest: "vendor/lead-model".to_string(),
+        ..TierMap::default()
+    };
     let lead_factory = server_orch_factory(
         registry_with_openrouter("vendor/lead-model"),
         MemoryCredentialStore::new(),

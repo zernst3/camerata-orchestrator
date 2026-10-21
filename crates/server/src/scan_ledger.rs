@@ -1523,8 +1523,10 @@ mod tests {
         );
 
         // ai-location-merge: 3 raw findings in, 1 deduped away, 2 location-merged into 1 row.
-        let mut location_acc = StageAccounting::default();
-        location_acc.deduped = 1;
+        let mut location_acc = StageAccounting {
+            deduped: 1,
+            ..StageAccounting::default()
+        };
         location_acc.push_merge("AI-DUP-NAME-1", "AI-CONFIG-HANDLER-DEFECT-1");
         let location_entry = ledger.record_stage("ai-location-merge", 3, 1, location_acc);
         assert_eq!(

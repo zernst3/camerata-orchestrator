@@ -492,10 +492,12 @@ mod tests {
         // A realistic Azure-Boards project: ADO link enabled, story-id in the SUBJECT with the
         // `AB#` format.
         use camerata_checks::vcs_action::{AdoLinkConfig, IdLocation, StoryIdFormat};
-        let mut cfg = ProcessRuleConfig::default();
-        cfg.ado_link = AdoLinkConfig {
-            enabled: true,
-            prefix: "AB".to_string(),
+        let mut cfg = ProcessRuleConfig {
+            ado_link: AdoLinkConfig {
+                enabled: true,
+                prefix: "AB".to_string(),
+            },
+            ..ProcessRuleConfig::default()
         };
         cfg.commit_doc.id_location = IdLocation::Subject;
         cfg.commit_doc.story_id_format = StoryIdFormat {
@@ -540,14 +542,16 @@ mod tests {
     #[test]
     fn branch_gate_blocks_nonconforming_when_rule_active() {
         use camerata_checks::vcs_action::BranchNamingConfig;
-        let mut cfg = ProcessRuleConfig::default();
-        cfg.branch_naming = BranchNamingConfig {
-            enabled: true,
-            prefixes: vec![
-                "feature/".to_string(),
-                "release/".to_string(),
-                "hotfix/".to_string(),
-            ],
+        let cfg = ProcessRuleConfig {
+            branch_naming: BranchNamingConfig {
+                enabled: true,
+                prefixes: vec![
+                    "feature/".to_string(),
+                    "release/".to_string(),
+                    "hotfix/".to_string(),
+                ],
+            },
+            ..ProcessRuleConfig::default()
         };
         // Camerata's default `camerata/<id>` slug does not match the required prefixes.
         assert!(

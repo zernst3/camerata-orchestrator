@@ -19,11 +19,11 @@
 //! the `X-OAuth-Scopes` response header.  We classify the outcome into one of
 //! four error categories:
 //!
-//! - `NoToken`           — `CAMERATA_GITHUB_TOKEN` is absent or empty.
-//! - `InvalidOrExpired`  — GitHub returned 401: the token is wrong or has expired.
+//! - `NoToken` — `CAMERATA_GITHUB_TOKEN` is absent or empty.
+//! - `InvalidOrExpired` — GitHub returned 401: the token is wrong or has expired.
 //! - `InsufficientScope` — GitHub returned 403: the token exists but lacks the
-//!                         permissions Camerata needs (read:user + repo).
-//! - `Unreachable`       — Any other non-2xx or a transport error.
+//!   permissions Camerata needs (read:user + repo).
+//! - `Unreachable` — Any other non-2xx or a transport error.
 //!
 //! We NEVER log or return the token value; only the derived `login` + `scopes` are
 //! surfaced.

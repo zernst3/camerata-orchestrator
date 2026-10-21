@@ -11543,7 +11543,7 @@ mod tests {
     /// `FindingRefJson::bucket` (the matrix entry) and `CuratedSiteJson::bucket` (the SAME
     /// finding's held-for-review row) must read the SAME value — both come from exactly one
     /// `effective_bucket` call per finding now (previously two independent `is_informational`
-    /// + `matrix_bucket` call sites in this file, which happened to agree today but had no
+    /// and `matrix_bucket` call sites in this file, which happened to agree today but had no
     /// structural guarantee against drifting apart). A hedged (`needs-review`) finding is the
     /// sharpest case: it must read `"held"` (C5-4) in BOTH places, never an action bucket — and
     /// it still ships (over-tell, never dropped), just consistently re-bucketed.

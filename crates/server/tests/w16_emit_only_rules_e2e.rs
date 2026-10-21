@@ -92,8 +92,10 @@ fn fixture_files() -> Vec<(String, String)> {
 }
 
 fn minimal_report(ledger: ScanLedger, audited_rule_ids: Vec<String>) -> ScanReport {
-    let mut provenance = onboard::ScanProvenance::default();
-    provenance.audited_rule_ids = audited_rule_ids;
+    let provenance = onboard::ScanProvenance {
+        audited_rule_ids,
+        ..onboard::ScanProvenance::default()
+    };
     ScanReport {
         repos: vec!["acme/api".to_string()],
         stacks: Vec::new(),
@@ -328,7 +330,7 @@ async fn req_w16_emit_only_rule_is_still_written_into_agents_md() {
     assert!(!structured.is_inspectable(), "precondition");
     assert_eq!(structured.enforcement.as_str(), "structured");
 
-    let arm_rules = vec![
+    let arm_rules = [
         camerata_server::arm::ArmRule {
             id: rule.id.0.clone(),
             title: rule.title.clone(),

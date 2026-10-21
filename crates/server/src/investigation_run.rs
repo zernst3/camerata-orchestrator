@@ -275,6 +275,9 @@ pub async fn execute_investigation_run(
 /// The resume context was persisted at the pause point and is CONSUMED here (so a run
 /// cannot be double-resumed). The clarify question itself is already marked answered by
 /// the 3a store before this is called.
+// too_many_arguments: the resume entry point takes the app's stores by value (each is a cheap
+// `Arc` handle) plus the persisted resume context; they are independent, not one concept.
+#[allow(clippy::too_many_arguments)]
 pub async fn resume_investigation_after_clarification(
     runs: RunStore,
     uow: UowStore,

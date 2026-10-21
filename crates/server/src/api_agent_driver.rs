@@ -1076,7 +1076,7 @@ fn parse_response(resp: &LlmResponse) -> ParsedResponse {
             let tool_use_blocks: Vec<ToolInvocation> = blocks
                 .iter()
                 .filter(|b| b["type"] == "tool_use")
-                .filter_map(|b| normalize_anthropic_tool_use(b))
+                .filter_map(normalize_anthropic_tool_use)
                 .collect();
 
             if !tool_use_blocks.is_empty() {
@@ -2056,6 +2056,9 @@ fn resolve_claude_backend(
 /// via [`resolve_claude_backend`] BEFORE any driver is built:
 /// - `Blocked` -> refuse to build ANYTHING; returns `Err` (the caller must not start the run).
 /// - `Api` / `Cli` -> proceeds normally.
+// too_many_arguments: a flat construction helper shared by three driver factories; every
+// parameter is an independent knob, and a params struct would only mirror these fields.
+#[allow(clippy::too_many_arguments)]
 fn build_claude_driver(
     model_id: &str,
     // ROUTES-9: credential store, consulted store-first (env fallback) for the Anthropic key

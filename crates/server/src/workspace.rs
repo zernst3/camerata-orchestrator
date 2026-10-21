@@ -637,8 +637,7 @@ fn canonical_or_self(p: PathBuf) -> PathBuf {
 /// for the inputs Camerata produces (branch names are slug-like).
 pub fn sanitize_branch_segment(branch: &str) -> String {
     let mut out = String::with_capacity(branch.len());
-    let mut chars = branch.chars().peekable();
-    while let Some(c) = chars.next() {
+    for c in branch.chars() {
         match c {
             '/' => out.push_str("__"),
             c if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' => out.push(c),
@@ -1178,19 +1177,17 @@ pub async fn git_status(dir: &Path) -> anyhow::Result<RepoGitStatus> {
 /// Kept as a pure function so the UI can format the same data without calling git.
 pub fn build_status_detail(branch: &str, dirty: bool, sync: &AheadBehind) -> String {
     let mut parts: Vec<String> = vec![format!("on {branch}")];
-    match (sync.ahead, sync.behind) {
-        (Some(a), Some(b)) => {
-            if a > 0 && b > 0 {
-                parts.push(format!("{a} ahead, {b} behind"));
-            } else if a > 0 {
-                parts.push(format!("{a} ahead"));
-            } else if b > 0 {
-                parts.push(format!("{b} behind"));
-            } else {
-                parts.push("in sync".to_string());
-            }
+    // No upstream (either side `None`) — say nothing about sync.
+    if let (Some(a), Some(b)) = (sync.ahead, sync.behind) {
+        if a > 0 && b > 0 {
+            parts.push(format!("{a} ahead, {b} behind"));
+        } else if a > 0 {
+            parts.push(format!("{a} ahead"));
+        } else if b > 0 {
+            parts.push(format!("{b} behind"));
+        } else {
+            parts.push("in sync".to_string());
         }
-        _ => {} // no upstream — say nothing about sync
     }
     if dirty {
         parts.push("uncommitted changes".to_string());
@@ -1217,7 +1214,7 @@ pub struct BranchList {
 
 /// Return the current branch and all local branch names in the working copy at `dir`.
 pub async fn list_branches(dir: &Path) -> anyhow::Result<BranchList> {
-    let current_out = git(Some(&dir), &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+    let current_out = git(Some(dir), &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
     let current = if current_out.status.success() {
         String::from_utf8_lossy(&current_out.stdout)
             .trim()
@@ -1502,11 +1499,11 @@ pub async fn fetch_all(dir: &Path, repo: &str, token: &str) -> anyhow::Result<St
 /// Stage all changes with `git add -A` then commit with `message`. Returns the
 /// commit output (or a "nothing to commit" notice if the tree was already clean).
 pub async fn commit_all(dir: &Path, message: &str) -> anyhow::Result<String> {
-    let add = git(Some(&dir), &["add", "-A"]).await?;
+    let add = git(Some(dir), &["add", "-A"]).await?;
     if !add.status.success() {
         anyhow::bail!("git add: {}", stderr_of(&add));
     }
-    let commit = git(Some(&dir), &["commit", "-m", message]).await?;
+    let commit = git(Some(dir), &["commit", "-m", message]).await?;
     if commit.status.success() {
         let out = String::from_utf8_lossy(&commit.stdout).trim().to_string();
         return Ok(out);
@@ -1591,7 +1588,7 @@ pub async fn snapshot_worktree(dir: &Path, task: &str) -> anyhow::Result<Option<
 /// in `.git/config`). This is the user-triggered push from the UI; the server never
 /// calls this on its own.
 pub async fn push_branch(dir: &Path, repo: &str, branch: &str, token: &str) -> anyhow::Result<()> {
-    let out = git(Some(&dir), &["push", &authed_url(repo, token), branch]).await?;
+    let out = git(Some(dir), &["push", &authed_url(repo, token), branch]).await?;
     if out.status.success() {
         return Ok(());
     }
@@ -1621,7 +1618,7 @@ pub async fn pull_branch(
     token: &str,
 ) -> anyhow::Result<String> {
     let out = git(
-        Some(&dir),
+        Some(dir),
         &["pull", "--ff-only", &authed_url(repo, token), branch],
     )
     .await?;
@@ -1633,7 +1630,7 @@ pub async fn pull_branch(
 
 /// Switch to an existing local branch (no creation). Use `create_branch_at` to create + switch.
 pub async fn switch_branch(dir: &Path, branch: &str) -> anyhow::Result<()> {
-    let out = git(Some(&dir), &["checkout", branch]).await?;
+    let out = git(Some(dir), &["checkout", branch]).await?;
     if out.status.success() {
         return Ok(());
     }
@@ -1644,12 +1641,12 @@ pub async fn switch_branch(dir: &Path, branch: &str) -> anyhow::Result<()> {
 /// switch to it. This variant takes the resolved `dir` directly (unlike `create_branch`
 /// which accepts root + repo identifiers).
 pub async fn create_branch_at(dir: &Path, branch: &str) -> anyhow::Result<()> {
-    let created = git(Some(&dir), &["checkout", "-b", branch]).await?;
+    let created = git(Some(dir), &["checkout", "-b", branch]).await?;
     if created.status.success() {
         return Ok(());
     }
     // Branch already exists — switch to it.
-    let switched = git(Some(&dir), &["checkout", branch]).await?;
+    let switched = git(Some(dir), &["checkout", branch]).await?;
     if switched.status.success() {
         return Ok(());
     }
@@ -1659,7 +1656,7 @@ pub async fn create_branch_at(dir: &Path, branch: &str) -> anyhow::Result<()> {
 /// Cherry-pick `sha` onto the current HEAD branch. On conflict, returns the stderr so
 /// the UI can show it; the repo is left in conflict state (the user resolves or aborts).
 pub async fn cherry_pick(dir: &Path, sha: &str) -> anyhow::Result<String> {
-    let out = git(Some(&dir), &["cherry-pick", sha]).await?;
+    let out = git(Some(dir), &["cherry-pick", sha]).await?;
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
     }

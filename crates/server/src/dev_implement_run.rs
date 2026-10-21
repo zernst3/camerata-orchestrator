@@ -756,6 +756,9 @@ pub async fn run_multi_repo_integration_gate(
 /// The decisions ARE the spec: every `Approved` decision is included verbatim so the
 /// agent understands the architect-approved constraints before touching any code.
 /// Pure + testable: no I/O, no async.
+// too_many_arguments: a pure prompt builder over independent prompt inputs; bundling them
+// into a struct would only add a type whose sole use is this call.
+#[allow(clippy::too_many_arguments)]
 pub fn implement_prompt(
     story_id: &str,
     story_title: &str,
@@ -1534,7 +1537,7 @@ pub async fn execute_dev_implement_run(
             } else {
                 std::borrow::Cow::Borrowed(&repo_worktrees)
             };
-            if let Some(gate_result) = run_multi_repo_integration_gate(
+            if let Some(Err(reason)) = run_multi_repo_integration_gate(
                 &runs,
                 &run_id,
                 &next_seq,
@@ -1544,26 +1547,24 @@ pub async fn execute_dev_implement_run(
             )
             .await
             {
-                if let Err(reason) = gate_result {
-                    iteration += 1;
-                    if iteration >= max_iterations {
-                        break Err(format!(
-                            "integration gate still failing after {iteration} pass(es): {reason}"
-                        ));
-                    }
-                    let _ = crate::workspace::snapshot_worktree(
-                        &dir,
-                        &format!("dev-implement iteration {}", iteration - 1),
-                    )
-                    .await;
-                    // LIFECYCLE-5: feed the integration-gate mismatch reason into the next pass.
-                    task = append_bounce_feedback(
-                        &base_task,
-                        iteration,
-                        &format!("Integration gate (R3.e) bounced — contract mismatch:\n{reason}"),
-                    );
-                    continue;
+                iteration += 1;
+                if iteration >= max_iterations {
+                    break Err(format!(
+                        "integration gate still failing after {iteration} pass(es): {reason}"
+                    ));
                 }
+                let _ = crate::workspace::snapshot_worktree(
+                    &dir,
+                    &format!("dev-implement iteration {}", iteration - 1),
+                )
+                .await;
+                // LIFECYCLE-5: feed the integration-gate mismatch reason into the next pass.
+                task = append_bounce_feedback(
+                    &base_task,
+                    iteration,
+                    &format!("Integration gate (R3.e) bounced — contract mismatch:\n{reason}"),
+                );
+                continue;
             }
             break Ok(());
         }
@@ -1648,7 +1649,7 @@ pub async fn execute_dev_implement_run(
                     } else {
                         std::borrow::Cow::Borrowed(&repo_worktrees)
                     };
-                if let Some(gate_result) = run_multi_repo_integration_gate(
+                if let Some(Err(reason)) = run_multi_repo_integration_gate(
                     &runs,
                     &run_id,
                     &next_seq,
@@ -1658,29 +1659,25 @@ pub async fn execute_dev_implement_run(
                 )
                 .await
                 {
-                    if let Err(reason) = gate_result {
-                        iteration += 1;
-                        if iteration >= max_iterations {
-                            break Err(format!(
-                                "integration gate still failing after {iteration} pass(es): {reason}"
-                            ));
-                        }
-                        let _ = crate::workspace::snapshot_worktree(
-                            &dir,
-                            &format!("dev-implement iteration {}", iteration - 1),
-                        )
-                        .await;
-                        // LIFECYCLE-5: feed the integration-gate mismatch reason into the next pass.
-                        task = append_bounce_feedback(
-                            &base_task,
-                            iteration,
-                            &format!(
-                                "Integration gate (R3.e) bounced — contract mismatch:\n{reason}"
-                            ),
-                        );
-                        // Bounce: re-run the agent to fix the contract mismatch.
-                        continue;
+                    iteration += 1;
+                    if iteration >= max_iterations {
+                        break Err(format!(
+                            "integration gate still failing after {iteration} pass(es): {reason}"
+                        ));
                     }
+                    let _ = crate::workspace::snapshot_worktree(
+                        &dir,
+                        &format!("dev-implement iteration {}", iteration - 1),
+                    )
+                    .await;
+                    // LIFECYCLE-5: feed the integration-gate mismatch reason into the next pass.
+                    task = append_bounce_feedback(
+                        &base_task,
+                        iteration,
+                        &format!("Integration gate (R3.e) bounced — contract mismatch:\n{reason}"),
+                    );
+                    // Bounce: re-run the agent to fix the contract mismatch.
+                    continue;
                 }
                 break Ok(());
             }

@@ -214,14 +214,7 @@ pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Res
                     .unwrap_or_default();
 
                 // Advisory title / summary — used in the detail field.
-                let title = vuln
-                    .get("summary")
-                    .and_then(|s| s.as_str())
-                    .or_else(|| {
-                        // Fallback: use aliases if no summary.
-                        None
-                    })
-                    .unwrap_or("");
+                let title = vuln.get("summary").and_then(|s| s.as_str()).unwrap_or("");
 
                 // Severity: prefer database_specific.severity (a plain word like
                 // "CRITICAL"), fall back to the CVSS score bucket, then default to
@@ -669,7 +662,7 @@ mod tests {
           "vulnerabilities":[{"id":"CVE-9","summary":"x","database_specific":{"severity":"HIGH"},
           "affected":[{"ranges":[{"type":"SEMVER","events":[{"introduced":"0"}]}]}]}]}]}]}"#;
         let g = &parse_osv_json("acme/api", &root, no_fix).unwrap()[0];
-        assert!(g.captures.get("osv_fixed_version").is_none());
+        assert!(!g.captures.contains_key("osv_fixed_version"));
         assert!(
             g.detail.contains("no patched version"),
             "detail: {}",

@@ -5568,7 +5568,7 @@ mod tests {
              {coverage:#?}"
         );
         assert!(
-            coverage.iter().any(|s| *s == na_headline),
+            coverage.contains(&na_headline),
             "the row's own headline must render verbatim or artifact parity breaks: \
              {na_headline:?} not in {coverage:#?}"
         );
@@ -5581,7 +5581,7 @@ mod tests {
 
         let findings = sheet_cell_strings(&bytes, "All Findings");
         assert!(
-            !findings.iter().any(|s| *s == na_headline),
+            !findings.contains(&na_headline),
             "a not-assessed row must not take equal billing with the defects"
         );
 

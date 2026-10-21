@@ -4125,10 +4125,8 @@ async fn run_passes_batch(
     // Retain the (ci, bi, prompt, cache_breakpoints) tuples so we can parse results.
     let mut work_meta: Vec<(usize, usize, String, Vec<usize>)> = Vec::with_capacity(n_c * n_b);
 
-    for ci in 0..n_c {
-        let digest = &digests[ci];
-        for bi in 0..n_b {
-            let batch = batches[bi];
+    for (ci, digest) in digests.iter().enumerate() {
+        for (bi, batch) in batches.iter().enumerate() {
             let rb = build_rules_block(batch);
             // BUG-AI-1: mirror run_passes semantics — advisory fires only on bi==0 AND
             // only when advisory_disabled is false. Without this check, every language-scoped
@@ -6339,88 +6337,6 @@ async fn run_routed_passes(
     )
 }
 
-/// Run the AI architectural audit for one repo. Returns the findings + proposed rules.
-///
-/// The repo is audited in CONTEXT-SIZED CHUNKS (see `chunk_files`): a real repo is far too
-/// large for one model context (a 2.8M-char repo is ~700k tokens vs a 200k window), and the
-/// old single-digest path silently fed the model only the first ~10% of files — so a
-/// blatant violation in a later file produced zero findings purely because the file was
-/// never in the input. Every chunk is audited against the full ruleset and the findings are
-/// aggregated. A model/transport failure on a chunk is noted and the audit continues, so a
-/// single bad pass never discards the others.
-///
-/// ## Rule-routing (Lever 2)
-///
-/// When `selected` contains language-scoped rules (e.g. `RUST-*`, `REACT-*`), `audit_repo`
-/// groups them by [`crate::scan_routing::Scope`] via [`crate::scan_routing::plan_routes`] and
-/// runs each group against ONLY the files that group's language matches. Cross-cutting groups
-/// (`Scope::All`) see every file; a `RUST-` group sees only `.rs` files, etc.
-///
-/// ### Advisory-pass interaction
-///
-/// The advisory "flag novel issues beyond the adopted rules" task is gated to `bi==0` in
-/// `run_passes` so novel issues are not re-flagged under N invented names across N rule-batches
-/// of the same chunk. Routing adds a second dimension: if we ran advisory in every language
-/// group WHILE an All group also exists, a `.rs` file would get advisory in the rust group AND
-/// the All group — bringing back the duplicate-novel-finding problem. The safe wiring
-/// (W2-amended — see `run_routed_passes`'s `has_all_group`):
-///
-/// - When a cross-cutting **All group** exists, it alone runs with advisory **enabled**:
-///   novel issues are discovered once, against every file, on the first batch of each chunk;
-///   every **language group** runs with `advisory_disabled = true` so it never re-triggers the
-///   advisory pass over files the All group already covers.
-/// - When NO All group exists at all (a purely language-scoped rule selection — e.g. a project
-///   that selected only `RUST-*` rules), advisory stays **enabled** in every language group
-///   instead of going dark for the whole scan: `Scope::Language` groups are mutually exclusive
-///   by file (`scan_routing::file_language` maps each file to at most one language), so this
-///   cannot duplicate a finding, and it is the ONLY way such a scan ever gets the model's
-///   backstop "is there anything wrong here beyond the listed rules?" pass at all. Before this
-///   fix, a language-only rule selection silently suppressed novel-issue discovery for the
-///   entire scan — the semantic-tier's security backstop role never fired, indistinguishable
-///   from "nothing to report."
-///
-/// Net: novel findings appear exactly once per file chunk that belongs to any group, language-
-/// scoped rules skip unmatched files, and no finding is missed.
-///
-/// ### Batch mode
-///
-/// Pass-1 W2 (A5.4, `docs/plans/2026-10-09_audit-findings-tracker.md`): decide what happens
-/// to `effective_selected`'s directive entry for `rule_id`, given the OPTION that was DECIDED
-/// for this rule this scan (forced by the operator, or model-recommended) — and, when that
-/// option is the degenerate/absent form of the requirement, build the finding that must be
-/// emitted instead of silently rewriting the directive to match it.
-///
-/// This is the single chokepoint both of `audit_repo`'s alternatives-block branches (the
-/// operator-forced loop and the model-recommendation loop) route through, so the two paths can
-/// never drift on what selecting a `violates` option actually does — the exact shape of the
-/// shipped defect this closes (`ai_audit.rs` ~5885 / ~5921-5929, pre-fix) rewrote the directive
-/// UNCONDITIONALLY for both paths.
-///
-/// - `option.violates == false` (the overwhelming majority of decisions: a genuine,
-///   non-degenerate alternative): rewrites `effective_selected`'s directive entry for `rule_id`
-///   to `option.directive`, exactly as before this fix — the per-chunk violation pass then
-///   judges conformance against the newly-adopted directive. Returns `None` (no finding is
-///   built here; any violation is the per-chunk pass's job, as always).
-/// - `option.violates == true`: the directive is LEFT UNTOUCHED — `effective_selected` is not
-///   modified at all, so the per-chunk pass keeps checking the rule's own pre-existing
-///   directive (the project's actually-selected/default option), which means OTHER sites that
-///   also happen to follow the defect can still be independently flagged by that pass. This
-///   function's own return value is the GUARANTEED floor: a `Finding` carrying the rule's own
-///   citation (`rule_id`) and remediation — `evaluated_option_id` is set to the violating
-///   option's id, which `report_export::resolve_fix` already resolves into that option's
-///   authored remediation text, exactly like any other multi-option finding; no remediation
-///   text is duplicated here. Severity anchors at `"high"` (a confirmed, evidence-backed
-///   determination that the repo follows the rule's own named defect, not a hedge) — a rule
-///   author who judges that too aggressive for a specific rule can cap it via `max_severity`
-///   (E2), which `report_export`/`xlsx_export` apply at export regardless of this anchor.
-///   `located`/`path`/`line` come from `evidence` via `report_export::parse_evidence_citation`
-///   when present (always true for a model-sourced recommendation — `parse_alternative_
-///   recommendations` already forces `applicable = false` on any unevidenced claim, so this
-///   function is never reached for one); an operator-forced pick carries no evidence by
-///   design, so `located = false` there, and the pipeline's own unlocated-above-informational
-///   safety net (`report_export::downgrade_unlocated_above_informational`) correctly demotes
-///   that one shape to `info` rather than asserting an unverifiable "high" with nothing to
-///   point at.
 /// D7 — strip the corpus's `Rejected:` AUTHORING token from prose about to reach a client.
 ///
 /// A `violates` option's `why` is interpolated verbatim into the defect detail a client
@@ -6460,6 +6376,43 @@ fn strip_authoring_token(why: &str) -> String {
     }
 }
 
+/// Pass-1 W2 (A5.4, `docs/plans/2026-10-09_audit-findings-tracker.md`): decide what happens
+/// to `effective_selected`'s directive entry for `rule_id`, given the OPTION that was DECIDED
+/// for this rule this scan (forced by the operator, or model-recommended) — and, when that
+/// option is the degenerate/absent form of the requirement, build the finding that must be
+/// emitted instead of silently rewriting the directive to match it.
+///
+/// This is the single chokepoint both of `audit_repo`'s alternatives-block branches (the
+/// operator-forced loop and the model-recommendation loop) route through, so the two paths can
+/// never drift on what selecting a `violates` option actually does — the exact shape of the
+/// shipped defect this closes (`ai_audit.rs` ~5885 / ~5921-5929, pre-fix) rewrote the directive
+/// UNCONDITIONALLY for both paths.
+///
+/// - `option.violates == false` (the overwhelming majority of decisions: a genuine,
+///   non-degenerate alternative): rewrites `effective_selected`'s directive entry for `rule_id`
+///   to `option.directive`, exactly as before this fix — the per-chunk violation pass then
+///   judges conformance against the newly-adopted directive. Returns `None` (no finding is
+///   built here; any violation is the per-chunk pass's job, as always).
+/// - `option.violates == true`: the directive is LEFT UNTOUCHED — `effective_selected` is not
+///   modified at all, so the per-chunk pass keeps checking the rule's own pre-existing
+///   directive (the project's actually-selected/default option), which means OTHER sites that
+///   also happen to follow the defect can still be independently flagged by that pass. This
+///   function's own return value is the GUARANTEED floor: a `Finding` carrying the rule's own
+///   citation (`rule_id`) and remediation — `evaluated_option_id` is set to the violating
+///   option's id, which `report_export::resolve_fix` already resolves into that option's
+///   authored remediation text, exactly like any other multi-option finding; no remediation
+///   text is duplicated here. Severity anchors at `"high"` (a confirmed, evidence-backed
+///   determination that the repo follows the rule's own named defect, not a hedge) — a rule
+///   author who judges that too aggressive for a specific rule can cap it via `max_severity`
+///   (E2), which `report_export`/`xlsx_export` apply at export regardless of this anchor.
+///   `located`/`path`/`line` come from `evidence` via `report_export::parse_evidence_citation`
+///   when present (always true for a model-sourced recommendation — `parse_alternative_
+///   recommendations` already forces `applicable = false` on any unevidenced claim, so this
+///   function is never reached for one); an operator-forced pick carries no evidence by
+///   design, so `located = false` there, and the pipeline's own unlocated-above-informational
+///   safety net (`report_export::downgrade_unlocated_above_informational`) correctly demotes
+///   that one shape to `info` rather than asserting an unverifiable "high" with nothing to
+///   point at.
 fn apply_alternative_decision(
     effective_selected: &mut [(String, String)],
     repo: &str,
@@ -6808,6 +6761,51 @@ pub(crate) fn not_assessed_findings(repo: &str, skipped: &[(String, String)]) ->
     out
 }
 
+/// Run the AI architectural audit for one repo. Returns the findings + proposed rules.
+///
+/// The repo is audited in CONTEXT-SIZED CHUNKS (see `chunk_files`): a real repo is far too
+/// large for one model context (a 2.8M-char repo is ~700k tokens vs a 200k window), and the
+/// old single-digest path silently fed the model only the first ~10% of files — so a
+/// blatant violation in a later file produced zero findings purely because the file was
+/// never in the input. Every chunk is audited against the full ruleset and the findings are
+/// aggregated. A model/transport failure on a chunk is noted and the audit continues, so a
+/// single bad pass never discards the others.
+///
+/// ## Rule-routing (Lever 2)
+///
+/// When `selected` contains language-scoped rules (e.g. `RUST-*`, `REACT-*`), `audit_repo`
+/// groups them by [`crate::scan_routing::Scope`] via [`crate::scan_routing::plan_routes`] and
+/// runs each group against ONLY the files that group's language matches. Cross-cutting groups
+/// (`Scope::All`) see every file; a `RUST-` group sees only `.rs` files, etc.
+///
+/// ### Advisory-pass interaction
+///
+/// The advisory "flag novel issues beyond the adopted rules" task is gated to `bi==0` in
+/// `run_passes` so novel issues are not re-flagged under N invented names across N rule-batches
+/// of the same chunk. Routing adds a second dimension: if we ran advisory in every language
+/// group WHILE an All group also exists, a `.rs` file would get advisory in the rust group AND
+/// the All group — bringing back the duplicate-novel-finding problem. The safe wiring
+/// (W2-amended — see `run_routed_passes`'s `has_all_group`):
+///
+/// - When a cross-cutting **All group** exists, it alone runs with advisory **enabled**:
+///   novel issues are discovered once, against every file, on the first batch of each chunk;
+///   every **language group** runs with `advisory_disabled = true` so it never re-triggers the
+///   advisory pass over files the All group already covers.
+/// - When NO All group exists at all (a purely language-scoped rule selection — e.g. a project
+///   that selected only `RUST-*` rules), advisory stays **enabled** in every language group
+///   instead of going dark for the whole scan: `Scope::Language` groups are mutually exclusive
+///   by file (`scan_routing::file_language` maps each file to at most one language), so this
+///   cannot duplicate a finding, and it is the ONLY way such a scan ever gets the model's
+///   backstop "is there anything wrong here beyond the listed rules?" pass at all. Before this
+///   fix, a language-only rule selection silently suppressed novel-issue discovery for the
+///   entire scan — the semantic-tier's security backstop role never fired, indistinguishable
+///   from "nothing to report."
+///
+/// Net: novel findings appear exactly once per file chunk that belongs to any group, language-
+/// scoped rules skip unmatched files, and no finding is missed.
+///
+/// ### Batch mode
+///
 /// The Batch execution path ([`run_passes_batch`]) does not yet apply per-rule routing — it
 /// submits every rule against every file as a single Anthropic Message Batch. Routing for the
 /// batch path is a follow-up (tracked in `docs/decisions/2026-06-20_rule_routing_wiring.md`).
@@ -14241,13 +14239,6 @@ mod tests {
         assert_eq!(recs[0].assessed_sites, None, "a zero count is no count");
     }
 
-    /// req A5.5: a decided, genuine (non-violates) convention with ZERO trace of a
-    /// violation ships as ONE informational convention_observed row — and any trace at all
-    /// (an own row, an also_matches demotion, or an absorbed merge site) suppresses it.
-    /// Verified failing before `conventions_observed_findings` existed: zero-violation
-    /// rules produced no row of any kind (the A5.5 ship-the-convention-set requirement had
-    /// no carrier).
-    #[test]
     /// W21/W22 — "the codebase consistently follows X" requires the model to have said the
     /// codebase follows X. `applicable: true` does not mean that and never did.
     ///
@@ -14285,7 +14276,7 @@ mod tests {
             "no existing pattern; recommending opt-a as the best-practice fit for this stack"
                 .to_string();
         assert!(
-            conventions_observed_findings("me/api", &[], &vec![aspirational], &alts).is_empty(),
+            conventions_observed_findings("me/api", &[], &[aspirational], &alts).is_empty(),
             "an aspirational target is not a convention the codebase follows"
         );
 
@@ -14296,11 +14287,17 @@ mod tests {
         let mut unsaid = deviation_rec("MULTI-RULE-1", "opt-a", Some(12));
         unsaid.currently_followed = None;
         assert!(
-            conventions_observed_findings("me/api", &[], &vec![unsaid], &alts).is_empty(),
+            conventions_observed_findings("me/api", &[], &[unsaid], &alts).is_empty(),
             "a model that did not answer the question has not affirmed the convention"
         );
     }
 
+    /// req A5.5: a decided, genuine (non-violates) convention with ZERO trace of a
+    /// violation ships as ONE informational convention_observed row — and any trace at all
+    /// (an own row, an also_matches demotion, or an absorbed merge site) suppresses it.
+    /// Verified failing before `conventions_observed_findings` existed: zero-violation
+    /// rules produced no row of any kind (the A5.5 ship-the-convention-set requirement had
+    /// no carrier).
     #[test]
     fn req_a5_5_convention_observed_emitted_only_when_zero_trace() {
         use camerata_api_types::audit::FindingKind;
