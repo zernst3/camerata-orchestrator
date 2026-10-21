@@ -128,6 +128,16 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
       middle finding, re-export, assert.
     - The withdrawal line, data-driven, with the retired set on the wire.
     - `sample-report/data.json` predates the `kind` field and needs regenerating.
+    - **Phase-A entry finding (2026-10-20):** running the regenerator
+      (`cargo test -p camerata-server --test generate_sample_report -- --ignored`) now panics on
+      its own sanity assertion `executive_summary.curated_total == 6` (actual **5**) BEFORE it
+      writes `data.json` (line 388 < 395), so the sample is still the stale Sep-22 file. One of
+      the six curated findings reclassified out of the open-action set since Sep 22 — accumulated
+      drift from prior corpus work (the supabase 14-rule rewrites in `910697d`, kind
+      reclassifications), NOT this turn's edits (Group 4 touched no SUPABASE-/SEC- rule; `cwe`
+      and remediation text don't change classification). First W27 task: identify which finding
+      dropped, confirm 5 is the correct current behaviour, and update the fixture expectation as
+      part of the regen — do NOT flip 6→5 blind.
 16. **W32 rule metadata** (D6). Part (a) DONE (`05d94df`): schema added (`cwe`/`asvs`/
     `superseded_since`/`current_recommendation` on RuleToml+Rule, both load sites, unknown-field
     allowlist, RULE_AUTHORING), `cwe` authored on all 14 SEC- rules from their own source CWE
