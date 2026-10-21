@@ -153,11 +153,33 @@ fn source_message(d: &DeadFile) -> String {
 
 fn rust_message(d: &DeadFile) -> String {
     let (f, key) = (&d.path, &d.key);
+    if !d.importers.is_empty() {
+        let (see, them) = if d.importers.len() == 1 {
+            ("that finding", "that file")
+        } else {
+            ("each finding", "those files")
+        };
+        return format!(
+            "`{f}` is declared only by {}, which `cargo` never compiles (see {see}), and no \
+             `#[path]` attribute, `include!` or Cargo target names it. Its name `{key}` appears \
+             nowhere outside the unreachable files. Delete it along with {them}, or add the \
+             `mod` declaration that was meant to bring them into the build.",
+            quoted_list(&refs(&d.importers)),
+        );
+    }
+    let name_clause = if d.mentioners.is_empty() {
+        format!("Its name `{key}` appears nowhere else in the repository.")
+    } else {
+        format!(
+            "Its name `{key}` appears only in {}, which is not compiled either.",
+            quoted_list(&refs(&d.mentioners)),
+        )
+    };
     format!(
         "`{f}` is not declared by any `mod` statement in its crate, and no `#[path]` \
-         attribute, `include!` or Cargo target names it, so `cargo` never compiles it. Its name \
-         `{key}` appears nowhere else in the repository. Delete the file, or add the `mod` \
-         declaration that was meant to bring it into the build."
+         attribute, `include!` or Cargo target names it, so `cargo` never compiles it. \
+         {name_clause} Delete the file, or add the `mod` declaration that was meant to bring \
+         it into the build."
     )
 }
 

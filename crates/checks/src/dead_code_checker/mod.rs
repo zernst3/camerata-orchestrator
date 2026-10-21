@@ -62,6 +62,7 @@ mod exclusions;
 mod manifests;
 mod mentions;
 mod roots;
+mod rust_pass;
 
 #[cfg(test)]
 mod tests;

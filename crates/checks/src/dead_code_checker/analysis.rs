@@ -14,6 +14,7 @@ use super::exclusions::{
 };
 use super::manifests::{manifest_roots, ManifestDirs, Packages};
 use super::mentions::{is_always_mentioned, key_of, MentionIndex};
+use super::rust_pass::RustPlan;
 use super::{family_of, Family};
 
 /// Whether a file with this path and text is NEVER reported (`G1` to `G3`, `G11`, `G12`).
@@ -41,21 +42,31 @@ fn has_main_guard(content: &str) -> bool {
     })
 }
 
-pub(super) fn analyze(files: &[(String, String)]) -> Vec<crate::arch_checker::ArchViolation> {
-    let emitted = emitted_js_paths(files);
-
-    // Candidates: source files that no exclusion covers. Everything else is context.
-    let mut candidates: Vec<usize> = Vec::new();
+/// Source files no exclusion covers: the files that may be reported. Rust files count only in
+/// a crate whose roots and declarations the Rust pass can see.
+fn find_candidates(
+    files: &[(String, String)],
+    emitted: &HashSet<&str>,
+    rust: &RustPlan,
+) -> Vec<usize> {
+    let mut candidates = Vec::new();
     for (i, (path, content)) in files.iter().enumerate() {
-        match family_of(path) {
-            Some(Family::Ecma | Family::Python)
-                if !emitted.contains(path.as_str()) && !is_excluded(path, content) =>
-            {
-                candidates.push(i);
-            }
-            _ => {}
+        let eligible = match family_of(path) {
+            Some(Family::Ecma | Family::Python) => !emitted.contains(path.as_str()),
+            Some(Family::Rust) => rust.is_checked(path),
+            None => false,
+        };
+        if eligible && !is_excluded(path, content) {
+            candidates.push(i);
         }
     }
+    candidates
+}
+
+pub(super) fn analyze(files: &[(String, String)]) -> Vec<crate::arch_checker::ArchViolation> {
+    let emitted = emitted_js_paths(files);
+    let rust = RustPlan::build(files);
+    let candidates = find_candidates(files, &emitted, &rust);
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -71,13 +82,15 @@ pub(super) fn analyze(files: &[(String, String)]) -> Vec<crate::arch_checker::Ar
         })
         .collect();
 
-    // Roots: every context file, plus each candidate that is alive by itself.
+    // Roots: every context file, the Rust crate roots, and each candidate that is alive by
+    // itself.
     let mut roots: HashSet<String> = HashSet::new();
     for (i, (path, _)) in files.iter().enumerate() {
         if !is_candidate.contains(&i) && !emitted.contains(path.as_str()) {
             roots.insert(path.clone());
         }
     }
+    roots.extend(rust.roots().cloned());
     let packages = Packages::load(files);
     let manifest = manifest_roots(files, &packages);
     let conventions = Conventions::new(files, &packages);
@@ -117,7 +130,19 @@ pub(super) fn analyze(files: &[(String, String)]) -> Vec<crate::arch_checker::Ar
         .collect();
     let index = MentionIndex::build(files, &keys);
 
-    let mut live = reachable_from_all(&graph, roots.iter().map(String::as_str));
+    // Alive = reachable over imports from the roots (ECMAScript and Python), plus everything
+    // the `mod` closure compiles from the Rust roots.
+    let liveness = |roots: &HashSet<String>| -> HashSet<String> {
+        let mut live = reachable_from_all(&graph, roots.iter().map(String::as_str));
+        let rust_roots: Vec<String> = roots
+            .iter()
+            .filter(|p| p.ends_with(".rs"))
+            .cloned()
+            .collect();
+        live.extend(rust.declared(&rust_roots));
+        live
+    };
+    let mut live = liveness(&roots);
     loop {
         let mut grew = false;
         for &i in &pending {
@@ -137,7 +162,7 @@ pub(super) fn analyze(files: &[(String, String)]) -> Vec<crate::arch_checker::Ar
         if !grew {
             break;
         }
-        live = reachable_from_all(&graph, roots.iter().map(String::as_str));
+        live = liveness(&roots);
     }
 
     let dead_paths: BTreeSet<&str> = candidates
@@ -151,24 +176,35 @@ pub(super) fn analyze(files: &[(String, String)]) -> Vec<crate::arch_checker::Ar
         if !dead_paths.contains(path.as_str()) {
             continue;
         }
+        let family = family_of(path).unwrap_or(Family::Ecma);
         let key = key_of_candidate[&i].clone();
-        let importers: BTreeSet<String> = graph
-            .iter()
-            .filter(|e| e.to_file == *path && dead_paths.contains(e.from_file.as_str()))
-            .map(|e| e.from_file.clone())
-            .collect();
+        // What refers to this file: importers (ECMAScript, Python) or `mod` declarations
+        // (Rust). Every one of them is itself unreachable, or the file would be alive.
+        let referrers: BTreeSet<String> = if family == Family::Rust {
+            rust.declarers(path)
+                .iter()
+                .filter(|p| dead_paths.contains(p.as_str()))
+                .cloned()
+                .collect()
+        } else {
+            graph
+                .iter()
+                .filter(|e| e.to_file == *path && dead_paths.contains(e.from_file.as_str()))
+                .map(|e| e.from_file.clone())
+                .collect()
+        };
         let mentioners: BTreeSet<String> = index
             .mentioners(&key)
             .iter()
             .filter(|&&m| m != i)
             .map(|&m| files[m].0.clone())
-            .filter(|p| !importers.contains(p))
+            .filter(|p| !referrers.contains(p))
             .collect();
         dead.push(DeadFile {
             path: path.clone(),
-            family: family_of(path).unwrap_or(Family::Ecma),
+            family,
             key,
-            importers: importers.into_iter().collect(),
+            importers: referrers.into_iter().collect(),
             mentioners: mentioners.into_iter().collect(),
         });
     }
