@@ -2373,6 +2373,75 @@ pub fn build_json_exports(
     ])
 }
 
+/// Convert a JSON array-of-objects (one row per object) into RFC 4180 CSV bytes, via the `csv`
+/// crate (never hand-rolled quoting). Header = the union of object keys in first-seen order, so
+/// the column set is stable and complete even if a later row carries a key an earlier one
+/// omitted. A scalar cell is written as its text; `null` as empty; a nested array/object (e.g.
+/// a finding's flattened `kind` payload or its `also_locations`) as a COMPACT JSON string in the
+/// one cell - CSV is flat, so a nested value is preserved losslessly as JSON rather than
+/// dropped. Deriving CSV from the SAME JSON the `json/` files carry makes the two formats agree
+/// by construction.
+fn json_array_to_csv(value: &serde_json::Value) -> anyhow::Result<Vec<u8>> {
+    let rows = value.as_array().cloned().unwrap_or_default();
+
+    // Header: union of keys, first-seen order.
+    let mut headers: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in &rows {
+        if let Some(obj) = row.as_object() {
+            for k in obj.keys() {
+                if seen.insert(k.clone()) {
+                    headers.push(k.clone());
+                }
+            }
+        }
+    }
+
+    let mut wtr = csv::WriterBuilder::new().from_writer(Vec::new());
+    wtr.write_record(&headers)?;
+    for row in &rows {
+        let obj = row.as_object();
+        let record: Vec<String> = headers
+            .iter()
+            .map(|key| match obj.and_then(|o| o.get(key)) {
+                None | Some(serde_json::Value::Null) => String::new(),
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(serde_json::Value::Bool(b)) => b.to_string(),
+                Some(serde_json::Value::Number(n)) => n.to_string(),
+                // Flat format: a nested value is kept losslessly as compact JSON in its cell.
+                Some(other) => serde_json::to_string(other).unwrap_or_default(),
+            })
+            .collect();
+        wtr.write_record(&record)?;
+    }
+    Ok(wtr.into_inner()?)
+}
+
+/// Build the per-dataset CSV exports that ride in the product ZIP under `csv/` - the plain-table
+/// sibling of [`build_json_exports`]. Each CSV is derived from the EXACT JSON that file's `json/`
+/// sibling carries (via [`json_array_to_csv`]), so `csv/`, `json/`, the xlsx, and `findings.json`
+/// all trace to the one `partition_rows` pass and cannot disagree. Returns `(csv/<name>.csv,
+/// bytes)` pairs mirroring the eight JSON tables.
+pub fn build_csv_exports(
+    report: &crate::onboard::SealedReport,
+    dispositions: &HashMap<String, DispositionWire>,
+    corpus: Option<&camerata_rules::RuleSet>,
+    opts: &ReportOptions,
+) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    let json = build_json_exports(report, dispositions, corpus, opts)?;
+    json.into_iter()
+        .map(|(path, bytes)| {
+            // json/foo.json -> csv/foo.csv
+            let name = path
+                .strip_prefix("json/")
+                .and_then(|s| s.strip_suffix(".json"))
+                .unwrap_or(&path);
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            Ok((format!("csv/{name}.csv"), json_array_to_csv(&value)?))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2694,6 +2763,44 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name} is not valid JSON: {e}"));
             assert!(v.is_array(), "{name} must be a JSON array of rows");
         }
+    }
+
+    #[test]
+    fn csv_exports_cover_every_table_and_survive_nasty_cells() {
+        // A detail with a comma, a double-quote and a newline - the exact RFC 4180 escaping
+        // case a hand-rolled writer fails. It must round-trip as ONE cell, text intact.
+        let mut f = finding("SEC-NO-RAW-SQL-CONCAT-1", "a.rs", 1, "high");
+        f.detail = "line one, with a comma and a \"quote\"\nand a second line".to_string();
+        let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
+        let sealed = report.clone().seal();
+
+        let exports = build_csv_exports(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let names: Vec<&str> = exports.iter().map(|(n, _)| n.as_str()).collect();
+        for expected in [
+            "csv/all-findings.csv",
+            "csv/deviations.csv",
+            "csv/conventions.csv",
+            "csv/not-assessed.csv",
+            "csv/dependencies.csv",
+            "csv/false-positives.csv",
+            "csv/coverage.csv",
+            "csv/rules-applied.csv",
+        ] {
+            assert!(names.contains(&expected), "missing {expected} in {names:?}");
+        }
+        assert_eq!(exports.len(), 8);
+
+        // Parse all-findings.csv back and confirm the nasty detail survived as one field.
+        let all = &exports.iter().find(|(n, _)| n == "csv/all-findings.csv").unwrap().1;
+        let mut rdr = csv::Reader::from_reader(all.as_slice());
+        let headers = rdr.headers().unwrap().clone();
+        let detail_col = headers.iter().position(|h| h == "detail").expect("detail column");
+        let rec = rdr.records().next().expect("one data row").unwrap();
+        assert_eq!(
+            &rec[detail_col],
+            "line one, with a comma and a \"quote\"\nand a second line",
+            "the comma/quote/newline cell must round-trip intact"
+        );
     }
 
     #[tokio::test]
