@@ -63,6 +63,40 @@ impl Packages {
     }
 }
 
+/// Directories holding a `package.json`, `Cargo.toml` or `pyproject.toml`, parsed or not:
+/// the root of "the package this file belongs to" for loads and tool folders.
+#[derive(Debug, Default)]
+pub(super) struct ManifestDirs {
+    /// Deepest first.
+    dirs: Vec<String>,
+}
+
+impl ManifestDirs {
+    pub(super) fn load(files: &[(String, String)]) -> Self {
+        let mut dirs: Vec<String> = files
+            .iter()
+            .filter(|(p, _)| {
+                matches!(
+                    p.rsplit('/').next().unwrap_or(p),
+                    "package.json" | "Cargo.toml" | "pyproject.toml"
+                )
+            })
+            .map(|(p, _)| directory_of(p).to_string())
+            .collect();
+        dirs.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        dirs.dedup();
+        Self { dirs }
+    }
+
+    /// The nearest manifest directory above `path` (`""` when no manifest encloses it).
+    pub(super) fn nearest(&self, path: &str) -> &str {
+        self.dirs
+            .iter()
+            .find(|d| is_inside(path, d))
+            .map_or("", String::as_str)
+    }
+}
+
 impl Package {
     fn is_private(&self) -> bool {
         self.json.get("private") == Some(&Value::Bool(true))

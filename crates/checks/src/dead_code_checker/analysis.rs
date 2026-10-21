@@ -7,11 +7,12 @@ use crate::extract::paths::emitted_js_paths;
 use crate::extract::resolver::{build_import_graph, reachable_from_all, ResolvedImport};
 
 use super::conventions::Conventions;
+use super::dynamic::dynamic_roots;
 use super::emit::{self, DeadFile};
 use super::exclusions::{
     has_generated_marker, has_keep_marker, is_config_shaped, is_declaration_file, is_test_file,
 };
-use super::manifests::{manifest_roots, Packages};
+use super::manifests::{manifest_roots, ManifestDirs, Packages};
 use super::mentions::{is_always_mentioned, key_of, MentionIndex};
 use super::{family_of, Family};
 
@@ -80,6 +81,7 @@ pub(super) fn analyze(files: &[(String, String)]) -> Vec<crate::arch_checker::Ar
     let packages = Packages::load(files);
     let manifest = manifest_roots(files, &packages);
     let conventions = Conventions::new(files, &packages);
+    let dynamic = dynamic_roots(files, &ManifestDirs::load(files));
     let key_of_candidate: HashMap<usize, String> = candidates
         .iter()
         .map(|&i| (i, key_of(&files[i].0)))
@@ -94,6 +96,7 @@ pub(super) fn analyze(files: &[(String, String)]) -> Vec<crate::arch_checker::Ar
         if is_always_mentioned(&key_of_candidate[&i])
             || is_executable(content, family)
             || manifest.contains(path)
+            || dynamic.contains(path)
             || conventions.is_convention_path(path, family)
             || in_manifest_package
         {

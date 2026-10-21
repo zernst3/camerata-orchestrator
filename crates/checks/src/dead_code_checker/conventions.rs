@@ -10,8 +10,7 @@
 
 use std::collections::HashMap;
 
-use super::manifests::{Package, Packages};
-use super::roots::is_inside;
+use super::manifests::{ManifestDirs, Package, Packages};
 use super::Family;
 
 /// Which routers and platforms a package uses.
@@ -138,8 +137,7 @@ const PYTHON_DIRS: &[&str] = &[
 pub(super) struct Conventions<'a> {
     packages: &'a Packages,
     frameworks: HashMap<String, Frameworks>,
-    /// Directories holding a `package.json`, `Cargo.toml` or `pyproject.toml`, deepest first.
-    manifest_dirs: Vec<String>,
+    manifest_dirs: ManifestDirs,
 }
 
 fn basename(path: &str) -> &str {
@@ -209,22 +207,10 @@ impl<'a> Conventions<'a> {
             };
             frameworks.insert(dir, fw);
         }
-        let mut manifest_dirs: Vec<String> = files
-            .iter()
-            .filter(|(p, _)| {
-                matches!(
-                    basename(p),
-                    "package.json" | "Cargo.toml" | "pyproject.toml"
-                )
-            })
-            .map(|(p, _)| dir_of(p).to_string())
-            .collect();
-        manifest_dirs.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
-        manifest_dirs.dedup();
         Self {
             packages,
             frameworks,
-            manifest_dirs,
+            manifest_dirs: ManifestDirs::load(files),
         }
     }
 
@@ -320,11 +306,7 @@ impl<'a> Conventions<'a> {
     /// `G5`: the first folder under the nearest manifest (or under the repository root) names a
     /// directory people or tools use directly.
     fn in_tool_directory(&self, path: &str) -> bool {
-        let nearest = self
-            .manifest_dirs
-            .iter()
-            .find(|d| is_inside(path, d))
-            .map_or("", String::as_str);
+        let nearest = self.manifest_dirs.nearest(path);
         [nearest, ""].iter().any(|base| {
             relative_to(path, base)
                 .and_then(|rel| rel.split_once('/'))

@@ -56,6 +56,7 @@ use crate::extract::{self, SourceLang};
 
 mod analysis;
 mod conventions;
+mod dynamic;
 mod emit;
 mod exclusions;
 mod manifests;
