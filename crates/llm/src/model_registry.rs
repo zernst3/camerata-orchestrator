@@ -735,13 +735,23 @@ impl AnthropicModelRaw {
 /// `reqwest::Client` from `crate::llm` (never an unbounded ad-hoc client — a stalled
 /// connection to Anthropic must not hang the registry refresh forever).
 async fn fetch_anthropic_models(api_key: &str) -> anyhow::Result<Vec<RegistryEntry>> {
+    fetch_anthropic_models_from(ANTHROPIC_MODELS_URL, api_key).await
+}
+
+/// [`fetch_anthropic_models`] against an explicit endpoint URL. The split exists so the
+/// pagination loop can be exercised against a local mock server; production always passes
+/// [`ANTHROPIC_MODELS_URL`].
+async fn fetch_anthropic_models_from(
+    models_url: &str,
+    api_key: &str,
+) -> anyhow::Result<Vec<RegistryEntry>> {
     let client = crate::llm::shared_http_client();
     let mut entries = Vec::new();
     let mut after_id: Option<String> = None;
 
     for _ in 0..ANTHROPIC_MODELS_MAX_PAGES {
         let mut req = client
-            .get(ANTHROPIC_MODELS_URL)
+            .get(models_url)
             .header("x-api-key", api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION);
         if let Some(ref id) = after_id {
@@ -1875,6 +1885,105 @@ mod tests {
         ],
         "has_more": false
     }"#;
+
+    /// `fetch_anthropic_models_from` follows `has_more`/`last_id` across pages: page 2 is
+    /// requested with `after_id` = page 1's `last_id`, and the entries of BOTH pages come back
+    /// in order. (This is the consumer of `SAMPLE_ANTHROPIC_MODELS_PAGE_2`.)
+    #[tokio::test]
+    async fn fetch_anthropic_models_follows_pagination_across_pages() {
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Page 2 only matches when `after_id` is present; higher priority (lower number) so it
+        // wins over the catch-all page-1 mock for that request.
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(query_param("after_id", "claude-fable-5"))
+            .and(header("x-api-key", "sk-test"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(SAMPLE_ANTHROPIC_MODELS_PAGE_2, "application/json"),
+            )
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(SAMPLE_ANTHROPIC_MODELS_PAGE_1, "application/json"),
+            )
+            .with_priority(5)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v1/models", server.uri());
+        let entries = fetch_anthropic_models_from(&url, "sk-test")
+            .await
+            .expect("both pages fetch");
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "claude-sonnet-5",
+                "claude-fable-5",
+                "claude-brand-new-model"
+            ],
+            "entries of page 1 then page 2, in order"
+        );
+        let brand_new = entries.last().expect("page 2 entry");
+        assert!(
+            !brand_new.price_known,
+            "an id absent from the static catalog is marked price-unknown, not free"
+        );
+    }
+
+    /// `has_more: true` with no `last_id` is malformed: pagination must stop after the one
+    /// page rather than re-requesting the same first page until the page cap.
+    #[tokio::test]
+    async fn fetch_anthropic_models_stops_when_has_more_lacks_last_id() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"{"data": [{"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5"}], "has_more": true}"#,
+                "application/json",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v1/models", server.uri());
+        let entries = fetch_anthropic_models_from(&url, "sk-test")
+            .await
+            .expect("one page fetched");
+        assert_eq!(entries.len(), 1);
+    }
+
+    /// A non-2xx response is an error (the caller keeps the static catalog), not an empty list.
+    #[tokio::test]
+    async fn fetch_anthropic_models_errors_on_non_success_status() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v1/models", server.uri());
+        let err = fetch_anthropic_models_from(&url, "bad-key")
+            .await
+            .expect_err("401 must surface as an error");
+        assert!(err.to_string().contains("401"), "error was: {err}");
+    }
 
     #[test]
     fn anthropic_models_response_parses_known_shape() {
