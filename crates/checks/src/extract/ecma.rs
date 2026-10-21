@@ -19,7 +19,9 @@
 
 use tree_sitter::{Node, Tree};
 
-use super::{FunctionSpan, Import, ImportKind, MethodCall};
+use super::{
+    ExportSurface, FunctionSpan, Import, ImportKind, MethodCall, NamedReExport, StarReExport,
+};
 
 /// Which of the three v1 ECMAScript-family grammars to parse `source` with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,6 +300,178 @@ fn collect_dynamic_import_or_require(node: Node, source: &str, out: &mut Vec<Imp
         kind: ImportKind::Dynamic,
         line: start_line(node),
     });
+}
+
+// ─── exports ─────────────────────────────────────────────────────────────────────────────
+
+/// The file's export surface: its own exported names, its named re-exports (with BOTH the
+/// origin and the exported name, which [`imports`] cannot carry for an aliased re-export), and
+/// its star re-exports. Only top-level `export` statements are read (an `export` is
+/// syntactically illegal anywhere else). CommonJS `module.exports` is out of scope.
+pub fn exports(dialect: EcmaDialect, source: &str) -> ExportSurface {
+    let mut out = ExportSurface::default();
+    let Some(tree) = parse(dialect, source) else {
+        return out;
+    };
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    for node in root.children(&mut cursor) {
+        if node.kind() == "export_statement" {
+            collect_export_statement(node, source, &mut out);
+        }
+    }
+    out
+}
+
+fn collect_export_statement(node: Node, source: &str, out: &mut ExportSurface) {
+    let line = start_line(node);
+    let source_node = node.child_by_field_name("source");
+    let specifier = source_node.and_then(|s| string_literal_text(s, source));
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.children(&mut cursor).collect();
+
+    // `export default ...` in all its forms (expression, function, class) is the single
+    // export `default`; a named function/class after it does not also export its own name.
+    if children.iter().any(|c| c.kind() == "default") {
+        out.own.push("default".to_string());
+        return;
+    }
+
+    if let Some(clause) = children.iter().find(|c| c.kind() == "export_clause") {
+        let mut cc = clause.walk();
+        for spec in clause
+            .children(&mut cc)
+            .filter(|c| c.kind() == "export_specifier")
+        {
+            let Some(name_node) = spec.child_by_field_name("name") else {
+                continue;
+            };
+            let Some(origin) = export_name_text(name_node, source) else {
+                continue;
+            };
+            let exported = match spec.child_by_field_name("alias") {
+                Some(alias) => match export_name_text(alias, source) {
+                    Some(a) => a,
+                    None => continue,
+                },
+                None => origin.clone(),
+            };
+            match (specifier, source_node) {
+                (Some(sp), _) => out.named_re_exports.push(NamedReExport {
+                    specifier: sp.to_string(),
+                    origin,
+                    exported,
+                    line,
+                }),
+                // `export { a, b as c }` with no source exposes local bindings.
+                (None, None) => out.own.push(exported),
+                // A source that is not a plain string literal cannot be followed.
+                (None, Some(_)) => {}
+            }
+        }
+        return;
+    }
+
+    // `export * from 'x'` / `export * as ns from 'x'`.
+    if source_node.is_some() {
+        if let Some(ns) = children.iter().find(|c| c.kind() == "namespace_export") {
+            let mut nc = ns.walk();
+            let name = ns
+                .children(&mut nc)
+                .find(|c| c.kind() == "identifier")
+                .map(|c| text(c, source).to_string());
+            if let Some(name) = name {
+                out.own.push(name);
+            }
+        } else if let Some(sp) = specifier {
+            out.star_re_exports.push(StarReExport {
+                specifier: sp.to_string(),
+                line,
+            });
+        }
+        return;
+    }
+
+    if let Some(decl) = node.child_by_field_name("declaration") {
+        collect_declared_names(decl, source, &mut out.own);
+    }
+}
+
+/// An export name: a plain identifier or the keyword `default` (`export { default } from`).
+/// A string-literal name (`export { a as "x-y" }`) is rare and unusable as an identifier, so
+/// it yields `None` and the specifier is skipped rather than guessed.
+fn export_name_text(node: Node, source: &str) -> Option<String> {
+    if node.kind() == "string" {
+        return None;
+    }
+    let t = text(node, source);
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+/// The names an exported declaration introduces.
+fn collect_declared_names(decl: Node, source: &str, out: &mut Vec<String>) {
+    match decl.kind() {
+        "lexical_declaration" | "variable_declaration" => {
+            let mut cursor = decl.walk();
+            for d in decl
+                .children(&mut cursor)
+                .filter(|c| c.kind() == "variable_declarator")
+            {
+                if let Some(name) = d.child_by_field_name("name") {
+                    collect_pattern_names(name, source, out);
+                }
+            }
+        }
+        // `export declare function f(): void;` wraps the real declaration.
+        "ambient_declaration" => {
+            let mut cursor = decl.walk();
+            for child in decl.named_children(&mut cursor) {
+                collect_declared_names(child, source, out);
+            }
+        }
+        // function / generator / class / abstract class / interface / type alias / enum /
+        // namespace / overload signature: the declared name is the `name` field.
+        _ => {
+            if let Some(name) = decl.child_by_field_name("name") {
+                if matches!(name.kind(), "identifier" | "type_identifier") {
+                    out.push(text(name, source).to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Every binding a declarator's left-hand side introduces, so `export const { a, b: c } = x`
+/// is read as `a` and `c`. Missing a binding here would let a star re-export be mistaken for
+/// the only source of that name, so destructuring is walked rather than skipped.
+fn collect_pattern_names(node: Node, source: &str, out: &mut Vec<String>) {
+    match node.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => {
+            out.push(text(node, source).to_string());
+        }
+        "pair_pattern" => {
+            if let Some(v) = node.child_by_field_name("value") {
+                collect_pattern_names(v, source, out);
+            }
+        }
+        "assignment_pattern" => {
+            if let Some(l) = node.child_by_field_name("left") {
+                collect_pattern_names(l, source, out);
+            }
+        }
+        "object_assignment_pattern" => {
+            if let Some(l) = node.child_by_field_name("left") {
+                collect_pattern_names(l, source, out);
+            }
+        }
+        "object_pattern" | "array_pattern" | "rest_pattern" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_pattern_names(child, source, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 // ─── functions ───────────────────────────────────────────────────────────────────────────
@@ -720,5 +894,196 @@ mod tests {
         let _ = imports(EcmaDialect::TypeScript, &src);
         let _ = functions(EcmaDialect::TypeScript, &src);
         let _ = method_calls(EcmaDialect::TypeScript, &src);
+    }
+    // ── exports ───────────────────────────────────────────────────────────────
+
+    fn own(dialect: EcmaDialect, src: &str) -> Vec<String> {
+        let mut v = exports(dialect, src).own;
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn exports_declaration_forms_are_own_names() {
+        let src = "export function f() {}\n\
+                   export async function g() {}\n\
+                   export function* gen() {}\n\
+                   export class C {}\n\
+                   export const k = 1, m = 2;\n\
+                   export let l = 3;\n\
+                   export var v = 4;\n\
+                   export interface I {}\n\
+                   export type T = string;\n\
+                   export enum E { A }\n\
+                   export namespace N { export const x = 1; }\n\
+                   export abstract class AC {}\n\
+                   export declare function ov(): void;\n";
+        assert_eq!(
+            own(EcmaDialect::TypeScript, src),
+            ["AC", "C", "E", "I", "N", "T", "f", "g", "gen", "k", "l", "m", "ov", "v"]
+        );
+    }
+
+    #[test]
+    fn exports_js_declaration_forms() {
+        let src = "export function f() {}\nexport class C {}\nexport const a = 1;\n";
+        assert_eq!(own(EcmaDialect::JavaScript, src), ["C", "a", "f"]);
+    }
+
+    #[test]
+    fn exports_destructured_const_yields_every_binding() {
+        let src = "export const { a, b: c, ...rest } = obj;\nexport const [x, , y] = arr;\n";
+        assert_eq!(
+            own(EcmaDialect::TypeScript, src),
+            ["a", "c", "rest", "x", "y"]
+        );
+    }
+
+    #[test]
+    fn exports_default_in_every_form_is_default_only() {
+        for src in [
+            "export default 42;\n",
+            "export default function named() {}\n",
+            "export default class Named {}\n",
+            "export default () => 1;\n",
+        ] {
+            assert_eq!(own(EcmaDialect::TypeScript, src), ["default"], "{src}");
+        }
+    }
+
+    #[test]
+    fn exports_local_clause_yields_exported_names_not_local_names() {
+        let src = "const a = 1, b = 2;\nexport { a, b as c };\n";
+        let ex = exports(EcmaDialect::TypeScript, src);
+        assert_eq!(ex.own, ["a", "c"]);
+        assert!(ex.named_re_exports.is_empty());
+        assert!(ex.star_re_exports.is_empty());
+    }
+
+    #[test]
+    fn exports_local_clause_aliased_to_default() {
+        let src = "const a = 1;\nexport { a as default };\n";
+        assert_eq!(own(EcmaDialect::TypeScript, src), ["default"]);
+    }
+
+    #[test]
+    fn exports_named_re_export_carries_origin_exported_and_line() {
+        let src = "\nexport { a, b as c } from './x';\n";
+        let ex = exports(EcmaDialect::TypeScript, src);
+        assert!(ex.own.is_empty(), "{ex:#?}");
+        assert_eq!(
+            ex.named_re_exports,
+            vec![
+                NamedReExport {
+                    specifier: "./x".into(),
+                    origin: "a".into(),
+                    exported: "a".into(),
+                    line: 2
+                },
+                NamedReExport {
+                    specifier: "./x".into(),
+                    origin: "b".into(),
+                    exported: "c".into(),
+                    line: 2
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn exports_default_re_export_forms() {
+        let src = "export { default } from './d';\nexport { default as Widget } from './w';\n\
+                   export { thing as default } from './t';\n";
+        let ex = exports(EcmaDialect::TypeScript, src);
+        let got: Vec<(&str, &str, &str)> = ex
+            .named_re_exports
+            .iter()
+            .map(|r| (r.specifier.as_str(), r.origin.as_str(), r.exported.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("./d", "default", "default"),
+                ("./w", "default", "Widget"),
+                ("./t", "thing", "default"),
+            ]
+        );
+    }
+
+    #[test]
+    fn exports_type_only_re_export_is_a_named_re_export() {
+        let ex = exports(
+            EcmaDialect::TypeScript,
+            "export type { T as U } from './t';\n",
+        );
+        assert_eq!(ex.named_re_exports.len(), 1, "{ex:#?}");
+        assert_eq!(ex.named_re_exports[0].origin, "T");
+        assert_eq!(ex.named_re_exports[0].exported, "U");
+    }
+
+    #[test]
+    fn exports_star_re_export_is_recorded_with_its_line() {
+        let ex = exports(
+            EcmaDialect::TypeScript,
+            "export * from './a';\n\nexport * from './b';\n",
+        );
+        assert!(
+            ex.own.is_empty() && ex.named_re_exports.is_empty(),
+            "{ex:#?}"
+        );
+        assert_eq!(
+            ex.star_re_exports,
+            vec![
+                StarReExport {
+                    specifier: "./a".into(),
+                    line: 1
+                },
+                StarReExport {
+                    specifier: "./b".into(),
+                    line: 3
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn exports_star_as_namespace_is_an_own_export_not_a_star() {
+        let ex = exports(EcmaDialect::TypeScript, "export * as ns from './a';\n");
+        assert_eq!(ex.own, ["ns"]);
+        assert!(ex.star_re_exports.is_empty());
+        assert!(ex.named_re_exports.is_empty());
+    }
+
+    #[test]
+    fn exports_ignore_imports_and_non_exported_declarations() {
+        let src = "import { a } from './a';\nfunction hidden() {}\nconst also = 1;\n";
+        assert_eq!(
+            exports(EcmaDialect::TypeScript, src),
+            ExportSurface::default()
+        );
+    }
+
+    #[test]
+    fn exports_malformed_input_does_not_panic() {
+        for src in [
+            "export",
+            "export {",
+            "export { a as } from",
+            "export * from",
+            "export default",
+            "export const = ;",
+            "export { a as 'x-y' } from './x';",
+            "export * as from './x';",
+            "\u{0}\u{1} export { \u{ffff} }",
+            "",
+        ] {
+            for dialect in [
+                EcmaDialect::TypeScript,
+                EcmaDialect::Tsx,
+                EcmaDialect::JavaScript,
+            ] {
+                let _ = exports(dialect, src);
+            }
+        }
     }
 }
