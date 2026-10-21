@@ -1152,6 +1152,7 @@ pub async fn scan_repos(
                     files,
                     truncated,
                     excluded_noise,
+                    ..
                 } = extracted;
                 files_total += files.len();
                 files_excluded += excluded_noise;
@@ -1462,8 +1463,10 @@ pub async fn audit_repos(
         {
             Ok(ExtractedRepo {
                 files,
+                reference_files,
                 truncated,
                 excluded_noise,
+                ..
             }) => {
                 files_total += files.len();
                 files_excluded_total += excluded_noise;
@@ -1597,7 +1600,15 @@ pub async fn audit_repos(
                     if let Some((jstore, jid)) = job {
                         jstore.det_tool_running(jid, "architectural");
                     }
-                    let arch = audit_architectural(spec, &files, &repo_selected_ids);
+                    // Reference text (HTML, components, docs) is handed to the architectural
+                    // tier ONLY, and only when an armed rule needs it: the AI digest and the
+                    // secrets floor above and below keep reading `files` alone.
+                    let arch_input = architectural::architectural_input(
+                        &files,
+                        &reference_files,
+                        &repo_selected_ids,
+                    );
+                    let arch = audit_architectural(spec, &arch_input, &repo_selected_ids);
                     if let Some((jstore, jid)) = job {
                         jstore.det_tool_done(jid, "architectural", arch.len());
                         jstore.add_findings(jid, arch.clone());

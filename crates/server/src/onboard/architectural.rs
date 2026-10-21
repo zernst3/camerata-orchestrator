@@ -11,6 +11,7 @@
 //! rides the EXISTING pipeline (suppression classification, test-scope down-ranking,
 //! report/CSV/UI) completely unchanged, exactly like the floor's own findings do.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use camerata_checks::arch_checker::{all_checkers, checker_applies, ArchViolation, RepoView};
@@ -56,6 +57,33 @@ pub fn audit_architectural(
         }
     }
     findings
+}
+
+/// Armed rules that reason from the ABSENCE of a reference and so must see reference text
+/// (HTML, single-file components, Markdown, stylesheets, templates, build-runner files) as well
+/// as code: a `<script src>` or a component import is the only evidence a file is still used.
+const RULES_NEEDING_REFERENCE_TEXT: &[&str] = &[camerata_checks::dead_code_checker::RULE_DEAD_CODE];
+
+/// The file list the architectural tier is handed: the audited `files`, plus the scan's
+/// `reference_files` when (and only when) an armed rule needs them. Every other consumer of the
+/// scan (the AI digest, the secrets floor, stack detection) keeps reading `files` alone, so
+/// adding reference text costs them nothing, and a scan that arms no such rule borrows `files`
+/// without copying.
+pub fn architectural_input<'a>(
+    files: &'a [(String, String)],
+    reference_files: &[(String, String)],
+    armed_rule_ids: &HashSet<&str>,
+) -> Cow<'a, [(String, String)]> {
+    let needed = RULES_NEEDING_REFERENCE_TEXT
+        .iter()
+        .any(|id| armed_rule_ids.contains(id));
+    if !needed || reference_files.is_empty() {
+        return Cow::Borrowed(files);
+    }
+    let mut all = Vec::with_capacity(files.len() + reference_files.len());
+    all.extend_from_slice(files);
+    all.extend_from_slice(reference_files);
+    Cow::Owned(all)
 }
 
 /// Which placeholder TOKEN NAME (no angle brackets — matches a rule's own
@@ -322,5 +350,45 @@ mod tests {
             findings.is_empty(),
             "no supabase/ files present -> no checker applies"
         );
+    }
+
+    // ── architectural_input: the reference-text tier reaches only the architectural tier ──
+
+    fn dead_code_armed() -> HashSet<&'static str> {
+        [camerata_checks::dead_code_checker::RULE_DEAD_CODE]
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn architectural_input_appends_reference_text_when_the_dead_code_rule_is_armed() {
+        let code = files(vec![("src/a.ts", "export {};\n")]);
+        let reference = files(vec![
+            ("index.html", "<script src=\"/src/a.ts\">"),
+            ("README.md", "hi"),
+        ]);
+        let input = architectural_input(&code, &reference, &dead_code_armed());
+        let paths: Vec<&str> = input.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, ["src/a.ts", "index.html", "README.md"]);
+        assert!(matches!(input, Cow::Owned(_)));
+    }
+
+    #[test]
+    fn architectural_input_borrows_the_audited_files_when_no_rule_needs_reference_text() {
+        let code = files(vec![("src/a.ts", "export {};\n")]);
+        let reference = files(vec![("index.html", "x")]);
+        let other: HashSet<&str> = ["UI-UTC-DATES-1"].into_iter().collect();
+        for armed in [HashSet::new(), other] {
+            let input = architectural_input(&code, &reference, &armed);
+            assert!(matches!(input, Cow::Borrowed(_)), "no copy without a need");
+            assert_eq!(&*input, code.as_slice());
+        }
+    }
+
+    #[test]
+    fn architectural_input_borrows_when_there_is_no_reference_text() {
+        let code = files(vec![("src/a.ts", "export {};\n")]);
+        let input = architectural_input(&code, &[], &dead_code_armed());
+        assert!(matches!(input, Cow::Borrowed(_)));
     }
 }

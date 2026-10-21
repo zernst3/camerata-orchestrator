@@ -215,6 +215,85 @@ pub(crate) fn is_admissible_text(path: &str) -> bool {
     }
 }
 
+/// Extensions of REFERENCE TEXT: files that are not audited as code and carry no committed-secret
+/// signal of their own, but whose text can REFER to a source file by name (a `<script src>` in
+/// HTML, an import inside a Vue or Svelte component, a run instruction in a README, a stylesheet
+/// `@import`). The dead-code rule needs them to see that a file is still used; nothing else
+/// reads them. See [`ExtractedRepo::reference_files`].
+const REFERENCE_TEXT_EXTS: &[&str] = &[
+    "html", "htm", "vue", "svelte", "astro", "md", "mdx", "css", "scss", "less", "ejs", "hbs",
+    "pug", "njk", "j2", "jinja", "jinja2",
+];
+
+/// Extensionless build-runner files that name the scripts and sources they run.
+const REFERENCE_TEXT_BASENAMES: &[&str] = &[
+    "Makefile",
+    "GNUmakefile",
+    "makefile",
+    "Procfile",
+    "Justfile",
+    "justfile",
+];
+
+/// Safety net for the reference list, separate from [`HARD_CAP_FILES`] so documentation-heavy
+/// repos do not crowd out code. Hitting it marks the list incomplete
+/// ([`ExtractedRepo::reference_truncated`]), which disables every rule that reasons from
+/// absence, exactly like [`ExtractedRepo::truncated`].
+pub(crate) const HARD_CAP_REFERENCE_FILES: usize = 20_000;
+
+/// True when `path` is reference text (see [`REFERENCE_TEXT_EXTS`]).
+pub(crate) fn is_reference_text(path: &str) -> bool {
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    if REFERENCE_TEXT_BASENAMES.contains(&basename) {
+        return true;
+    }
+    match basename.rsplit_once('.') {
+        Some((stem, ext)) => {
+            !stem.is_empty() && REFERENCE_TEXT_EXTS.contains(&ext.to_ascii_lowercase().as_str())
+        }
+        None => false,
+    }
+}
+
+/// Collects reference text under the same noise, size and UTF-8 rules as the audited files.
+struct ReferenceSink {
+    files: Vec<(String, String)>,
+    truncated: bool,
+    cap: usize,
+}
+
+impl ReferenceSink {
+    fn new(cap: usize) -> Self {
+        Self {
+            files: Vec::new(),
+            truncated: false,
+            cap,
+        }
+    }
+
+    /// Offer `rel` (read from `full`) when it is reference text that audit admission skipped.
+    /// A file over the size limit or not valid UTF-8 is dropped, like any other file; a list
+    /// that is already full is marked truncated instead of growing.
+    fn offer(&mut self, rel: &str, full: &std::path::Path) {
+        if !is_reference_text(rel) {
+            return;
+        }
+        if self.files.len() >= self.cap {
+            self.truncated = true;
+            return;
+        }
+        let too_big = std::fs::metadata(full)
+            .map(|m| m.len() as usize > MAX_FILE_BYTES)
+            .unwrap_or(true);
+        if too_big {
+            return;
+        }
+        if let Ok(content) = std::fs::read_to_string(full) {
+            self.files.push((rel.to_string(), content));
+        }
+    }
+}
+
 /// The reserved filename prefix for every artifact Camerata itself writes into, or beside, a
 /// scanned repository: the incremental scan cache, the scan ledger, the shared cargo target,
 /// the provisioned virtualenv and the agent worktrees.
@@ -307,8 +386,19 @@ pub(crate) fn extra_exclude_dirs() -> Vec<String> {
 /// cap was hit, and how many would-be-scannable files were pruned as noise (so the scan can
 /// SHOW the filter doing its job — "1,583 scanned, 2,800 excluded as build/generated noise").
 pub struct ExtractedRepo {
+    /// The audited files: code and committed-secret-bearing config. This is what the AI digest,
+    /// the secrets floor, stack detection and every other consumer read.
     pub files: Vec<(String, String)>,
+    /// Reference text ([`is_reference_text`]): HTML, single-file components, Markdown,
+    /// stylesheets, templates and build-runner files. Kept apart from `files` on purpose, so
+    /// the AI digest (which takes whatever slice it is given, capped by characters) and the
+    /// secrets floor see exactly the input they always have, and no model cost or prompt
+    /// space changes. Only the architectural tier is handed `files` plus this list, and only
+    /// when a rule that reasons from absence is armed.
+    pub reference_files: Vec<(String, String)>,
     pub truncated: bool,
+    /// The reference list hit [`HARD_CAP_REFERENCE_FILES`]: some reference text is missing.
+    pub reference_truncated: bool,
     pub excluded_noise: usize,
 }
 
@@ -373,6 +463,7 @@ fn read_local_repo_files_gitignore(
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut excluded_noise = 0usize;
     let mut truncated = false;
+    let mut reference = ReferenceSink::new(HARD_CAP_REFERENCE_FILES);
 
     // hidden(false): we want to scan dotfiles like .env and .camerata/ — the `ignore`
     // crate would otherwise skip them by default.
@@ -411,6 +502,9 @@ fn read_local_repo_files_gitignore(
         let admissible = is_admissible_text(&rel);
         if noise && admissible {
             excluded_noise += 1;
+        }
+        if !noise && !admissible {
+            reference.offer(&rel, p);
         }
         if noise || !admissible {
             continue;
@@ -452,10 +546,13 @@ fn read_local_repo_files_gitignore(
                 if noise && admissible {
                     excluded_noise += 1;
                 }
+                let full = root.join(&rel);
+                if !noise && !admissible {
+                    reference.offer(&rel, &full);
+                }
                 if noise || !admissible {
                     continue;
                 }
-                let full = root.join(&rel);
                 let Ok(meta) = std::fs::metadata(&full) else {
                     continue; // tracked in the index but not present on disk (rare edge case)
                 };
@@ -477,7 +574,9 @@ fn read_local_repo_files_gitignore(
 
     Ok(ExtractedRepo {
         files,
+        reference_files: reference.files,
         truncated,
+        reference_truncated: reference.truncated,
         excluded_noise,
     })
 }
@@ -515,6 +614,7 @@ fn read_local_repo_files_noise_denylist(
     let mut files = Vec::new();
     let mut excluded_noise = 0usize;
     let mut truncated = false;
+    let mut reference = ReferenceSink::new(HARD_CAP_REFERENCE_FILES);
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -547,6 +647,9 @@ fn read_local_repo_files_noise_denylist(
             if noise && admissible {
                 excluded_noise += 1;
             }
+            if !noise && !admissible {
+                reference.offer(&rel, &p);
+            }
             if noise || !admissible {
                 continue;
             }
@@ -573,7 +676,9 @@ fn read_local_repo_files_noise_denylist(
     }
     Ok(ExtractedRepo {
         files,
+        reference_files: reference.files,
         truncated,
+        reference_truncated: reference.truncated,
         excluded_noise,
     })
 }
@@ -705,5 +810,181 @@ mod tests {
             findings.iter().any(|f| f.path == "bin/deploy.sh"),
             "the floor must read bin/deploy.sh: {findings:#?}"
         );
+    }
+
+    // ── reference text tier ────────────────────────────────────────────────────
+
+    #[test]
+    fn reference_text_covers_markup_components_docs_styles_templates_and_runners() {
+        for yes in [
+            "index.html",
+            "pages/x.htm",
+            "src/App.vue",
+            "src/Page.svelte",
+            "src/pages/index.astro",
+            "README.md",
+            "docs/guide.mdx",
+            "styles/a.css",
+            "styles/a.scss",
+            "styles/a.less",
+            "views/layout.ejs",
+            "views/p.hbs",
+            "views/p.pug",
+            "views/p.njk",
+            "templates/p.j2",
+            "templates/p.jinja",
+            "templates/p.jinja2",
+            "Makefile",
+            "sub/Procfile",
+            "Justfile",
+            "justfile",
+            "INDEX.HTML",
+        ] {
+            assert!(is_reference_text(yes), "{yes}");
+        }
+        for no in [
+            "src/a.ts",
+            "src/a.rs",
+            "Makefile.bak",
+            "notes",
+            "a.md.bak",
+            ".html",
+            "src/htmlparser.ts",
+            "Cargo.toml",
+        ] {
+            assert!(!is_reference_text(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn reference_text_is_not_audit_input() {
+        for path in [
+            "index.html",
+            "src/App.vue",
+            "README.md",
+            "a.css",
+            "Makefile",
+        ] {
+            assert!(
+                !is_admissible_text(path),
+                "{path} must stay out of the audited file list"
+            );
+        }
+    }
+
+    fn reference_fixture(root: &std::path::Path) {
+        write(root, "src/a.ts", "export const a = 1;\n");
+        write(root, "index.html", "<script src=\"/src/a.ts\"></script>\n");
+        write(root, "src/App.vue", "<script setup>import './a'</script>\n");
+        // A secret-shaped literal in prose: reference text is not read by the secrets floor.
+        let readme = concat!("Run it.\nAPI_KEY=\"Zq9Xk3Pm7Rt2", "Vw5Yb8Nc4Jd6Hf1Ga0\"\n");
+        write(root, "README.md", readme);
+        write(root, "Makefile", "run:\n\tnode src/a.ts\n");
+        write(root, "styles/a.css", "body { color: red; }\n");
+        write(root, "node_modules/x/README.md", "vendored\n");
+        write(root, ".camerata-cache/notes.md", "engine output\n");
+        write(root, "docs/huge.md", &"x".repeat(MAX_FILE_BYTES + 1));
+    }
+
+    fn reference_paths(extracted: &ExtractedRepo) -> Vec<String> {
+        let mut v: Vec<String> = extracted
+            .reference_files
+            .iter()
+            .map(|(p, _)| p.clone())
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn expect_reference_tier(extracted: &ExtractedRepo) {
+        // The audited list, which feeds the AI digest and the secrets floor, is exactly what it
+        // was before the tier existed.
+        assert_eq!(paths(extracted), ["src/a.ts"]);
+        assert_eq!(extracted.excluded_noise, 0);
+        assert_eq!(
+            reference_paths(extracted),
+            [
+                "Makefile",
+                "README.md",
+                "index.html",
+                "src/App.vue",
+                "styles/a.css"
+            ],
+            "noise dirs, engine artifacts and oversized files are excluded from the tier too"
+        );
+        assert!(!extracted.reference_truncated);
+        assert!(!extracted.truncated);
+
+        // The digest input is byte-for-byte the digest of the audited files alone.
+        let expected = crate::ai_audit::build_digest(&[(
+            "src/a.ts".to_string(),
+            "export const a = 1;\n".to_string(),
+        )]);
+        assert_eq!(crate::ai_audit::build_digest(&extracted.files), expected);
+
+        // The secrets floor reads only the audited files, so the literal in the README is not a
+        // finding, and nothing about the floor's input changed.
+        let findings = crate::onboard::audit::audit_files("o/r", &extracted.files);
+        assert!(
+            findings.iter().all(|f| f.path != "README.md"),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn reference_text_is_collected_apart_from_audited_files_in_a_non_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        reference_fixture(dir.path());
+        expect_reference_tier(&scan(dir.path()));
+    }
+
+    #[test]
+    fn reference_text_is_collected_apart_from_audited_files_in_a_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        reference_fixture(dir.path());
+        expect_reference_tier(&scan(dir.path()));
+    }
+
+    #[test]
+    fn a_git_tracked_but_gitignored_reference_file_is_still_collected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .status();
+            matches!(status, Ok(s) if s.success())
+        };
+        if !git(&["init", "-q"]) {
+            return; // no git on PATH: the union path is not exercisable here
+        }
+        write(root, "src/a.ts", "export const a = 1;\n");
+        write(root, "docs/guide.md", "see a.ts\n");
+        assert!(git(&["add", "-f", "src/a.ts", "docs/guide.md"]));
+        write(root, ".gitignore", "docs/\n");
+        let extracted = scan(root);
+        assert_eq!(reference_paths(&extracted), ["docs/guide.md"]);
+    }
+
+    #[test]
+    fn the_reference_list_marks_itself_truncated_instead_of_growing_past_its_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.md", "b.md", "c.md"] {
+            write(dir.path(), name, "text\n");
+        }
+        let mut sink = ReferenceSink::new(2);
+        for name in ["a.md", "b.md", "c.md", "src/skip.ts"] {
+            sink.offer(name, &dir.path().join(name));
+        }
+        assert_eq!(sink.files.len(), 2);
+        assert!(sink.truncated);
+
+        let mut roomy = ReferenceSink::new(10);
+        roomy.offer("a.md", &dir.path().join("a.md"));
+        roomy.offer("missing.md", &dir.path().join("missing.md"));
+        assert_eq!(roomy.files.len(), 1);
+        assert!(!roomy.truncated);
     }
 }
