@@ -5,6 +5,7 @@ layer = "universal"
 enforcement = "mechanical"
 kind = "decision"
 inspectable = true
+cwe = ["CWE-89"]
 default = true
 verification = "grounded"
 

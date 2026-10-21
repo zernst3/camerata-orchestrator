@@ -5,6 +5,7 @@ layer = "universal"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
+cwe = ["CWE-330"]
 default = true
 verification = "grounded"
 

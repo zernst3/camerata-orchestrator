@@ -5,6 +5,7 @@ layer = "universal"
 enforcement = "mechanical"
 kind = "defect"
 inspectable = true
+cwe = ["CWE-532"]
 # Severity floor, transcribed from this rule's own prose -- a MULTI-BRANCH rule, so the
 # rule-level floor is the LOWEST severity its prose names: "A secret/credential reaching the
 # sink this way is a HIGH finding; a regulated-PII value reaching the sink this way is a

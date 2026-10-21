@@ -52,6 +52,10 @@ enforcement = "prose" | "structured" | "mechanical" | "architectural"
 domain = "agentic"             # also derived from the folder; keep them agreed
 kind = "…"                     # REQUIRED since 2026-10-09; FOUR values; see docs/RULES_REFERENCE.md
 inspectable = true | false     # REQUIRED since 2026-10-12 (W16); see below
+cwe = ["CWE-89"]               # W32, security rules only: recognised vuln code(s); source from [[sources]]
+asvs = ["V5.3.4"]              # W32, optional: OWASP ASVS requirement id(s)
+superseded_since = "2021"      # W32, optional: year a pattern-level arch rule's default aged out
+current_recommendation = "…"   # W32, optional: pointer to the guidance that replaced it
 ```
 
 - **`id` is forever.** It is referenced by selections, grounding, role subsets, code, and the user's

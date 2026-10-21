@@ -692,6 +692,28 @@ struct RuleToml {
     /// applies.
     #[serde(default)]
     deviation_ceiling: Option<String>,
+    /// W32 (report credibility): external vulnerability-taxonomy codes this rule maps to, e.g.
+    /// `cwe = ["CWE-89"]`. Lets a finding print a recognised anchor the client's own security
+    /// team already tracks. Sourced from the rule's `[[sources]]` where they already cite a CWE
+    /// URL. Empty for a rule with no recognised code (most non-security rules). See [`Rule::cwe`].
+    #[serde(default)]
+    cwe: Vec<String>,
+    /// W32: OWASP ASVS requirement ids this rule maps to, e.g. `asvs = ["V5.3.4"]`. Same role as
+    /// [`RuleToml::cwe`] for the ASVS taxonomy; empty when none applies. See [`Rule::asvs`].
+    #[serde(default)]
+    asvs: Vec<String>,
+    /// W32: the year the ecosystem moved off the pattern this rule describes, e.g.
+    /// `superseded_since = "2021"`, so a finding can say "current guidance moved on in 2021".
+    /// Only authored on pattern-level architecture rules whose default genuinely aged out; `None`
+    /// for every current rule. Pairs with [`RuleToml::current_recommendation`]. See
+    /// [`Rule::superseded_since`].
+    #[serde(default)]
+    superseded_since: Option<String>,
+    /// W32: a pointer to the current guidance that replaced a superseded pattern — a URL or short
+    /// phrase a finding can render next to [`RuleToml::superseded_since`]. `None` unless the rule
+    /// is marked superseded. See [`Rule::current_recommendation`].
+    #[serde(default)]
+    current_recommendation: Option<String>,
     /// W17 (gotcha 8, half resolved): `tag` is GONE. It was authored on all 417 corpus rules,
     /// read by nothing, and W14 declared it here as accepted-but-unconsumed so
     /// [`corpus_files_with_unknown_fields`] could treat every OTHER unrecognized rule-level key
@@ -1081,6 +1103,18 @@ pub struct Rule {
     /// whose kind is `Deviation` — defects under the same rule are untouched by this field.
     /// Same free-form lowercase severity vocabulary as `max_severity`, for the same reason.
     pub deviation_ceiling: Option<String>,
+    /// W32 (report credibility): external vulnerability-taxonomy codes, e.g. `["CWE-89"]`. A
+    /// finding renders these as a recognised anchor beside the headline. Empty for most rules;
+    /// authored on security rules, sourced from their `[[sources]]` CWE citations.
+    pub cwe: Vec<String>,
+    /// W32: OWASP ASVS requirement ids, e.g. `["V5.3.4"]`. Empty when none applies.
+    pub asvs: Vec<String>,
+    /// W32: the year the pattern this rule describes was superseded, e.g. `"2021"`. `None` for
+    /// every current rule; set only on pattern-level architecture rules whose default aged out.
+    pub superseded_since: Option<String>,
+    /// W32: pointer to the guidance that replaced a superseded pattern (URL or short phrase).
+    /// `None` unless [`Rule::superseded_since`] is set.
+    pub current_recommendation: Option<String>,
 }
 
 /// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`): a GENERAL mechanism for a
@@ -1417,6 +1451,10 @@ pub fn bare_rule(id: &str, domain: &str) -> Rule {
         max_severity: None,
         min_severity: None,
         deviation_ceiling: None,
+        cwe: Vec::new(),
+        asvs: Vec::new(),
+        superseded_since: None,
+        current_recommendation: None,
     }
 }
 
@@ -1473,6 +1511,10 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         max_severity: None,
         min_severity: None,
         deviation_ceiling: None,
+        cwe: Vec::new(),
+        asvs: Vec::new(),
+        superseded_since: None,
+        current_recommendation: None,
     };
     let mut set = RuleSet::default();
     set.push(rule);
@@ -1736,6 +1778,10 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
         max_severity: raw.max_severity.filter(|s| !s.trim().is_empty()),
         min_severity: raw.min_severity.filter(|s| !s.trim().is_empty()),
         deviation_ceiling: raw.deviation_ceiling.filter(|s| !s.trim().is_empty()),
+        cwe: raw.cwe,
+        asvs: raw.asvs,
+        superseded_since: raw.superseded_since.filter(|s| !s.trim().is_empty()),
+        current_recommendation: raw.current_recommendation.filter(|s| !s.trim().is_empty()),
     })
 }
 
@@ -2124,6 +2170,11 @@ const RULE_LEVEL_FIELDS: &[&str] = &[
     "max_severity",
     "min_severity",
     "deviation_ceiling",
+    // W32 (report credibility): external-taxonomy + supersession metadata.
+    "cwe",
+    "asvs",
+    "superseded_since",
+    "current_recommendation",
     // Accepted, unconsumed (gotcha 8), established 2026-10-11. `tag` was here too until W17
     // deleted it from the schema AND from all 417 files; do not re-add it.
     "layer",
@@ -2832,6 +2883,46 @@ pub fn options_with_invalid_effort(set: &RuleSet) -> Vec<String> {
     found
 }
 
+/// W32 (report credibility): every SECURITY rule must carry at least one `cwe` code, so a
+/// finding can print the externally-recognised anchor a client's security team already tracks.
+/// "Security rule" is the `SEC-` id prefix — the deterministic security family. Returns the
+/// offending rule ids, sorted. (ASVS is optional and not gated: not every security rule maps
+/// cleanly to an ASVS requirement, and a missing ASVS code does not undermine credibility the
+/// way a missing CWE on a vulnerability finding does.)
+pub fn security_rules_without_cwe(set: &RuleSet) -> Vec<String> {
+    let mut found: Vec<String> = set
+        .iter()
+        .filter(|r| r.id.0.starts_with("SEC-"))
+        .filter(|r| r.cwe.iter().all(|c| c.trim().is_empty()))
+        .map(|r| r.id.0.clone())
+        .collect();
+    found.sort();
+    found
+}
+
+/// W32: every authored `cwe` code is shaped like `CWE-<digits>` and every `superseded_since`
+/// like a 4-digit year. A free-form typo (`"CWE89"`, `"cwe-89"`, `"21"`) would render a
+/// malformed anchor in the client PDF. Returns `"<rule-id>: <bad-value>"` for each offender,
+/// sorted.
+pub fn rules_with_malformed_credibility_metadata(set: &RuleSet) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for rule in set.iter() {
+        for code in &rule.cwe {
+            let rest = code.strip_prefix("CWE-");
+            if !rest.is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit())) {
+                found.push(format!("{}: cwe {:?}", rule.id.0, code));
+            }
+        }
+        if let Some(year) = rule.superseded_since.as_deref() {
+            if year.len() != 4 || !year.chars().all(|c| c.is_ascii_digit()) {
+                found.push(format!("{}: superseded_since {:?}", rule.id.0, year));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Rule-subset selection (pure — RUST-PURE-STATE-TRANSITIONS-1)
 // ────────────────────────────────────────────────────────────────────────────
@@ -3078,6 +3169,10 @@ mod tests {
             max_severity: None,
             min_severity: None,
             deviation_ceiling: None,
+            cwe: Vec::new(),
+            asvs: Vec::new(),
+            superseded_since: None,
+            current_recommendation: None,
         }
     }
 
@@ -3162,6 +3257,10 @@ mod tests {
             max_severity: raw.max_severity.filter(|s| !s.trim().is_empty()),
             min_severity: raw.min_severity.filter(|s| !s.trim().is_empty()),
             deviation_ceiling: raw.deviation_ceiling.filter(|s| !s.trim().is_empty()),
+            cwe: raw.cwe,
+            asvs: raw.asvs,
+            superseded_since: raw.superseded_since.filter(|s| !s.trim().is_empty()),
+            current_recommendation: raw.current_recommendation.filter(|s| !s.trim().is_empty()),
         }
     }
 
