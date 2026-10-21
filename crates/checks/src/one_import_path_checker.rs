@@ -7,37 +7,53 @@
 //! Registered in [`crate::arch_checker::all_checkers`] together with the corpus rule
 //! `crates/rules/principles/javascript/arch-one-import-path-1.toml` (`javascript` domain).
 //!
+//! # The rule applies to index barrels
+//!
+//! A split between a symbol's origin file and an `index` barrel IS a violation. Owner ruling,
+//! 2026-10-21 ("that is the rule working as intended"), recorded in
+//! `docs/OVERNIGHT_DECISIONS.md` under DECISIONS MADE: work order section 7's "non-index
+//! modules" wording does not exempt index barrels from the one-home rule.
+//!
 //! # How it decides
 //!
 //! 1. Build each ECMA file's export surface ([`crate::extract::exports`]): its own names,
-//!    its named re-exports (origin AND exported name) and its star re-exports. Specifiers are
-//!    resolved with [`EcmaResolver`], the same resolution the import graph uses.
+//!    its named re-exports (origin AND exported name, plus whether the edge is type-only) and
+//!    its star re-exports. `import { a } from './x'; export { a };` is read as the re-export it
+//!    is. Specifiers are resolved with [`EcmaResolver`], the same resolution the import graph
+//!    uses (nearest-ancestor `tsconfig.json`, TypeScript `paths` matching).
 //! 2. Canonicalize `(file, name)` through the re-export edges to the `(origin_file,
 //!    origin_name)` that really defines it. Own exports win over star re-exports; a star never
-//!    carries `default`; two star sources that both supply the name, a re-export cycle, or an
-//!    opaque (unresolvable) star source make the name uncertain, and an uncertain name is
-//!    skipped, never guessed.
+//!    carries `default`; two star sources that both supply the name, a re-export cycle, an
+//!    opaque (unresolvable) star source, or a type-only re-export edge (a name that may be both
+//!    a type and a value is only partly reachable through it) make the name uncertain, and an
+//!    uncertain name is skipped, never guessed.
 //! 3. Every named or default import becomes a use of a canonical symbol, reached through a
 //!    resolved target file. Group by canonical symbol; the distinct targets are the "paths".
-//! 4. Drop importers that are test files, and importers inside the directory subtree of any
-//!    module that re-exports the symbol (a barrel's own internals import their siblings
-//!    directly by convention). Flag when two or more distinct targets remain.
+//! 4. Drop importers that are test, fixture, mock, e2e or story files, importers inside the
+//!    directory subtree of any module that re-exports the symbol (a barrel's own internals
+//!    import their siblings directly by convention), and importers inside the origin file's own
+//!    folder (origin siblings, for the same cycle-avoidance reason). Flag when two or more
+//!    distinct targets remain.
 //!
 //! Keying the group on the canonical symbol is what catches the rule's real case (the same
 //! symbol imported from its origin AND from a barrel: two different resolved files), while
 //! keying the paths on RESOLVED targets keeps `./utils` versus `../a/utils`, or a tsconfig
-//! alias versus a relative path to the same file, from ever counting as two paths.
+//! alias versus a relative path to the same file, from ever counting as two paths. A committed
+//! `X.js` beside `X.ts` / `X.tsx` is treated as build output and ignored entirely.
 //!
 //! # Documented limits (all false-negative, by design)
 //!
-//! - A re-exporter at the repo root (directory `""`) has the whole repo as its subtree, so it
-//!   excludes every importer and the symbol is never flagged.
+//! - A re-exporter (or an origin file) at the repo root (directory `""`) has the whole repo as
+//!   its subtree, so it excludes every importer and the symbol is never flagged.
+//! - The exclusion uses the UNION of every re-exporting module's folder for the symbol. In a
+//!   monorepo where every package has a root barrel, that hides splits INSIDE a package: once
+//!   any outside file imports the package through its root barrel, the whole package folder is
+//!   "inside the barrel". Known and accepted; it only ever hides findings.
 //! - `import * as ns`, side-effect imports, dynamic `import()` / `require()` and re-export
 //!   statements are not importers (which members `ns` uses is unknown without member-access
 //!   analysis).
-//! - `import { a } from './x'; export { a };` is read as an own export of the re-exporting
-//!   file (the extractor does not track local bindings), so that indirect barrel form is not
-//!   followed.
+//! - Specifiers that spell a TypeScript source with a `.js` suffix (NodeNext style) resolve
+//!   only when that `.js` file exists; otherwise the edge is dropped.
 //! - A re-export no one imports both ways is not flagged: there is no verifiable split.
 //!
 //! # Severity
@@ -46,7 +62,7 @@
 //! declares `max_severity = "low"`, which the report export clamps down to (see
 //! `report_export::clamp_to_rule_max_severity`).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_MEDIUM};
 use crate::extract::resolver::EcmaResolver;
@@ -142,6 +158,9 @@ struct NamedEdge {
     target: Option<String>,
     origin: String,
     line: usize,
+    /// `export type { A } from` / `export { type A } from`: only the TYPE meaning of the name
+    /// passes through, so a same-named value is not reachable by this edge.
+    type_only: bool,
 }
 
 #[derive(Default)]
@@ -160,11 +179,15 @@ struct Model {
 
 impl Model {
     fn build(files: &[(String, String)], resolver: &EcmaResolver<'_>) -> Self {
+        let emitted = emitted_js_paths(files);
         let mut modules = HashMap::new();
         for (path, content) in files {
             let Some(lang) = ecma_lang(path) else {
                 continue;
             };
+            if emitted.contains(path.as_str()) {
+                continue;
+            }
             let surface = extract::exports(lang, content);
             let mut m = Module {
                 own: surface.own.into_iter().collect(),
@@ -175,6 +198,7 @@ impl Model {
                     target: resolver.resolve(path, &re.specifier),
                     origin: re.origin,
                     line: re.line,
+                    type_only: re.type_only,
                 });
             }
             for star in surface.star_re_exports {
@@ -241,6 +265,11 @@ impl Model {
             let [edge] = edges.as_slice() else {
                 return Canon::Uncertain;
             };
+            // A name that can be both a type and a value is only partly reachable through a
+            // type-only edge; which meaning an importer wants is unknowable here. Skip.
+            if edge.type_only {
+                return Canon::Uncertain;
+            }
             let Some(target) = &edge.target else {
                 return Canon::Absent;
             };
@@ -303,10 +332,14 @@ impl Model {
     ) -> BTreeMap<(String, String), Vec<Usage>> {
         let mut groups: BTreeMap<(String, String), Vec<Usage>> = BTreeMap::new();
         let mut memo = Memo::new();
+        let emitted = emitted_js_paths(files);
         for (importer, content) in files {
             let Some(lang) = ecma_lang(importer) else {
                 continue;
             };
+            if emitted.contains(importer.as_str()) {
+                continue;
+            }
             for imp in extract::imports(lang, content) {
                 let name = match (imp.kind, imp.names.as_slice()) {
                     (ImportKind::Named, [n]) => n.clone(),
@@ -358,10 +391,13 @@ struct Usage {
 fn judge_group(origin_file: &str, name: &str, group: &[Usage]) -> Option<ArchViolation> {
     // Every module that re-exports this symbol, on any importer's chain. Its directory subtree
     // is "inside the barrel", where importing siblings directly is the convention.
-    let barrel_dirs: BTreeSet<&str> = group
+    // The origin's own folder is excluded the same way: its siblings import it directly for the
+    // same cycle-avoidance reason, whichever folder the barrel happens to live in.
+    let mut barrel_dirs: BTreeSet<&str> = group
         .iter()
         .flat_map(|u| u.hops.iter().map(|h| directory_of(&h.file)))
         .collect();
+    barrel_dirs.insert(directory_of(origin_file));
 
     let counted: Vec<&Usage> = group
         .iter()
@@ -407,7 +443,8 @@ fn judge_group(origin_file: &str, name: &str, group: &[Usage]) -> Option<ArchVio
     let message = format!(
         "{subject} is imported by code outside the re-exporting module's folder through {} \
          different paths: {paths}. The re-export at {sites} is what makes each path work. \
-         Import it from one home, the origin or a single barrel, and delete the other path.",
+         Pick one home for it, either the file that defines it or one barrel. If the barrel, \
+         route every importer through it; if the file that defines it, remove the re-export.",
         by_target.len(),
     );
     Some(ArchViolation {
@@ -451,25 +488,56 @@ fn is_inside_dir(path: &str, dir: &str) -> bool {
     dir.is_empty() || path.strip_prefix(dir).is_some_and(|r| r.starts_with('/'))
 }
 
-/// Test and fixture locations, which reach internals directly by design. The same convention
-/// as the gateway's `is_test_or_fixture_path`, restricted to what applies to ECMA files
-/// (`camerata-checks` cannot depend on the gateway crate, and no helper exists here).
+/// Test, fixture, mock, end-to-end and story locations, which reach internals directly by
+/// design. Mirrors the gateway's `is_test_or_fixture_path` (`camerata-checks` cannot depend on
+/// the gateway crate, and no helper exists here) and adds the JS/TS ecosystem's mock, e2e,
+/// Cypress and Storybook conventions.
 fn is_test_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     let mut segs: Vec<&str> = lower.split('/').collect();
     let Some(file) = segs.pop() else {
         return false;
     };
-    if segs
-        .iter()
-        .any(|s| matches!(*s, "tests" | "test" | "__tests__"))
-    {
+    if segs.iter().any(|s| {
+        matches!(
+            *s,
+            "tests"
+                | "test"
+                | "__tests__"
+                | "testdata"
+                | "fixtures"
+                | "benches"
+                | "__mocks__"
+                | "e2e"
+                | "cypress"
+                | "stories"
+        )
+    }) {
         return true;
     }
     file.rfind('.').is_some_and(|dot| {
         let stem = &file[..dot];
-        stem.ends_with(".test") || stem.ends_with(".spec") || stem.ends_with("_test")
+        [".test", ".spec", "_test", ".cy", ".stories"]
+            .iter()
+            .any(|suffix| stem.ends_with(suffix))
     })
+}
+
+/// A committed `X.js` that sits beside `X.ts` or `X.tsx` in the same folder is build output
+/// (tsc emit), a copy of the source rather than a second module. It must not count as an
+/// importer or as a module, or the copy's imports would register as extra paths.
+fn emitted_js_paths(files: &[(String, String)]) -> HashSet<&str> {
+    let all: HashSet<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+    files
+        .iter()
+        .map(|(p, _)| p.as_str())
+        .filter(|p| {
+            p.strip_suffix(".js").is_some_and(|stem| {
+                all.contains(format!("{stem}.ts").as_str())
+                    || all.contains(format!("{stem}.tsx").as_str())
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -532,11 +600,7 @@ mod tests {
                 v.message
             );
         }
-        assert!(
-            v.message.contains("Import it from one home"),
-            "{}",
-            v.message
-        );
+        assert!(v.message.contains("Pick one home"), "{}", v.message);
     }
 
     #[test]
@@ -1001,6 +1065,270 @@ mod tests {
         assert!(run(&f).is_empty());
     }
 
+    // ── review fixes ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn safe_twin_type_only_barrel_does_not_make_a_value_path() {
+        // The value `User` and the type `User` share a name. The barrel re-exports ONLY the
+        // type, so the value importer has no barrel path available: not a split.
+        for barrel in [
+            "export type { User } from './user';\n",
+            "export { type User } from './user';\n",
+        ] {
+            let f = files(vec![
+                (
+                    "lib/user.ts",
+                    "export const User = 1;\nexport type User = number;\n",
+                ),
+                ("lib/index.ts", barrel),
+                ("app/one.ts", "import type { User } from '../lib';\n"),
+                ("app/two.ts", "import { User } from '../lib/user';\n"),
+            ]);
+            assert!(run(&f).is_empty(), "{barrel}");
+        }
+    }
+
+    #[test]
+    fn a_type_only_re_export_in_a_star_chain_is_skipped_too() {
+        let f = files(vec![
+            ("lib/user.ts", "export const User = 1;\n"),
+            ("lib/inner.ts", "export type { User } from './user';\n"),
+            ("lib/index.ts", "export * from './inner';\n"),
+            ("app/one.ts", "import { User } from '../lib';\n"),
+            ("app/two.ts", "import { User } from '../lib/user';\n"),
+        ]);
+        assert!(run(&f).is_empty());
+    }
+
+    #[test]
+    fn type_import_through_a_real_barrel_plus_value_import_from_origin_is_flagged() {
+        let f = files(vec![
+            ("lib/user.ts", "export class User {}\n"),
+            ("lib/index.ts", "export { User } from './user';\n"),
+            ("app/one.ts", "import type { User } from '../lib';\n"),
+            ("app/two.ts", "import { User } from '../lib/user';\n"),
+        ]);
+        assert_eq!(run(&f).len(), 1);
+        let g = files(vec![
+            ("lib/x.ts", "export const a = 1;\nexport type T = number;\n"),
+            ("lib/index.ts", "export { a, type T } from './x';\n"),
+            ("app/one.ts", "import { type T, a } from '../lib';\n"),
+            ("app/two.ts", "import { a } from '../lib/x';\n"),
+        ]);
+        let vs = run(&g);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].object.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn tsconfig_alias_pair_resolves_to_the_longest_match_every_time() {
+        // `@acme/ui` and `@acme/ui/*` both match `@acme/ui/Button`; the longer wins, so the
+        // two importers reach the barrel and the origin as two different paths, every run.
+        let f = files(vec![
+            (
+                "tsconfig.json",
+                r#"{"compilerOptions": {"baseUrl": ".", "paths": {"@acme/ui": ["packages/ui/src/index.ts"], "@acme/ui/*": ["packages/ui/src/*"]}}}"#,
+            ),
+            (
+                "packages/ui/src/Button.tsx",
+                "export function Button() {}\n",
+            ),
+            (
+                "packages/ui/src/index.ts",
+                "export { Button } from './Button';\n",
+            ),
+            (
+                "packages/app/src/a.tsx",
+                "import { Button } from '@acme/ui';\n",
+            ),
+            (
+                "packages/app/src/b.tsx",
+                "import { Button } from '@acme/ui/Button';\n",
+            ),
+        ]);
+        let first = run(&f);
+        assert_eq!(first.len(), 1, "{first:#?}");
+        assert!(
+            first[0].message.contains("packages/ui/src/Button.tsx")
+                && first[0].message.contains("packages/ui/src/index.ts"),
+            "{}",
+            first[0].message
+        );
+        for _ in 0..20 {
+            assert_eq!(run(&f), first);
+        }
+    }
+
+    #[test]
+    fn a_sibling_package_sharing_an_alias_prefix_is_not_the_aliased_barrel() {
+        let f = files(vec![
+            (
+                "tsconfig.json",
+                r#"{"compilerOptions": {"baseUrl": ".", "paths": {"@acme/ui": ["packages/ui/src/index.ts"]}}}"#,
+            ),
+            ("packages/ui/src/Icon.tsx", "export function Icon() {}\n"),
+            (
+                "packages/ui/src/index.ts",
+                "export { Icon } from './Icon';\n",
+            ),
+            (
+                "packages/app/src/a.tsx",
+                "import { Icon } from '@acme/ui-icons';\n",
+            ),
+            (
+                "packages/app/src/b.tsx",
+                "import { Icon } from '../../ui/src/Icon';\n",
+            ),
+        ]);
+        assert!(run(&f).is_empty());
+    }
+
+    #[test]
+    fn nested_tsconfig_alias_is_not_resolved_against_the_repo_root() {
+        let f = files(vec![
+            (
+                "packages/a/tsconfig.json",
+                r#"{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}}}"#,
+            ),
+            ("src/lib/x.ts", "export const a = 1;\n"),
+            ("src/lib/index.ts", "export { a } from './x';\n"),
+            ("src/app/one.ts", "import { a } from '../lib';\n"),
+            ("packages/a/src/lib/x.ts", "export const a = 2;\n"),
+            ("packages/a/src/foo.ts", "import { a } from '@/lib/x';\n"),
+        ]);
+        assert!(run(&f).is_empty());
+    }
+
+    #[test]
+    fn safe_twin_origin_siblings_importing_directly_while_the_barrel_is_elsewhere() {
+        let f = files(vec![
+            ("src/utils/format.ts", "export const fmt = 1;\n"),
+            (
+                "src/utils/money.ts",
+                "import { fmt } from './format';\nexport const money = fmt;\n",
+            ),
+            (
+                "src/shared/index.ts",
+                "export { fmt } from '../utils/format';\n",
+            ),
+            ("src/pages/home.ts", "import { fmt } from '../shared';\n"),
+            ("src/pages/about.ts", "import { fmt } from '../shared';\n"),
+        ]);
+        assert!(run(&f).is_empty());
+        let g = files(vec![
+            ("lib/x.ts", "export const a = 1;\n"),
+            ("lib/y.ts", "import { a } from './x';\n"),
+            ("lib/public/index.ts", "export { a } from '../x';\n"),
+            ("app/one.ts", "import { a } from '../lib/public';\n"),
+        ]);
+        assert!(run(&g).is_empty());
+    }
+
+    #[test]
+    fn test_fixture_mock_e2e_and_story_locations_are_excluded() {
+        for test_path in [
+            "fixtures/one.ts",
+            "testdata/one.ts",
+            "benches/one.ts",
+            "e2e/one.ts",
+            "cypress/e2e/one.cy.ts",
+            "app/one.cy.ts",
+            "src/__mocks__/one.ts",
+            "stories/Button.stories.tsx",
+            "app/Button.stories.tsx",
+        ] {
+            let depth = test_path.matches('/').count();
+            let up = "../".repeat(depth);
+            let importer = format!("import {{ a }} from '{up}lib/x';\n");
+            let f = lib_with(
+                "export { a } from './x';\n",
+                vec![
+                    ("app/real.ts", "import { a } from '../lib';\n"),
+                    (test_path, importer.as_str()),
+                ],
+            );
+            assert!(run(&f).is_empty(), "{test_path} must be excluded");
+        }
+    }
+
+    #[test]
+    fn committed_compiled_js_beside_its_ts_source_is_build_output_not_a_path() {
+        let f = files(vec![
+            ("lib/x.ts", "export const a = 1;\n"),
+            ("lib/x.js", "export const a = 1;\n"),
+            ("lib/index.ts", "export { a } from './x';\n"),
+            ("lib/index.js", "export { a } from './x';\n"),
+            ("app/one.ts", "import { a } from '../lib';\n"),
+            ("app/two.js", "import { a } from '../lib/x.js';\n"),
+            ("app/three.js", "import { a } from '../lib/index.js';\n"),
+        ]);
+        assert!(run(&f).is_empty());
+        // A .js with NO ts sibling is real source and still counts.
+        let g = files(vec![
+            ("lib/x.js", "export const a = 1;\n"),
+            ("lib/index.js", "export { a } from './x';\n"),
+            ("app/one.js", "import { a } from '../lib';\n"),
+            ("app/two.js", "import { a } from '../lib/x';\n"),
+        ]);
+        assert_eq!(run(&g).len(), 1);
+    }
+
+    #[test]
+    fn an_exported_imported_binding_is_attributed_to_its_real_origin() {
+        let f = files(vec![
+            ("lib/x.ts", "export const a = 1;\n"),
+            ("lib/index.ts", "import { a } from './x';\nexport { a };\n"),
+            ("lib2/index.ts", "export { a } from '../lib';\n"),
+            ("app/one.ts", "import { a } from '../lib';\n"),
+            ("app/two.ts", "import { a } from '../lib/x';\n"),
+            ("app/three.ts", "import { a } from '../lib2';\n"),
+        ]);
+        let vs = run(&f);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert!(
+            vs[0].message.contains("defined in `lib/x.ts`"),
+            "{}",
+            vs[0].message
+        );
+        assert!(vs[0].message.contains("lib2/index.ts"), "{}", vs[0].message);
+    }
+
+    #[test]
+    fn a_type_only_import_that_is_re_exported_is_a_type_only_edge() {
+        let f = files(vec![
+            (
+                "lib/user.ts",
+                "export const User = 1;\nexport type User = number;\n",
+            ),
+            (
+                "lib/index.ts",
+                "import type { User } from './user';\nexport { User };\n",
+            ),
+            ("app/one.ts", "import type { User } from '../lib';\n"),
+            ("app/two.ts", "import { User } from '../lib/user';\n"),
+        ]);
+        assert!(run(&f).is_empty());
+    }
+
+    #[test]
+    fn message_fix_sentence_covers_both_choices_of_home() {
+        let f = lib_with(
+            "export { a } from './x';\n",
+            vec![
+                ("app/one.ts", "import { a } from '../lib';\n"),
+                ("app/two.ts", "import { a } from '../lib/x';\n"),
+            ],
+        );
+        let m = &run(&f)[0].message;
+        for needle in [
+            "Pick one home",
+            "route every importer through it",
+            "remove the re-export",
+        ] {
+            assert!(m.contains(needle), "{needle} missing: {m}");
+        }
+    }
+
     // ── robustness ─────────────────────────────────────────────────────────────
 
     #[test]
@@ -1020,17 +1348,6 @@ mod tests {
     #[test]
     fn empty_file_set_does_not_panic() {
         assert!(run(&[]).is_empty());
-    }
-
-    #[test]
-    fn output_is_deterministic() {
-        let f = files(vec![
-            ("lib/x.ts", "export const a = 1;\nexport const b = 2;\n"),
-            ("lib/index.ts", "export { a, b } from './x';\n"),
-            ("app/one.ts", "import { a, b } from '../lib';\n"),
-            ("app/two.ts", "import { a, b } from '../lib/x';\n"),
-        ]);
-        assert_eq!(run(&f), run(&f));
     }
 
     // ── contract ───────────────────────────────────────────────────────────────
