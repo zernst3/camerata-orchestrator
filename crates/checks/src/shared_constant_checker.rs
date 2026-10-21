@@ -57,9 +57,6 @@
 //! Always [`SEVERITY_MEDIUM`]: the checker contract forbids emitting `low`. The corpus rule
 //! declares `max_severity = "low"`, which the report export clamps down to.
 
-// TEMPORARY while the checker is built up over several commits; removed when `check` uses these.
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_MEDIUM};
@@ -199,25 +196,273 @@ struct Group<'a> {
     occurrences: Vec<Occurrence<'a>>,
 }
 
-// ─── the guards that read an occurrence's context (stubs until the safe twins drive them) ─
+// ─── the guards that read an occurrence's context ────────────────────────────────────────
+
+/// V1: call names that look a message up by key.
+const I18N_CALLEES: &[&str] = &[
+    "t",
+    "$t",
+    "i18n",
+    "i18next",
+    "translate",
+    "tr",
+    "gettext",
+    "ngettext",
+    "pgettext",
+    "_",
+    "__",
+    "formatMessage",
+    "defineMessage",
+    "useTranslation",
+];
+
+/// V2: JSX attributes whose value is a class name or an element id.
+const CLASS_ATTRS: &[&str] = &["className", "class", "classList", "id", "htmlFor", "for"];
+
+/// V2: calls whose arguments are class names or style text.
+const CLASS_CALLEES: &[&str] = &[
+    "cn",
+    "cx",
+    "clsx",
+    "classnames",
+    "classNames",
+    "cva",
+    "tv",
+    "twMerge",
+    "twJoin",
+    "tw",
+    "css",
+    "styled",
+    "keyframes",
+    "createGlobalStyle",
+    "sx",
+];
+
+/// V3: calls that read an environment variable by name.
+const ENV_CALLEES: &[&str] = &["getenv", "env", "var", "var_os", "environ", "option_env"];
+
+/// V6: calls that take a header name directly.
+const HEADER_CALLEES: &[&str] = &["setHeader", "getHeader", "header", "headers"];
+
+/// V6: verbs that take a header name when the receiver is a headers object.
+const HEADER_VERBS: &[&str] = &["get", "set", "has", "append", "delete", "insert"];
+
+/// V9: calls whose argument names a logger or a tracing span.
+const LOGGER_CALLEES: &[&str] = &[
+    "getLogger",
+    "get_logger",
+    "child",
+    "logger",
+    "span",
+    "instrument",
+    "trace_span",
+    "info_span",
+    "debug_span",
+];
+
+/// V10: calls whose argument is a query fragment or a column path.
+const SQL_CALLEES: &[&str] = &[
+    "sql", "raw", "query", "execute", "prepare", "select", "insert", "update", "delete", "where",
+    "orderBy", "groupBy",
+];
+
+/// V11: calls that subscribe to, or emit, an event.
+const EVENT_CALLEES: &[&str] = &[
+    "addEventListener",
+    "removeEventListener",
+    "on",
+    "once",
+    "off",
+    "emit",
+];
+
+/// V11: DOM and runtime event names. Custom colon and kebab names (`order:created`) are the
+/// rule's own subject and are not here.
+const DOM_EVENTS: &[&str] = &[
+    "click",
+    "change",
+    "input",
+    "submit",
+    "keydown",
+    "keyup",
+    "resize",
+    "scroll",
+    "load",
+    "error",
+    "exit",
+    "SIGTERM",
+    "SIGINT",
+    "uncaughtException",
+    "unhandledRejection",
+    "message",
+    "connection",
+    "close",
+    "data",
+    "end",
+];
 
 /// Value-level disqualifiers V1 to V11: one occurrence anywhere in the family that shows the
-/// value is something other than a domain constant removes the value entirely.
+/// value is something other than a domain constant removes the value entirely. Numbers have
+/// none: the rate shape is guarded by its arithmetic requirement instead.
 fn context_disqualifies(shape: Shape, value: &str, ctx: &LiteralCtx) -> bool {
-    let _ = (shape, value, ctx);
-    false
+    if shape == Shape::Rate {
+        return false;
+    }
+    let callee = ctx.callee.as_deref().unwrap_or("");
+    let chain = ctx.callee_chain.as_deref().unwrap_or("");
+    let in_callees = |list: &[&str]| list.contains(&callee);
+    // V1 i18n keys.
+    if in_callees(I18N_CALLEES) {
+        return true;
+    }
+    // V2 class names and style text.
+    if ctx
+        .jsx_attr
+        .as_deref()
+        .is_some_and(|a| CLASS_ATTRS.contains(&a))
+        || in_callees(CLASS_CALLEES)
+    {
+        return true;
+    }
+    // V3 environment variable names (the SCREAMING_SNAKE shape).
+    if shape == Shape::ScreamingSnake
+        && (in_callees(ENV_CALLEES)
+            || chain.ends_with("environ.get")
+            || (ctx.subscript
+                && ctx
+                    .subscript_receiver
+                    .as_deref()
+                    .is_some_and(|r| r.ends_with("env") || r.ends_with("environ")))
+            || ctx.value_of_key.as_deref() == Some("env"))
+    {
+        return true;
+    }
+    // V4 typed enum members (the token and SCREAMING_SNAKE shapes): the type IS the home.
+    if shape != Shape::Route && ctx.type_position {
+        return true;
+    }
+    // V5 import specifiers.
+    if ctx.import_specifier {
+        return true;
+    }
+    // V6 header names, by the call that takes them.
+    if in_callees(HEADER_CALLEES)
+        || (in_callees(HEADER_VERBS) && chain.to_ascii_lowercase().contains("header"))
+    {
+        return true;
+    }
+    // V9 logger and span names, V10 query fragments.
+    if in_callees(LOGGER_CALLEES) || in_callees(SQL_CALLEES) {
+        return true;
+    }
+    // V11 DOM and runtime event names.
+    in_callees(EVENT_CALLEES) && DOM_EVENTS.contains(&value)
 }
 
 /// Occurrence-level exclusions O1 to O4: this occurrence is not counted; the value survives.
-fn occurrence_excluded(shape: Shape, value: &str, ctx: &LiteralCtx) -> bool {
-    let _ = (shape, value, ctx);
-    false
+fn occurrence_excluded(shape: Shape, _value: &str, ctx: &LiteralCtx) -> bool {
+    // O1 a module specifier; O2 a wire-format or build-feature name in an attribute (a route in
+    // an attribute IS a route definition and counts); O3 a key of the data's schema; O4 the
+    // value of a CSS property.
+    ctx.import_specifier
+        || (ctx.attribute && shape != Shape::Route)
+        || ctx.object_key
+        || ctx.subscript
+        || ctx.value_of_key.as_deref().is_some_and(is_css_property)
 }
 
-/// Every key found in a translation catalogue (V1's second half).
+// ─── translation catalogues (V1's second half) ──────────────────────────────────────────
+
+/// Directories that hold translation catalogues.
+const CATALOGUE_DIRS: &[&str] = &[
+    "locales",
+    "i18n",
+    "lang",
+    "langs",
+    "translations",
+    "messages",
+    "intl",
+];
+
+/// Every key found in a translation catalogue under one of [`CATALOGUE_DIRS`]: a cheap text
+/// scan for `"key":` in JSON and `key:` in YAML. A value that is a catalogue key is a message
+/// id, whichever call reads it.
 fn collect_locale_keys(files: &[(String, String)]) -> HashSet<String> {
-    let _ = files;
-    HashSet::new()
+    let mut keys = HashSet::new();
+    for (path, content) in files {
+        let lower = path.to_ascii_lowercase();
+        let mut segments: Vec<&str> = lower.split('/').collect();
+        let Some(base) = segments.pop() else {
+            continue;
+        };
+        if !segments.iter().any(|s| CATALOGUE_DIRS.contains(s)) {
+            continue;
+        }
+        if base.ends_with(".json") {
+            json_keys(content, &mut keys);
+        } else if base.ends_with(".yaml") || base.ends_with(".yml") {
+            yaml_keys(content, &mut keys);
+        }
+    }
+    keys
+}
+
+/// Strings in `text` that are followed (after optional whitespace) by a colon.
+fn json_keys(text: &str, out: &mut HashSet<String>) {
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            continue;
+        }
+        let mut key = String::new();
+        let mut closed = false;
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => {
+                    if let Some(escaped) = chars.next() {
+                        key.push(escaped);
+                    }
+                }
+                '"' => {
+                    closed = true;
+                    break;
+                }
+                other => key.push(other),
+            }
+        }
+        if !closed {
+            return;
+        }
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        if chars.peek() == Some(&':') {
+            out.insert(key);
+        }
+    }
+}
+
+/// The key on each `key: value` line, quoted or bare, with list dashes ignored.
+fn yaml_keys(text: &str, out: &mut HashSet<String>) {
+    for line in text.lines() {
+        let mut rest = line.trim_start();
+        if rest.starts_with('#') {
+            continue;
+        }
+        while let Some(after) = rest.strip_prefix("- ") {
+            rest = after.trim_start();
+        }
+        let key = match rest.chars().next() {
+            Some(quote @ ('"' | '\'')) => rest[1..]
+                .split_once(quote)
+                .and_then(|(key, after)| after.trim_start().starts_with(':').then_some(key)),
+            _ => rest
+                .split_once(':')
+                .filter(|(_, after)| after.is_empty() || after.starts_with(char::is_whitespace))
+                .map(|(key, _)| key.trim_end()),
+        };
+        if let Some(key) = key.filter(|k| !k.is_empty()) {
+            out.insert(key.to_string());
+        }
+    }
 }
 
 // ─── the verdict ────────────────────────────────────────────────────────────────────────
@@ -1433,6 +1678,1185 @@ mod tests {
         assert_eq!(first.len(), 2, "{first:#?}");
         let keys: Vec<(&str, usize)> = first.iter().map(|v| (v.file.as_str(), v.line)).collect();
         assert_eq!(keys, [("src/x.ts", 1), ("src/y.ts", 1)]);
+    }
+
+    // ── safe twins ─────────────────────────────────────────────────────────────
+
+    /// A guard proof: `guarded` is silent, and `control` (the same text without the feature the
+    /// guard keys on) is flagged exactly once, so the silence is the guard's doing and not an
+    /// accident of the fixture.
+    fn assert_guarded(guarded: Vec<(&str, &str)>, control: Vec<(&str, &str)>) {
+        let silent = run_pairs(guarded);
+        assert!(
+            silent.is_empty(),
+            "guarded input must be silent: {silent:#?}"
+        );
+        let flagged = run_pairs(control);
+        assert_eq!(
+            flagged.len(),
+            1,
+            "control must be flagged once: {flagged:#?}"
+        );
+    }
+
+    #[test]
+    fn twin_same_value_in_two_languages_is_not_grouped() {
+        assert_guarded(
+            vec![
+                ("src/api.ts", "fetch('/api/v1/orders');\n"),
+                ("app/server.py", "client.get('/api/v1/orders')\n"),
+            ],
+            vec![
+                ("src/api.ts", "fetch('/api/v1/orders');\n"),
+                ("src/other.ts", "fetch('/api/v1/orders');\n"),
+            ],
+        );
+        // Three families, one copy each.
+        let v = run_pairs(vec![
+            ("src/api.ts", "publish('orders-high');\n"),
+            ("app/api.py", "publish('orders-high')\n"),
+            ("src/api.rs", "fn f() { publish(\"orders-high\"); }\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn twin_same_literal_twice_in_one_file_is_silent() {
+        assert_guarded(
+            vec![(
+                "src/a.ts",
+                "publish('orders-high');\nsubscribe('orders-high');\n",
+            )],
+            vec![
+                ("src/a.ts", "publish('orders-high');\n"),
+                ("src/b.ts", "subscribe('orders-high');\n"),
+            ],
+        );
+    }
+
+    #[test]
+    fn twin_test_and_fixture_files_are_not_counted() {
+        let body = "publish('orders-high');\n";
+        let v = run_pairs(vec![
+            ("src/a.ts", body),
+            ("src/a.test.ts", body),
+            ("fixtures/x.ts", body),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        // Each test-shaped location on its own, against an ordinary path as the control.
+        for test_path in [
+            "src/a.spec.ts",
+            "src/__tests__/b.ts",
+            "e2e/b.ts",
+            "src/b.stories.tsx",
+            "src/__mocks__/b.ts",
+        ] {
+            assert_guarded(
+                vec![("src/a.ts", body), (test_path, body)],
+                vec![("src/a.ts", body), ("src/ordinary.ts", body)],
+            );
+        }
+        let py = "publish('orders-high')\n";
+        for test_path in [
+            "tests/b.py",
+            "app/seeds/b.py",
+            "app/conftest.py",
+            "app/b_test.py",
+        ] {
+            assert_guarded(
+                vec![("app/a.py", py), (test_path, py)],
+                vec![("app/a.py", py), ("app/ordinary.py", py)],
+            );
+        }
+    }
+
+    #[test]
+    fn twin_config_and_settings_files_are_not_counted() {
+        let py = "CACHES = make({'default': {'LOCATION': 'orders-cache'}})\n";
+        let ts = "export default { queue: 'orders-high' };\n";
+        // The spec's own pair, with the spec's own value (a header-shaped prefix, so doubly out).
+        let v = run_pairs(vec![
+            ("config/settings/dev.py", "X = {'L': 'cache-orders'}\n"),
+            ("config/settings/prod.py", "X = {'L': 'cache-orders'}\n"),
+            ("vite.config.ts", ts),
+            ("vitest.config.ts", ts),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        assert_guarded(
+            vec![
+                ("config/settings/dev.py", py),
+                ("config/settings/prod.py", py),
+            ],
+            vec![("app/dev.py", py), ("app/prod.py", py)],
+        );
+        assert_guarded(
+            vec![("vite.config.ts", ts), ("vitest.config.ts", ts)],
+            vec![("src/a.ts", ts), ("src/b.ts", ts)],
+        );
+        assert_guarded(
+            vec![("app/settings.py", py), ("app/settings/prod.py", py)],
+            vec![("app/a.py", py), ("app/b.py", py)],
+        );
+        assert_guarded(
+            vec![
+                ("src/environments/environment.ts", ts),
+                ("src/environments/environment.prod.ts", ts),
+            ],
+            vec![("src/a.ts", ts), ("src/b.ts", ts)],
+        );
+    }
+
+    #[test]
+    fn twin_migrations_scripts_and_generated_are_not_counted() {
+        let py = "register('orders-high')\n";
+        let ts = "register('orders-high');\n";
+        let v = run_pairs(vec![
+            ("migrations/0001.py", py),
+            ("migrations/0002.py", py),
+            ("scripts/a.ts", ts),
+            ("scripts/b.ts", ts),
+            ("src/gen.ts", "// @generated\nregister('orders-high');\n"),
+            ("src/real.ts", ts),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        assert_guarded(
+            vec![("migrations/0001.py", py), ("migrations/0002.py", py)],
+            vec![("app/a.py", py), ("app/b.py", py)],
+        );
+        assert_guarded(
+            vec![("scripts/a.ts", ts), ("scripts/b.ts", ts)],
+            vec![("src/a.ts", ts), ("src/b.ts", ts)],
+        );
+        assert_guarded(
+            vec![
+                ("src/gen.ts", "// @generated\nregister('orders-high');\n"),
+                ("src/real.ts", ts),
+            ],
+            vec![("src/gen.ts", ts), ("src/real.ts", ts)],
+        );
+        assert_guarded(
+            vec![("docs/a.ts", ts), ("examples/b.ts", ts)],
+            vec![("src/a.ts", ts), ("src/b.ts", ts)],
+        );
+    }
+
+    #[test]
+    fn twin_declaration_and_emitted_files_are_not_counted() {
+        let ts = "register('orders-high');\n";
+        assert_guarded(
+            vec![("src/types.d.ts", ts), ("src/real.ts", ts)],
+            vec![("src/types.ts", ts), ("src/real.ts", ts)],
+        );
+        // A committed `X.js` beside `X.ts` is build output, not a second module.
+        let v = run_pairs(vec![
+            ("src/a.ts", "register('orders-high');\n"),
+            ("src/a.js", "register('orders-high');\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn twin_i18n_key_via_t_call_is_disqualified_everywhere() {
+        assert_guarded(
+            vec![
+                ("src/a.tsx", "const x = t('errors-required');\n"),
+                ("src/b.tsx", "const y = label('errors-required');\n"),
+                ("src/c.tsx", "const z = label('errors-required');\n"),
+            ],
+            vec![
+                ("src/a.tsx", "const x = pick('errors-required');\n"),
+                ("src/b.tsx", "const y = label('errors-required');\n"),
+            ],
+        );
+        for callee in [
+            "t",
+            "$t",
+            "i18n.t",
+            "i18next.t",
+            "translate",
+            "tr",
+            "gettext",
+            "ngettext",
+            "pgettext",
+            "_",
+            "__",
+            "formatMessage",
+            "defineMessage",
+            "useTranslation",
+        ] {
+            let a = format!("const x = {callee}('errors-required');\n");
+            assert_guarded(
+                vec![
+                    ("src/a.ts", &a),
+                    ("src/b.ts", "label('errors-required');\n"),
+                ],
+                vec![
+                    ("src/a.ts", "pick('errors-required');\n"),
+                    ("src/b.ts", "label('errors-required');\n"),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn twin_i18n_key_in_a_python_gettext_call_is_disqualified() {
+        assert_guarded(
+            vec![
+                ("app/a.py", "msg = _('errors-required')\n"),
+                ("app/b.py", "label('errors-required')\n"),
+                ("app/c.py", "label('errors-required')\n"),
+            ],
+            vec![
+                ("app/b.py", "label('errors-required')\n"),
+                ("app/c.py", "label('errors-required')\n"),
+            ],
+        );
+    }
+
+    #[test]
+    fn twin_i18n_key_present_in_locales_json_is_disqualified() {
+        let a = "label('errors-required');\n";
+        assert_guarded(
+            vec![
+                (
+                    "locales/en.json",
+                    "{\n  \"errors-required\": \"Required\"\n}\n",
+                ),
+                ("src/a.ts", a),
+                ("src/b.ts", a),
+            ],
+            vec![
+                ("locales/en.json", "{\n  \"other-key\": \"Required\"\n}\n"),
+                ("src/a.ts", a),
+                ("src/b.ts", a),
+            ],
+        );
+        for catalogue in [
+            "src/i18n/en.json",
+            "app/lang/en.json",
+            "app/langs/en.json",
+            "public/translations/en.json",
+            "src/messages/en.json",
+            "src/intl/en.json",
+        ] {
+            assert_guarded(
+                vec![
+                    (catalogue, "{\"errors-required\": \"Required\"}"),
+                    ("src/a.ts", a),
+                    ("src/b.ts", a),
+                ],
+                vec![
+                    ("src/other/en.json", "{\"errors-required\": \"Required\"}"),
+                    ("src/a.ts", a),
+                    ("src/b.ts", a),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn twin_i18n_key_in_yaml_catalogues_is_disqualified() {
+        let a = "label('errors-required');\n";
+        for yaml in [
+            "errors-required: Required\n",
+            "\"errors-required\": Required\n",
+            "'errors-required': Required\n",
+            "forms:\n  errors-required: Required\n",
+            "- errors-required: Required\n",
+        ] {
+            assert_guarded(
+                vec![("locales/en.yaml", yaml), ("src/a.ts", a), ("src/b.ts", a)],
+                vec![
+                    ("locales/en.yaml", "other: 1\n"),
+                    ("src/a.ts", a),
+                    ("src/b.ts", a),
+                ],
+            );
+        }
+        assert_guarded(
+            vec![
+                ("config/locales/en.yml", "errors-required: Required\n"),
+                ("src/a.ts", a),
+                ("src/b.ts", a),
+            ],
+            vec![
+                ("config/locales/en.yml", "x: 1\n"),
+                ("src/a.ts", a),
+                ("src/b.ts", a),
+            ],
+        );
+    }
+
+    #[test]
+    fn twin_catalogue_values_are_not_keys() {
+        // `errors-required` appears only as a VALUE in the catalogue: not an i18n key.
+        let a = "label('errors-required');\n";
+        let v = run_pairs(vec![
+            ("locales/en.json", "{\"message\": \"errors-required\"}"),
+            ("src/a.ts", a),
+            ("src/b.ts", a),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
+    #[test]
+    fn twin_class_name_attribute_and_cn_call_are_disqualified() {
+        // The spec's pair (`items-center` is also a Tailwind prefix, so doubly out).
+        let v = run_pairs(vec![
+            (
+                "src/a.tsx",
+                "export const A = () => <div className=\"items-center\" />;\n",
+            ),
+            ("src/b.ts", "export const b = cn('items-center');\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        // A custom class name, which only the position guards can recognise.
+        assert_guarded(
+            vec![
+                (
+                    "src/a.tsx",
+                    "export const A = () => <div className=\"card-header\" />;\n",
+                ),
+                ("src/b.ts", "export const x = label('card-header');\n"),
+                ("src/c.ts", "export const y = label('card-header');\n"),
+            ],
+            vec![
+                ("src/b.ts", "export const x = label('card-header');\n"),
+                ("src/c.ts", "export const y = label('card-header');\n"),
+            ],
+        );
+        for callee in [
+            "cn",
+            "cx",
+            "clsx",
+            "classnames",
+            "classNames",
+            "cva",
+            "tv",
+            "twMerge",
+            "twJoin",
+            "tw",
+            "css",
+            "styled",
+            "keyframes",
+            "createGlobalStyle",
+            "sx",
+        ] {
+            let a = format!("export const a = {callee}('card-header');\n");
+            assert_guarded(
+                vec![("src/a.ts", &a), ("src/b.ts", "label('card-header');\n")],
+                vec![
+                    ("src/a.ts", "pick('card-header');\n"),
+                    ("src/b.ts", "label('card-header');\n"),
+                ],
+            );
+        }
+        for attr in ["className", "class", "classList", "id", "htmlFor"] {
+            let a = format!("export const A = () => <div {attr}=\"card-header\" />;\n");
+            assert_guarded(
+                vec![("src/a.tsx", &a), ("src/b.ts", "label('card-header');\n")],
+                vec![
+                    (
+                        "src/a.tsx",
+                        "export const A = () => <div title=\"card-header\" />;\n",
+                    ),
+                    ("src/b.ts", "label('card-header');\n"),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn twin_tailwind_prefixed_token_is_disqualified_by_shape() {
+        let v = run_pairs(vec![
+            ("src/a.ts", "pick('text-gray-500');\n"),
+            ("src/b.ts", "pick('text-gray-500');\n"),
+            ("src/c.ts", "pick('hover:bg-red-500');\n"),
+            ("src/d.ts", "pick('hover:bg-red-500');\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn twin_css_keyword_value_under_a_css_property_key_is_excluded() {
+        let a = "export const s = { justifyContent: 'space-between' };\n";
+        let v = run_pairs(vec![("src/a.ts", a), ("src/b.ts", a)]);
+        assert!(v.is_empty(), "{v:#?}");
+        // The property key alone excludes the occurrence, whatever the value is (O4).
+        assert_guarded(
+            vec![
+                (
+                    "src/a.ts",
+                    "export const s = { transition: 'fade-quick' };\n",
+                ),
+                (
+                    "src/b.ts",
+                    "export const s = { transition: 'fade-quick' };\n",
+                ),
+            ],
+            vec![
+                (
+                    "src/a.ts",
+                    "export function s() { return { queue: 'fade-quick' }; }\n",
+                ),
+                (
+                    "src/b.ts",
+                    "export function s() { return { queue: 'fade-quick' }; }\n",
+                ),
+            ],
+        );
+        // kebab-case property keys too.
+        assert_guarded(
+            vec![
+                (
+                    "app/a.py",
+                    "def f():\n    return {'transition': 'fade-quick'}\n",
+                ),
+                (
+                    "app/b.py",
+                    "def f():\n    return {'transition': 'fade-quick'}\n",
+                ),
+            ],
+            vec![
+                ("app/a.py", "def f():\n    return {'queue': 'fade-quick'}\n"),
+                ("app/b.py", "def f():\n    return {'queue': 'fade-quick'}\n"),
+            ],
+        );
+    }
+
+    #[test]
+    fn twin_env_var_name_is_disqualified() {
+        let ts = vec![
+            ("src/a.ts", "const q = process.env['ORDERS_QUEUE'];\n"),
+            ("src/b.ts", "register('ORDERS_QUEUE');\n"),
+            ("src/c.ts", "register('ORDERS_QUEUE');\n"),
+        ];
+        assert_guarded(
+            ts,
+            vec![
+                ("src/b.ts", "register('ORDERS_QUEUE');\n"),
+                ("src/c.ts", "register('ORDERS_QUEUE');\n"),
+            ],
+        );
+        assert_guarded(
+            vec![
+                ("app/a.py", "q = os.environ['ORDERS_QUEUE']\n"),
+                ("app/b.py", "register('ORDERS_QUEUE')\n"),
+                ("app/c.py", "register('ORDERS_QUEUE')\n"),
+            ],
+            vec![
+                ("app/b.py", "register('ORDERS_QUEUE')\n"),
+                ("app/c.py", "register('ORDERS_QUEUE')\n"),
+            ],
+        );
+        for first in [
+            ("src/a.ts", "const q = getenv('ORDERS_QUEUE');\n"),
+            ("src/a.ts", "const q = env('ORDERS_QUEUE');\n"),
+            ("src/a.ts", "const q = config.env('ORDERS_QUEUE');\n"),
+            ("src/a.ts", "const c = { env: 'ORDERS_QUEUE' };\n"),
+            ("app/a.py", "q = os.getenv('ORDERS_QUEUE')\n"),
+            ("app/a.py", "q = os.environ.get('ORDERS_QUEUE')\n"),
+            (
+                "src/a.rs",
+                "fn f() { let q = std::env::var(\"ORDERS_QUEUE\"); }\n",
+            ),
+            (
+                "src/a.rs",
+                "fn f() { let q = env::var_os(\"ORDERS_QUEUE\"); }\n",
+            ),
+        ] {
+            let family_ts = first.0.ends_with(".ts");
+            let family_py = first.0.ends_with(".py");
+            let (b, c) = if family_ts {
+                ("src/b.ts", "src/c.ts")
+            } else if family_py {
+                ("app/b.py", "app/c.py")
+            } else {
+                ("src/b.rs", "src/c.rs")
+            };
+            let body = if family_ts {
+                "register('ORDERS_QUEUE');\n"
+            } else if family_py {
+                "register('ORDERS_QUEUE')\n"
+            } else {
+                "fn f() { register(\"ORDERS_QUEUE\"); }\n"
+            };
+            let silent = run_pairs(vec![first, (b, body), (c, body)]);
+            assert!(silent.is_empty(), "{first:?}: {silent:#?}");
+        }
+        // The env-name guard is for S3 values only: a kebab value under `env(..)` is not one.
+        let v = run_pairs(vec![
+            ("src/a.ts", "env('orders-high');\n"),
+            ("src/b.ts", "register('orders-high');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
+    #[test]
+    fn twin_screaming_snake_member_of_a_union_type_is_disqualified() {
+        assert_guarded(
+            vec![
+                (
+                    "src/types.ts",
+                    "export type Status = 'IN_PROGRESS' | 'DONE';\n",
+                ),
+                ("src/a.ts", "if (s === 'IN_PROGRESS') {}\n"),
+                ("src/b.ts", "if (s === 'IN_PROGRESS') {}\n"),
+            ],
+            vec![
+                ("src/types.ts", "export type Status = 'DONE';\n"),
+                ("src/a.ts", "if (s === 'IN_PROGRESS') {}\n"),
+                ("src/b.ts", "if (s === 'IN_PROGRESS') {}\n"),
+            ],
+        );
+        // An `as const` tuple that a type is derived from is a type source too.
+        assert_guarded(
+            vec![
+                (
+                    "src/types.ts",
+                    "export const STATUSES = ['IN_PROGRESS', 'DONE'] as const;\nexport type Status = (typeof STATUSES)[number];\n",
+                ),
+                ("src/a.ts", "if (s === 'IN_PROGRESS') {}\n"),
+                ("src/b.ts", "if (s === 'IN_PROGRESS') {}\n"),
+            ],
+            vec![
+                ("src/types.ts", "export const STATUSES = ['DONE'] as const;\n"),
+                ("src/a.ts", "if (s === 'IN_PROGRESS') {}\n"),
+                ("src/b.ts", "if (s === 'IN_PROGRESS') {}\n"),
+            ],
+        );
+        // Kebab members of a union are S1 values: the same guard.
+        assert_guarded(
+            vec![
+                (
+                    "src/types.ts",
+                    "export type Lane = 'orders-high' | 'orders-low';\n",
+                ),
+                ("src/a.ts", "publish('orders-high');\n"),
+                ("src/b.ts", "publish('orders-high');\n"),
+            ],
+            vec![
+                ("src/types.ts", "export type Lane = 'orders-low';\n"),
+                ("src/a.ts", "publish('orders-high');\n"),
+                ("src/b.ts", "publish('orders-high');\n"),
+            ],
+        );
+    }
+
+    #[test]
+    fn twin_enum_initializer_is_disqualified() {
+        assert_guarded(
+            vec![
+                (
+                    "src/types.ts",
+                    "export enum S { InProgress = 'IN_PROGRESS' }\n",
+                ),
+                ("src/a.ts", "if (s === 'IN_PROGRESS') {}\n"),
+                ("src/b.ts", "if (s === 'IN_PROGRESS') {}\n"),
+            ],
+            vec![
+                (
+                    "src/types.ts",
+                    "export const S = { InProgress: 'IN_PROGRESS' };\n",
+                ),
+                ("src/a.ts", "if (s === 'IN_PROGRESS') {}\n"),
+                ("src/b.ts", "if (s === 'IN_PROGRESS') {}\n"),
+            ],
+        );
+    }
+
+    #[test]
+    fn twin_python_literal_and_enum_are_disqualified() {
+        let uses = |first: &'static str| {
+            vec![
+                ("app/types.py", first),
+                ("app/a.py", "if s == 'IN_PROGRESS':\n    pass\n"),
+                ("app/b.py", "if s == 'IN_PROGRESS':\n    pass\n"),
+            ]
+        };
+        let control = vec![
+            ("app/a.py", "if s == 'IN_PROGRESS':\n    pass\n"),
+            ("app/b.py", "if s == 'IN_PROGRESS':\n    pass\n"),
+        ];
+        assert_guarded(uses("Status = Literal['IN_PROGRESS']\n"), control.clone());
+        assert_guarded(
+            uses("class Status(Enum):\n    IN_PROGRESS = 'IN_PROGRESS'\n"),
+            control,
+        );
+    }
+
+    #[test]
+    fn twin_import_specifier_shaped_string_is_disqualified() {
+        // The spec's pair: an import and a test mock. Neither is a bare copy of a constant.
+        let v = run_pairs(vec![
+            ("src/a.ts", "import x from 'react-dom/client';\n"),
+            ("src/b.ts", "jest.mock('react-dom/client');\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        // And a specifier anywhere removes the value from the other users.
+        assert_guarded(
+            vec![
+                ("src/a.ts", "import x from 'react-dom/client';\n"),
+                ("src/b.ts", "label('react-dom/client');\n"),
+                ("src/c.ts", "label('react-dom/client');\n"),
+            ],
+            vec![
+                ("src/b.ts", "label('react-dom/client');\n"),
+                ("src/c.ts", "label('react-dom/client');\n"),
+            ],
+        );
+        for first in [
+            "const x = require('react-dom/client');\n",
+            "const x = await import('react-dom/client');\n",
+            "export * from 'react-dom/client';\n",
+            "vi.mock('react-dom/client');\n",
+            "require.resolve('react-dom/client');\n",
+        ] {
+            let silent = run_pairs(vec![
+                ("src/a.ts", first),
+                ("src/b.ts", "label('react-dom/client');\n"),
+                ("src/c.ts", "label('react-dom/client');\n"),
+            ]);
+            assert!(silent.is_empty(), "{first}: {silent:#?}");
+        }
+        assert_guarded(
+            vec![
+                ("app/a.py", "m = importlib.import_module('app/plugins')\n"),
+                ("app/b.py", "label('app/plugins')\n"),
+                ("app/c.py", "label('app/plugins')\n"),
+            ],
+            vec![
+                ("app/b.py", "label('app/plugins')\n"),
+                ("app/c.py", "label('app/plugins')\n"),
+            ],
+        );
+    }
+
+    #[test]
+    fn twin_mime_header_encoding_and_cache_tokens_are_excluded() {
+        let body = "res.setHeader('content-type', 'application/json');\n\
+                    res.setHeader('x-request-id', id);\n\
+                    enc('utf-8');\ncache('no-cache');\nmode('same-origin');\n\
+                    locale('en-us');\nver('1.2.0-beta');\n";
+        let v = run_pairs(vec![("src/a.ts", body), ("src/b.ts", body)]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn twin_header_call_receivers_disqualify_a_value_that_has_no_header_shape() {
+        for first in [
+            "res.setHeader('tenant-id', v);\n",
+            "const v = req.getHeader('tenant-id');\n",
+            "res.header('tenant-id', v);\n",
+            "res.headers.set('tenant-id', v);\n",
+            "res.headers.append('tenant-id', v);\n",
+            "const v = res.headers.get('tenant-id');\n",
+            "res.headers.has('tenant-id');\n",
+            "res.headers.delete('tenant-id');\n",
+            "res.headers.insert('tenant-id', v);\n",
+        ] {
+            let silent = run_pairs(vec![
+                ("src/a.ts", first),
+                ("src/b.ts", "label('tenant-id');\n"),
+                ("src/c.ts", "label('tenant-id');\n"),
+            ]);
+            assert!(silent.is_empty(), "{first}: {silent:#?}");
+        }
+        // The same verbs on a receiver that is not a headers object are ordinary calls.
+        let v = run_pairs(vec![
+            ("src/a.ts", "cache.set('tenant-id', v);\n"),
+            ("src/b.ts", "store.get('tenant-id');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert_guarded(
+            vec![
+                ("app/a.py", "v = response.headers.get('tenant-id')\n"),
+                ("app/b.py", "label('tenant-id')\n"),
+                ("app/c.py", "label('tenant-id')\n"),
+            ],
+            vec![
+                ("app/b.py", "label('tenant-id')\n"),
+                ("app/c.py", "label('tenant-id')\n"),
+            ],
+        );
+    }
+
+    #[test]
+    fn twin_platform_tokens_are_excluded() {
+        let body = "t('linux-x64');\ntarget('wasm32-unknown-unknown');\nattr('aria-label');\nattr('data-testid');\narch('x86_64');\n";
+        let v = run_pairs(vec![("src/a.ts", body), ("src/b.ts", body)]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn twin_host_port_date_ip_and_uuid_fail_the_shape() {
+        let body = "f('localhost:3000');\nf('2024-01-01');\nf('127.0.0.1');\nf('0.0.0.0');\n\
+                    f('123e4567-e89b-12d3-a456-426614174000');\nf('db:5432');\n";
+        let v = run_pairs(vec![("src/a.ts", body), ("src/b.ts", body)]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn twin_filesystem_paths_and_urls_are_excluded() {
+        let body = "f('./data/seed.json');\nf('/tmp/cache');\nf('config/default.yaml');\n\
+                    f('https://api.example.com/v1');\nf('/usr/local/bin');\nf('../shared/lib');\n";
+        let v = run_pairs(vec![("src/a.ts", body), ("src/b.ts", body)]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn twin_object_keys_and_subscripts_are_not_counted() {
+        // The spec's pair (`x-` is also a header prefix, so doubly out).
+        let v = run_pairs(vec![
+            ("src/a.ts", "const h = { 'x-tenant': 1 };\n"),
+            ("src/b.ts", "const t = row['x-tenant'];\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        assert_guarded(
+            vec![
+                ("src/a.ts", "const h = { 'tenant-id': 1 };\n"),
+                ("src/b.ts", "const t = row['tenant-id'];\n"),
+            ],
+            vec![
+                ("src/a.ts", "const h = { id: 'tenant-id' };\n"),
+                ("src/b.ts", "const t = pick('tenant-id');\n"),
+            ],
+        );
+        assert_guarded(
+            vec![
+                ("app/a.py", "h = {'tenant-id': 1}\n"),
+                ("app/b.py", "t = row['tenant-id']\n"),
+            ],
+            vec![
+                ("app/a.py", "h = {'id': 'tenant-id'}\n"),
+                ("app/b.py", "t = pick('tenant-id')\n"),
+            ],
+        );
+        assert_guarded(
+            vec![
+                ("src/a.rs", "fn f() { let t = row[\"tenant-id\"]; }\n"),
+                ("src/b.rs", "fn f() { let t = row[\"tenant-id\"]; }\n"),
+            ],
+            vec![
+                ("src/a.rs", "fn f() { let t = pick(\"tenant-id\"); }\n"),
+                ("src/b.rs", "fn f() { let t = pick(\"tenant-id\"); }\n"),
+            ],
+        );
+    }
+
+    #[test]
+    fn twin_dotted_only_and_snake_only_strings_are_out_of_scope() {
+        let body = "f('orders.created');\nf('order_created');\n";
+        let v = run_pairs(vec![("src/a.ts", body), ("src/b.ts", body)]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn twin_single_word_strings_are_out_of_scope() {
+        let body = "f('pending');\nf('orders');\nf('GET');\n";
+        let v = run_pairs(vec![("src/a.ts", body), ("src/b.ts", body)]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn twin_logger_name_is_disqualified() {
+        for first in [
+            "const l = getLogger('svc-orders');\n",
+            "const l = logging.getLogger('svc-orders');\n",
+            "const l = get_logger('svc-orders');\n",
+            "const l = log.child('svc-orders');\n",
+            "const l = logger('svc-orders');\n",
+            "const s = span('svc-orders');\n",
+            "const s = tracer.instrument('svc-orders');\n",
+            "const s = trace_span('svc-orders');\n",
+            "const s = info_span('svc-orders');\n",
+            "const s = debug_span('svc-orders');\n",
+        ] {
+            let silent = run_pairs(vec![
+                ("src/a.ts", first),
+                ("src/b.ts", "tag('svc-orders');\n"),
+            ]);
+            assert!(silent.is_empty(), "{first}: {silent:#?}");
+        }
+        assert_guarded(
+            vec![
+                ("app/a.py", "log = logging.getLogger('svc-orders')\n"),
+                ("app/b.py", "tag('svc-orders')\n"),
+            ],
+            vec![
+                ("app/a.py", "tag('svc-orders')\n"),
+                ("app/b.py", "tag('svc-orders')\n"),
+            ],
+        );
+        assert_guarded(
+            vec![
+                (
+                    "src/a.rs",
+                    "fn f() { let s = info_span(\"svc-orders\"); }\n",
+                ),
+                ("src/b.rs", "fn f() { tag(\"svc-orders\"); }\n"),
+            ],
+            vec![
+                ("src/a.rs", "fn f() { tag(\"svc-orders\"); }\n"),
+                ("src/b.rs", "fn f() { tag(\"svc-orders\"); }\n"),
+            ],
+        );
+    }
+
+    #[test]
+    fn twin_dom_event_names_are_excluded_but_custom_channels_count() {
+        let v = run_pairs(vec![
+            ("src/a.ts", "el.addEventListener('click', h);\n"),
+            ("src/b.ts", "el.addEventListener('click', h);\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        let v = run_pairs(vec![
+            ("src/a.ts", "bus.on('order:created', h);\n"),
+            ("src/b.ts", "bus.emit('order:created');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert_eq!(v[0].object.as_deref(), Some("order:created"));
+    }
+
+    #[test]
+    fn v11_event_names_under_event_callees_disqualify_a_value() {
+        // Real DOM and Node events are single words today, so the shape already drops them; the
+        // guard is pinned directly so a future widening of the shape cannot reopen it.
+        let ctx_for = |callee: &str| LiteralCtx {
+            callee: Some(callee.to_string()),
+            callee_chain: Some(callee.to_string()),
+            ..LiteralCtx::default()
+        };
+        for callee in [
+            "addEventListener",
+            "removeEventListener",
+            "on",
+            "once",
+            "off",
+            "emit",
+        ] {
+            for event in [
+                "click",
+                "keydown",
+                "SIGTERM",
+                "uncaughtException",
+                "message",
+            ] {
+                assert!(
+                    context_disqualifies(Shape::Token, event, &ctx_for(callee)),
+                    "{callee} {event}"
+                );
+            }
+            assert!(
+                !context_disqualifies(Shape::Token, "order:created", &ctx_for(callee)),
+                "{callee} custom"
+            );
+        }
+        let process_on = LiteralCtx {
+            callee: Some("on".to_string()),
+            callee_chain: Some("process.on".to_string()),
+            ..LiteralCtx::default()
+        };
+        assert!(context_disqualifies(Shape::Token, "SIGINT", &process_on));
+        assert!(!context_disqualifies(
+            Shape::Token,
+            "click",
+            &ctx_for("publish")
+        ));
+    }
+
+    #[test]
+    fn twin_serde_rename_and_cfg_feature_attributes_are_excluded() {
+        let rename = "#[derive(Serialize)]\nstruct S {\n    #[serde(rename = \"created-at\")]\n    a: u8,\n}\n";
+        let v = run_pairs(vec![("src/a.rs", rename), ("src/b.rs", rename)]);
+        assert!(v.is_empty(), "{v:#?}");
+        let cfg = "#[cfg(feature = \"extra-fast\")]\nfn f() {}\n";
+        let v = run_pairs(vec![("src/a.rs", cfg), ("src/b.rs", cfg)]);
+        assert!(v.is_empty(), "{v:#?}");
+        // The same text as an ordinary string is flagged.
+        let plain = "fn f() { pick(\"created-at\"); }\n";
+        let v = run_pairs(vec![("src/a.rs", plain), ("src/b.rs", plain)]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
+    #[test]
+    fn twin_python_decorator_arguments_that_are_not_routes_are_excluded() {
+        let task = "@celery.task(queue='orders-high')\ndef work():\n    pass\n";
+        assert_guarded(
+            vec![("app/a.py", task), ("app/b.py", task)],
+            vec![
+                ("app/a.py", "work(queue='orders-high')\n"),
+                ("app/b.py", "work(queue='orders-high')\n"),
+            ],
+        );
+    }
+
+    #[test]
+    fn twin_rust_macro_bodies_are_not_extracted() {
+        let body = "fn f() { let j = json!({\"q\": \"orders-high\"}); }\n";
+        let v = run_pairs(vec![("src/a.rs", body), ("src/b.rs", body)]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn twin_interpolated_and_concatenated_strings_are_skipped() {
+        let ts = "const u = `/api/${v}`;\nconst q = 'orders-' + tier;\n";
+        let v = run_pairs(vec![("src/a.ts", ts), ("src/b.ts", ts)]);
+        assert!(v.is_empty(), "{v:#?}");
+        let py = "u = f'/api/{v}'\nq = 'orders-' 'high'\n";
+        let v = run_pairs(vec![("app/a.py", py), ("app/b.py", py)]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn twin_decimal_outside_arithmetic_is_not_counted() {
+        let v = run_pairs(vec![
+            ("src/a.ts", "export const s = { opacity: 0.8 };\n"),
+            ("src/b.ts", "export const s = { scale: 0.8 };\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        // The excluded round fractions, even in arithmetic.
+        for fraction in ["0.5", "0.25", "0.75"] {
+            let a = format!("const t = total * {fraction};\n");
+            let v = run_pairs(vec![("src/a.ts", &a), ("src/b.ts", &a)]);
+            assert!(v.is_empty(), "{fraction}: {v:#?}");
+        }
+        // Every bare copy must be an operand: one stray copy removes the value.
+        assert_guarded(
+            vec![
+                ("src/a.ts", "const t = total * 0.12;\n"),
+                ("src/b.ts", "const t = subtotal * 0.12;\n"),
+                (
+                    "src/c.ts",
+                    "function f() { const fee = 0.12; return fee; }\n",
+                ),
+            ],
+            vec![
+                ("src/a.ts", "const t = total * 0.12;\n"),
+                ("src/b.ts", "const t = subtotal * 0.12;\n"),
+            ],
+        );
+    }
+
+    #[test]
+    fn decimal_rates_work_in_python_and_rust_arithmetic() {
+        let v = run_pairs(vec![
+            ("app/a.py", "t = total * 0.12\n"),
+            ("app/b.py", "t = subtotal * 0.12\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        let v = run_pairs(vec![
+            ("src/a.rs", "fn f(t: f64) -> f64 { t * 0.12 }\n"),
+            ("src/b.rs", "fn g(t: f64) -> f64 { t + t * 0.12 }\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
+    #[test]
+    fn a_rate_with_a_home_flags_each_arithmetic_copy() {
+        let v = run_pairs(vec![
+            ("src/fees.ts", "export const FEE_RATE = 0.12;\n"),
+            ("src/cart.ts", "const t = total * 0.12;\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert!(v[0].message.contains("`FEE_RATE`"), "{}", v[0].message);
+        // A non-arithmetic bare copy of the same number removes it.
+        let v = run_pairs(vec![
+            ("src/fees.ts", "export const FEE_RATE = 0.12;\n"),
+            ("src/cart.ts", "const t = total * 0.12;\n"),
+            (
+                "src/ui.ts",
+                "const s = { opacity: 0.12 };\nconst x = pick(0.12);\n",
+            ),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn twin_integers_and_time_units_are_out_of_scope() {
+        let body = "const a = t * 60;\nconst b = t * 1000;\nconst c = t * 86400;\n\
+                    const d = t * 1048576;\nconst e = t + 404;\nconst f = t + 8080;\n";
+        let v = run_pairs(vec![("src/a.ts", body), ("src/b.ts", body)]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn twin_two_homes_and_no_bare_copies_is_silent() {
+        let v = run_pairs(vec![
+            ("src/a.ts", "export const Q = 'orders-high';\n"),
+            ("src/b.ts", "export const Q = 'orders-high';\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn two_homes_with_a_bare_copy_name_both_homes() {
+        let v = run_pairs(vec![
+            ("src/a.ts", "export const QA = 'orders-high';\n"),
+            ("src/b.ts", "export const QB = 'orders-high';\n"),
+            ("src/c.ts", "subscribe('orders-high');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        let m = &v[0].message;
+        for needle in [
+            "`QA` in `src/a.ts:1`",
+            "`QB` in `src/b.ts:1`",
+            "1 other file",
+        ] {
+            assert!(m.contains(needle), "{needle} missing: {m}");
+        }
+    }
+
+    #[test]
+    fn twin_home_file_own_bare_use_is_ignored() {
+        let v = run_pairs(vec![
+            (
+                "src/q.ts",
+                "export const Q = 'orders-high';\nlog('orders-high');\n",
+            ),
+            ("src/other.ts", "subscribe('orders-high');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert!(v[0].message.contains("1 other file"), "{}", v[0].message);
+        // With no other file there is nothing to flag.
+        let v = run_pairs(vec![(
+            "src/q.ts",
+            "export const Q = 'orders-high';\nlog('orders-high');\n",
+        )]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn twin_sql_fragment_callees_are_excluded() {
+        for callee in [
+            "sql", "raw", "query", "execute", "prepare", "select", "insert", "update", "delete",
+            "where", "orderBy", "groupBy",
+        ] {
+            let first = format!("db.{callee}('orders-high');\n");
+            let v = run_pairs(vec![
+                ("src/a.ts", &first),
+                ("src/b.ts", "publish('orders-high');\n"),
+            ]);
+            assert!(v.is_empty(), "{callee}: {v:#?}");
+        }
+        // The spec's pair, and the callees that ARE the rule's target.
+        let v = run_pairs(vec![
+            ("src/a.ts", "query('orders-high');\n"),
+            ("src/b.ts", "raw('orders-high');\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        for callee in [
+            "from",
+            "table",
+            "collection",
+            "model",
+            "rpc",
+            "channel",
+            "bucket",
+            "topic",
+            "queue",
+        ] {
+            let a = format!("db.{callee}('orders-high');\n");
+            let v = run_pairs(vec![
+                ("src/a.ts", &a),
+                ("src/b.ts", "publish('orders-high');\n"),
+            ]);
+            assert_eq!(v.len(), 1, "{callee}: {v:#?}");
+        }
+    }
+
+    #[test]
+    fn value_level_guards_ignore_excluded_files() {
+        // The i18n call sits in a test file, which is not read: it cannot disqualify the value.
+        let v = run_pairs(vec![
+            ("src/a.test.tsx", "const x = t('errors-required');\n"),
+            ("src/b.ts", "label('errors-required');\n"),
+            ("src/c.ts", "label('errors-required');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
+    #[test]
+    fn a_guard_in_one_language_family_does_not_reach_another() {
+        // `t('errors-required')` in Python does not disqualify the TypeScript copies.
+        let v = run_pairs(vec![
+            ("app/a.py", "msg = _('errors-required')\n"),
+            ("src/b.ts", "label('errors-required');\n"),
+            ("src/c.ts", "label('errors-required');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
+    #[test]
+    fn twin_empty_and_malformed_inputs_never_panic() {
+        let _ = run_pairs(vec![
+            ("src/a.ts", ""),
+            ("src/b.ts", "\u{0}\u{1}\u{2}\u{ffff}"),
+            ("src/c.rs", "fn f( { let = ;"),
+            ("src/d.tsx", "<div className=\"a-b"),
+            ("app/e.py", "def (:\n x = 'orders-high"),
+            ("locales/en.json", "{ not json"),
+            ("locales/en.yaml", ": : :\n- - -\n"),
+            ("src/f.ts", "const a = `${"),
+        ]);
+        assert!(run_pairs(vec![]).is_empty());
+        assert!(run_pairs(vec![("README.md", "orders-high"), ("a.txt", "orders-high")]).is_empty());
+    }
+
+    #[test]
+    fn message_is_client_voice_without_dashes_or_tool_names() {
+        let v = run_pairs(vec![
+            (
+                "src/queues.ts",
+                "export const ORDERS_QUEUE = 'orders-high';\n",
+            ),
+            ("src/a.ts", "subscribe('orders-high');\n"),
+            ("src/b.ts", "publish('orders-high');\n"),
+        ]);
+        let plain = run_pairs(vec![
+            ("src/a.ts", "subscribe('orders-high');\n"),
+            ("src/b.ts", "publish('orders-high');\n"),
+        ]);
+        for m in [&v[0].message, &plain[0].message] {
+            assert!(!m.contains('\u{2014}') && !m.contains('\u{2013}'), "{m}");
+            for banned in [
+                "camerata", "Camerata", "eslint", "ESLint", "Sonar", "Semgrep",
+            ] {
+                assert!(!m.contains(banned), "{banned} in {m}");
+            }
+        }
+    }
+
+    // ── contract ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn checker_answers_its_rule_id_and_scopes_to_source_and_catalogue_files() {
+        assert_eq!(SharedConstantChecker.rule_ids(), &[RULE_SHARED_CONSTANT]);
+        for path in [
+            "src/a.ts",
+            "src/a.tsx",
+            "src/a.js",
+            "src/a.jsx",
+            "src/a.mjs",
+            "src/a.cjs",
+            "app/a.py",
+            "src/a.rs",
+            "locales/en.json",
+            "src/i18n/en.yaml",
+            "public/translations/en.yml",
+        ] {
+            assert!(
+                crate::arch_checker::checker_applies(
+                    &SharedConstantChecker,
+                    &files(vec![(path, "")])
+                ),
+                "{path}"
+            );
+        }
+        assert!(!crate::arch_checker::checker_applies(
+            &SharedConstantChecker,
+            &files(vec![("README.md", ""), ("data/x.json", ""), ("a.go", "")])
+        ));
     }
 
     // ── shape classifier ───────────────────────────────────────────────────────
