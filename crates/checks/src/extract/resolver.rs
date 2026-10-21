@@ -25,6 +25,10 @@
 //! - **TS/TSX/JS**: relative (`./`, `../`, `/`) specifiers always attempt resolution.
 //!   Non-relative (bare) specifiers only resolve via a `tsconfig.json` `compilerOptions.paths`
 //!   alias, when one is present in the file set; otherwise treated as an external package.
+//!   The alias comes from the importer's NEAREST ancestor `tsconfig.json`, with `baseUrl` and
+//!   `paths` relative to that file's directory. Matching follows TypeScript: a pattern with no
+//!   `*` is an exact match, a `*` pattern must match its prefix AND suffix, and the best match
+//!   wins (exact, then longest prefix, then pattern text), never map iteration order.
 //! - **Python**: leading-dot relative imports (`.`, `..pkg`) resolve against the importing
 //!   file's own directory tree. A dotted absolute import (`a.b.c`) resolves by SUFFIX match
 //!   against every Python file's own derived dotted module path (the repo's true "source
@@ -54,7 +58,7 @@ pub struct ResolvedImport {
 /// it calls already guarantees that).
 pub fn build_import_graph(files: &[(String, String)]) -> Vec<ResolvedImport> {
     let path_set: HashSet<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
-    let tsconfig = load_tsconfig(files);
+    let tsconfigs = TsConfigs::load(files);
     let mut out = Vec::new();
     for (path, content) in files {
         let Some(lang) = super::lang_for_path(path) else {
@@ -64,7 +68,7 @@ pub fn build_import_graph(files: &[(String, String)]) -> Vec<ResolvedImport> {
             let resolved = match lang {
                 SourceLang::Rust => resolve_rust(path, &imp.specifier, &path_set),
                 SourceLang::TypeScript | SourceLang::Tsx | SourceLang::JavaScript => {
-                    resolve_ecma(path, &imp.specifier, &path_set, tsconfig.as_ref())
+                    resolve_ecma(path, &imp.specifier, &path_set, &tsconfigs)
                 }
                 SourceLang::Python => resolve_python(path, &imp, &path_set),
             };
@@ -243,16 +247,80 @@ struct TsCompilerOptions {
     paths: HashMap<String, Vec<String>>,
 }
 
-/// Find and parse a `tsconfig.json` in `files` (preferring one at the repo root). Absent or
-/// malformed (including the common JSONC-with-comments case, which `serde_json` rejects) both
-/// degrade to `None` — never a panic, never a hard error that would abort the whole resolver.
-fn load_tsconfig(files: &[(String, String)]) -> Option<TsConfigFile> {
-    let content = files
-        .iter()
-        .find(|(p, _)| p == "tsconfig.json")
-        .or_else(|| files.iter().find(|(p, _)| p.ends_with("/tsconfig.json")))
-        .map(|(_, c)| c.as_str())?;
-    serde_json::from_str::<TsConfigFile>(content).ok()
+/// Every parseable `tsconfig.json` in the file set, with the directory it governs. An importer
+/// is governed by the NEAREST ancestor tsconfig, and that tsconfig's `baseUrl` / `paths` are
+/// relative to ITS directory, as `tsc` reads them. (`extends` is not followed: a nested config
+/// that inherits its `paths` resolves nothing, a false negative.) An absent or malformed file
+/// (including the common JSONC-with-comments case, which `serde_json` rejects) is simply not an
+/// entry: never a panic, never a hard error that would abort the whole resolver.
+#[derive(Debug, Default)]
+struct TsConfigs {
+    /// `(directory, config)`; the directory is `""` for a repo-root tsconfig.
+    entries: Vec<(String, TsConfigFile)>,
+}
+
+impl TsConfigs {
+    fn load(files: &[(String, String)]) -> Self {
+        let mut entries: Vec<(String, TsConfigFile)> = files
+            .iter()
+            .filter(|(p, _)| p == "tsconfig.json" || p.ends_with("/tsconfig.json"))
+            .filter_map(|(p, c)| {
+                let cfg = serde_json::from_str::<TsConfigFile>(c).ok()?;
+                Some((directory_of(p).to_string(), cfg))
+            })
+            .collect();
+        // Deepest first, so the first ancestor found in `nearest` is the nearest one.
+        entries.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+        Self { entries }
+    }
+
+    fn nearest(&self, importer: &str) -> Option<(&str, &TsConfigFile)> {
+        let dir = directory_of(importer);
+        self.entries
+            .iter()
+            .find(|(d, _)| d.is_empty() || dir == d || dir.starts_with(&format!("{d}/")))
+            .map(|(d, c)| (d.as_str(), c))
+    }
+}
+
+/// The `paths` entry that `specifier` selects, with the text its `*` captured (empty for an
+/// exact pattern), following TypeScript: a pattern with no `*` matches only the identical
+/// specifier; a pattern with one `*` must match both the text before and after it; when several
+/// patterns match, an exact one wins, then the longest prefix, then the pattern text (so the
+/// choice never depends on map iteration order).
+fn best_paths_match<'p>(
+    paths: &'p HashMap<String, Vec<String>>,
+    specifier: &str,
+) -> Option<(&'p [String], String)> {
+    let mut best: Option<(bool, usize, &'p str, &'p [String], String)> = None;
+    for (pattern, templates) in paths {
+        let candidate = match pattern.split_once('*') {
+            None => (pattern == specifier).then(|| (true, pattern.len(), String::new())),
+            Some((prefix, suffix)) => {
+                let fits = specifier.len() >= prefix.len() + suffix.len()
+                    && specifier.starts_with(prefix)
+                    && specifier.ends_with(suffix);
+                fits.then(|| {
+                    let mid = &specifier[prefix.len()..specifier.len() - suffix.len()];
+                    (false, prefix.len(), mid.to_string())
+                })
+            }
+        };
+        let Some((exact, prefix_len, captured)) = candidate else {
+            continue;
+        };
+        let better = match &best {
+            None => true,
+            Some((b_exact, b_len, b_pat, _, _)) => {
+                (exact, prefix_len, std::cmp::Reverse(pattern.as_str()))
+                    > (*b_exact, *b_len, std::cmp::Reverse(*b_pat))
+            }
+        };
+        if better {
+            best = Some((exact, prefix_len, pattern.as_str(), templates, captured));
+        }
+    }
+    best.map(|(_, _, _, templates, captured)| (templates, captured))
 }
 
 const ECMA_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
@@ -281,32 +349,26 @@ fn resolve_ecma(
     importer: &str,
     specifier: &str,
     path_set: &HashSet<&str>,
-    tsconfig: Option<&TsConfigFile>,
+    tsconfigs: &TsConfigs,
 ) -> Option<String> {
     if specifier.starts_with('.') || specifier.starts_with('/') {
         let dir = directory_of(importer);
         let base = normalize_join(dir, specifier);
         return try_ecma_extensions(&base, path_set);
     }
-    // Non-relative (bare) specifier: only resolvable via a tsconfig `paths` alias.
-    let ts = tsconfig?;
-    let base_url = ts
-        .compiler_options
-        .base_url
-        .clone()
-        .unwrap_or_else(|| ".".to_string());
-    for (pattern, templates) in &ts.compiler_options.paths {
-        let prefix = pattern.trim_end_matches('*');
-        if !specifier.starts_with(prefix) {
-            continue;
-        }
-        let suffix = &specifier[prefix.len()..];
-        for template in templates {
-            let templ_resolved = template.replace('*', suffix);
-            let joined = normalize_join(&base_url, &templ_resolved);
-            if let Some(found) = try_ecma_extensions(&joined, path_set) {
-                return Some(found);
-            }
+    // Non-relative (bare) specifier: only resolvable via a tsconfig `paths` alias, read from
+    // the importer's nearest tsconfig and relative to that tsconfig's own directory.
+    let (ts_dir, ts) = tsconfigs.nearest(importer)?;
+    let base_url = normalize_join(
+        ts_dir,
+        ts.compiler_options.base_url.as_deref().unwrap_or("."),
+    );
+    let (templates, captured) = best_paths_match(&ts.compiler_options.paths, specifier)?;
+    for template in templates {
+        let templ_resolved = template.replace('*', &captured);
+        let joined = normalize_join(&base_url, &templ_resolved);
+        if let Some(found) = try_ecma_extensions(&joined, path_set) {
+            return Some(found);
         }
     }
     None // external package (or an unaliased bare specifier) — correctly dropped
@@ -320,20 +382,20 @@ fn resolve_ecma(
 /// unresolvable or external specifier is `None`, never a guess.
 pub struct EcmaResolver<'a> {
     path_set: HashSet<&'a str>,
-    tsconfig: Option<TsConfigFile>,
+    tsconfigs: TsConfigs,
 }
 
 impl<'a> EcmaResolver<'a> {
     pub fn new(files: &'a [(String, String)]) -> Self {
         Self {
             path_set: files.iter().map(|(p, _)| p.as_str()).collect(),
-            tsconfig: load_tsconfig(files),
+            tsconfigs: TsConfigs::load(files),
         }
     }
 
     /// The repo-relative file `specifier` (written in `importer`) points at, if any.
     pub fn resolve(&self, importer: &str, specifier: &str) -> Option<String> {
-        resolve_ecma(importer, specifier, &self.path_set, self.tsconfig.as_ref())
+        resolve_ecma(importer, specifier, &self.path_set, &self.tsconfigs)
     }
 }
 
@@ -477,6 +539,124 @@ mod tests {
             r.resolve("src/routes/orders.ts", "../lib/db"),
             Some(graph[0].to_file.clone())
         );
+    }
+
+    #[test]
+    fn tsconfig_paths_longest_matching_prefix_wins_deterministically() {
+        // `@acme/ui` (exact) and `@acme/ui/*` (wildcard) both exist; the order a map happens to
+        // iterate them in must never decide which one `@acme/ui/Button` takes.
+        let f = files(vec![
+            (
+                "tsconfig.json",
+                r#"{"compilerOptions": {"baseUrl": ".", "paths": {
+                    "@acme/*": ["packages/wrong/*"],
+                    "@acme/ui": ["packages/ui/src/index.ts"],
+                    "@acme/ui/*": ["packages/ui/src/*"]}}}"#,
+            ),
+            ("packages/ui/src/Button.tsx", ""),
+            ("packages/ui/src/index.ts", ""),
+            ("packages/wrong/ui/Button.tsx", ""),
+            ("packages/app/src/a.tsx", ""),
+        ]);
+        for _ in 0..20 {
+            let r = EcmaResolver::new(&f);
+            assert_eq!(
+                r.resolve("packages/app/src/a.tsx", "@acme/ui/Button")
+                    .as_deref(),
+                Some("packages/ui/src/Button.tsx")
+            );
+            assert_eq!(
+                r.resolve("packages/app/src/a.tsx", "@acme/ui").as_deref(),
+                Some("packages/ui/src/index.ts")
+            );
+        }
+    }
+
+    #[test]
+    fn tsconfig_paths_pattern_without_a_star_is_an_exact_match() {
+        let f = files(vec![
+            (
+                "tsconfig.json",
+                r#"{"compilerOptions": {"baseUrl": ".", "paths": {"@acme/ui": ["packages/ui/src/index.ts"]}}}"#,
+            ),
+            ("packages/ui/src/index.ts", ""),
+            ("a.ts", ""),
+        ]);
+        let r = EcmaResolver::new(&f);
+        assert_eq!(
+            r.resolve("a.ts", "@acme/ui").as_deref(),
+            Some("packages/ui/src/index.ts")
+        );
+        // A different package that merely shares the prefix is NOT the aliased one.
+        assert_eq!(r.resolve("a.ts", "@acme/ui-icons"), None);
+        assert_eq!(r.resolve("a.ts", "@acme/ui/extra"), None);
+    }
+
+    #[test]
+    fn tsconfig_paths_wildcard_must_match_prefix_and_suffix() {
+        let f = files(vec![
+            (
+                "tsconfig.json",
+                r#"{"compilerOptions": {"baseUrl": ".", "paths": {"@c/*/api": ["src/*/api.ts"]}}}"#,
+            ),
+            ("src/foo/api.ts", ""),
+            ("src/foo/other.ts", ""),
+            ("a.ts", ""),
+        ]);
+        let r = EcmaResolver::new(&f);
+        assert_eq!(
+            r.resolve("a.ts", "@c/foo/api").as_deref(),
+            Some("src/foo/api.ts")
+        );
+        assert_eq!(r.resolve("a.ts", "@c/foo/other"), None);
+    }
+
+    #[test]
+    fn nested_tsconfig_scopes_its_paths_to_its_own_directory() {
+        let f = files(vec![
+            (
+                "packages/a/tsconfig.json",
+                r#"{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}}}"#,
+            ),
+            ("src/lib/x.ts", ""),
+            ("packages/a/src/lib/x.ts", ""),
+            ("packages/a/src/foo.ts", ""),
+            ("src/other.ts", ""),
+            ("packages/b/src/bar.ts", ""),
+        ]);
+        let r = EcmaResolver::new(&f);
+        // Under packages/a, `@/` means packages/a/src, not the repo's src.
+        assert_eq!(
+            r.resolve("packages/a/src/foo.ts", "@/lib/x").as_deref(),
+            Some("packages/a/src/lib/x.ts")
+        );
+        // Files outside that tsconfig's directory are not governed by it.
+        assert_eq!(r.resolve("src/other.ts", "@/lib/x"), None);
+        assert_eq!(r.resolve("packages/b/src/bar.ts", "@/lib/x"), None);
+    }
+
+    #[test]
+    fn nearest_ancestor_tsconfig_wins_and_base_url_is_relative_to_it() {
+        let f = files(vec![
+            (
+                "tsconfig.json",
+                r#"{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["root-src/*"]}}}"#,
+            ),
+            (
+                "packages/a/tsconfig.json",
+                r#"{"compilerOptions": {"baseUrl": "src", "paths": {"@/*": ["*"]}}}"#,
+            ),
+            ("root-src/m.ts", ""),
+            ("packages/a/src/m.ts", ""),
+            ("packages/a/src/foo.ts", ""),
+            ("top.ts", ""),
+        ]);
+        let r = EcmaResolver::new(&f);
+        assert_eq!(
+            r.resolve("packages/a/src/foo.ts", "@/m").as_deref(),
+            Some("packages/a/src/m.ts")
+        );
+        assert_eq!(r.resolve("top.ts", "@/m").as_deref(), Some("root-src/m.ts"));
     }
 
     // ── TS / JS: relative resolution ───────────────────────────────────────────
