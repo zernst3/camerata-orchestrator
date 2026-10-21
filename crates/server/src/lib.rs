@@ -483,14 +483,22 @@ impl AppState {
     /// cached, so a later call (after a token is configured) can still resolve it.
     pub async fn github_login(&self) -> Option<String> {
         // Fast path: already resolved.
-        if let Some(login) = self.github_login_cache.lock().unwrap().clone() {
+        if let Some(login) = self
+            .github_login_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
             return Some(login);
         }
         // Not cached, so resolve via the token. No token, no identity.
         let token = self.github_token()?;
         match crate::github_issues::get_authenticated_login(&token).await {
             Ok(login) if !login.is_empty() => {
-                *self.github_login_cache.lock().unwrap() = Some(login.clone());
+                *self
+                    .github_login_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(login.clone());
                 Some(login)
             }
             _ => None,

@@ -246,7 +246,10 @@ impl RunStore {
     pub fn fail_with_reason(&self, id: &str, reason: String) {
         let mut became_done = false;
         {
-            let mut runs = self.runs.lock().unwrap();
+            let mut runs = self
+                .runs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(run) = runs.get_mut(id) {
                 if run.done || Self::is_terminal_status(&run.status) {
                     return;
@@ -289,7 +292,10 @@ impl RunStore {
     pub fn cancel(&self, id: &str) {
         // Set the atomic cancel signal first (between-step checks read this).
         {
-            let signals = self.cancel_signals.lock().unwrap();
+            let signals = self
+                .cancel_signals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(sig) = signals.get(id) {
                 sig.store(true, std::sync::atomic::Ordering::SeqCst);
             }
@@ -297,7 +303,10 @@ impl RunStore {
         // Abort the driving task so a run blocked inside a live agent subprocess is reaped
         // immediately (the dropped driver future kills the kill_on_drop child).
         {
-            let mut handles = self.abort_handles.lock().unwrap();
+            let mut handles = self
+                .abort_handles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(handle) = handles.remove(id) {
                 handle.abort();
             }
@@ -306,7 +315,10 @@ impl RunStore {
         // it (the aborted task can no longer set status itself).
         let mut became_done = false;
         {
-            let mut runs = self.runs.lock().unwrap();
+            let mut runs = self
+                .runs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(run) = runs.get_mut(id) {
                 // Don't clobber an already-terminal failure/cancel.
                 if !run.done {
@@ -323,7 +335,10 @@ impl RunStore {
 
     /// Return `true` when a cancel signal has been set for this run.
     pub fn is_cancelled(&self, id: &str) -> bool {
-        let signals = self.cancel_signals.lock().unwrap();
+        let signals = self
+            .cancel_signals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         signals
             .get(id)
             .map(|sig| sig.load(std::sync::atomic::Ordering::SeqCst))

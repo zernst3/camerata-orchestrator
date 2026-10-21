@@ -167,7 +167,12 @@ impl JobStore {
     /// `det_tool_done`, and the streaming scan-tool path (per stdout line and per mtime
     /// advance) so idle time stays low while a tool is actively running.
     pub(crate) fn touch_activity(&self, id: &str) {
-        if let Some(meta) = self.job_meta.lock().unwrap().get(id) {
+        if let Some(meta) = self
+            .job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+        {
             meta.tracker.tick();
         }
     }
@@ -271,7 +276,12 @@ impl JobStore {
     /// Request cancellation of a job by setting its cancel flag. The background worker is
     /// expected to check `is_cancel_requested` periodically and stop early.
     pub fn request_cancel(&self, id: &str) {
-        if let Some(meta) = self.job_meta.lock().unwrap().get(id) {
+        if let Some(meta) = self
+            .job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+        {
             meta.cancel_requested
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
@@ -281,7 +291,7 @@ impl JobStore {
     pub fn is_cancel_requested(&self, id: &str) -> bool {
         self.job_meta
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(id)
             .map(|m| m.cancel_requested.load(std::sync::atomic::Ordering::SeqCst))
             .unwrap_or(false)
@@ -296,7 +306,7 @@ impl JobStore {
     pub fn idle_ms(&self, id: &str, now_ms: u128) -> Option<u128> {
         self.job_meta
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(id)
             .map(|m| u128::from(m.tracker.idle_ms(now_ms.try_into().unwrap_or(u64::MAX))))
     }
