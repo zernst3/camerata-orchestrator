@@ -385,6 +385,19 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
 - **`stash@{0}`** (09-28 dead-P1 partial): checked 2026-10-21, fully superseded (every function
   and test it adds exists at HEAD; the rest is clippy --fix churn). DROPPED 2026-10-21 on Zach's OK.
 
+- **Live severity is unclamped** (Fable review 2026-10-21, confirmed): `onboard/architectural.rs`
+  copies a checker's severity into the live Finding; corpus `max_severity`/`min_severity`/
+  `deviation_ceiling` are applied only at export (`report_export.rs` `build_report_json`,
+  `xlsx_export.rs`). The app's triage view and the billed PDF can disagree for all 12 rules
+  that declare a ceiling. Fix: one `apply_corpus_severity_bounds` after `classify_repo_findings`
+  in `onboard.rs`, export clamps kept as idempotent backstops, plus a live-report ceiling test.
+- **ONE-IMPORT-PATH known false negative:** the union barrel exclusion hides intra-package splits
+  in monorepos where every package has a root barrel. A per-chain exclusion that keeps the
+  barrel-internal safe twin silent is an open design question.
+- **Owner confirmation wanted:** work order §7 says the rule looks at re-exports "in non-index
+  modules"; the checker also flags an origin-plus-index-barrel split (supported by the §7
+  directive "import from one home, the origin or a single barrel"). Confirm that reading.
+
 ## 3. Explicitly NOT doing
 
 - `ARCH-OBSERVABILITY-CORRELATION-ID-1` stays `decision` — prior ruling, recorded in the roster.
