@@ -1,5 +1,8 @@
 # TECHNICAL.md — Camerata Under the Hood
 
+> **Start with [`OVERVIEW.md`](OVERVIEW.md)** for the high-level map; this is the deep code-level
+> reference under it.
+
 > **Audience:** developers and architects who want to understand HOW Camerata
 > works in code, not what it does for end users. For the user-facing feature
 > reference, see `docs/USER_GUIDE.md`.

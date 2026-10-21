@@ -1,5 +1,8 @@
 # ARCHITECTURE.md
 
+> **For the 10-minute high-level map, read [`OVERVIEW.md`](OVERVIEW.md) first.** This doc is the
+> detailed layering/runtime view; OVERVIEW is the human entry point.
+
 The Camerata Orchestrator stack, top to bottom and sideways. This reflects the
 **verified all-Rust core** (see `RUST_CORE_VERIFICATION.md`). It supersedes the
 TypeScript-core / Rust-BFF shape in the earlier `TECH_DESIGN.md` and `UI_DESIGN.md`

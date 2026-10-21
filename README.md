@@ -1,5 +1,9 @@
 # Camerata Orchestrator
 
+> **New here? Read [`docs/OVERVIEW.md`](docs/OVERVIEW.md) first** — the high-level human map of
+> the whole system (crates, the inspection pipeline, the core concepts) in one sitting. This
+> README is the product pitch; OVERVIEW is the architecture at a glance.
+
 I set out to build Camerata because managing multiple AI agents across multiple projects through conversational chat alone became unwieldy, and frankly cognitively tiring. The governance itself worked: my rules held and the agent's code quality stayed high. But routines would fail silently, and I often wouldn't know a run had failed until I went and asked the agent about it. The missing piece was never the governance, it is already baked into my process. What was missing was a structured place for it to live: status and state visible and managed in a real interface, instead of buried in chat. That is what Camerata is: a structured management layer for orchestrating AI agents across any number of projects, while enforcing rules and deterministic gates to maintain code quality.
 
 Camerata is an all-Rust, governed multi-agent engineering platform. This README leads with what runs and is defensible today, and is explicit about what is built but staged. The intended reader is the person who will clone the repo and check, so the line between "proven" and "built but not yet validated live" is drawn deliberately, not blurred.
