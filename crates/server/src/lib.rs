@@ -64,6 +64,7 @@ pub mod live_fleet;
 pub mod llm;
 pub mod notify;
 pub mod onboard;
+pub mod ownership;
 /// `POST /api/orchestrator/message` — the architect-orchestrator's first
 /// functional turn (real LLM + real governed execution seam). See the module doc.
 pub mod orchestrator_message;

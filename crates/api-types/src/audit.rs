@@ -113,6 +113,55 @@ impl FindingKind {
     }
 }
 
+/// WHO can fix a finding — the W33 "ownership" axis, orthogonal to `kind` (what it is),
+/// `severity` (how bad), and the disposition (the triage call). It answers: is the fix in the
+/// client's OWN first-party code, or does it live somewhere they do not control? A non-
+/// `ClientOwned` finding is real and keeps its true severity, but it is routed out of the action
+/// tiers into a "Findings outside your direct control" section and excluded from the remediation
+/// budget — ranking an unfixable finding beside an actionable one spends the client's attention
+/// on something they cannot act on. Derived per finding (see `camerata_server::ownership`), never
+/// hand-authored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Ownership {
+    /// The fix is in the client's own code — the normal, actionable case (today's default for
+    /// every finding). Stays in the action tiers and the remediation budget.
+    #[default]
+    ClientOwned,
+    /// A platform-managed resource the client cannot change (e.g. Supabase `auth.*`/`storage.*`
+    /// RLS). Action: accept the risk or escalate to the platform.
+    PlatformManaged,
+    /// A third-party dependency with NO patched version available yet (a dependency WITH a fix
+    /// stays `ClientOwned` — upgrading is the fix). Action: monitor the advisory, accept, or
+    /// replace the dependency.
+    ExternalDependency,
+    /// Generated output — the fix belongs in the generator/source, not the artifact.
+    Generated,
+    /// Vendored third-party code — the fix belongs upstream.
+    Vendored,
+}
+
+impl Ownership {
+    /// The stable snake_case wire tag, for exporters that render a cell/column rather than
+    /// serde (the xlsx, the CSV header value).
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Ownership::ClientOwned => "client_owned",
+            Ownership::PlatformManaged => "platform_managed",
+            Ownership::ExternalDependency => "external_dependency",
+            Ownership::Generated => "generated",
+            Ownership::Vendored => "vendored",
+        }
+    }
+
+    /// Whether the client can fix this in their own code. Only `ClientOwned` is directly
+    /// fixable; every other ownership routes to the "outside your control" section and out of
+    /// the remediation budget.
+    pub fn is_client_fixable(&self) -> bool {
+        matches!(self, Ownership::ClientOwned)
+    }
+}
+
 /// The exporters' ALWAYS-PRESENT wire rendering of an `Option<FindingKind>` (Pass-1 W3,
 /// A5.6's backfill rule): a known kind serializes exactly as the kind itself (internally
 /// tagged, flat payload), while an ABSENT kind serializes as `{"kind": "unspecified"}` — the
