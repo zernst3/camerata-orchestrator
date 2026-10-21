@@ -239,6 +239,43 @@ sheets, an R-id column). The CSV/JSON set is defined as "one per data worksheet,
 tracks whatever W27 settles on; building it first would target a layout about to change.
 If wanted sooner, build against today's sheets and let the set follow when W27 moves.
 
+## Execution plan (turnkey, verified against the tree 2026-10-20)
+
+Green, committable increments. Facts confirmed by reading the code:
+
+- `xlsx_export::partition_rows` is the single source: `(Vec<FindingRow>, Vec<DepRow>)`.
+  `FindingRow` ALREADY derives `Serialize` and IS the exact `findings.json` row shape
+  (`build_findings_export` filters it to non-FP). The other sheets build from `DepRow`,
+  `CoverageRow` + `RulesAppliedRow` (Coverage), `ConventionRow` (Conventions),
+  `NotAssessedRow` (part of the not-assessed/deviations surface), `DeviationGroupRow`
+  (Deviations) - all simple (String/usize/bool/u8) but NOT yet `Serialize`.
+- There is NO `csv` crate dependency yet - add `csv = "1"` to the server crate.
+
+1. **Field contract first (the quality gate).** For each row struct, decide the EXPORTED
+   keys: stable snake_case, matching the sheet's visible columns, with `#[serde(skip)]` on
+   internal-only fields (`ConventionRow::rank`, `FindingRow::citation_kind` already skipped).
+   Do NOT blanket-derive and leak sort keys. This is the step that makes the JSON a contract
+   rather than a struct dump.
+2. **`machine_export` module** (server): `fn sheet_json(rows) -> Vec<u8>` (serde_json pretty)
+   and `fn sheet_csv(rows) -> Vec<u8>` (the `csv` crate's `Writer::serialize`, never
+   hand-rolled). One pair per row type. Parity test: All-Findings JSON == `findings.json`
+   rows; CSV round-trips a comma/quote/newline cell.
+3. **Add `Serialize` to the five remaining row structs** with the field contract from (1).
+4. **`manifest.json` builder**: walk the produced `(path, bytes)` list, sha256 each, assemble
+   the `inspection` provenance (commit per repo, `env!("CARGO_PKG_VERSION")`, corpus content
+   digest, `rules_last_reviewed` from `CorpusFreshness` oldest-relevant-domain). Build LAST.
+5. **Wire `build_product_zip`** (`crates/server/src/lib.rs`): add a `&[(String, Vec<u8>)]`
+   param for the `csv/*`, `json/*`, and `manifest.json` entries; both `export_product` (HTTP)
+   and `inspect_cmd` (CLI) call it, so both gain the files at once. Extend
+   `product_export_readme` to print the new provenance lines.
+6. **Sample regen** (`generate_sample_report`): write `sample-report/csv/`, `json/`,
+   `manifest.json` so they are reviewable fixtures.
+7. The seven gates in the Testing section.
+
+Note: W27 reworks the xlsx sheet set (per-kind sheets, R-id column). If W27 lands first, the
+CSV/JSON set tracks its final sheets for free (one-per-data-sheet); if exports land first, the
+set follows when W27 moves. Either order is fine; do NOT block one on the other.
+
 ## Non-goals
 
 - No change to the xlsx, the PDF, or the existing `findings.json`. CSV/JSON-per-set is
