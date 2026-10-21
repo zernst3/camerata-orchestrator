@@ -1406,7 +1406,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("{ID} must be proposed for {repo}"));
             assert_eq!(rule.domain, "javascript");
             assert!(rule.recommended, "{repo}: suggested, not merely available");
-            assert!(rule.is_auto_recommended, "{repo}: grounded, so pre-checked");
+            assert!(
+                rule.is_auto_recommended,
+                "{repo}: a policy rule is still auto-recommended (pre-checked)"
+            );
             assert_eq!(rule.repos, vec![repo.to_string()]);
         }
 

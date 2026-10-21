@@ -570,6 +570,8 @@ mod tests {
 
     // ── positives ──────────────────────────────────────────────────────────────
 
+    /// Owner ruling 2026-10-21 (docs/OVERNIGHT_DECISIONS.md, DECISIONS MADE): a split between the
+    /// origin file and an INDEX barrel is a violation, not an exemption.
     #[test]
     fn symbol_imported_from_origin_and_from_barrel_is_flagged() {
         let f = lib_with(
