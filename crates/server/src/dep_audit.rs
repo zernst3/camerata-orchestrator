@@ -91,6 +91,42 @@ const TOOL_NAME: &str = "osv-scanner";
 /// Malformed or empty JSON returns `Err` so the caller can emit a coverage note.
 /// Advisory objects with missing fields are skipped (not surfaced as errors) —
 /// a partial parse is better than a hard failure.
+/// The patched version to recommend for an OSV vulnerability: the SMALLEST `fixed` version
+/// across the vuln's `affected[].ranges[].events[]` (OSV schema) — the earliest release that
+/// resolves it, i.e. the "upgrade at least to" target. `None` when OSV lists no fix (the
+/// advisory has no patched version yet). Presence vs absence is what drives the ownership split
+/// (fixable `ClientOwned` vs not-yet-fixable `ExternalDependency`) in
+/// [`crate::ownership::ownership_of`].
+fn osv_fixed_version(vuln: &serde_json::Value) -> Option<String> {
+    let mut fixed: Vec<String> = Vec::new();
+    for aff in vuln.get("affected").and_then(|a| a.as_array()).into_iter().flatten() {
+        for range in aff.get("ranges").and_then(|r| r.as_array()).into_iter().flatten() {
+            for event in range.get("events").and_then(|e| e.as_array()).into_iter().flatten() {
+                if let Some(v) = event.get("fixed").and_then(|f| f.as_str()) {
+                    if !v.trim().is_empty() {
+                        fixed.push(v.to_string());
+                    }
+                }
+            }
+        }
+    }
+    fixed.into_iter().min_by(|a, b| semver_sort_key(a).cmp(&semver_sort_key(b)))
+}
+
+/// A coarse semver sort key: `(major, minor, patch)` from the leading numeric components, with
+/// the original string as a final tiebreak. Pre-release/build metadata is ignored for ordering.
+/// Good enough to pick the lowest fixed version; not a full semver implementation (no dep added).
+fn semver_sort_key(v: &str) -> (u64, u64, u64, String) {
+    let core = v.split(['-', '+']).next().unwrap_or(v);
+    let mut parts = core.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        v.to_string(),
+    )
+}
+
 pub fn parse_osv_json(
     repo: &str,
     repo_root: &Path,
@@ -192,10 +228,19 @@ pub fn parse_osv_json(
                 } else {
                     format!(" (also: {})", aliases.join(", "))
                 };
+                // W33: the patched version, if OSV knows one. Presence drives the ownership
+                // split (fixable-by-upgrade `ClientOwned` vs not-yet-fixable `ExternalDependency`)
+                // in `ownership::ownership_of`, which reads the `osv_fixed_version` capture below.
+                let fixed_version = osv_fixed_version(vuln);
+
+                let fixed_clause = match &fixed_version {
+                    Some(v) => format!(" — fixed in {v}"),
+                    None => " — no patched version available yet".to_string(),
+                };
                 let detail = if title.is_empty() {
-                    format!("{advisory_id}{aliases_str} affects {coord}")
+                    format!("{advisory_id}{aliases_str} affects {coord}{fixed_clause}")
                 } else {
-                    format!("{advisory_id}{aliases_str}: {title} (affects {coord})")
+                    format!("{advisory_id}{aliases_str}: {title} (affects {coord}){fixed_clause}")
                 };
 
                 out.push(Finding {
@@ -219,19 +264,27 @@ pub fn parse_osv_json(
                     effort: None,
                     category: None,
                     located: true,
-                    // Dependency findings never flow through `report_export::resolve_fix` (they
-                    // are partitioned into their own dependency-snapshot lane before the
-                    // curated-findings loop runs), so there is no rule remediation text for a
-                    // capture to instantiate here.
-                    captures: Default::default(),
+                    // W33: carry OSV's patched version (when any) so `ownership::ownership_of`
+                    // can split fixable-by-upgrade (ClientOwned) from not-yet-fixable
+                    // (ExternalDependency). A structured capture key, not prose in `detail`.
+                    captures: match &fixed_version {
+                        Some(v) => std::collections::BTreeMap::from([(
+                            "osv_fixed_version".to_string(),
+                            v.clone(),
+                        )]),
+                        None => Default::default(),
+                    },
                     // Not a multi-option semantic rule finding — never evaluated under an
                     // alternative option.
                     evaluated_option_id: None,
                     also_locations: Vec::new(),
-                    // Dependency findings are carved out of the curated-findings lane
-                    // entirely (see the `captures` comment above) — no fix-generation pass
-                    // ever runs over them.
-                    fix_specific: None,
+                    // W33: a concrete upgrade is the fix when OSV knows a patched version — a
+                    // fixable (ClientOwned) dependency finding then ships an actionable fix
+                    // rather than only a "you are vulnerable" statement. When no patch exists the
+                    // finding is ExternalDependency and its action comes from `ownership_action`.
+                    fix_specific: fixed_version
+                        .as_ref()
+                        .map(|v| format!("Upgrade {pkg_name} to >= {v} (the patched version).")),
                     // Dependency findings never flow through calibration either.
                     calibration_rationale: None,
                 });
@@ -579,6 +632,41 @@ mod tests {
         assert_eq!(f.preview_tool, None);
         // Status defaults to active.
         assert_eq!(f.status, "active");
+    }
+
+    #[test]
+    fn osv_fixed_version_drives_the_ownership_split() {
+        use crate::ownership::{ownership_of, Ownership};
+        let root = fixture_root();
+        // A vuln WITH affected ranges carrying two `fixed` events — the SMALLEST is the target.
+        let with_fix = r#"{"results":[{"source":{"path":"/w/Cargo.lock","type":"lockfile"},
+          "packages":[{"package":{"name":"acme","version":"1.0.0","ecosystem":"crates.io"},
+          "vulnerabilities":[{"id":"CVE-9","summary":"x","database_specific":{"severity":"HIGH"},
+          "affected":[{"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"1.4.2"},{"fixed":"1.10.0"}]}]}]}]}]}]}"#;
+        let f = &parse_osv_json("acme/api", &root, with_fix).unwrap()[0];
+        assert_eq!(
+            f.captures.get("osv_fixed_version").map(String::as_str),
+            Some("1.4.2"),
+            "smallest fixed version by semver (1.4.2 < 1.10.0), not string order"
+        );
+        assert!(f.detail.contains("fixed in 1.4.2"), "detail: {}", f.detail);
+        assert!(
+            f.fix_specific.as_deref().unwrap_or("").contains("Upgrade acme to >= 1.4.2"),
+            "fix: {:?}", f.fix_specific
+        );
+        // A patched CVE is fixable by upgrade → client-owned.
+        assert_eq!(ownership_of(&f.rule_id, &f.captures), Ownership::ClientOwned);
+
+        // A vuln with NO `fixed` event → not-yet-fixable → external-dependency.
+        let no_fix = r#"{"results":[{"source":{"path":"/w/Cargo.lock","type":"lockfile"},
+          "packages":[{"package":{"name":"acme","version":"1.0.0","ecosystem":"crates.io"},
+          "vulnerabilities":[{"id":"CVE-9","summary":"x","database_specific":{"severity":"HIGH"},
+          "affected":[{"ranges":[{"type":"SEMVER","events":[{"introduced":"0"}]}]}]}]}]}]}"#;
+        let g = &parse_osv_json("acme/api", &root, no_fix).unwrap()[0];
+        assert!(g.captures.get("osv_fixed_version").is_none());
+        assert!(g.detail.contains("no patched version"), "detail: {}", g.detail);
+        assert!(g.fix_specific.is_none());
+        assert_eq!(ownership_of(&g.rule_id, &g.captures), Ownership::ExternalDependency);
     }
 
     #[test]
