@@ -125,3 +125,34 @@ never every minor. Noted, not planned.)
 4. The gate (reason + action required).
 5. Tests: positive (a platform-managed finding routes to the section, keeps severity, leaves the
    budget), safe-twin (a public-schema RLS finding stays client-owned and actionable).
+
+## Implementation status (2026-10-21) — W33
+
+**BUILT and tested (green):**
+- The axis: `camerata_api_types::audit::Ownership` (+ `tag()`, `is_client_fixable()`).
+- Pure derivation: `camerata_server::ownership::ownership_of(rule_id, captures)` +
+  `ownership_action(ownership)` — one source of truth, 6 unit tests.
+- **Dependency arm (the live payoff):** `dep_audit::parse_osv_json` extracts OSV's smallest
+  `fixed` version into `captures[osv_fixed_version]`, enriches the detail, sets an actionable
+  `fix_specific` ("Upgrade <pkg> to >= X") when patched. `ownership_of` splits client-owned
+  (patch exists) from external-dependency (none). Surfaced in the Dependencies sheet
+  ("Fixed in" + "Recommended action" columns) and dependencies.json/.csv.
+
+**KEY FINDING — the W24 motivating case was already handled.** The RLS checker's `is_platform_owned`
+(`crates/checks/src/supabase/rls_checker.rs`) already gates severity so it NEVER fires a false
+"RLS disabled" finding on a platform-owned table (`auth.*`/`storage.*`) the repo didn't create —
+their baseline is platform-managed-enabled. So the platform-owned-table case is a NON-issue by
+non-emission (the correct behavior — don't surface a non-problem), not a real finding needing
+routing. The genuinely-live "real but not fixable" case is therefore the **no-patch dependency
+CVE**, which is built.
+
+**Dormant-but-supported:** the `PlatformManaged`/`Generated`/`Vendored` branches of
+`ownership_of` + `ownership_action` are correct, tested infrastructure, ready if a genuine
+non-dependency platform-managed REAL finding ever needs surfacing (a detector would set
+`captures[platform_schema]`). No such finding arises today, so no dedicated PDF "outside your
+control" section is populated yet — building an empty section now would be speculative. Revisit
+if/when such a finding class appears.
+
+**Budget exclusion:** dependency findings already live in their own lane (the Dependencies sheet /
+`dependency_snapshot`), outside the curated action tiers and the remediation budget — so the
+"route unfixable findings out of the budget" intent is already satisfied for the live case.
