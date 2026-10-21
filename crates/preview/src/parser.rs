@@ -74,16 +74,24 @@ pub fn parse_dx_line(line: &str) -> Option<PreviewEvent> {
     if let Some(path) = msg.strip_prefix("Hotreloading:") {
         let path = path.trim();
         return Some(PreviewEvent::Hotreload {
-            path: if path.is_empty() { None } else { Some(path.to_string()) },
+            path: if path.is_empty() {
+                None
+            } else {
+                Some(path.to_string())
+            },
         });
     }
 
     if msg.contains("Build failed") || is_rustc_error_marker(msg) {
-        return Some(PreviewEvent::BuildFailed { summary: msg.to_string() });
+        return Some(PreviewEvent::BuildFailed {
+            summary: msg.to_string(),
+        });
     }
 
     if msg.starts_with("Build completed") {
-        return Some(PreviewEvent::BuildOk { secs: parse_build_completed_secs(msg) });
+        return Some(PreviewEvent::BuildOk {
+            secs: parse_build_completed_secs(msg),
+        });
     }
 
     // Any other dx-tagged ERROR line is a build/startup failure worth surfacing (e.g. the
@@ -91,7 +99,9 @@ pub fn parse_dx_line(line: &str) -> Option<PreviewEvent> {
     // `cannot find module or crate` rustc diagnostic ahead of the terminal "Build failed:"
     // line) even though it doesn't literally contain "Build failed".
     if _level == Some(Level::Error) {
-        return Some(PreviewEvent::BuildFailed { summary: msg.to_string() });
+        return Some(PreviewEvent::BuildFailed {
+            summary: msg.to_string(),
+        });
     }
 
     if let Some(url) = extract_serving_url(msg) {
@@ -130,9 +140,12 @@ fn split_prefix(trimmed: &str) -> (Option<Level>, &str) {
         }
     }
 
-    for (token, level) in
-        [("ERROR", Level::Error), ("WARN", Level::Warn), ("INFO", Level::Info), ("DEBUG", Level::Debug)]
-    {
+    for (token, level) in [
+        ("ERROR", Level::Error),
+        ("WARN", Level::Warn),
+        ("INFO", Level::Info),
+        ("DEBUG", Level::Debug),
+    ] {
         if let Some(stripped) = rest.strip_prefix(token) {
             if stripped.is_empty() || stripped.starts_with(char::is_whitespace) {
                 return (Some(level), stripped.trim_start());
@@ -157,7 +170,9 @@ fn is_rustc_error_marker(msg: &str) -> bool {
 /// found rather than panicking on format drift.
 fn parse_build_completed_secs(msg: &str) -> Option<f64> {
     let after_in = msg.split_once("in ")?.1;
-    let token = after_in.split(|c: char| c.is_whitespace() || c == ',').next()?;
+    let token = after_in
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .next()?;
     token.strip_suffix('s')?.parse::<f64>().ok()
 }
 
@@ -173,7 +188,9 @@ fn extract_serving_url(msg: &str) -> Option<String> {
     }
     let idx = msg.find("http://").or_else(|| msg.find("https://"))?;
     let candidate = &msg[idx..];
-    let end = candidate.find(char::is_whitespace).unwrap_or(candidate.len());
+    let end = candidate
+        .find(char::is_whitespace)
+        .unwrap_or(candidate.len());
     Some(candidate[..end].trim_end_matches(['.', ',']).to_string())
 }
 
@@ -185,7 +202,9 @@ fn extract_serving_url(msg: &str) -> Option<String> {
 /// real captured line is available.
 fn looks_like_rebuild_started_hint(msg: &str) -> bool {
     let lower = msg.to_ascii_lowercase();
-    lower.starts_with("compiling") || lower.contains("rebuilding") || lower.starts_with("running cargo")
+    lower.starts_with("compiling")
+        || lower.contains("rebuilding")
+        || lower.starts_with("running cargo")
 }
 
 #[cfg(test)]
@@ -196,7 +215,9 @@ mod tests {
 
     #[test]
     fn hotreloading_line_with_elapsed_prefix() {
-        let ev = parse_dx_line("177.27s  INFO Hotreloading: /src/frontend/timeline.rs.tmp.2169.de41133820de");
+        let ev = parse_dx_line(
+            "177.27s  INFO Hotreloading: /src/frontend/timeline.rs.tmp.2169.de41133820de",
+        );
         assert_eq!(
             ev,
             Some(PreviewEvent::Hotreload {
@@ -208,7 +229,12 @@ mod tests {
     #[test]
     fn hotreloading_line_without_elapsed_prefix() {
         let ev = parse_dx_line("INFO Hotreloading: /src/frontend/timeline.rs");
-        assert_eq!(ev, Some(PreviewEvent::Hotreload { path: Some("/src/frontend/timeline.rs".to_string()) }));
+        assert_eq!(
+            ev,
+            Some(PreviewEvent::Hotreload {
+                path: Some("/src/frontend/timeline.rs".to_string())
+            })
+        );
     }
 
     #[test]
@@ -217,14 +243,20 @@ mod tests {
         // filename, on atomic-write watchers (BSD sed -i '', many editors). The adapter must
         // not choke on it -- it's still a valid Hotreload event, just with a temp path.
         let ev = parse_dx_line("INFO Hotreloading: /src/frontend/.!81005!timeline.rs");
-        assert_eq!(ev, Some(PreviewEvent::Hotreload { path: Some("/src/frontend/.!81005!timeline.rs".to_string()) }));
+        assert_eq!(
+            ev,
+            Some(PreviewEvent::Hotreload {
+                path: Some("/src/frontend/.!81005!timeline.rs".to_string())
+            })
+        );
     }
 
     // ── Build completed / success (Q3 #2, quoted verbatim) ──────────────────
 
     #[test]
     fn build_completed_first_launch_suffix() {
-        let ev = parse_dx_line("INFO Build completed successfully in 5.37s, launching app! \u{1f4ab}");
+        let ev =
+            parse_dx_line("INFO Build completed successfully in 5.37s, launching app! \u{1f4ab}");
         assert_eq!(ev, Some(PreviewEvent::BuildOk { secs: Some(5.37) }));
     }
 
@@ -236,7 +268,8 @@ mod tests {
 
     #[test]
     fn build_completed_warm_target_variant() {
-        let ev = parse_dx_line(" 76.12s  INFO Build completed in 3.65s   (fresh process, warm target/)");
+        let ev =
+            parse_dx_line(" 76.12s  INFO Build completed in 3.65s   (fresh process, warm target/)");
         assert_eq!(ev, Some(PreviewEvent::BuildOk { secs: Some(3.65) }));
     }
 
@@ -247,13 +280,17 @@ mod tests {
         let ev = parse_dx_line("39.86s ERROR cannot find module or crate `reqwest` in this scope");
         assert_eq!(
             ev,
-            Some(PreviewEvent::BuildFailed { summary: "cannot find module or crate `reqwest` in this scope".to_string() })
+            Some(PreviewEvent::BuildFailed {
+                summary: "cannot find module or crate `reqwest` in this scope".to_string()
+            })
         );
     }
 
     #[test]
     fn could_not_compile_warn_line_is_classified_as_build_failed() {
-        let ev = parse_dx_line("40.27s  WARN error: could not compile `itinerary-app` (lib) due to 6 previous errors");
+        let ev = parse_dx_line(
+            "40.27s  WARN error: could not compile `itinerary-app` (lib) due to 6 previous errors",
+        );
         assert!(matches!(ev, Some(PreviewEvent::BuildFailed { .. })));
     }
 
@@ -299,7 +336,9 @@ mod tests {
 
     #[test]
     fn failed_to_read_rust_file_is_noise() {
-        let ev = parse_dx_line("10.98s DEBUG Failed to read rust file while hotreloading: \".!79680!timeline.rs\"");
+        let ev = parse_dx_line(
+            "10.98s DEBUG Failed to read rust file while hotreloading: \".!79680!timeline.rs\"",
+        );
         assert_eq!(ev, None);
     }
 
@@ -321,7 +360,9 @@ mod tests {
 
     #[test]
     fn ignoring_file_change_debug_line_is_unknown() {
-        let ev = parse_dx_line("10.98s DEBUG Ignoring file change: /src/frontend/.!79680!timeline.rs dx_src=dev");
+        let ev = parse_dx_line(
+            "10.98s DEBUG Ignoring file change: /src/frontend/.!79680!timeline.rs dx_src=dev",
+        );
         assert_eq!(ev, Some(PreviewEvent::Unknown));
     }
 
@@ -336,7 +377,12 @@ mod tests {
     #[test]
     fn serving_url_best_effort_match() {
         let ev = parse_dx_line("INFO Serving your app at http://127.0.0.1:8080/");
-        assert_eq!(ev, Some(PreviewEvent::Serving { url: "http://127.0.0.1:8080/".to_string() }));
+        assert_eq!(
+            ev,
+            Some(PreviewEvent::Serving {
+                url: "http://127.0.0.1:8080/".to_string()
+            })
+        );
     }
 
     #[test]
@@ -344,7 +390,9 @@ mod tests {
         // Guards against false positives: a non-ERROR line that merely mentions a URL (e.g.
         // dx auto-installing wasm-bindgen-cli from GitHub, per Q1) must not be treated as a
         // Serving event just because it contains "http://".
-        let ev = parse_dx_line("INFO fetching wasm-bindgen-cli@0.2.126 from http://github.com/example/release.tar.gz");
+        let ev = parse_dx_line(
+            "INFO fetching wasm-bindgen-cli@0.2.126 from http://github.com/example/release.tar.gz",
+        );
         assert_eq!(ev, Some(PreviewEvent::Unknown));
     }
 

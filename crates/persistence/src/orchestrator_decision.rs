@@ -268,7 +268,9 @@ impl OrchestratorDecisionLog {
         sqlx::query(CREATE_IDX_ORCHESTRATOR_DECISIONS_RUN_ID)
             .execute(&self.pool)
             .await?;
-        sqlx::query(CREATE_DECISION_OUTCOMES).execute(&self.pool).await?;
+        sqlx::query(CREATE_DECISION_OUTCOMES)
+            .execute(&self.pool)
+            .await?;
         sqlx::query(CREATE_IDX_DECISION_OUTCOMES_DECISION_ID)
             .execute(&self.pool)
             .await?;
@@ -376,7 +378,9 @@ mod tests {
 
     #[tokio::test]
     async fn open_in_memory_and_reopen_migrate_is_idempotent() {
-        let log = OrchestratorDecisionLog::open_in_memory().await.expect("open");
+        let log = OrchestratorDecisionLog::open_in_memory()
+            .await
+            .expect("open");
         log.migrate().await.expect("second migrate is a no-op");
     }
 
@@ -409,7 +413,8 @@ mod tests {
 
     #[test]
     fn new_constructor_sets_fields_and_defaults() {
-        let d = OrchestratorDecision::new("run-1", "preview_reversible", "medium", "used default copy");
+        let d =
+            OrchestratorDecision::new("run-1", "preview_reversible", "medium", "used default copy");
         assert_eq!(d.run_id, "run-1");
         assert_eq!(d.class, "preview_reversible");
         assert_eq!(d.confidence, "medium");
@@ -452,13 +457,25 @@ mod tests {
 
     #[tokio::test]
     async fn record_decision_returns_increasing_ids() {
-        let log = OrchestratorDecisionLog::open_in_memory().await.expect("open");
+        let log = OrchestratorDecisionLog::open_in_memory()
+            .await
+            .expect("open");
         let id1 = log
-            .record_decision(OrchestratorDecision::new("run-a", "mechanically_verified", "high", "x"))
+            .record_decision(OrchestratorDecision::new(
+                "run-a",
+                "mechanically_verified",
+                "high",
+                "x",
+            ))
             .await
             .expect("record 1");
         let id2 = log
-            .record_decision(OrchestratorDecision::new("run-a", "preview_reversible", "high", "y"))
+            .record_decision(OrchestratorDecision::new(
+                "run-a",
+                "preview_reversible",
+                "high",
+                "y",
+            ))
             .await
             .expect("record 2");
         assert!(id1 < id2);
@@ -466,13 +483,23 @@ mod tests {
 
     #[tokio::test]
     async fn record_outcome_links_to_a_decision() {
-        let log = OrchestratorDecisionLog::open_in_memory().await.expect("open");
+        let log = OrchestratorDecisionLog::open_in_memory()
+            .await
+            .expect("open");
         let decision_id = log
-            .record_decision(OrchestratorDecision::new("run-a", "preview_reversible", "high", "used default copy"))
+            .record_decision(OrchestratorDecision::new(
+                "run-a",
+                "preview_reversible",
+                "high",
+                "used default copy",
+            ))
             .await
             .expect("record decision");
         let outcome_id = log
-            .record_outcome(DecisionOutcome::new(decision_id, DecisionOutcomeKind::Redirected))
+            .record_outcome(DecisionOutcome::new(
+                decision_id,
+                DecisionOutcomeKind::Redirected,
+            ))
             .await
             .expect("record outcome");
         assert!(outcome_id > 0);
@@ -482,20 +509,34 @@ mod tests {
 
     #[tokio::test]
     async fn calibration_is_empty_with_no_decisions() {
-        let log = OrchestratorDecisionLog::open_in_memory().await.expect("open");
+        let log = OrchestratorDecisionLog::open_in_memory()
+            .await
+            .expect("open");
         let calibration = log.calibration().await.expect("calibration");
         assert!(calibration.is_empty());
     }
 
     #[tokio::test]
     async fn calibration_counts_decisions_with_no_outcome_as_total_only() {
-        let log = OrchestratorDecisionLog::open_in_memory().await.expect("open");
-        log.record_decision(OrchestratorDecision::new("run-a", "mechanically_verified", "high", "x"))
+        let log = OrchestratorDecisionLog::open_in_memory()
             .await
-            .expect("record");
-        log.record_decision(OrchestratorDecision::new("run-a", "mechanically_verified", "high", "y"))
-            .await
-            .expect("record");
+            .expect("open");
+        log.record_decision(OrchestratorDecision::new(
+            "run-a",
+            "mechanically_verified",
+            "high",
+            "x",
+        ))
+        .await
+        .expect("record");
+        log.record_decision(OrchestratorDecision::new(
+            "run-a",
+            "mechanically_verified",
+            "high",
+            "y",
+        ))
+        .await
+        .expect("record");
 
         let calibration = log.calibration().await.expect("calibration");
         assert_eq!(calibration.len(), 1);
@@ -509,7 +550,9 @@ mod tests {
 
     #[tokio::test]
     async fn calibration_computes_redirect_rate_per_class() {
-        let log = OrchestratorDecisionLog::open_in_memory().await.expect("open");
+        let log = OrchestratorDecisionLog::open_in_memory()
+            .await
+            .expect("open");
 
         // Class "preview_reversible": 4 decisions, 1 redirected, 1 defect-linked, 2 survived.
         let mut pr_ids = Vec::new();
@@ -525,29 +568,49 @@ mod tests {
                 .expect("record");
             pr_ids.push(id);
         }
-        log.record_outcome(DecisionOutcome::new(pr_ids[0], DecisionOutcomeKind::Redirected))
-            .await
-            .expect("record outcome");
-        log.record_outcome(DecisionOutcome::new(pr_ids[1], DecisionOutcomeKind::DefectLinked))
-            .await
-            .expect("record outcome");
-        log.record_outcome(DecisionOutcome::new(pr_ids[2], DecisionOutcomeKind::Survived))
-            .await
-            .expect("record outcome");
-        log.record_outcome(DecisionOutcome::new(pr_ids[3], DecisionOutcomeKind::Survived))
-            .await
-            .expect("record outcome");
+        log.record_outcome(DecisionOutcome::new(
+            pr_ids[0],
+            DecisionOutcomeKind::Redirected,
+        ))
+        .await
+        .expect("record outcome");
+        log.record_outcome(DecisionOutcome::new(
+            pr_ids[1],
+            DecisionOutcomeKind::DefectLinked,
+        ))
+        .await
+        .expect("record outcome");
+        log.record_outcome(DecisionOutcome::new(
+            pr_ids[2],
+            DecisionOutcomeKind::Survived,
+        ))
+        .await
+        .expect("record outcome");
+        log.record_outcome(DecisionOutcome::new(
+            pr_ids[3],
+            DecisionOutcomeKind::Survived,
+        ))
+        .await
+        .expect("record outcome");
 
         // Class "irreversible": 1 decision, 1 redirected (a red flag if this ever
         // happens for real — C should always be human-gated before it executes — but
         // the store itself does not enforce that; it just records what happened).
         let irr_id = log
-            .record_decision(OrchestratorDecision::new("run-b", "irreversible", "low", "z"))
+            .record_decision(OrchestratorDecision::new(
+                "run-b",
+                "irreversible",
+                "low",
+                "z",
+            ))
             .await
             .expect("record");
-        log.record_outcome(DecisionOutcome::new(irr_id, DecisionOutcomeKind::Redirected))
-            .await
-            .expect("record outcome");
+        log.record_outcome(DecisionOutcome::new(
+            irr_id,
+            DecisionOutcomeKind::Redirected,
+        ))
+        .await
+        .expect("record outcome");
 
         let calibration = log.calibration().await.expect("calibration");
         assert_eq!(calibration.len(), 2);
@@ -573,10 +636,13 @@ mod tests {
 
     #[tokio::test]
     async fn alternatives_and_assumption_round_trip_through_storage() {
-        let log = OrchestratorDecisionLog::open_in_memory().await.expect("open");
-        let decision = OrchestratorDecision::new("run-a", "mechanically_verified", "high", "picked option B")
-            .with_alternatives(vec!["option A".to_string(), "option C".to_string()])
-            .with_assumption("assumed the default config applies");
+        let log = OrchestratorDecisionLog::open_in_memory()
+            .await
+            .expect("open");
+        let decision =
+            OrchestratorDecision::new("run-a", "mechanically_verified", "high", "picked option B")
+                .with_alternatives(vec!["option A".to_string(), "option C".to_string()])
+                .with_assumption("assumed the default config applies");
         let id = log.record_decision(decision).await.expect("record");
         assert!(id > 0);
         // No direct read-back-by-id accessor is exposed today (only the aggregate

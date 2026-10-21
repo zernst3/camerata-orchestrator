@@ -223,7 +223,8 @@ fn gap2_pr_bypass_with_reason_produces_audit_record() {
     .expect("bypass with a non-empty reason must succeed");
 
     // The PR body is empty and would have been blocked; the bypass record must exist.
-    let summary = record.expect("a bypass record must be produced for a blocked action with a reason");
+    let summary =
+        record.expect("a bypass record must be produced for a blocked action with a reason");
     assert!(
         !summary.is_empty(),
         "the bypass record must contain the suppressed rule name(s): {summary}"
@@ -286,7 +287,10 @@ fn refinement1_machine_commit_without_story_id_hard_blocks() {
 #[test]
 fn refinement1_generated_commit_passes_ado_subject_id_config() {
     let mut cfg = ProcessRuleConfig::default();
-    cfg.ado_link = AdoLinkConfig { enabled: true, prefix: "AB".to_string() };
+    cfg.ado_link = AdoLinkConfig {
+        enabled: true,
+        prefix: "AB".to_string(),
+    };
     cfg.commit_doc.id_location = IdLocation::Subject;
     cfg.commit_doc.story_id_format = StoryIdFormat {
         prefix: "AB".to_string(),
@@ -295,8 +299,9 @@ fn refinement1_generated_commit_passes_ado_subject_id_config() {
     };
 
     let msg = compliant_machine_commit_message(&cfg, "fix", "resolve PR #7 feedback", "1234");
-    gated_commit(&cfg, &msg)
-        .unwrap_or_else(|e| panic!("generated commit must pass the ADO subject-id gate: {e}\n{msg}"));
+    gated_commit(&cfg, &msg).unwrap_or_else(|e| {
+        panic!("generated commit must pass the ADO subject-id gate: {e}\n{msg}")
+    });
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -314,8 +319,9 @@ fn refinement2_generated_machine_pr_passes_hard_block() {
         "Opened by Camerata for story `acme/widgets#42`.",
         "42",
     );
-    gated_pr(&cfg, &title, &body)
-        .unwrap_or_else(|e| panic!("the generated machine PR must PASS the hard-block gate: {e}\n{title}\n{body}"));
+    gated_pr(&cfg, &title, &body).unwrap_or_else(|e| {
+        panic!("the generated machine PR must PASS the hard-block gate: {e}\n{title}\n{body}")
+    });
 }
 
 /// A UoW PR-open with a VIOLATING title/body (empty body, no story id) is gated and blocked
@@ -342,7 +348,11 @@ fn refinement3_branch_gate_enforces_when_rule_active() {
     let mut cfg = ProcessRuleConfig::default();
     cfg.branch_naming = BranchNamingConfig {
         enabled: true,
-        prefixes: vec!["feature/".to_string(), "release/".to_string(), "hotfix/".to_string()],
+        prefixes: vec![
+            "feature/".to_string(),
+            "release/".to_string(),
+            "hotfix/".to_string(),
+        ],
     };
 
     let err = gated_branch(&cfg, "camerata/acme-widgets-42")

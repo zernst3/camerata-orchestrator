@@ -163,13 +163,19 @@ mod tests {
         let store = CheckpointStore::new();
         let _c1 = mk(&store, "me/api#1");
         let c2 = mk(&store, "me/api#1"); // a second pause on the same story
-        // latest_open returns the most recent un-resumed one.
+                                         // latest_open returns the most recent un-resumed one.
         assert_eq!(store.latest_open_for_story("me/api#1").unwrap().id, c2.id);
         // mark it resumed; it is no longer "open", and can't be resumed twice.
         assert!(store.mark_resumed(&c2.id).is_some());
-        assert!(store.mark_resumed(&c2.id).is_none(), "already resumed -> None");
+        assert!(
+            store.mark_resumed(&c2.id).is_none(),
+            "already resumed -> None"
+        );
         // now the earlier one is the latest open.
-        assert_eq!(store.latest_open_for_story("me/api#1").unwrap().id, "ckpt-1");
+        assert_eq!(
+            store.latest_open_for_story("me/api#1").unwrap().id,
+            "ckpt-1"
+        );
         assert!(store.latest_open_for_story("other").is_none());
     }
 }

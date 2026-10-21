@@ -89,8 +89,14 @@ mod tests {
         assert_eq!(ProjectBackend::Cli.label(), "CLI");
         assert_eq!(ProjectBackend::Api.label(), "API");
         // Wire value re-parses to the same variant.
-        assert_eq!(ProjectBackend::parse_lenient(ProjectBackend::Api.as_wire()), ProjectBackend::Api);
-        assert_eq!(ProjectBackend::parse_lenient(ProjectBackend::Cli.as_wire()), ProjectBackend::Cli);
+        assert_eq!(
+            ProjectBackend::parse_lenient(ProjectBackend::Api.as_wire()),
+            ProjectBackend::Api
+        );
+        assert_eq!(
+            ProjectBackend::parse_lenient(ProjectBackend::Cli.as_wire()),
+            ProjectBackend::Cli
+        );
     }
 
     #[test]

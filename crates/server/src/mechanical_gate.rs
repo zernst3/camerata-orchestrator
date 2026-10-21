@@ -346,7 +346,10 @@ mod tests {
                 .into_iter()
                 .map(|(id, _)| id)
                 .collect();
-        let orphaned: Vec<&String> = offenders.iter().filter(|id| !reached.contains(*id)).collect();
+        let orphaned: Vec<&String> = offenders
+            .iter()
+            .filter(|id| !reached.contains(*id))
+            .collect();
         assert!(
             orphaned.is_empty(),
             "mechanical-enforcement rule(s) with NO wired deterministic detector AND NOT \

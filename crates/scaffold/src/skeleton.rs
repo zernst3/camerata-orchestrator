@@ -19,22 +19,52 @@ use crate::{AppRequirements, ScaffoldError, ScaffoldOutcome};
 /// covers every file on disk (a possible follow-up: a build script that asserts the
 /// two agree).
 const TEMPLATE_FILES: &[(&str, &str)] = &[
-    (".gitignore", include_str!("../templates/skeleton/.gitignore")),
-    ("Cargo.toml", include_str!("../templates/skeleton/Cargo.toml")),
-    ("Dioxus.toml", include_str!("../templates/skeleton/Dioxus.toml")),
+    (
+        ".gitignore",
+        include_str!("../templates/skeleton/.gitignore"),
+    ),
+    (
+        "Cargo.toml",
+        include_str!("../templates/skeleton/Cargo.toml"),
+    ),
+    (
+        "Dioxus.toml",
+        include_str!("../templates/skeleton/Dioxus.toml"),
+    ),
     ("README.md", include_str!("../templates/skeleton/README.md")),
-    ("index.html", include_str!("../templates/skeleton/index.html")),
-    ("CONVENTIONS.md", include_str!("../templates/skeleton/CONVENTIONS.md")),
+    (
+        "index.html",
+        include_str!("../templates/skeleton/index.html"),
+    ),
+    (
+        "CONVENTIONS.md",
+        include_str!("../templates/skeleton/CONVENTIONS.md"),
+    ),
     ("AGENTS.md", include_str!("../templates/skeleton/AGENTS.md")),
     (
         ".github/workflows/ci.yml",
         include_str!("../templates/skeleton/.github/workflows/ci.yml"),
     ),
-    ("src/main.rs", include_str!("../templates/skeleton/src/main.rs")),
-    ("src/lib.rs", include_str!("../templates/skeleton/src/lib.rs")),
-    ("src/app.rs", include_str!("../templates/skeleton/src/app.rs")),
-    ("src/routes.rs", include_str!("../templates/skeleton/src/routes.rs")),
-    ("src/server.rs", include_str!("../templates/skeleton/src/server.rs")),
+    (
+        "src/main.rs",
+        include_str!("../templates/skeleton/src/main.rs"),
+    ),
+    (
+        "src/lib.rs",
+        include_str!("../templates/skeleton/src/lib.rs"),
+    ),
+    (
+        "src/app.rs",
+        include_str!("../templates/skeleton/src/app.rs"),
+    ),
+    (
+        "src/routes.rs",
+        include_str!("../templates/skeleton/src/routes.rs"),
+    ),
+    (
+        "src/server.rs",
+        include_str!("../templates/skeleton/src/server.rs"),
+    ),
     (
         "src/wasm_bridge.rs",
         include_str!("../templates/skeleton/src/wasm_bridge.rs"),
@@ -75,7 +105,10 @@ const TEMPLATE_FILES: &[(&str, &str)] = &[
         "assets/manifest.json",
         include_str!("../templates/skeleton/assets/manifest.json"),
     ),
-    ("assets/icon.svg", include_str!("../templates/skeleton/assets/icon.svg")),
+    (
+        "assets/icon.svg",
+        include_str!("../templates/skeleton/assets/icon.svg"),
+    ),
     (
         "assets/service-worker.js",
         include_str!("../templates/skeleton/assets/service-worker.js"),
@@ -197,7 +230,11 @@ pub fn scaffold_skeleton(
     // them — see `substitution::substitute`'s doc comment.
     let is_private = matches!(reqs.visibility, crate::Visibility::Private);
     let (access_gate_import, access_gate_open, access_gate_close) = if is_private {
-        ("use crate::components::AccessGate;\n", "AccessGate {\n            ", "\n        }")
+        (
+            "use crate::components::AccessGate;\n",
+            "AccessGate {\n            ",
+            "\n        }",
+        )
     } else {
         ("", "", "")
     };
@@ -322,7 +359,10 @@ mod tests {
         assert_eq!(outcome.files_written.len(), TEMPLATE_FILES.len() + 1);
         for (relative_path, _) in TEMPLATE_FILES {
             let path = tmp.path().join(relative_path);
-            assert!(path.is_file(), "expected {relative_path} to exist at {path:?}");
+            assert!(
+                path.is_file(),
+                "expected {relative_path} to exist at {path:?}"
+            );
         }
         assert!(tmp.path().join("src/components/access_gate.rs").is_file());
         assert_eq!(outcome.package_name, "trip_planner");
@@ -342,7 +382,8 @@ mod tests {
                 "{relative_path} still has unfilled placeholders: {leftover:?}"
             );
         }
-        let access_gate = fs::read_to_string(tmp.path().join("src/components/access_gate.rs")).unwrap();
+        let access_gate =
+            fs::read_to_string(tmp.path().join("src/components/access_gate.rs")).unwrap();
         assert!(leftover_placeholders(&access_gate).is_empty());
     }
 
@@ -468,7 +509,9 @@ mod tests {
         scaffold_skeleton(&reqs, tmp.path()).expect("scaffold");
 
         let index_html = fs::read_to_string(tmp.path().join("index.html")).unwrap();
-        assert!(index_html.contains("window.CAMERATA_CAPTURE_URL = \"https://example.test/ingest\";"));
+        assert!(
+            index_html.contains("window.CAMERATA_CAPTURE_URL = \"https://example.test/ingest\";")
+        );
     }
 
     #[test]
@@ -591,7 +634,11 @@ mod tests {
     fn generated_skeleton_compiles() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let outcome = scaffold_skeleton(&sample_reqs(), tmp.path()).expect("scaffold");
-        println!("scaffolded {} files into {:?}", outcome.files_written.len(), tmp.path());
+        println!(
+            "scaffolded {} files into {:?}",
+            outcome.files_written.len(),
+            tmp.path()
+        );
 
         let run_cargo_check = |extra_args: &[&str]| -> (bool, String) {
             let output = std::process::Command::new("cargo")

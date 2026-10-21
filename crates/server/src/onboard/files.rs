@@ -37,7 +37,17 @@ const CODE_BASENAMES: &[&str] = &["Jenkinsfile", "Dockerfile"];
 /// extensions into the file list doesn't create noise on the architectural/style rules or the
 /// scan-tool previews: those consumers already self-scope by their own file-type interest.
 const CONFIG_TEXT_EXTS: &[&str] = &[
-    "conf", "properties", "txt", "pem", "crt", "cert", "p12", "pfx", "jks", "keystore", "pgpass",
+    "conf",
+    "properties",
+    "txt",
+    "pem",
+    "crt",
+    "cert",
+    "p12",
+    "pfx",
+    "jks",
+    "keystore",
+    "pgpass",
 ];
 
 /// Directory names that are build output, dependency trees, caches, or tool state — pure

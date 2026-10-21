@@ -438,7 +438,10 @@ pub fn evaluate(ledger: &ScanLedger, opts: &IntegrityGateOptions) -> IntegrityVe
             parts.push(format!("{} with backslash separators", hygiene.backslash));
         }
         if hygiene.prose > 0 {
-            parts.push(format!("{} carrying prose rather than a path", hygiene.prose));
+            parts.push(format!(
+                "{} carrying prose rather than a path",
+                hygiene.prose
+            ));
         }
         failures.push(IntegrityFailure {
             code: "path_hygiene".to_string(),
@@ -661,7 +664,11 @@ pub fn render(verdict: &IntegrityVerdict) -> String {
         "  {:<52} {}{}",
         "Camerata's own artifacts admitted",
         i.engine_artifacts_admitted,
-        if i.engine_artifacts_admitted == 0 { "" } else { "   <-- the engine audited its own output" }
+        if i.engine_artifacts_admitted == 0 {
+            ""
+        } else {
+            "   <-- the engine audited its own output"
+        }
     );
     let h = &verdict.path_hygiene;
     let _ = writeln!(
@@ -670,7 +677,11 @@ pub fn render(verdict: &IntegrityVerdict) -> String {
         "rows whose path is not a repo-relative path",
         h.offending_rows,
         h.rows_total,
-        if h.is_clean() { "" } else { "   <-- absolute, prose, or backslash" }
+        if h.is_clean() {
+            ""
+        } else {
+            "   <-- absolute, prose, or backslash"
+        }
     );
     out.push('\n');
 
@@ -717,8 +728,8 @@ pub fn render(verdict: &IntegrityVerdict) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::scan_ledger::ScanInputFacts;
     use super::*;
+    use crate::scan_ledger::ScanInputFacts;
     use crate::scan_ledger::StageAccounting;
 
     // ── req_i2: the pre-flight integrity gate ────────────────────────────────────────────
@@ -1082,7 +1093,10 @@ mod tests {
         let verdict = evaluate(&l, &IntegrityGateOptions::default());
         assert!(!verdict.passed(), "self-ingestion must never pass");
         assert!(
-            verdict.failures.iter().any(|f| f.code == "engine_self_ingestion"),
+            verdict
+                .failures
+                .iter()
+                .any(|f| f.code == "engine_self_ingestion"),
             "expected engine_self_ingestion, got {:?}",
             verdict.failures
         );
@@ -1092,7 +1106,10 @@ mod tests {
         // local scan exactly as much as a graded one, and detecting it is free.
         let smoke = evaluate(&l, &IntegrityGateOptions::smoke());
         assert!(
-            smoke.failures.iter().any(|f| f.code == "engine_self_ingestion"),
+            smoke
+                .failures
+                .iter()
+                .any(|f| f.code == "engine_self_ingestion"),
             "smoke must still catch self-ingestion, got {:?}",
             smoke.failures
         );
@@ -1110,7 +1127,10 @@ mod tests {
     #[test]
     fn req_w19_an_unrecorded_audit_model_blocks_a_graded_run_but_not_a_smoke_scan() {
         let mut l = healthy_ledger();
-        l.record_input(ScanInputFacts { audit_model: None, ..healthy_input() });
+        l.record_input(ScanInputFacts {
+            audit_model: None,
+            ..healthy_input()
+        });
 
         let graded = evaluate(&l, &IntegrityGateOptions::default());
         assert!(
@@ -1161,7 +1181,11 @@ mod tests {
     #[test]
     fn req_w19_a_clean_input_still_passes() {
         let verdict = evaluate(&healthy_ledger(), &IntegrityGateOptions::default());
-        assert!(verdict.passed(), "clean input must pass: {:?}", verdict.failures);
+        assert!(
+            verdict.passed(),
+            "clean input must pass: {:?}",
+            verdict.failures
+        );
         assert_eq!(healthy_input().engine_artifacts_admitted, 0);
     }
 
@@ -1200,7 +1224,9 @@ mod tests {
         assert_eq!(h.offending_rows, 3, "three DISTINCT bad rows");
         assert!(!h.is_clean());
         assert!(
-            h.worst_example.as_deref().is_some_and(|w| w.contains("transaction boundary")),
+            h.worst_example
+                .as_deref()
+                .is_some_and(|w| w.contains("transaction boundary")),
             "the worst example should be the prose one, the hardest to spot from a count: {:?}",
             h.worst_example
         );
@@ -1215,7 +1241,11 @@ mod tests {
             .find(|f| f.code == "path_hygiene")
             .expect("expected a path_hygiene failure");
         assert!(f.detail.contains("3 of 6"), "{}", f.detail);
-        assert!(f.detail.contains("worst:"), "must name an offender, not just count: {}", f.detail);
+        assert!(
+            f.detail.contains("worst:"),
+            "must name an offender, not just count: {}",
+            f.detail
+        );
     }
 
     /// A repository path may legitimately contain spaces, and the prose signals must not
@@ -1530,7 +1560,9 @@ mod tests {
         let mut l = ScanLedger::new();
         l.record_input(healthy_input());
         l.record_corpus_load_failure("SEC-NO-SILENT-CORPUS-DROP-1");
-        let entry = l.rule("SEC-NO-SILENT-CORPUS-DROP-1").expect("just recorded");
+        let entry = l
+            .rule("SEC-NO-SILENT-CORPUS-DROP-1")
+            .expect("just recorded");
         assert_eq!(
             SkipClass::classify(entry.skip_reason.as_deref()),
             SkipClass::CorpusLoadFailed

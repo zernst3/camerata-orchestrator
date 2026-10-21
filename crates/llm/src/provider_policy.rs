@@ -191,7 +191,10 @@ mod tests {
         // An old settings file (or a hand-edited one) that omits the field entirely
         // must still resolve to safe_mode=true, not panic and not default to false.
         let p: ProviderPolicy = serde_json::from_str("{}").unwrap();
-        assert!(p.safe_mode, "missing safe_mode in JSON must default to true (fail-safe)");
+        assert!(
+            p.safe_mode,
+            "missing safe_mode in JSON must default to true (fail-safe)"
+        );
         assert_eq!(p.pinned_provider, None);
     }
 
@@ -216,7 +219,10 @@ mod tests {
 
     #[test]
     fn safe_mode_off_omits_constraint_even_with_known_safe_set() {
-        let policy = ProviderPolicy { safe_mode: false, pinned_provider: None };
+        let policy = ProviderPolicy {
+            safe_mode: false,
+            pinned_provider: None,
+        };
         let out = provider_constraint_for_request(&policy, &safe(&["deepinfra", "novita"]), "m");
         assert_eq!(out, Ok(None));
     }
@@ -224,7 +230,10 @@ mod tests {
     #[test]
     fn safe_mode_off_omits_constraint_even_when_safe_set_unknown() {
         // Testing mode never blocks on missing data — that's the whole point of the toggle.
-        let policy = ProviderPolicy { safe_mode: false, pinned_provider: None };
+        let policy = ProviderPolicy {
+            safe_mode: false,
+            pinned_provider: None,
+        };
         let out = provider_constraint_for_request(&policy, &SafeProviders::Unknown, "m");
         assert_eq!(out, Ok(None));
     }

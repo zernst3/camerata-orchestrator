@@ -107,7 +107,10 @@ pub fn caching_heuristic(provider: &str, id: &str) -> bool {
 
 /// Build the static Claude portion of the registry.
 pub fn claude_entries() -> Vec<RegistryEntry> {
-    CLAUDE_REGISTRY_MODELS.iter().map(|m| m.to_entry()).collect()
+    CLAUDE_REGISTRY_MODELS
+        .iter()
+        .map(|m| m.to_entry())
+        .collect()
 }
 
 // ── OpenRouter model shape (subset of the /api/v1/models response) ───────────
@@ -214,8 +217,16 @@ impl OpenRouterModelRaw {
 fn coding_score(id: &str, name: &str, tool_use: bool) -> f32 {
     let haystack = format!("{} {}", id.to_lowercase(), name.to_lowercase());
     let coding_signals = [
-        "coder", "code", "codex", "starcoder", "deepseek-coder", "qwen-coder",
-        "coding", "devstral", "granite-code", "wizard-coder",
+        "coder",
+        "code",
+        "codex",
+        "starcoder",
+        "deepseek-coder",
+        "qwen-coder",
+        "coding",
+        "devstral",
+        "granite-code",
+        "wizard-coder",
     ];
     if coding_signals.iter().any(|&s| haystack.contains(s)) {
         return 1.0;
@@ -683,10 +694,7 @@ impl AnthropicModelRaw {
     /// number. All Claude models are assumed tool-use + caching + vision capable, matching
     /// [`RegistryEntryStatic::to_entry`]'s identical assumption for the whole family.
     fn to_entry(&self) -> RegistryEntry {
-        let display = self
-            .display_name
-            .clone()
-            .unwrap_or_else(|| self.id.clone());
+        let display = self.display_name.clone().unwrap_or_else(|| self.id.clone());
         match price_join_for_claude_id(&self.id) {
             Some(static_entry) => RegistryEntry {
                 provider: "claude".to_string(),
@@ -1000,7 +1008,9 @@ async fn fetch_model_endpoints(
 ) -> anyhow::Result<Vec<OpenRouterEndpointRaw>> {
     let client = reqwest::Client::new();
     let mut req = client
-        .get(format!("https://openrouter.ai/api/v1/models/{model_id}/endpoints"))
+        .get(format!(
+            "https://openrouter.ai/api/v1/models/{model_id}/endpoints"
+        ))
         .header("HTTP-Referer", "https://camerata.ai")
         .header("X-Title", "Camerata");
     if let Some(key) = api_key {
@@ -1040,7 +1050,10 @@ mod tests {
     #[test]
     fn claude_entries_all_have_provider_claude() {
         for e in claude_entries() {
-            assert_eq!(e.provider, "claude", "Claude entries must carry provider='claude'");
+            assert_eq!(
+                e.provider, "claude",
+                "Claude entries must carry provider='claude'"
+            );
         }
     }
 
@@ -1054,7 +1067,11 @@ mod tests {
     #[test]
     fn claude_entries_are_never_free() {
         for e in claude_entries() {
-            assert!(!e.free, "{} must not be marked free (subscription path)", e.id);
+            assert!(
+                !e.free,
+                "{} must not be marked free (subscription path)",
+                e.id
+            );
         }
     }
 
@@ -1064,7 +1081,10 @@ mod tests {
         let fable = entries.iter().find(|e| e.id == "claude-fable-5").unwrap();
         let opus = entries.iter().find(|e| e.id == "claude-opus-5").unwrap();
         let sonnet = entries.iter().find(|e| e.id == "claude-sonnet-5").unwrap();
-        let haiku = entries.iter().find(|e| e.id == "claude-haiku-4-5-20251001").unwrap();
+        let haiku = entries
+            .iter()
+            .find(|e| e.id == "claude-haiku-4-5-20251001")
+            .unwrap();
         assert!(
             fable.weight > opus.weight,
             "Fable weight must exceed Opus (got {} vs {})",
@@ -1121,7 +1141,10 @@ mod tests {
     fn claude_fable_has_1m_context() {
         let entries = claude_entries();
         let fable = entries.iter().find(|e| e.id == "claude-fable-5").unwrap();
-        assert_eq!(fable.context, 1_000_000, "Fable 5 must carry a 1M-token context window");
+        assert_eq!(
+            fable.context, 1_000_000,
+            "Fable 5 must carry a 1M-token context window"
+        );
     }
 
     #[test]
@@ -1226,7 +1249,10 @@ mod tests {
         let raw = OpenRouterModelRaw {
             id: "qwen/qwen3-coder:free".to_string(),
             name: "Qwen3 235B Coder (free)".to_string(),
-            pricing: OpenRouterPricing { prompt: 0.0, completion: 0.0 },
+            pricing: OpenRouterPricing {
+                prompt: 0.0,
+                completion: 0.0,
+            },
             context_length: 32_768,
             supported_parameters: vec!["tools".to_string()],
             architecture: OpenRouterArchitecture::default(),
@@ -1246,7 +1272,10 @@ mod tests {
             id: "openai/gpt-4o".to_string(),
             name: "GPT-4o".to_string(),
             // $0.000005 per token = $5 per million tokens input
-            pricing: OpenRouterPricing { prompt: 0.000005, completion: 0.000015 },
+            pricing: OpenRouterPricing {
+                prompt: 0.000005,
+                completion: 0.000015,
+            },
             context_length: 128_000,
             supported_parameters: vec!["tools".to_string()],
             architecture: OpenRouterArchitecture::default(),
@@ -1283,14 +1312,23 @@ mod tests {
         let creds = crate::credentials::MemoryCredentialStore::new();
         // No key ever set on this store — mirrors a fresh install / no OpenRouter key saved.
         let attempted = reg.try_refresh_from_store(&creds).await;
-        assert!(!attempted, "no key configured: must no-op, not attempt a live call");
+        assert!(
+            !attempted,
+            "no key configured: must no-op, not attempt a live call"
+        );
         assert!(
             !reg.openrouter_fetched(),
             "cache must stay unpopulated (None), not Some([]) — that's the fetch-attempted state"
         );
         let all = reg.all_entries();
-        assert!(all.iter().any(|e| e.provider == "claude"), "Claude entries unaffected");
-        assert!(!all.iter().any(|e| e.provider == "openrouter"), "no OpenRouter entries appear");
+        assert!(
+            all.iter().any(|e| e.provider == "claude"),
+            "Claude entries unaffected"
+        );
+        assert!(
+            !all.iter().any(|e| e.provider == "openrouter"),
+            "no OpenRouter entries appear"
+        );
     }
 
     #[tokio::test]
@@ -1386,18 +1424,27 @@ mod tests {
 
     #[test]
     fn caching_heuristic_gemini_openrouter_true() {
-        assert!(caching_heuristic("openrouter", "google/gemini-2.0-flash-001"));
+        assert!(caching_heuristic(
+            "openrouter",
+            "google/gemini-2.0-flash-001"
+        ));
         assert!(caching_heuristic("openrouter", "google/gemini-pro"));
     }
 
     #[test]
     fn caching_heuristic_anthropic_openrouter_true() {
-        assert!(caching_heuristic("openrouter", "anthropic/claude-3-5-sonnet"));
+        assert!(caching_heuristic(
+            "openrouter",
+            "anthropic/claude-3-5-sonnet"
+        ));
     }
 
     #[test]
     fn caching_heuristic_random_openrouter_model_false() {
-        assert!(!caching_heuristic("openrouter", "meta-llama/llama-3.1-8b-instruct"));
+        assert!(!caching_heuristic(
+            "openrouter",
+            "meta-llama/llama-3.1-8b-instruct"
+        ));
         assert!(!caching_heuristic("openrouter", "openai/gpt-4o"));
         assert!(!caching_heuristic("openrouter", "qwen/qwen3-235b-a22b"));
     }
@@ -1430,7 +1477,10 @@ mod tests {
         let raw = OpenRouterModelRaw {
             id: "minimax/minimax-01".to_string(),
             name: "MiniMax-01".to_string(),
-            pricing: OpenRouterPricing { prompt: 0.0, completion: 0.0 },
+            pricing: OpenRouterPricing {
+                prompt: 0.0,
+                completion: 0.0,
+            },
             context_length: 1_000_000,
             supported_parameters: vec!["tools".to_string()],
             architecture: OpenRouterArchitecture {
@@ -1450,7 +1500,10 @@ mod tests {
         let raw = OpenRouterModelRaw {
             id: "qwen/qwen3-235b:free".to_string(),
             name: "Qwen3 235B (free)".to_string(),
-            pricing: OpenRouterPricing { prompt: 0.0, completion: 0.0 },
+            pricing: OpenRouterPricing {
+                prompt: 0.0,
+                completion: 0.0,
+            },
             context_length: 32_768,
             supported_parameters: vec!["tools".to_string()],
             architecture: OpenRouterArchitecture {
@@ -1471,7 +1524,10 @@ mod tests {
         let raw = OpenRouterModelRaw {
             id: "some/text-model".to_string(),
             name: "Text Model".to_string(),
-            pricing: OpenRouterPricing { prompt: 0.0, completion: 0.0 },
+            pricing: OpenRouterPricing {
+                prompt: 0.0,
+                completion: 0.0,
+            },
             context_length: 8_192,
             supported_parameters: vec![],
             architecture: OpenRouterArchitecture::default(),
@@ -1599,7 +1655,10 @@ mod tests {
     fn provider_slug_from_tag_splits_on_first_slash() {
         assert_eq!(provider_slug_from_tag("deepinfra/fp4"), "deepinfra");
         assert_eq!(provider_slug_from_tag("streamlake"), "streamlake");
-        assert_eq!(provider_slug_from_tag("google-vertex/us-south1"), "google-vertex");
+        assert_eq!(
+            provider_slug_from_tag("google-vertex/us-south1"),
+            "google-vertex"
+        );
     }
 
     #[test]
@@ -1622,7 +1681,10 @@ mod tests {
         endpoints.push(OpenRouterEndpointRaw {
             provider_name: "DeepSeek".to_string(),
             tag: Some("deepseek".to_string()),
-            pricing: OpenRouterPricing { prompt: 0.0000002, completion: 0.0000008 },
+            pricing: OpenRouterPricing {
+                prompt: 0.0000002,
+                completion: 0.0000008,
+            },
         });
         let policies = sample_policies();
         let joined = join_endpoints_with_policy(&endpoints, &policies);
@@ -1643,7 +1705,10 @@ mod tests {
         let endpoints = sample_endpoints();
         let policies = sample_policies();
         let joined = join_endpoints_with_policy(&endpoints, &policies);
-        let streamlake = joined.iter().find(|e| e.provider_slug == "streamlake").unwrap();
+        let streamlake = joined
+            .iter()
+            .find(|e| e.provider_slug == "streamlake")
+            .unwrap();
         assert!(streamlake.retains_prompts);
         assert!(!streamlake.training);
         assert!(!streamlake.is_safe());
@@ -1813,10 +1878,14 @@ mod tests {
 
     #[test]
     fn anthropic_models_response_parses_known_shape() {
-        let resp: AnthropicModelsResp = serde_json::from_str(SAMPLE_ANTHROPIC_MODELS_PAGE_1).unwrap();
+        let resp: AnthropicModelsResp =
+            serde_json::from_str(SAMPLE_ANTHROPIC_MODELS_PAGE_1).unwrap();
         assert_eq!(resp.data.len(), 2);
         assert_eq!(resp.data[0].id, "claude-sonnet-5");
-        assert_eq!(resp.data[0].display_name.as_deref(), Some("Claude Sonnet 5"));
+        assert_eq!(
+            resp.data[0].display_name.as_deref(),
+            Some("Claude Sonnet 5")
+        );
         assert!(resp.has_more);
         assert_eq!(resp.last_id.as_deref(), Some("claude-fable-5"));
     }
@@ -1826,7 +1895,10 @@ mod tests {
         let json = r#"{"id": "claude-mystery-model"}"#;
         let raw: AnthropicModelRaw = serde_json::from_str(json).unwrap();
         let entry = raw.to_entry();
-        assert_eq!(entry.display, "claude-mystery-model", "no display_name -> falls back to id");
+        assert_eq!(
+            entry.display, "claude-mystery-model",
+            "no display_name -> falls back to id"
+        );
     }
 
     #[test]
@@ -1843,13 +1915,15 @@ mod tests {
 
     #[test]
     fn known_claude_id_joins_price_context_weight_from_static_catalog() {
-        let raw: AnthropicModelRaw = serde_json::from_str(
-            r#"{"id": "claude-opus-5", "display_name": "Claude Opus 5"}"#,
-        )
-        .unwrap();
+        let raw: AnthropicModelRaw =
+            serde_json::from_str(r#"{"id": "claude-opus-5", "display_name": "Claude Opus 5"}"#)
+                .unwrap();
         let entry = raw.to_entry();
         assert_eq!(entry.provider, "claude");
-        assert!(entry.price_known, "opus-5 is in the static catalog: price must be known");
+        assert!(
+            entry.price_known,
+            "opus-5 is in the static catalog: price must be known"
+        );
         assert_eq!(entry.price_in, 5.0);
         assert_eq!(entry.price_out, 25.0);
         assert_eq!(entry.context, 200_000);
@@ -1871,10 +1945,16 @@ mod tests {
         .unwrap();
         let entry = raw.to_entry();
         assert_eq!(entry.id, "claude-brand-new-model");
-        assert!(!entry.price_known, "id absent from the static catalog: price must be UNKNOWN");
+        assert!(
+            !entry.price_known,
+            "id absent from the static catalog: price must be UNKNOWN"
+        );
         assert_eq!(entry.price_in, 0.0);
         assert_eq!(entry.price_out, 0.0);
-        assert!(!entry.free, "unknown price is NOT the same as free — must stay false");
+        assert!(
+            !entry.free,
+            "unknown price is NOT the same as free — must stay false"
+        );
         // Still fully selectable: tool-use/caching/vision assumptions hold for the whole
         // Claude family regardless of catalog presence.
         assert!(entry.tool_use);
@@ -1909,7 +1989,10 @@ mod tests {
     #[test]
     fn seeding_anthropic_entries_marks_fetched() {
         let reg = ModelRegistry::new();
-        reg.seed_anthropic_entries(vec![live_claude_entry("claude-sonnet-5", "Claude Sonnet 5")]);
+        reg.seed_anthropic_entries(vec![live_claude_entry(
+            "claude-sonnet-5",
+            "Claude Sonnet 5",
+        )]);
         assert!(reg.anthropic_fetched());
     }
 
@@ -1921,7 +2004,11 @@ mod tests {
         let reg = ModelRegistry::new();
         reg.seed_anthropic_entries(vec![live_claude_entry("claude-sonnet-5", "Live Sonnet")]);
         let entries = reg.claude_entries_for_backend(false);
-        assert_eq!(entries, claude_entries(), "CLI/non-live path must equal the hardcoded catalog exactly");
+        assert_eq!(
+            entries,
+            claude_entries(),
+            "CLI/non-live path must equal the hardcoded catalog exactly"
+        );
         assert!(!entries.iter().any(|e| e.display == "Live Sonnet"));
     }
 
@@ -1961,9 +2048,16 @@ mod tests {
     fn api_backend_with_failed_live_fetch_falls_back_to_hardcoded() {
         let reg = ModelRegistry::new();
         reg.seed_anthropic_entries(vec![]); // simulates a fetch that failed or returned zero
-        assert!(reg.anthropic_fetched(), "a failed fetch still marks fetched=true");
+        assert!(
+            reg.anthropic_fetched(),
+            "a failed fetch still marks fetched=true"
+        );
         let entries = reg.claude_entries_for_backend(true);
-        assert_eq!(entries, claude_entries(), "empty live cache must fall back to hardcoded, never render empty");
+        assert_eq!(
+            entries,
+            claude_entries(),
+            "empty live cache must fall back to hardcoded, never render empty"
+        );
     }
 
     /// `entries_for_backend` combines the backend-aware Claude portion with the (backend-
@@ -1990,7 +2084,9 @@ mod tests {
         }]);
         let entries = reg.entries_for_backend(true);
         assert_eq!(entries.len(), 2);
-        assert!(entries.iter().any(|e| e.provider == "claude" && e.display == "Live Sonnet"));
+        assert!(entries
+            .iter()
+            .any(|e| e.provider == "claude" && e.display == "Live Sonnet"));
         assert!(entries.iter().any(|e| e.provider == "openrouter"));
     }
 
@@ -2001,7 +2097,10 @@ mod tests {
     #[test]
     fn all_entries_unaffected_by_live_anthropic_cache() {
         let reg = ModelRegistry::new();
-        reg.seed_anthropic_entries(vec![live_claude_entry("claude-brand-new-model", "Brand New")]);
+        reg.seed_anthropic_entries(vec![live_claude_entry(
+            "claude-brand-new-model",
+            "Brand New",
+        )]);
         let entries = reg.all_entries();
         assert!(
             !entries.iter().any(|e| e.id == "claude-brand-new-model"),

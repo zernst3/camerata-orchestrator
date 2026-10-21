@@ -212,7 +212,10 @@ pub fn eslint_workspace_dir(tooling: &Path) -> PathBuf {
 /// Path to the eslint binary inside the Camerata-managed node_modules.
 pub fn eslint_bin(workspace: &Path) -> PathBuf {
     #[cfg(windows)]
-    let bin = workspace.join("node_modules").join(".bin").join("eslint.cmd");
+    let bin = workspace
+        .join("node_modules")
+        .join(".bin")
+        .join("eslint.cmd");
     #[cfg(not(windows))]
     let bin = workspace.join("node_modules").join(".bin").join("eslint");
     bin
@@ -483,8 +486,7 @@ pub const OSV_SCANNER_VERSION: &str = "v1.9.2";
 
 /// The download base URL for osv-scanner prebuilt release binaries.  The full
 /// asset URL is constructed as `{BASE}/{VERSION}/{ASSET_NAME}`.
-const OSV_RELEASE_BASE: &str =
-    "https://github.com/google/osv-scanner/releases/download";
+const OSV_RELEASE_BASE: &str = "https://github.com/google/osv-scanner/releases/download";
 
 /// Path to the Camerata-managed osv-scanner directory:
 /// `<tooling_dir>/osv-scanner/`.
@@ -580,12 +582,14 @@ async fn download_osv_scanner(dest: &Path) -> Result<(), ProvisionError> {
             detail: format!("could not build HTTP client: {e}"),
         })?;
 
-    let resp = client.get(&url).send().await.map_err(|e| {
-        ProvisionError::InstallFailed {
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| ProvisionError::InstallFailed {
             tool: "osv-scanner",
             detail: format!("download failed (network unavailable?): {e}"),
-        }
-    })?;
+        })?;
 
     if !resp.status().is_success() {
         return Err(ProvisionError::InstallFailed {
@@ -597,10 +601,13 @@ async fn download_osv_scanner(dest: &Path) -> Result<(), ProvisionError> {
         });
     }
 
-    let bytes = resp.bytes().await.map_err(|e| ProvisionError::InstallFailed {
-        tool: "osv-scanner",
-        detail: format!("failed to read download body: {e}"),
-    })?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| ProvisionError::InstallFailed {
+            tool: "osv-scanner",
+            detail: format!("failed to read download body: {e}"),
+        })?;
 
     // Write the binary to the destination path.
     tokio::fs::write(dest, &bytes).await?;
@@ -751,14 +758,12 @@ pub async fn ensure_osv_scanner(tooling: &Path) -> Result<PathBuf, ProvisionErro
 
     // Step (d): go install fallback.
     if interpreter_available("go").await {
-        let go_bin = go_install_osv_scanner().await.map_err(|e| {
-            ProvisionError::InstallFailed {
+        let go_bin = go_install_osv_scanner()
+            .await
+            .map_err(|e| ProvisionError::InstallFailed {
                 tool: "osv-scanner",
-                detail: format!(
-                    "prebuilt download failed and `go install` also failed: {e}"
-                ),
-            }
-        })?;
+                detail: format!("prebuilt download failed and `go install` also failed: {e}"),
+            })?;
         return Ok(go_bin);
     }
 
@@ -846,7 +851,10 @@ mod tests {
         .unwrap();
         assert_eq!(installed_major(&nm, "eslint"), Some(10));
         // The drifted major (10) does not equal the pinned major (9) → not "installed".
-        assert_ne!(installed_major(&nm, "eslint"), npm_pinned_major("eslint@^9"));
+        assert_ne!(
+            installed_major(&nm, "eslint"),
+            npm_pinned_major("eslint@^9")
+        );
         // A package with no package.json reads as absent.
         assert_eq!(installed_major(&nm, "nope"), None);
     }
@@ -1039,7 +1047,9 @@ mod tests {
         let bin_dir = venv.join("bin");
         tokio::fs::create_dir_all(&bin_dir).await.unwrap();
         let stub = bin_dir.join("semgrep");
-        tokio::fs::write(&stub, b"#!/bin/sh\nexit 0\n").await.unwrap();
+        tokio::fs::write(&stub, b"#!/bin/sh\nexit 0\n")
+            .await
+            .unwrap();
         // Make it executable.
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
@@ -1081,7 +1091,9 @@ mod tests {
         let bin_dir = ws.join("node_modules").join(".bin");
         tokio::fs::create_dir_all(&bin_dir).await.unwrap();
         let stub = bin_dir.join("eslint");
-        tokio::fs::write(&stub, b"#!/bin/sh\nexit 0\n").await.unwrap();
+        tokio::fs::write(&stub, b"#!/bin/sh\nexit 0\n")
+            .await
+            .unwrap();
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
             .await
@@ -1099,7 +1111,9 @@ mod tests {
         let bin_dir = venv.join("bin");
         tokio::fs::create_dir_all(&bin_dir).await.unwrap();
         let stub = bin_dir.join("semgrep");
-        tokio::fs::write(&stub, b"#!/bin/sh\nexit 1\n").await.unwrap();
+        tokio::fs::write(&stub, b"#!/bin/sh\nexit 1\n")
+            .await
+            .unwrap();
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
             .await
@@ -1130,7 +1144,9 @@ mod tests {
             let bin_dir = venv.join("bin");
             tokio::fs::create_dir_all(&bin_dir).await.unwrap();
             let stub = bin_dir.join("semgrep");
-            tokio::fs::write(&stub, b"#!/bin/sh\nexit 0\n").await.unwrap();
+            tokio::fs::write(&stub, b"#!/bin/sh\nexit 0\n")
+                .await
+                .unwrap();
             use std::os::unix::fs::PermissionsExt;
             tokio::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
                 .await
@@ -1155,7 +1171,9 @@ mod tests {
             let bin_dir = ws.join("node_modules").join(".bin");
             tokio::fs::create_dir_all(&bin_dir).await.unwrap();
             let stub = bin_dir.join("eslint");
-            tokio::fs::write(&stub, b"#!/bin/sh\nexit 0\n").await.unwrap();
+            tokio::fs::write(&stub, b"#!/bin/sh\nexit 0\n")
+                .await
+                .unwrap();
             use std::os::unix::fs::PermissionsExt;
             tokio::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
                 .await
@@ -1212,7 +1230,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let tooling = tmp.path().to_path_buf();
         let dir = osv_scanner_dir(&tooling);
-        assert!(dir.starts_with(&tooling), "osv-scanner dir must be inside tooling: {dir:?}");
+        assert!(
+            dir.starts_with(&tooling),
+            "osv-scanner dir must be inside tooling: {dir:?}"
+        );
     }
 
     #[test]
@@ -1220,9 +1241,15 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("osv-scanner");
         let bin = osv_scanner_bin(&dir);
-        assert!(bin.starts_with(&dir), "osv-scanner bin must be inside its dir: {bin:?}");
+        assert!(
+            bin.starts_with(&dir),
+            "osv-scanner bin must be inside its dir: {bin:?}"
+        );
         let name = bin.file_name().unwrap().to_str().unwrap();
-        assert!(name.starts_with("osv-scanner"), "binary name must start with osv-scanner: {name}");
+        assert!(
+            name.starts_with("osv-scanner"),
+            "binary name must start with osv-scanner: {name}"
+        );
     }
 
     // ── osv-scanner probe logic ───────────────────────────────────────────────
@@ -1243,7 +1270,9 @@ mod tests {
         let dir = tmp.path().join("osv-scanner");
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let bin = osv_scanner_bin(&dir);
-        tokio::fs::write(&bin, b"#!/bin/sh\nexit 0\n").await.unwrap();
+        tokio::fs::write(&bin, b"#!/bin/sh\nexit 0\n")
+            .await
+            .unwrap();
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
             .await
@@ -1258,7 +1287,9 @@ mod tests {
         let dir = tmp.path().join("osv-scanner");
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let bin = osv_scanner_bin(&dir);
-        tokio::fs::write(&bin, b"#!/bin/sh\nexit 1\n").await.unwrap();
+        tokio::fs::write(&bin, b"#!/bin/sh\nexit 1\n")
+            .await
+            .unwrap();
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
             .await
@@ -1276,7 +1307,9 @@ mod tests {
         let dir = osv_scanner_dir(&tooling);
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let bin = osv_scanner_bin(&dir);
-        tokio::fs::write(&bin, b"#!/bin/sh\nexit 0\n").await.unwrap();
+        tokio::fs::write(&bin, b"#!/bin/sh\nexit 0\n")
+            .await
+            .unwrap();
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
             .await
@@ -1285,7 +1318,11 @@ mod tests {
         assert!(r1.is_ok(), "first call must succeed: {r1:?}");
         let r2 = ensure_osv_scanner(&tooling).await;
         assert!(r2.is_ok(), "second call must succeed: {r2:?}");
-        assert_eq!(r1.unwrap(), r2.unwrap(), "both calls must return the same path");
+        assert_eq!(
+            r1.unwrap(),
+            r2.unwrap(),
+            "both calls must return the same path"
+        );
     }
 
     // ── download timeout bounds ───────────────────────────────────────────────
@@ -1322,11 +1359,7 @@ mod tests {
         // The whole attempt (including the connect_timeout) must complete within
         // 8 s (generous buffer above the 5 s connect-timeout).  If there is no
         // timeout on the client the request hangs indefinitely.
-        let result = tokio::time::timeout(
-            Duration::from_secs(8),
-            client.get(url).send(),
-        )
-        .await;
+        let result = tokio::time::timeout(Duration::from_secs(8), client.get(url).send()).await;
 
         // Either the outer timeout fired first (should not happen if connect_timeout
         // is wired up) or reqwest itself returned an error (connection refused or
@@ -1357,8 +1390,14 @@ mod tests {
         let asset = osv_release_asset();
         // On common platforms (linux amd64/arm64, darwin amd64/arm64) it must be Some.
         #[cfg(any(
-            all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")),
-            all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64"))
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ),
+            all(
+                target_os = "macos",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
         ))]
         assert!(
             asset.is_some(),

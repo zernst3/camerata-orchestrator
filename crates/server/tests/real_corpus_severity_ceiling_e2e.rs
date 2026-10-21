@@ -32,9 +32,7 @@
 
 use std::collections::HashMap;
 
-use camerata_server::onboard::{
-    AuditedRef, Finding, LanguageVolume, ScanProvenance, ScanReport,
-};
+use camerata_server::onboard::{AuditedRef, Finding, LanguageVolume, ScanProvenance, ScanReport};
 use camerata_server::report_export::{build_report_json, ReportOptions};
 
 /// Load the real shipped corpus, or `None` when it isn't checked out (mirrors the
@@ -129,7 +127,10 @@ fn exported_severities(
     proposed: &str,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> (Vec<String>, usize) {
-    let report = report_with(vec![finding(rule_id, "src/a.ts", 1, proposed)], vec![rule_id]);
+    let report = report_with(
+        vec![finding(rule_id, "src/a.ts", 1, proposed)],
+        vec![rule_id],
+    );
     let json = build_report_json(
         &report.seal(),
         &HashMap::new(),

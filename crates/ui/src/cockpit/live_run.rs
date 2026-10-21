@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// One selectable option on a structured clarification (mirrors the server's
 /// `ClarifyOption`): a label + a benefit/drawback description.
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
@@ -54,7 +53,9 @@ pub(super) async fn fetch_clarifications_for_story(story_id: &str) -> Vec<Clarif
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
-    resp.json::<Vec<ClarificationView>>().await.unwrap_or_default()
+    resp.json::<Vec<ClarificationView>>()
+        .await
+        .unwrap_or_default()
 }
 
 /// Fetch only the OPEN clarifications for a story (used as a story-authoring pause point).
@@ -73,13 +74,16 @@ pub(super) async fn fetch_all_open_clarifications() -> Vec<ClarificationView> {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
-    resp.json::<Vec<ClarificationView>>().await.unwrap_or_default()
+    resp.json::<Vec<ClarificationView>>()
+        .await
+        .unwrap_or_default()
 }
 
 /// Fetch all OPEN UoW (Governed Development) review escalations across every story — paused runs
 /// awaiting an Approve / Amend / Reject. Filters the shared escalation feed to UoW subjects.
 pub(super) async fn fetch_open_uow_escalations() -> Vec<crate::routines::EscalationView> {
-    let resp = match reqwest::get(format!("{}/api/escalations?open=true", crate::bff_base())).await {
+    let resp = match reqwest::get(format!("{}/api/escalations?open=true", crate::bff_base())).await
+    {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
@@ -100,7 +104,11 @@ pub(super) async fn answer_uow_escalation(
     action: &str,
 ) -> Option<crate::routines::EscalationView> {
     reqwest::Client::new()
-        .post(format!("{}/api/escalations/{}/answer", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/escalations/{}/answer",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({ "answer": answer, "action": action }))
         .send()
         .await
@@ -569,7 +577,11 @@ pub(super) fn NeedsYouQueue() -> Element {
 pub(super) fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
     let (status_label, status_cls) = run_status_badge(&run.status);
     let live = run.mode == "live";
-    let mode_label = if live { "live fleet" } else { "scripted · token-free" };
+    let mode_label = if live {
+        "live fleet"
+    } else {
+        "scripted · token-free"
+    };
     let sub = if live {
         "A real governed fleet (claude -p) under the gate. Stage and bounce events are reported as they happen."
     } else {
@@ -997,15 +1009,16 @@ mod render_tests {
     fn model_select_harness() -> Element {
         // AuditModelsResp / AuditModelOption don't derive Default, but both derive
         // Deserialize — build the fixture from JSON (the same wire shape the BFF sends).
-        let models: super::super::scan::AuditModelsResp = serde_json::from_value(serde_json::json!({
-            "models": [
-                { "label": "Claude Sonnet 5", "id": "claude-sonnet-5", "provider": "claude" },
-                { "label": "DeepSeek R1", "id": "deepseek-r1", "provider": "openrouter" }
-            ],
-            "default": "claude-sonnet-5",
-            "openrouter_fetched": true
-        }))
-        .expect("valid AuditModelsResp fixture");
+        let models: super::super::scan::AuditModelsResp =
+            serde_json::from_value(serde_json::json!({
+                "models": [
+                    { "label": "Claude Sonnet 5", "id": "claude-sonnet-5", "provider": "claude" },
+                    { "label": "DeepSeek R1", "id": "deepseek-r1", "provider": "openrouter" }
+                ],
+                "default": "claude-sonnet-5",
+                "openrouter_fetched": true
+            }))
+            .expect("valid AuditModelsResp fixture");
         rsx! {
             ModelSelectHarnessInner { models }
         }
@@ -1025,11 +1038,26 @@ mod render_tests {
         let mut vdom = VirtualDom::new(model_select_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("run-model-select"), "the <select> renders; html=\n{html}");
-        assert!(html.contains("Claude (subscription)"), "claude optgroup; html=\n{html}");
-        assert!(html.contains("OpenRouter"), "openrouter optgroup; html=\n{html}");
-        assert!(html.contains("Claude Sonnet 5"), "claude option label; html=\n{html}");
-        assert!(html.contains("DeepSeek R1"), "openrouter option label; html=\n{html}");
+        assert!(
+            html.contains("run-model-select"),
+            "the <select> renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("Claude (subscription)"),
+            "claude optgroup; html=\n{html}"
+        );
+        assert!(
+            html.contains("OpenRouter"),
+            "openrouter optgroup; html=\n{html}"
+        );
+        assert!(
+            html.contains("Claude Sonnet 5"),
+            "claude option label; html=\n{html}"
+        );
+        assert!(
+            html.contains("DeepSeek R1"),
+            "openrouter option label; html=\n{html}"
+        );
     }
 
     #[test]
@@ -1082,8 +1110,14 @@ mod render_tests {
         let mut vdom = VirtualDom::new(uow_panel_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("NEEDS YOUR REVIEW"), "the review badge; html=\n{html}");
-        assert!(html.contains("TEST-TAMPER-1"), "the rule/reason; html=\n{html}");
+        assert!(
+            html.contains("NEEDS YOUR REVIEW"),
+            "the review badge; html=\n{html}"
+        );
+        assert!(
+            html.contains("TEST-TAMPER-1"),
+            "the rule/reason; html=\n{html}"
+        );
         assert!(
             html.contains("The agent edited a test assertion."),
             "the stopped-for line; html=\n{html}"
@@ -1092,11 +1126,20 @@ mod render_tests {
             html.contains("Restore the original assertion."),
             "a suggestion renders; html=\n{html}"
         );
-        assert!(html.contains("A test assertion was weakened."), "the chat thread; html=\n{html}");
+        assert!(
+            html.contains("A test assertion was weakened."),
+            "the chat thread; html=\n{html}"
+        );
         // SSR HTML-escapes '&' to '&#38;', so assert on the stable class names + the unescaped
         // leading word rather than the literal "Approve & resume".
-        assert!(html.contains("uow-review-approve") && html.contains("Approve"), "approve action; html=\n{html}");
-        assert!(html.contains("uow-review-reject") && html.contains("Reject"), "reject action; html=\n{html}");
+        assert!(
+            html.contains("uow-review-approve") && html.contains("Approve"),
+            "approve action; html=\n{html}"
+        );
+        assert!(
+            html.contains("uow-review-reject") && html.contains("Reject"),
+            "reject action; html=\n{html}"
+        );
     }
 
     // ── Tier-1 render: RunProvenancePanel (needs the toast context) ─────────────
@@ -1117,7 +1160,10 @@ mod render_tests {
         let mut vdom = VirtualDom::new(provenance_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("PROVENANCE"), "the provenance heading; html=\n{html}");
+        assert!(
+            html.contains("PROVENANCE"),
+            "the provenance heading; html=\n{html}"
+        );
         assert!(
             html.contains("Sign off this run") || html.contains("Computing provenance"),
             "the sign-off affordance / pending branch renders; html=\n{html}"
@@ -1213,7 +1259,11 @@ mod tests {
         let open = super::fetch_open_clarifications_for_story("story-9").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(open.len(), 1, "only the unanswered clarification survives the filter");
+        assert_eq!(
+            open.len(),
+            1,
+            "only the unanswered clarification survives the filter"
+        );
         assert_eq!(open[0].id, "c1");
     }
 
@@ -1320,7 +1370,11 @@ mod tests {
         let uow = super::fetch_open_uow_escalations().await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(uow.len(), 1, "only the uow-subject escalation survives the filter");
+        assert_eq!(
+            uow.len(),
+            1,
+            "only the uow-subject escalation survives the filter"
+        );
         assert_eq!(uow[0].id, "e1");
         assert_eq!(uow[0].subject_kind, "uow");
     }
@@ -1461,7 +1515,9 @@ mod tests {
                 "free_text": "lean toward managed",
                 "answered_by": "you"
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -1495,7 +1551,9 @@ mod tests {
                 "free_text": null,
                 "answered_by": "you"
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -1504,7 +1562,10 @@ mod tests {
         let ok = super::answer_clarification("clar-5", vec!["Yes".to_string()], None).await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert!(ok, "a single-select answer with no free text posts free_text: null");
+        assert!(
+            ok,
+            "a single-select answer with no free text posts free_text: null"
+        );
     }
 
     // ── Tier-2: answer_clarification — a non-2xx response is reported as false ──

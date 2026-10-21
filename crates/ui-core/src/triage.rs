@@ -395,8 +395,10 @@ pub fn surface_counts(findings: &[FindingView]) -> [(KindSurface, usize); 4] {
 pub fn rules_on_multiple_surfaces(
     findings: &[FindingView],
 ) -> Vec<((String, String), Vec<KindSurface>)> {
-    let mut seen: std::collections::BTreeMap<(String, String), std::collections::BTreeSet<KindSurface>> =
-        std::collections::BTreeMap::new();
+    let mut seen: std::collections::BTreeMap<
+        (String, String),
+        std::collections::BTreeSet<KindSurface>,
+    > = std::collections::BTreeMap::new();
     for f in findings {
         seen.entry((f.repo.clone(), f.rule_id.clone()))
             .or_default()
@@ -1902,7 +1904,10 @@ mod tests {
         let e = f("r", 5, "low", "active");
         m.ignore(std::slice::from_ref(&b), "noise");
         m.move_to(std::slice::from_ref(&c), TriageState::TechDebt);
-        m.mark_false_positive(std::slice::from_ref(&d), "not exploitable — mocked in test scope");
+        m.mark_false_positive(
+            std::slice::from_ref(&d),
+            "not exploitable — mocked in test scope",
+        );
         m.confirm(std::slice::from_ref(&e));
         let all = vec![a, b, c, d, e];
         assert_eq!(
@@ -1929,7 +1934,10 @@ mod tests {
     fn mark_false_positive_sets_state_and_reason_together() {
         let mut m = TriageModel::new();
         let item = f("r", 1, "low", "active");
-        m.mark_false_positive(std::slice::from_ref(&item), "tool misfired on generated code");
+        m.mark_false_positive(
+            std::slice::from_ref(&item),
+            "tool misfired on generated code",
+        );
         let d = m.dispositions.get(&finding_key(&item)).expect("recorded");
         assert_eq!(d.state, TriageState::FalsePositive);
         assert_eq!(d.reason, "tool misfired on generated code");
@@ -1956,7 +1964,10 @@ mod tests {
         let mut m = TriageModel::new();
         let unresolved = f("r", 1, "high", "active");
         let fp = f("r", 2, "critical", "active");
-        m.mark_false_positive(std::slice::from_ref(&fp), "generated fixture, not real code");
+        m.mark_false_positive(
+            std::slice::from_ref(&fp),
+            "generated fixture, not real code",
+        );
         let all = vec![unresolved.clone(), fp.clone()];
 
         // Unresolved view excludes the false positive.
@@ -2017,8 +2028,14 @@ mod tests {
             back["kind"], "deviation",
             "the kind discriminator must survive into the view model and back out"
         );
-        assert_eq!(back["deviating_sites"], 2, "the deviation numerator must survive");
-        assert_eq!(back["assessed_sites"], 47, "the deviation denominator must survive");
+        assert_eq!(
+            back["deviating_sites"], 2,
+            "the deviation numerator must survive"
+        );
+        assert_eq!(
+            back["assessed_sites"], 47,
+            "the deviation denominator must survive"
+        );
         assert_eq!(back["convention_label"], "URI-versioned endpoints");
     }
 
@@ -2043,7 +2060,10 @@ mod tests {
             1,
             "the Queue must hold only the accusing kinds; got {} rows: {:?}",
             visible.len(),
-            visible.iter().map(|f| f.rule_id.clone()).collect::<Vec<_>>()
+            visible
+                .iter()
+                .map(|f| f.rule_id.clone())
+                .collect::<Vec<_>>()
         );
         assert_eq!(visible[0].rule_id, "SQL-INJECTION-1");
     }
@@ -2127,7 +2147,10 @@ mod tests {
     #[test]
     fn req_pass2_1_kind_tag_matches_the_wire_discriminator_for_every_kind() {
         assert_eq!(kind_tag(&defect("D", "high")), "defect");
-        assert_eq!(kind_tag(&deviation("V", "medium", 2, Some(47))), "deviation");
+        assert_eq!(
+            kind_tag(&deviation("V", "medium", 2, Some(47))),
+            "deviation"
+        );
         assert_eq!(kind_tag(&convention("C")), "convention_observed");
         assert_eq!(kind_tag(&no_convention("N")), "no_convention");
         assert_eq!(kind_tag(&not_assessed("A")), "not_assessed");
@@ -2165,10 +2188,16 @@ mod tests {
         assert_eq!(findings_on_surface(&all, KindSurface::Queue).len(), 3);
         let conventions = findings_on_surface(&all, KindSurface::Conventions);
         assert_eq!(
-            conventions.iter().map(|f| f.rule_id.clone()).collect::<Vec<_>>(),
+            conventions
+                .iter()
+                .map(|f| f.rule_id.clone())
+                .collect::<Vec<_>>(),
             vec!["C1", "C2"]
         );
-        assert_eq!(findings_on_surface(&all, KindSurface::NoConvention).len(), 1);
+        assert_eq!(
+            findings_on_surface(&all, KindSurface::NoConvention).len(),
+            1
+        );
         assert_eq!(findings_on_surface(&all, KindSurface::NotAssessed).len(), 1);
 
         let counts = surface_counts(&all);
@@ -2230,7 +2259,10 @@ mod tests {
     #[test]
     fn req_pass2_3_unspecified_rows_rank_ahead_of_defects_not_as_defects() {
         let m = TriageModel::new();
-        let out = m.visible(&[defect("A-DEFECT", "high"), unspecified("Z-UNMAPPED", "high")]);
+        let out = m.visible(&[
+            defect("A-DEFECT", "high"),
+            unspecified("Z-UNMAPPED", "high"),
+        ]);
         assert_eq!(
             out.iter().map(|f| f.rule_id.clone()).collect::<Vec<_>>(),
             vec!["Z-UNMAPPED", "A-DEFECT"]
@@ -2278,7 +2310,10 @@ mod tests {
             "medium"
         );
         // The bug being fixed, stated outright: the authored words alone are mis-ordered.
-        assert!("low" < "medium", "the raw authored words sort low above medium");
+        assert!(
+            "low" < "medium",
+            "the raw authored words sort low above medium"
+        );
     }
 
     /// req_pass2_8: ascending and descending are exact reverses of ONE ladder — a manual cut
@@ -2387,7 +2422,10 @@ mod tests {
 
         // The same rule emitting BOTH a convention row and deviating sites: impossible by the
         // pipeline's own contract, therefore a bug the UI must name.
-        let broken = vec![convention("API-VERSIONING-1"), deviation("API-VERSIONING-1", "medium", 2, Some(47))];
+        let broken = vec![
+            convention("API-VERSIONING-1"),
+            deviation("API-VERSIONING-1", "medium", 2, Some(47)),
+        ];
         let violations = rules_on_multiple_surfaces(&broken);
         assert_eq!(violations.len(), 1, "the conflicting rule must be reported");
         assert_eq!(violations[0].0 .1, "API-VERSIONING-1");
@@ -2549,7 +2587,11 @@ mod tests {
             kinded("LEGACY-1", "high", serde_json::json!({})),
             convention("ALREADY-GOOD-1"),
         ] {
-            assert!(deviation_headline(&f).is_none(), "{} has no headline", f.rule_id);
+            assert!(
+                deviation_headline(&f).is_none(),
+                "{} has no headline",
+                f.rule_id
+            );
             assert_eq!(
                 rule_group_label(&f),
                 f.rule_id,
@@ -2571,7 +2613,11 @@ mod tests {
         let b = deviation_labelled("NAMING-1", 5, None, "snake_case");
         let groups = deviation_groups(&[a1.clone(), defect("D", "high"), a2.clone(), b.clone()]);
 
-        assert_eq!(groups.len(), 2, "one group per deviation rule; the defect is not one");
+        assert_eq!(
+            groups.len(),
+            2,
+            "one group per deviation rule; the defect is not one"
+        );
         assert_eq!(groups[0].rule_id, "API-VERSIONING-1");
         assert_eq!(groups[0].row_count(), 2);
         assert_eq!(groups[0].label, rule_group_label(&a1));
@@ -2608,7 +2654,11 @@ mod tests {
         let other = defect("SQL-INJECTION-1", "critical");
         let all = vec![a1, a2, a3, other];
         let group = deviation_groups(&all).remove(0);
-        assert_eq!(group.row_count(), 3, "three distinct rows, no key collision");
+        assert_eq!(
+            group.row_count(),
+            3,
+            "three distinct rows, no key collision"
+        );
 
         // One act on the group — through the SHIPPED entry point, not a hand-rolled loop, so
         // this proves the product's own path rather than a convenient stand-in for it.
@@ -2664,7 +2714,11 @@ mod tests {
         let group = deviation_groups(std::slice::from_ref(&f)).remove(0);
         let mut m = TriageModel::new();
         for blank in ["", "   ", "\n\t "] {
-            assert_eq!(m.bulk_false_positive(&group, blank), None, "refused: {blank:?}");
+            assert_eq!(
+                m.bulk_false_positive(&group, blank),
+                None,
+                "refused: {blank:?}"
+            );
             assert!(m.dispositions.is_empty(), "and nothing was written");
             assert_eq!(m.state_of(&f), TriageState::Unresolved);
         }
@@ -2776,7 +2830,10 @@ mod tests {
         m.confirm(std::slice::from_ref(&item));
         let d = m.dispositions.get(&finding_key(&item)).expect("recorded");
         assert_eq!(d.state, TriageState::Confirmed);
-        assert_eq!(d.reason, "", "no reason was asked for and none was invented");
+        assert_eq!(
+            d.reason, "",
+            "no reason was asked for and none was invented"
+        );
     }
 
     /// req_pass2_10: `Confirmed` gets its own triage table, exactly like the other four.
@@ -2907,7 +2964,11 @@ mod tests {
         let other = defect("SQL-INJECTION-1", "critical");
         let all = vec![a1, a2, a3, other];
         let group = deviation_groups(&all).remove(0);
-        assert_eq!(group.row_count(), 3, "three distinct rows, no key collision");
+        assert_eq!(
+            group.row_count(),
+            3,
+            "three distinct rows, no key collision"
+        );
 
         // One act on the group, through the SHIPPED entry point.
         let mut bulk = TriageModel::new();
@@ -3043,7 +3104,11 @@ mod tests {
                   "consequence": true }
             ]
         }));
-        assert_eq!(f.also_locations.len(), 2, "both absorbed sites must reach the view model");
+        assert_eq!(
+            f.also_locations.len(),
+            2,
+            "both absorbed sites must reach the view model"
+        );
         assert_eq!(f.also_locations[0].path, "src/export.rs");
         assert_eq!(f.also_locations[0].line, 31);
         assert_eq!(f.also_locations[0].rule_id, "SQL-INJECTION-1");
@@ -3067,7 +3132,11 @@ mod tests {
             "repo": "r", "path": "p", "line": 1, "rule_id": "R",
             "severity": "high", "snippet": "s", "detail": ""
         }));
-        assert_eq!(site_count(&plain), 1, "an un-merged row is one site, never zero");
+        assert_eq!(
+            site_count(&plain),
+            1,
+            "an un-merged row is one site, never zero"
+        );
         let merged = finding(serde_json::json!({
             "repo": "r", "path": "p", "line": 1, "rule_id": "R",
             "severity": "high", "snippet": "s", "detail": "",
@@ -3118,7 +3187,9 @@ mod tests {
     #[test]
     fn req_pass2_11_focus_follows_the_row_itself_across_a_re_sort() {
         let before = keys(&["a", "b", "c", "d"]);
-        let c = RowCursor::new().resolve(&before).moved(&before, FocusMove::Down);
+        let c = RowCursor::new()
+            .resolve(&before)
+            .moved(&before, FocusMove::Down);
         assert_eq!(c.key(), Some("b"), "cursor-down from the first row");
         assert_eq!(c.index(), 1);
 
@@ -3139,7 +3210,9 @@ mod tests {
     #[test]
     fn req_pass2_11_focus_falls_to_the_row_that_took_its_place() {
         let before = keys(&["a", "b", "c"]);
-        let c = RowCursor::new().resolve(&before).moved(&before, FocusMove::Down);
+        let c = RowCursor::new()
+            .resolve(&before)
+            .moved(&before, FocusMove::Down);
         assert_eq!(c.key(), Some("b"));
         // `b` is confirmed and drops out of the Unresolved table.
         let after = keys(&["a", "c"]);
@@ -3204,7 +3277,11 @@ mod tests {
     fn req_pass2_11_arrow_movement_stops_at_both_ends() {
         let ks = keys(&["a", "b", "c"]);
         let top = RowCursor::new().resolve(&ks);
-        assert_eq!(top.moved(&ks, FocusMove::Up).key(), Some("a"), "no wrap at the top");
+        assert_eq!(
+            top.moved(&ks, FocusMove::Up).key(),
+            Some("a"),
+            "no wrap at the top"
+        );
         let bottom = top
             .moved(&ks, FocusMove::Down)
             .moved(&ks, FocusMove::Down)
@@ -3281,7 +3358,18 @@ mod tests {
     #[test]
     fn req_pass2_11_a_key_typed_into_the_reason_prompt_is_text_not_a_disposition() {
         let m = KeyMods::none();
-        for key in ["c", "C", "i", "I", "t", "T", "f", "F", "ArrowDown", "ArrowUp"] {
+        for key in [
+            "c",
+            "C",
+            "i",
+            "I",
+            "t",
+            "T",
+            "f",
+            "F",
+            "ArrowDown",
+            "ArrowUp",
+        ] {
             assert_eq!(
                 pane_command(PaneFocus::ReasonPrompt, key, m),
                 None,
@@ -3305,7 +3393,11 @@ mod tests {
     fn req_pass2_11_keys_do_nothing_while_focus_is_outside_the_pane() {
         let m = KeyMods::none();
         for key in ["c", "i", "t", "f", "ArrowDown", "ArrowUp"] {
-            assert_eq!(pane_command(PaneFocus::Elsewhere, key, m), None, "{key} outside the pane");
+            assert_eq!(
+                pane_command(PaneFocus::Elsewhere, key, m),
+                None,
+                "{key} outside the pane"
+            );
         }
     }
 
@@ -3315,9 +3407,18 @@ mod tests {
     #[test]
     fn req_pass2_11_modified_presses_are_never_dispositions() {
         for m in [
-            KeyMods { ctrl: true, ..KeyMods::none() },
-            KeyMods { alt: true, ..KeyMods::none() },
-            KeyMods { meta: true, ..KeyMods::none() },
+            KeyMods {
+                ctrl: true,
+                ..KeyMods::none()
+            },
+            KeyMods {
+                alt: true,
+                ..KeyMods::none()
+            },
+            KeyMods {
+                meta: true,
+                ..KeyMods::none()
+            },
         ] {
             for key in ["c", "i", "t", "f"] {
                 assert_eq!(
@@ -3328,7 +3429,14 @@ mod tests {
             }
         }
         assert_eq!(
-            pane_command(PaneFocus::Cursor, "c", KeyMods { shift: true, ..KeyMods::none() }),
+            pane_command(
+                PaneFocus::Cursor,
+                "c",
+                KeyMods {
+                    shift: true,
+                    ..KeyMods::none()
+                }
+            ),
             Some(PaneCommand::Dispose(TriageState::Confirmed)),
             "shift is how a capital C is typed, not a modifier that cancels it"
         );
@@ -3339,8 +3447,22 @@ mod tests {
     #[test]
     fn req_pass2_11_unclaimed_keys_produce_no_command() {
         let m = KeyMods::none();
-        for key in ["a", "x", "Tab", "Escape", "Enter", " ", "ArrowLeft", "ArrowRight", "1"] {
-            assert_eq!(pane_command(PaneFocus::Cursor, key, m), None, "{key} is not ours");
+        for key in [
+            "a",
+            "x",
+            "Tab",
+            "Escape",
+            "Enter",
+            " ",
+            "ArrowLeft",
+            "ArrowRight",
+            "1",
+        ] {
+            assert_eq!(
+                pane_command(PaneFocus::Cursor, key, m),
+                None,
+                "{key} is not ours"
+            );
         }
     }
 
@@ -3352,7 +3474,11 @@ mod tests {
         assert!(pane_keys_armed(PaneFocus::Cursor));
         assert!(!pane_keys_armed(PaneFocus::ReasonPrompt));
         assert!(!pane_keys_armed(PaneFocus::Elsewhere));
-        for focus in [PaneFocus::Cursor, PaneFocus::ReasonPrompt, PaneFocus::Elsewhere] {
+        for focus in [
+            PaneFocus::Cursor,
+            PaneFocus::ReasonPrompt,
+            PaneFocus::Elsewhere,
+        ] {
             assert_eq!(
                 pane_keys_armed(focus),
                 pane_command(focus, "c", KeyMods::none()).is_some(),
@@ -3436,7 +3562,11 @@ mod tests {
         let mut entry = m
             .dispose_with_undo(std::slice::from_ref(&f), TriageState::Confirmed, "", 1_000)
             .expect("Confirm needs no reason, so it is never refused");
-        assert_eq!(m.state_of(&f), TriageState::Confirmed, "applied immediately");
+        assert_eq!(
+            m.state_of(&f),
+            TriageState::Confirmed,
+            "applied immediately"
+        );
 
         assert_eq!(m.undo(&mut entry, 1_000 + 4_999), UndoOutcome::Reverted(1));
         assert_eq!(m.state_of(&f), TriageState::Unresolved, "and put back");
@@ -3457,8 +3587,15 @@ mod tests {
             UndoOutcome::WindowClosed,
             "five seconds exactly is already closed"
         );
-        assert_eq!(m.state_of(&f), TriageState::Confirmed, "the decision stands");
-        assert_eq!(m.undo(&mut entry, 1_000 + 60_000), UndoOutcome::WindowClosed);
+        assert_eq!(
+            m.state_of(&f),
+            TriageState::Confirmed,
+            "the decision stands"
+        );
+        assert_eq!(
+            m.undo(&mut entry, 1_000 + 60_000),
+            UndoOutcome::WindowClosed
+        );
         assert_eq!(m.state_of(&f), TriageState::Confirmed);
     }
 
@@ -3473,7 +3610,10 @@ mod tests {
             .expect("applied");
         assert!(entry.is_live(1_000));
         assert!(entry.is_live(5_999));
-        assert!(!entry.is_live(6_000), "the window closes exactly at +5000ms");
+        assert!(
+            !entry.is_live(6_000),
+            "the window closes exactly at +5000ms"
+        );
         assert_eq!(entry.remaining_ms(1_000), 5_000);
         assert_eq!(entry.remaining_ms(3_500), 2_500);
         assert_eq!(entry.remaining_ms(99_999), 0);
@@ -3498,7 +3638,10 @@ mod tests {
         assert_eq!(m.undo(&mut entry, 11_000), UndoOutcome::Reverted(1));
         let d = m.dispositions.get(&finding_key(&f)).expect("still present");
         assert_eq!(d.state, TriageState::Ignored);
-        assert_eq!(d.reason, "accepted: fixture-only path", "the audit trail comes back");
+        assert_eq!(
+            d.reason, "accepted: fixture-only path",
+            "the audit trail comes back"
+        );
         assert_eq!(d.bucket, TechDebtBucket::Now, "and so does the bucket");
     }
 
@@ -3548,7 +3691,8 @@ mod tests {
             let f = row("src/a.rs");
             let mut m = TriageModel::new();
             assert!(
-                m.dispose_with_undo(std::slice::from_ref(&f), state, "   ", 0).is_none(),
+                m.dispose_with_undo(std::slice::from_ref(&f), state, "   ", 0)
+                    .is_none(),
                 "{} with a blank reason must be refused",
                 state.label()
             );
@@ -3577,7 +3721,9 @@ mod tests {
             match state {
                 TriageState::Confirmed => via_button.confirm(std::slice::from_ref(&f)),
                 TriageState::Ignored => via_button.ignore(std::slice::from_ref(&f), reason),
-                TriageState::FalsePositive => via_button.mark_false_positive(std::slice::from_ref(&f), reason),
+                TriageState::FalsePositive => {
+                    via_button.mark_false_positive(std::slice::from_ref(&f), reason)
+                }
                 other => via_button.move_to(std::slice::from_ref(&f), other),
             }
             assert!(
@@ -3614,7 +3760,9 @@ mod tests {
     #[test]
     fn req_pass2_11_disposing_nothing_arms_no_undo() {
         let mut m = TriageModel::new();
-        assert!(m.dispose_with_undo(&[], TriageState::Confirmed, "", 0).is_none());
+        assert!(m
+            .dispose_with_undo(&[], TriageState::Confirmed, "", 0)
+            .is_none());
         assert!(m.dispositions.is_empty());
     }
 
@@ -3741,7 +3889,11 @@ mod tests {
         let h = rule_hub(&conv, "o/r", "SQL-STYLE-1").expect("present");
         assert_eq!(h.surface, KindSurface::Conventions);
         assert_eq!(h.convention_label.as_deref(), Some("Parameterized queries"));
-        assert!(h.outcome.contains("Parameterized queries"), "{:?}", h.outcome);
+        assert!(
+            h.outcome.contains("Parameterized queries"),
+            "{:?}",
+            h.outcome
+        );
 
         let none = vec![hub_row(
             "o/r",
@@ -3779,7 +3931,12 @@ mod tests {
     #[test]
     fn req_pass2_12_hub_surfaces_the_cross_surface_conflict_it_does_not_redecide_it() {
         let rows = vec![
-            hub_row("o/r", "DUP-1", "src/a.rs", serde_json::json!({"kind": "defect"})),
+            hub_row(
+                "o/r",
+                "DUP-1",
+                "src/a.rs",
+                serde_json::json!({"kind": "defect"}),
+            ),
             hub_row(
                 "o/r",
                 "DUP-1",
@@ -3816,9 +3973,24 @@ mod tests {
     #[test]
     fn req_pass2_12_hub_is_scoped_per_repo_like_the_invariant() {
         let rows = vec![
-            hub_row("o/a", "R-1", "src/a.rs", serde_json::json!({"kind": "defect"})),
-            hub_row("o/b", "R-1", "src/b.rs", serde_json::json!({"kind": "defect"})),
-            hub_row("o/b", "R-1", "src/c.rs", serde_json::json!({"kind": "defect"})),
+            hub_row(
+                "o/a",
+                "R-1",
+                "src/a.rs",
+                serde_json::json!({"kind": "defect"}),
+            ),
+            hub_row(
+                "o/b",
+                "R-1",
+                "src/b.rs",
+                serde_json::json!({"kind": "defect"}),
+            ),
+            hub_row(
+                "o/b",
+                "R-1",
+                "src/c.rs",
+                serde_json::json!({"kind": "defect"}),
+            ),
         ];
         assert_eq!(rule_hub(&rows, "o/a", "R-1").expect("present").row_count, 1);
         assert_eq!(rule_hub(&rows, "o/b", "R-1").expect("present").row_count, 2);
@@ -3829,7 +4001,12 @@ mod tests {
     /// the same conservation discipline §6 imposed on the detail pane.
     #[test]
     fn req_pass2_12_hub_counts_absorbed_sites_without_doubling_rows() {
-        let mut f = hub_row("o/r", "R-1", "src/a.rs", serde_json::json!({"kind": "defect"}));
+        let mut f = hub_row(
+            "o/r",
+            "R-1",
+            "src/a.rs",
+            serde_json::json!({"kind": "defect"}),
+        );
         f.also_locations = vec![
             MergedSiteView {
                 repo: "o/r".to_string(),
@@ -3950,7 +4127,11 @@ mod tests {
                 confidence_tag(r)
             );
         }
-        assert_eq!(vocab.len(), 4, "and nothing filterable that is never emitted");
+        assert_eq!(
+            vocab.len(),
+            4,
+            "and nothing filterable that is never emitted"
+        );
     }
 
     /// req_pass2_13 (§9.2): the on-demand reason prompt NAMES the disposition and the count.
@@ -3967,7 +4148,10 @@ mod tests {
         assert!(many.contains("False positive"), "{many}");
         assert!(many.contains("7 findings"), "{many}");
         for h in [&one, &many] {
-            assert!(h.contains("required"), "the invariant is stated up front; {h}");
+            assert!(
+                h.contains("required"),
+                "the invariant is stated up front; {h}"
+            );
         }
     }
 

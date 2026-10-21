@@ -23,7 +23,7 @@ use camerata_agent::post_story_hook::{PostStoryHook, StoryCompletion, StoryDocEm
 use camerata_persistence::{
     encode, ArtifactKind, ArtifactStore, EditActor, NewRevision, RevisionOp,
 };
-use camerata_worktracker::investigation::{DecisionRecord, DecisionOutcome, InvestigationArtifact};
+use camerata_worktracker::investigation::{DecisionOutcome, DecisionRecord, InvestigationArtifact};
 
 use crate::lifecycle::{TransitionError, UowStage, UowTransitions};
 
@@ -518,10 +518,12 @@ impl UowStore {
         // Decide Create vs Update by whether a prior revision exists. The actor is
         // derived from the freshest decision provenance: a set with any user-touched
         // decision is attributed to the user, else the AI.
-        let actor = if decisions
-            .iter()
-            .any(|d| matches!(d.outcome, DecisionOutcome::Approved | DecisionOutcome::Rejected { .. }))
-        {
+        let actor = if decisions.iter().any(|d| {
+            matches!(
+                d.outcome,
+                DecisionOutcome::Approved | DecisionOutcome::Rejected { .. }
+            )
+        }) {
             EditActor::User
         } else {
             EditActor::Ai
@@ -804,7 +806,9 @@ impl UowStore {
             uow.history.push(HistoryEntry {
                 ts: now.clone(),
                 kind: "authored".to_string(),
-                text: format!("Story authored with AI and published to the board: {work_item_story_id}"),
+                text: format!(
+                    "Story authored with AI and published to the board: {work_item_story_id}"
+                ),
             });
             uow.updated = now;
             uow.clone()
@@ -1018,12 +1022,7 @@ impl UowStore {
     /// Append one turn to the investigation/refinement agent chat transcript (3-phase
     /// doc §4). `role` is `"user"` or `"agent"`. Creates the UoW if needed. Returns the
     /// updated UoW. Persists.
-    pub fn append_investigation_chat(
-        &self,
-        story_id: &str,
-        role: &str,
-        text: &str,
-    ) -> UnitOfWork {
+    pub fn append_investigation_chat(&self, story_id: &str, role: &str, text: &str) -> UnitOfWork {
         let now = Self::now_rfc3339();
         let updated = {
             let mut map = self.mem.lock().expect("uow mutex poisoned");
@@ -1072,12 +1071,7 @@ impl UowStore {
 
     /// Append one turn to the development agent chat transcript (3-phase doc §5). `role`
     /// is `"user"` or `"agent"`. Creates the UoW if needed. Returns the updated UoW. Persists.
-    pub fn append_development_chat(
-        &self,
-        story_id: &str,
-        role: &str,
-        text: &str,
-    ) -> UnitOfWork {
+    pub fn append_development_chat(&self, story_id: &str, role: &str, text: &str) -> UnitOfWork {
         let now = Self::now_rfc3339();
         let updated = {
             let mut map = self.mem.lock().expect("uow mutex poisoned");
@@ -1294,9 +1288,7 @@ impl UowStore {
                 Err(e) => {
                     // Hook failure is non-fatal: the sign-off is already persisted.
                     // Log to stderr and continue.
-                    eprintln!(
-                        "[camerata] post-story doc hook failed for {story_id}: {e:#}"
-                    );
+                    eprintln!("[camerata] post-story doc hook failed for {story_id}: {e:#}");
                 }
             }
         }
@@ -1421,10 +1413,7 @@ impl UowStore {
     ///
     /// The `actor` recorded is derived from the note's own provenance so a
     /// `mark_reviewed` save is attributed to the architect and an authoring save to the AI.
-    pub fn set_investigation_note(
-        &self,
-        note: &InvestigationArtifact,
-    ) -> Option<i64> {
+    pub fn set_investigation_note(&self, note: &InvestigationArtifact) -> Option<i64> {
         let artifacts = self.artifacts.clone()?;
         let aid = investigation_artifact_id(&note.story_id);
         let payload = encode(note).ok()?;
@@ -1593,7 +1582,8 @@ impl UowStore {
     ) -> UnitOfWork {
         let now = Self::now_rfc3339();
         let has_critical = evidence.is_sign_off_blocked();
-        let summary = format!(
+        let summary =
+            format!(
             "SOC-2 evidence record attached for run {}: {} gate event(s), {} scoped finding(s){}.",
             evidence.run_id,
             evidence.history.len(),
@@ -1628,20 +1618,14 @@ impl UowStore {
     ///
     /// Asserts (debug only, BUG-10) that `provenance.total_bounces == provenance.deny_count`.
     /// Prefer [`GateProvenance::new`] over struct literals to prevent mismatches.
-    pub fn record_gate_provenance(
-        &self,
-        story_id: &str,
-        provenance: GateProvenance,
-    ) -> UnitOfWork {
+    pub fn record_gate_provenance(&self, story_id: &str, provenance: GateProvenance) -> UnitOfWork {
         // BUG-10: total_bounces and deny_count must be identical (same semantic; different
         // vocabulary). Assert in debug mode to catch callers that set them inconsistently.
         debug_assert_eq!(
-            provenance.total_bounces,
-            provenance.deny_count,
+            provenance.total_bounces, provenance.deny_count,
             "GateProvenance invariant violated: total_bounces ({}) != deny_count ({}). \
              Use GateProvenance::new() to build provenance records.",
-            provenance.total_bounces,
-            provenance.deny_count,
+            provenance.total_bounces, provenance.deny_count,
         );
         let now = Self::now_rfc3339();
         let summary = format!(
@@ -1686,7 +1670,11 @@ impl UowStore {
                     story_id: story_id.to_string(),
                     ..Default::default()
                 });
-            if let Some(pos) = uow.attachments.iter().position(|a| a.name == attachment.name) {
+            if let Some(pos) = uow
+                .attachments
+                .iter()
+                .position(|a| a.name == attachment.name)
+            {
                 uow.attachments[pos] = attachment;
             } else {
                 uow.attachments.push(attachment);
@@ -1954,9 +1942,7 @@ impl UowStore {
     /// design-status and design-delete endpoints to 404 non-design ids.
     pub fn get_design_root(&self, story_id: &str) -> Option<UnitOfWork> {
         let map = self.mem.lock().expect("uow mutex poisoned");
-        map.get(story_id)
-            .filter(|u| u.is_design_root)
-            .cloned()
+        map.get(story_id).filter(|u| u.is_design_root).cloned()
     }
 
     /// Set the Design-Canvas status (`"draft"` | `"published"` | `"archived"`) on a
@@ -2020,13 +2006,23 @@ mod tests {
     #[test]
     fn get_does_not_create_a_uow_for_an_unknown_id() {
         let store = UowStore::new();
-        assert!(store.get("typo/repo#999").is_none(), "unknown id yields None");
-        assert!(store.list().is_empty(), "a read must not have created a record");
+        assert!(
+            store.get("typo/repo#999").is_none(),
+            "unknown id yields None"
+        );
+        assert!(
+            store.list().is_empty(),
+            "a read must not have created a record"
+        );
 
         // A real create is still found by get.
         store.get_or_create("me/api#1");
         assert!(store.get("me/api#1").is_some());
-        assert_eq!(store.list().len(), 1, "only the explicitly-created UoW exists");
+        assert_eq!(
+            store.list().len(),
+            1,
+            "only the explicitly-created UoW exists"
+        );
     }
 
     /// ROUTES-8: `get_or_default` returns a transient (story_id-stamped) UoW for an unknown
@@ -2036,13 +2032,22 @@ mod tests {
     fn get_or_default_returns_transient_without_persisting() {
         let store = UowStore::new();
         let uow = store.get_or_default("ghost/repo#7");
-        assert_eq!(uow.story_id, "ghost/repo#7", "story_id is stamped on the default");
+        assert_eq!(
+            uow.story_id, "ghost/repo#7",
+            "story_id is stamped on the default"
+        );
         assert_eq!(uow.dev_status, DevStatus::New);
         assert!(uow.attachments.is_empty());
         assert!(uow.diagram.is_none());
         // Crucially: nothing was persisted.
-        assert!(store.get("ghost/repo#7").is_none(), "the default must not be stored");
-        assert!(store.list().is_empty(), "list stays empty after a get_or_default read");
+        assert!(
+            store.get("ghost/repo#7").is_none(),
+            "the default must not be stored"
+        );
+        assert!(
+            store.list().is_empty(),
+            "list stays empty after a get_or_default read"
+        );
     }
 
     /// ROUTES-8: `decisions_for` (a read, called by the decisions-review GET) must not
@@ -2078,8 +2083,7 @@ mod tests {
         assert_eq!(beta[0].story_id, "other/beta#7");
 
         // A project with both repos sees both repos' UoWs but never the draft.
-        let both = store
-            .list_for_repos(&["acme/alpha".to_string(), "other/beta".to_string()]);
+        let both = store.list_for_repos(&["acme/alpha".to_string(), "other/beta".to_string()]);
         assert_eq!(both.len(), 3);
         assert!(both.iter().all(|u| u.story_id != "CAM-DRAFT"));
 
@@ -2167,10 +2171,17 @@ mod tests {
             assert_eq!(uow.pr_number, None);
             assert_eq!(uow.pr_url, None);
             // Set the PR; flush-on-set writes it to disk.
-            store.set_pr("o/r#7", Some(42), Some("https://github.com/o/r/pull/42".to_string()));
+            store.set_pr(
+                "o/r#7",
+                Some(42),
+                Some("https://github.com/o/r/pull/42".to_string()),
+            );
             let after = store.get_or_create("o/r#7");
             assert_eq!(after.pr_number, Some(42));
-            assert_eq!(after.pr_url.as_deref(), Some("https://github.com/o/r/pull/42"));
+            assert_eq!(
+                after.pr_url.as_deref(),
+                Some("https://github.com/o/r/pull/42")
+            );
         }
 
         // A fresh store reading the same file rehydrates the PR fields (persisted).
@@ -2299,7 +2310,10 @@ mod tests {
         store.set_decisions("S-3", vec![pending_decision("S-3", "a")]);
         let err = store.start_development("S-3").unwrap_err();
         assert!(matches!(err, TransitionError::DecisionsNotApproved { .. }));
-        assert_eq!(store.get_or_create("S-3").stage, UowStage::DecisionsApproved);
+        assert_eq!(
+            store.get_or_create("S-3").stage,
+            UowStage::DecisionsApproved
+        );
 
         // Re-approve and the gate opens.
         store.set_decisions("S-3", vec![approved_decision("S-3", "a")]);
@@ -2360,8 +2374,13 @@ mod tests {
 
     // ── Evidence (issue #53) ────────────────────────────────────────────────────
 
-    fn make_evidence_record(story: &str, run: &str, has_critical: bool) -> crate::evidence::UowEvidenceRecord {
-        let mut record = crate::evidence::UowEvidenceRecord::new(story, run, "2026-06-20T00:00:00Z");
+    fn make_evidence_record(
+        story: &str,
+        run: &str,
+        has_critical: bool,
+    ) -> crate::evidence::UowEvidenceRecord {
+        let mut record =
+            crate::evidence::UowEvidenceRecord::new(story, run, "2026-06-20T00:00:00Z");
         record.set_scoped_scan(crate::evidence::ScopedScanSummary {
             files_scanned: 1,
             total_findings: if has_critical { 1 } else { 0 },
@@ -2384,8 +2403,10 @@ mod tests {
         assert_eq!(stored.story_id, "S-ev-1");
 
         // Appended to history.
-        assert!(uow.history.iter().any(|h| h.kind == "evidence"),
-            "attach_evidence must append a history entry with kind='evidence'");
+        assert!(
+            uow.history.iter().any(|h| h.kind == "evidence"),
+            "attach_evidence must append a history entry with kind='evidence'"
+        );
     }
 
     #[test]
@@ -2401,7 +2422,10 @@ mod tests {
         let store = UowStore::new();
         let evidence = make_evidence_record("S-ev-3", "run-1", false);
         let uow = store.attach_evidence("S-ev-3", evidence);
-        assert!(!uow.is_sign_off_blocked(), "non-critical evidence must not block sign-off");
+        assert!(
+            !uow.is_sign_off_blocked(),
+            "non-critical evidence must not block sign-off"
+        );
     }
 
     #[test]
@@ -2409,7 +2433,10 @@ mod tests {
         let store = UowStore::new();
         let evidence = make_evidence_record("S-ev-4", "run-1", true);
         let uow = store.attach_evidence("S-ev-4", evidence);
-        assert!(uow.is_sign_off_blocked(), "critical evidence must block sign-off");
+        assert!(
+            uow.is_sign_off_blocked(),
+            "critical evidence must block sign-off"
+        );
     }
 
     #[test]
@@ -2417,7 +2444,9 @@ mod tests {
         let store = UowStore::new();
         let evidence = make_evidence_record("S-ev-5", "run-42", true);
         let uow = store.attach_evidence("S-ev-5", evidence);
-        let entry = uow.history.iter()
+        let entry = uow
+            .history
+            .iter()
             .find(|h| h.kind == "evidence")
             .expect("evidence history entry");
         assert!(
@@ -2451,7 +2480,10 @@ mod tests {
 
         // A subsequent get must see the same evidence.
         let uow = store.get_or_create("S-ev-7");
-        assert!(uow.evidence.is_some(), "evidence must survive get_or_create round-trip");
+        assert!(
+            uow.evidence.is_some(),
+            "evidence must survive get_or_create round-trip"
+        );
         assert_eq!(uow.evidence.unwrap().run_id, "run-99");
     }
 
@@ -2473,7 +2505,10 @@ mod tests {
         {
             let uow = store.get_or_create("S-bug9");
             let ev = uow.evidence.as_ref().expect("evidence must be attached");
-            assert!(ev.sign_off.is_none(), "evidence must not have sign-off before sign_off() call");
+            assert!(
+                ev.sign_off.is_none(),
+                "evidence must not have sign-off before sign_off() call"
+            );
         }
 
         // Sign off.
@@ -2481,7 +2516,10 @@ mod tests {
 
         // The durable evidence record must NOW carry the sign-off (BUG-9 fix).
         let uow = store.get_or_create("S-bug9");
-        let ev = uow.evidence.as_ref().expect("evidence must still be present after sign-off");
+        let ev = uow
+            .evidence
+            .as_ref()
+            .expect("evidence must still be present after sign-off");
         assert!(
             ev.sign_off.is_some(),
             "BUG-9: durable evidence record must include sign-off after UowStore::sign_off; \
@@ -2503,9 +2541,15 @@ mod tests {
     fn bug9_sign_off_without_evidence_still_works() {
         let store = UowStore::new();
         let uow = store.sign_off("S-bug9b", "alice", "run-2", None);
-        assert!(uow.sign_off.is_some(), "sign_off must be set even when no evidence record exists");
+        assert!(
+            uow.sign_off.is_some(),
+            "sign_off must be set even when no evidence record exists"
+        );
         // No evidence → evidence field remains None; no crash.
-        assert!(uow.evidence.is_none(), "evidence must remain None when never attached");
+        assert!(
+            uow.evidence.is_none(),
+            "evidence must remain None when never attached"
+        );
     }
 
     // ── BUG-10 regression: GateProvenance invariant ─────────────────────────────
@@ -2523,16 +2567,25 @@ mod tests {
         let store = UowStore::new();
 
         // No UoW yet — not blocked.
-        assert!(!store.is_sign_off_blocked("S-bug12"), "absent UoW is never blocked");
+        assert!(
+            !store.is_sign_off_blocked("S-bug12"),
+            "absent UoW is never blocked"
+        );
 
         // UoW exists but no evidence — not blocked.
         store.get_or_create("S-bug12");
-        assert!(!store.is_sign_off_blocked("S-bug12"), "UoW without evidence is not blocked");
+        assert!(
+            !store.is_sign_off_blocked("S-bug12"),
+            "UoW without evidence is not blocked"
+        );
 
         // Attach non-critical evidence — still not blocked.
         let non_crit = make_evidence_record("S-bug12", "run-1", false);
         store.attach_evidence("S-bug12", non_crit);
-        assert!(!store.is_sign_off_blocked("S-bug12"), "non-critical evidence must not block");
+        assert!(
+            !store.is_sign_off_blocked("S-bug12"),
+            "non-critical evidence must not block"
+        );
 
         // Replace with critical evidence — now blocked.
         let crit = make_evidence_record("S-bug12", "run-2", true);
@@ -2658,9 +2711,9 @@ mod artifact_store_tests {
 
         // Approved in the store: gate opens (read THROUGH the store).
         store.set_decisions("CAM-300", vec![approved("CAM-300", "a")]);
-        assert!(decisions_approved_for_development(&store.decisions_for(
-            "CAM-300"
-        )));
+        assert!(decisions_approved_for_development(
+            &store.decisions_for("CAM-300")
+        ));
         let uow = store
             .approve_decisions("CAM-300")
             .expect("gate satisfied via store");
@@ -2964,7 +3017,10 @@ mod post_story_hook_tests {
 
         let tech = StoryDocEmitter::technical_path(dir.path(), "CAM-G2");
         let guide = StoryDocEmitter::user_path(dir.path(), "CAM-G2");
-        assert!(tech.exists(), "selected default must emit the technical doc");
+        assert!(
+            tech.exists(),
+            "selected default must emit the technical doc"
+        );
         assert!(guide.exists(), "selected default must emit the user guide");
         assert!(
             uow.history
@@ -3067,14 +3123,18 @@ mod post_story_hook_tests {
 
         store.sign_off("CAM-H5", "zach", "run-h5", None);
 
-        let content = std::fs::read_to_string(
-            StoryDocEmitter::technical_path(dir.path(), "CAM-H5"),
-        )
-        .unwrap();
+        let content =
+            std::fs::read_to_string(StoryDocEmitter::technical_path(dir.path(), "CAM-H5")).unwrap();
         assert!(content.contains("CAM-H5"), "story id in technical doc");
-        assert!(content.contains("Some decision"), "decision label in technical doc");
+        assert!(
+            content.contains("Some decision"),
+            "decision label in technical doc"
+        );
         // Run summary derived from gate provenance.
-        assert!(content.contains("run-h5"), "run id in technical doc summary");
+        assert!(
+            content.contains("run-h5"),
+            "run id in technical doc summary"
+        );
     }
 }
 
@@ -3150,9 +3210,7 @@ mod concurrency_regression_tests {
     #[tokio::test]
     async fn bug_uow1_current_thread_runtime_degrades_gracefully_not_silently() {
         // Build the store while inside the current-thread tokio runtime.
-        let sqlite = SqliteStore::open("sqlite::memory:")
-            .await
-            .expect("sqlite");
+        let sqlite = SqliteStore::open("sqlite::memory:").await.expect("sqlite");
         let artifacts: Arc<dyn ArtifactStore> = Arc::new(sqlite);
         let store = UowStore::new().with_artifacts(artifacts);
 
@@ -3167,8 +3225,15 @@ mod concurrency_regression_tests {
                 .map(|u| u.decisions.clone())
                 .unwrap_or_default()
         };
-        assert_eq!(inline.len(), 1, "inline cache must hold the decision even when store write degrades");
-        assert!(!inline[0].needs_review(), "decision outcome preserved in inline cache");
+        assert_eq!(
+            inline.len(),
+            1,
+            "inline cache must hold the decision even when store write degrades"
+        );
+        assert!(
+            !inline[0].needs_review(),
+            "decision outcome preserved in inline cache"
+        );
     }
 
     // ── BUG-UOW-2 ───────────────────────────────────────────────────────────────
@@ -3226,10 +3291,16 @@ mod concurrency_regression_tests {
         // doesn't panic.
         let result = store.decisions_for("BUG-UOW-2");
         // Store holds the pending version (it was the last set_decisions call).
-        assert_eq!(result.len(), 1, "BUG-UOW-2: decisions_for returns store value");
-        assert!(result[0].needs_review(),
+        assert_eq!(
+            result.len(),
+            1,
+            "BUG-UOW-2: decisions_for returns store value"
+        );
+        assert!(
+            result[0].needs_review(),
             "BUG-UOW-2: store-authoritative pending decision returned; \
-             concurrent write is not silently reverted to a STALE inline snapshot");
+             concurrent write is not silently reverted to a STALE inline snapshot"
+        );
     }
 
     // ── BUG-UOW-3 ───────────────────────────────────────────────────────────────
@@ -3275,8 +3346,15 @@ mod concurrency_regression_tests {
 
         // Verify the hook received the frozen snapshot from sign-off time.
         let received = captured.lock().unwrap().clone().expect("hook must fire");
-        assert_eq!(received.len(), 1, "BUG-UOW-3: hook receives exactly the sign-off-time decisions");
-        assert!(!received[0].needs_review(), "BUG-UOW-3: decision from sign-off time is approved");
+        assert_eq!(
+            received.len(),
+            1,
+            "BUG-UOW-3: hook receives exactly the sign-off-time decisions"
+        );
+        assert!(
+            !received[0].needs_review(),
+            "BUG-UOW-3: decision from sign-off time is approved"
+        );
 
         // Now mutate decisions AFTER sign-off.
         store.set_decisions("BUG-UOW-3", vec![pending("BUG-UOW-3", "post-sign-off")]);
@@ -3332,7 +3410,11 @@ mod concurrency_regression_tests {
 
         // First decisions_for: triggers hydrate + single store read (no second read).
         let result = store.decisions_for("BUG-UOW-4");
-        assert_eq!(result.len(), 1, "BUG-UOW-4: decisions_for returns the seeded decision");
+        assert_eq!(
+            result.len(),
+            1,
+            "BUG-UOW-4: decisions_for returns the seeded decision"
+        );
         assert!(!result[0].needs_review(), "BUG-UOW-4: decision is approved");
 
         // Hydrate must have seeded exactly ONE revision (not two from a double write).
@@ -3417,7 +3499,10 @@ mod concurrency_regression_tests {
         // A second turn appends without clobbering the requirements prompt.
         let updated = store.append_authoring_turn(&id, "Columns: a, b", "Updated.", "T2", "B2");
         let st = updated.authoring.unwrap();
-        assert_eq!(st.requirements_prompt, "Build a CSV export", "prompt unchanged");
+        assert_eq!(
+            st.requirements_prompt, "Build a CSV export",
+            "prompt unchanged"
+        );
         assert_eq!(st.chat.len(), 4);
         assert_eq!(st.draft_title, "T2");
     }
@@ -3457,7 +3542,10 @@ mod concurrency_regression_tests {
             story_id: "draft-x".to_string(),
             authoring: Some(AuthoringState {
                 requirements_prompt: "r".into(),
-                chat: vec![AuthorChatMessage { role: "user".into(), text: "t".into() }],
+                chat: vec![AuthorChatMessage {
+                    role: "user".into(),
+                    text: "t".into(),
+                }],
                 draft_title: "dt".into(),
                 draft_body: "db".into(),
             }),
@@ -3601,11 +3689,14 @@ mod concurrency_regression_tests {
     #[test]
     fn remove_attachment_is_idempotent() {
         let store = UowStore::new();
-        store.add_attachment("S-2", UowAttachment {
-            name: "mockup.html".to_string(),
-            mime: "text/html".to_string(),
-            content: "<html></html>".to_string(),
-        });
+        store.add_attachment(
+            "S-2",
+            UowAttachment {
+                name: "mockup.html".to_string(),
+                mime: "text/html".to_string(),
+                content: "<html></html>".to_string(),
+            },
+        );
         let after_remove = store.remove_attachment("S-2", "mockup.html");
         assert!(after_remove.attachments.is_empty(), "attachment removed");
 
@@ -3622,7 +3713,10 @@ mod concurrency_regression_tests {
     fn attachments_default_empty_on_normal_uow() {
         let store = UowStore::new();
         let uow = store.get_or_create("acme/repo#55");
-        assert!(uow.attachments.is_empty(), "normal UoW has no attachments by default");
+        assert!(
+            uow.attachments.is_empty(),
+            "normal UoW has no attachments by default"
+        );
     }
 
     #[test]
@@ -3633,7 +3727,10 @@ mod concurrency_regression_tests {
         assert_eq!(uow.diagram.as_deref(), Some("graph TD\n  A-->B"));
         // Replace with a new diagram.
         let uow2 = store.set_diagram(id, "sequenceDiagram\n  A->>B: hi".to_string());
-        assert_eq!(uow2.diagram.as_deref(), Some("sequenceDiagram\n  A->>B: hi"));
+        assert_eq!(
+            uow2.diagram.as_deref(),
+            Some("sequenceDiagram\n  A->>B: hi")
+        );
     }
 
     #[test]
@@ -3652,7 +3749,10 @@ mod concurrency_regression_tests {
     fn diagram_defaults_none_on_normal_uow() {
         let store = UowStore::new();
         let uow = store.get_or_create("acme/repo#77");
-        assert!(uow.diagram.is_none(), "normal UoW has no diagram by default");
+        assert!(
+            uow.diagram.is_none(),
+            "normal UoW has no diagram by default"
+        );
     }
 
     // ── Design-tree tests ──────────────────────────────────────────────────────
@@ -3661,11 +3761,8 @@ mod concurrency_regression_tests {
     fn design_node_fields_default_and_round_trip() {
         let store = UowStore::new();
         // A design root node: node_type set, no draft_parent_id.
-        let root = store.create_blank_design(
-            Some("Epic".to_string()),
-            None,
-            Some("proj-1".to_string()),
-        );
+        let root =
+            store.create_blank_design(Some("Epic".to_string()), None, Some("proj-1".to_string()));
         assert!(root.story_id.starts_with("draft-"), "draft id");
         assert_eq!(root.node_type.as_deref(), Some("Epic"));
         assert!(root.draft_parent_id.is_none());
@@ -3680,7 +3777,10 @@ mod concurrency_regression_tests {
             Some(root.story_id.clone()),
             Some("proj-1".to_string()),
         );
-        assert_eq!(child.draft_parent_id.as_deref(), Some(root.story_id.as_str()));
+        assert_eq!(
+            child.draft_parent_id.as_deref(),
+            Some(root.story_id.as_str())
+        );
 
         // New fields default to None / empty on a normal (non-design) UoW.
         let normal = store.get_or_create("acme/repo#42");
@@ -3716,7 +3816,10 @@ mod concurrency_regression_tests {
             body: String::new(),
         }];
         let updated2 = store.set_proposed_children(&root.story_id, single.clone());
-        assert_eq!(updated2.proposed_children, single, "set replaces, not appends");
+        assert_eq!(
+            updated2.proposed_children, single,
+            "set replaces, not appends"
+        );
     }
 
     #[test]
@@ -3746,9 +3849,18 @@ mod concurrency_regression_tests {
         assert_eq!(tree[0].story_id, root.story_id, "root is first");
 
         // Children appear before grandchild (BFS ordering).
-        let pos_child_a = tree.iter().position(|u| u.story_id == child_a.story_id).unwrap();
-        let pos_child_b = tree.iter().position(|u| u.story_id == child_b.story_id).unwrap();
-        let pos_grandchild = tree.iter().position(|u| u.story_id == grandchild.story_id).unwrap();
+        let pos_child_a = tree
+            .iter()
+            .position(|u| u.story_id == child_a.story_id)
+            .unwrap();
+        let pos_child_b = tree
+            .iter()
+            .position(|u| u.story_id == child_b.story_id)
+            .unwrap();
+        let pos_grandchild = tree
+            .iter()
+            .position(|u| u.story_id == grandchild.story_id)
+            .unwrap();
         assert!(pos_child_a < pos_grandchild, "child_a before grandchild");
         assert!(pos_child_b < pos_grandchild, "child_b before grandchild");
     }
@@ -3792,7 +3904,10 @@ mod concurrency_regression_tests {
         assert!(ids.contains(&root.story_id.as_str()), "root survives");
         assert!(ids.contains(&sibling.story_id.as_str()), "sibling survives");
         assert!(!ids.contains(&child.story_id.as_str()), "child removed");
-        assert!(!ids.contains(&grandchild.story_id.as_str()), "grandchild removed");
+        assert!(
+            !ids.contains(&grandchild.story_id.as_str()),
+            "grandchild removed"
+        );
     }
 
     #[test]
@@ -3810,7 +3925,11 @@ mod concurrency_regression_tests {
         // A root (no draft_parent_id) is marked + defaults to draft status.
         let root = store.create_blank_design(Some("Epic".to_string()), None, Some("p".to_string()));
         assert!(root.is_design_root, "root is marked");
-        assert_eq!(root.design_status.as_deref(), Some("draft"), "default status");
+        assert_eq!(
+            root.design_status.as_deref(),
+            Some("draft"),
+            "default status"
+        );
 
         // A child (has draft_parent_id) is NOT a root and carries no status.
         let child = store.create_blank_design(
@@ -3845,10 +3964,17 @@ mod concurrency_regression_tests {
 
         let roots = store.list_design_roots_for_project("p1");
         let ids: Vec<&str> = roots.iter().map(|u| u.story_id.as_str()).collect();
-        assert_eq!(roots.len(), 2, "only the two p1 roots (no child, no plain, no p2)");
+        assert_eq!(
+            roots.len(),
+            2,
+            "only the two p1 roots (no child, no plain, no p2)"
+        );
         assert!(ids.contains(&r1.story_id.as_str()));
         assert!(ids.contains(&r2.story_id.as_str()));
-        assert!(!ids.contains(&r_other.story_id.as_str()), "other project excluded");
+        assert!(
+            !ids.contains(&r_other.story_id.as_str()),
+            "other project excluded"
+        );
     }
 
     #[test]
@@ -3872,7 +3998,9 @@ mod concurrency_regression_tests {
             Some(root.story_id.clone()),
             Some("p".to_string()),
         );
-        assert!(store.set_design_status(&child.story_id, "published").is_none());
+        assert!(store
+            .set_design_status(&child.story_id, "published")
+            .is_none());
         // Unknown id also returns None.
         assert!(store.set_design_status("draft-nope", "draft").is_none());
     }

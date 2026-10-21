@@ -314,25 +314,27 @@ struct ProjectContextLite {
 /// Returns `(project_name, scan_section, selected_rules_section, ruleset_summary)`
 /// where each is `None` when absent/empty. Silently degrades: all are `None`
 /// when the endpoint is unreachable or there is no active project.
-async fn fetch_project_context_sections(
-) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
-    let ctx: ProjectContextLite = match reqwest::get(format!(
-        "{}/api/projects/active/context",
-        crate::bff_base()
-    ))
-    .await
-    .ok()
-    .and_then(|r| {
-        // reqwest::Response::json is async; block via a small sync parse.
-        // We're already inside an async context so we just await below.
-        Some(r)
-    }) {
-        Some(r) => match r.json::<ProjectContextLite>().await {
-            Ok(v) => v,
-            Err(_) => return (None, None, None, None),
-        },
-        None => return (None, None, None, None),
-    };
+async fn fetch_project_context_sections() -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let ctx: ProjectContextLite =
+        match reqwest::get(format!("{}/api/projects/active/context", crate::bff_base()))
+            .await
+            .ok()
+            .and_then(|r| {
+                // reqwest::Response::json is async; block via a small sync parse.
+                // We're already inside an async context so we just await below.
+                Some(r)
+            }) {
+            Some(r) => match r.json::<ProjectContextLite>().await {
+                Ok(v) => v,
+                Err(_) => return (None, None, None, None),
+            },
+            None => return (None, None, None, None),
+        };
     if !ctx.ok {
         return (None, None, None, None);
     }
@@ -558,9 +560,7 @@ pub(crate) fn unified_system_prompt(
     // that exist. Always rendered (absence is meaningful): an empty body must
     // read as an explicit NONE so the model never infers the governing rules
     // from the Layer 2 catalog.
-    p.push_str(
-        "=== LAYER 3e: PROJECT RULESET (committed rules governing this project) ===\n",
-    );
+    p.push_str("=== LAYER 3e: PROJECT RULESET (committed rules governing this project) ===\n");
     match project_ruleset_section {
         Some(sec) if !sec.trim().is_empty() => p.push_str(sec),
         _ => p.push_str(
@@ -671,7 +671,11 @@ async fn fetch_models() -> Option<ModelsResp> {
             } else {
                 format!("{}  {}", e.display, parts.join(" · "))
             };
-            ModelOption { label, id: e.id, provider: e.provider }
+            ModelOption {
+                label,
+                id: e.id,
+                provider: e.provider,
+            }
         })
         .collect();
 
@@ -683,7 +687,11 @@ async fn fetch_models() -> Option<ModelsResp> {
         .unwrap_or_default();
 
     // `backend` not returned by the registry endpoint; leave empty (shown only when non-empty).
-    Some(ModelsResp { models, default, backend: String::new() })
+    Some(ModelsResp {
+        models,
+        default,
+        backend: String::new(),
+    })
 }
 
 /// The subset of `GET /api/settings` the chat selector needs: the APP-LEVEL (cross-project)
@@ -1450,7 +1458,9 @@ mod tests {
             .and(body_json(
                 serde_json::json!({ "kind": "decision", "text": "A durable learning." }),
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -1486,20 +1496,31 @@ mod tests {
                     { "role": "assistant", "content": "hello" },
                 ],
             })))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "text": "It is blocked on the gate.", "backend": "cli" })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "text": "It is blocked on the gate.", "backend": "cli" }),
+            ))
             .expect(1)
             .mount(&server)
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
         let history = vec![
-            super::ChatHistoryTurn { role: "user", content: "hi".to_string() },
-            super::ChatHistoryTurn { role: "assistant", content: "hello".to_string() },
+            super::ChatHistoryTurn {
+                role: "user",
+                content: "hi".to_string(),
+            },
+            super::ChatHistoryTurn {
+                role: "assistant",
+                content: "hello".to_string(),
+            },
         ];
-        let res = super::send_chat("What is CAM-1 blocked on?", "claude-opus-5", "SYS PROMPT", history).await;
+        let res = super::send_chat(
+            "What is CAM-1 blocked on?",
+            "claude-opus-5",
+            "SYS PROMPT",
+            history,
+        )
+        .await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         let resp = res.expect("2xx with a valid ChatResp body parses");
@@ -1520,7 +1541,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/chat"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("claude CLI exited 1: rate limited"))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_string("claude CLI exited 1: rate limited"),
+            )
             .mount(&server)
             .await;
 
@@ -1529,7 +1552,10 @@ mod tests {
         std::env::remove_var("CAMERATA_BFF_URL");
 
         let err = res.expect_err("a 500 must be an Err");
-        assert!(err.contains("500"), "error must include the status; got: {err}");
+        assert!(
+            err.contains("500"),
+            "error must include the status; got: {err}"
+        );
         assert!(
             err.contains("claude CLI exited 1: rate limited"),
             "error must preserve the backend body verbatim; got: {err}"
@@ -1548,7 +1574,9 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/settings/chat-model"))
             .and(body_json(serde_json::json!({ "model": "claude-sonnet-4" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -1578,7 +1606,10 @@ mod tests {
         let ok = super::save_app_chat_model("x").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert!(!ok, "a 500 response must be reported as failure (best-effort helper)");
+        assert!(
+            !ok,
+            "a 500 response must be reported as failure (best-effort helper)"
+        );
     }
 
     // ── Tier-2: fetch_app_chat_model GETs /api/settings and reads chat_model ──
@@ -1617,7 +1648,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/settings"))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "chat_model": "   " })),
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "chat_model": "   " })),
             )
             .mount(&server)
             .await;
@@ -1626,7 +1658,10 @@ mod tests {
         let model = super::fetch_app_chat_model().await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(model, None, "a blank/whitespace chat_model must read as unset");
+        assert_eq!(
+            model, None,
+            "a blank/whitespace chat_model must read as unset"
+        );
     }
 
     // ── Tier-2: fetch_models GETs /api/models/registry and builds labels ──────
@@ -1678,17 +1713,53 @@ mod tests {
         assert_eq!(resp.models.len(), 2);
         // The first claude model is the default.
         assert_eq!(resp.default, "claude-opus-5");
-        let opus = resp.models.iter().find(|m| m.id == "claude-opus-5").expect("opus present");
+        let opus = resp
+            .models
+            .iter()
+            .find(|m| m.id == "claude-opus-5")
+            .expect("opus present");
         assert_eq!(opus.provider, "claude");
         // price_out 15 -> "$15/M"; tool_use -> "tool-use"; 200000 ctx -> "200K"; caching -> "cache".
-        assert!(opus.label.contains("Opus"), "label keeps display name; got {}", opus.label);
-        assert!(opus.label.contains("$15/M"), "label encodes price; got {}", opus.label);
-        assert!(opus.label.contains("tool-use"), "label encodes tool-use; got {}", opus.label);
-        assert!(opus.label.contains("200K"), "label encodes context; got {}", opus.label);
-        assert!(opus.label.contains("cache"), "label encodes caching; got {}", opus.label);
-        let ds = resp.models.iter().find(|m| m.id == "ds-free").expect("deepseek present");
-        assert!(ds.label.contains("FREE"), "free models are labelled FREE; got {}", ds.label);
-        assert!(ds.label.contains("no-tools"), "non-tool models are labelled no-tools; got {}", ds.label);
+        assert!(
+            opus.label.contains("Opus"),
+            "label keeps display name; got {}",
+            opus.label
+        );
+        assert!(
+            opus.label.contains("$15/M"),
+            "label encodes price; got {}",
+            opus.label
+        );
+        assert!(
+            opus.label.contains("tool-use"),
+            "label encodes tool-use; got {}",
+            opus.label
+        );
+        assert!(
+            opus.label.contains("200K"),
+            "label encodes context; got {}",
+            opus.label
+        );
+        assert!(
+            opus.label.contains("cache"),
+            "label encodes caching; got {}",
+            opus.label
+        );
+        let ds = resp
+            .models
+            .iter()
+            .find(|m| m.id == "ds-free")
+            .expect("deepseek present");
+        assert!(
+            ds.label.contains("FREE"),
+            "free models are labelled FREE; got {}",
+            ds.label
+        );
+        assert!(
+            ds.label.contains("no-tools"),
+            "non-tool models are labelled no-tools; got {}",
+            ds.label
+        );
     }
 
     // ── Tier-2: fetch_rules_catalog GETs /api/corpus-rules and renders a catalog ──
@@ -1726,14 +1797,29 @@ mod tests {
         std::env::remove_var("CAMERATA_BFF_URL");
 
         let catalog = catalog.expect("non-empty rule corpus yields Some(catalog)");
-        assert!(catalog.contains("SEC-1"), "catalog must name the rule id; got:\n{catalog}");
-        assert!(catalog.contains("[security · repo-local]"), "catalog encodes domain · scope; got:\n{catalog}");
-        assert!(catalog.contains("no hardcoded secrets"), "catalog includes the title");
-        assert!(catalog.contains("alternatives: warn / deny"), "catalog lists option labels as alternatives");
+        assert!(
+            catalog.contains("SEC-1"),
+            "catalog must name the rule id; got:\n{catalog}"
+        );
+        assert!(
+            catalog.contains("[security · repo-local]"),
+            "catalog encodes domain · scope; got:\n{catalog}"
+        );
+        assert!(
+            catalog.contains("no hardcoded secrets"),
+            "catalog includes the title"
+        );
+        assert!(
+            catalog.contains("alternatives: warn / deny"),
+            "catalog lists option labels as alternatives"
+        );
         // Sorted by (domain, id): architecture sorts before security.
         let arch_pos = catalog.find("ARCH-1").expect("ARCH-1 present");
         let sec_pos = catalog.find("SEC-1").expect("SEC-1 present");
-        assert!(arch_pos < sec_pos, "rules must be sorted by domain then id (architecture before security)");
+        assert!(
+            arch_pos < sec_pos,
+            "rules must be sorted by domain then id (architecture before security)"
+        );
     }
 
     #[tokio::test]
@@ -1754,7 +1840,10 @@ mod tests {
         let catalog = super::fetch_rules_catalog().await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(catalog, None, "an empty corpus must yield None, not an empty catalog string");
+        assert_eq!(
+            catalog, None,
+            "an empty corpus must yield None, not an empty catalog string"
+        );
     }
 
     // ── Tier-2: fetch_uow_snapshot prefers the object-wrapped context endpoint ──
@@ -1864,7 +1953,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/active/context"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
+            )
             .mount(&server)
             .await;
 
@@ -1872,7 +1963,11 @@ mod tests {
         let tuple = super::fetch_project_context_sections().await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(tuple, (None, None, None, None), "ok=false must degrade every section to None");
+        assert_eq!(
+            tuple,
+            (None, None, None, None),
+            "ok=false must degrade every section to None"
+        );
     }
 
     // Whitespace-only sections must be filtered to None (empty sections are not meaningful grounding).
@@ -1901,7 +1996,11 @@ mod tests {
 
         assert_eq!(name, None, "whitespace-only project_name filters to None");
         assert_eq!(scan, None, "whitespace-only scan section filters to None");
-        assert_eq!(selected, Some("real\n".to_string()), "non-blank section survives");
+        assert_eq!(
+            selected,
+            Some("real\n".to_string()),
+            "non-blank section survives"
+        );
         assert_eq!(ruleset, None, "absent ruleset_summary is None");
     }
 
@@ -1914,20 +2013,31 @@ mod tests {
     fn chat_reply_text_shows_backend_error_verbatim() {
         // A real backend failure (e.g. the `claude` CLI error) must be shown to
         // the user, not swallowed into a generic "no response" line.
-        let out = chat_reply_text(Err("backend error 500: claude CLI exited 1: rate limited".into()));
+        let out = chat_reply_text(Err(
+            "backend error 500: claude CLI exited 1: rate limited".into()
+        ));
         assert!(out.contains("chat failed"), "got: {out}");
-        assert!(out.contains("claude CLI exited 1: rate limited"), "got: {out}");
+        assert!(
+            out.contains("claude CLI exited 1: rate limited"),
+            "got: {out}"
+        );
     }
 
     #[test]
     fn chat_reply_text_returns_model_text_on_success() {
-        let out = chat_reply_text(Ok(ChatResp { text: "hello".into(), backend: "cli".into() }));
+        let out = chat_reply_text(Ok(ChatResp {
+            text: "hello".into(),
+            backend: "cli".into(),
+        }));
         assert_eq!(out, "hello");
     }
 
     #[test]
     fn chat_reply_text_flags_empty_success() {
-        let out = chat_reply_text(Ok(ChatResp { text: "   ".into(), backend: "cli".into() }));
+        let out = chat_reply_text(Ok(ChatResp {
+            text: "   ".into(),
+            backend: "cli".into(),
+        }));
         assert!(out.contains("empty response"), "got: {out}");
     }
 
@@ -1950,7 +2060,9 @@ mod tests {
             story_id: story_id.to_string(),
             stage: stage.to_string(),
             sign_off: if signed_off {
-                Some(serde_json::json!({"by": "zach", "ts": "2026-06-21T00:00:00Z", "run_id": "r1"}))
+                Some(
+                    serde_json::json!({"by": "zach", "ts": "2026-06-21T00:00:00Z", "run_id": "r1"}),
+                )
             } else {
                 None
             },
@@ -2014,7 +2126,9 @@ mod tests {
             "UNIFIED_NOT_COVERED_PHRASE should not start with a space"
         );
         assert!(
-            UNIFIED_NOT_COVERED_PHRASE.chars().any(|c| c.is_alphabetic()),
+            UNIFIED_NOT_COVERED_PHRASE
+                .chars()
+                .any(|c| c.is_alphabetic()),
             "UNIFIED_NOT_COVERED_PHRASE should contain at least one letter"
         );
     }
@@ -2050,7 +2164,8 @@ mod tests {
     #[test]
     fn unified_prompt_includes_rules_catalog_when_present() {
         let catalog = "- RULE-1 [security · repo-local]: no hardcoded secrets\n";
-        let prompt = unified_system_prompt(catalog, "No stories.\n", None, None, None, None, None, None);
+        let prompt =
+            unified_system_prompt(catalog, "No stories.\n", None, None, None, None, None, None);
         assert!(
             prompt.contains("=== LAYER 2: GOVERNANCE RULES CATALOG"),
             "Unified prompt missing LAYER 2 header"
@@ -2072,7 +2187,16 @@ mod tests {
 
     #[test]
     fn unified_prompt_omits_rules_catalog_for_whitespace_only_input() {
-        let prompt = unified_system_prompt("   \n\t  ", "No stories.\n", None, None, None, None, None, None);
+        let prompt = unified_system_prompt(
+            "   \n\t  ",
+            "No stories.\n",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(
             !prompt.contains("=== LAYER 2: GOVERNANCE RULES CATALOG"),
             "Unified prompt should omit LAYER 2 header for whitespace-only catalog"
@@ -2090,8 +2214,16 @@ mod tests {
 
     #[test]
     fn unified_prompt_layer3_header_names_active_project_when_present() {
-        let prompt =
-            unified_system_prompt("", "No stories.\n", None, None, None, None, None, Some("agora-api"));
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("agora-api"),
+        );
         assert!(
             prompt.contains(
                 "=== LAYER 3: LIVE DEVELOPMENT STATE (project: agora-api, refreshed this turn) ==="
@@ -2229,7 +2361,8 @@ mod tests {
     #[test]
     fn unified_prompt_with_finding_includes_focused_finding_section() {
         let f = make_finding();
-        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&f), None, None, None, None);
+        let prompt =
+            unified_system_prompt("", "No stories.\n", None, Some(&f), None, None, None, None);
         assert!(
             prompt.contains("=== LAYER 4: FOCUSED FINDING"),
             "Prompt with finding missing LAYER 4 header"
@@ -2264,7 +2397,16 @@ mod tests {
     #[test]
     fn unified_prompt_with_empty_finding_has_no_layer4() {
         let empty = FindingContext::default();
-        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&empty), None, None, None, None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            Some(&empty),
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(
             !prompt.contains("=== LAYER 4: FOCUSED FINDING"),
             "Prompt with empty finding must not include LAYER 4"
@@ -2274,7 +2416,8 @@ mod tests {
     #[test]
     fn unified_prompt_with_finding_retains_not_covered_guardrail() {
         let f = make_finding();
-        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&f), None, None, None, None);
+        let prompt =
+            unified_system_prompt("", "No stories.\n", None, Some(&f), None, None, None, None);
         assert!(
             prompt.contains(UNIFIED_NOT_COVERED_PHRASE),
             "Finding-scoped prompt must retain the not-covered guardrail"
@@ -2305,7 +2448,16 @@ mod tests {
     #[test]
     fn unified_prompt_layer3b_present_when_pulled_issues_supplied() {
         let issues = "- #10 [Epic, open]: Auth overhaul\n  - #11 [child, open]: Token refresh\n";
-        let prompt = unified_system_prompt("", "No stories.\n", Some(issues), None, None, None, None, None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            Some(issues),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(
             prompt.contains("=== LAYER 3b: PULLED ISSUES"),
             "Layer 3b header must appear when pulled_issues_section is Some"
@@ -2327,7 +2479,16 @@ mod tests {
 
     #[test]
     fn unified_prompt_layer3b_absent_when_whitespace_only() {
-        let prompt = unified_system_prompt("", "No stories.\n", Some("   \n "), None, None, None, None, None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            Some("   \n "),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(
             !prompt.contains("=== LAYER 3b:"),
             "Layer 3b header must not appear for whitespace-only pulled_issues_section"
@@ -2377,8 +2538,14 @@ mod tests {
         assert!(s.contains("CAM-1"), "Should include story id");
         assert!(s.contains("stage=development"), "Should include stage");
         assert!(s.contains("gate=no run yet"), "Should include gate status");
-        assert!(s.contains("not signed off"), "Should include sign-off state");
-        assert!(s.contains("2026-06-21"), "Should include last-activity timestamp");
+        assert!(
+            s.contains("not signed off"),
+            "Should include sign-off state"
+        );
+        assert!(
+            s.contains("2026-06-21"),
+            "Should include last-activity timestamp"
+        );
     }
 
     #[test]
@@ -2397,14 +2564,8 @@ mod tests {
             s.contains("gate=gate blocked"),
             "Should label gate as blocked"
         );
-        assert!(
-            s.contains("SEC-1"),
-            "Should surface rules that fired"
-        );
-        assert!(
-            s.contains("ARCH-1"),
-            "Should surface all rules that fired"
-        );
+        assert!(s.contains("SEC-1"), "Should surface rules that fired");
+        assert!(s.contains("ARCH-1"), "Should surface all rules that fired");
     }
 
     #[test]
@@ -2464,7 +2625,16 @@ mod tests {
     #[test]
     fn unified_prompt_layer3c_present_when_scan_results_supplied() {
         let scan = "Total findings: 3\n  high: 2\n  medium: 1\n";
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, Some(scan), None, None, None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            None,
+            Some(scan),
+            None,
+            None,
+            None,
+        );
         assert!(
             prompt.contains("=== LAYER 3c: ACTIVE PROJECT SCAN RESULTS"),
             "Layer 3c header must appear when scan_results_section is Some, got no header in prompt"
@@ -2492,7 +2662,16 @@ mod tests {
 
     #[test]
     fn unified_prompt_layer3c_renders_none_marker_when_whitespace_only() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, Some("   \n "), None, None, None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            None,
+            Some("   \n "),
+            None,
+            None,
+            None,
+        );
         assert!(
             prompt.contains("NONE — the active project has no scan results"),
             "whitespace-only scan results must render the explicit NONE marker"
@@ -2505,7 +2684,16 @@ mod tests {
         let uow = "- CAM-1: stage=development\n";
         let issues = "- #10 [Epic, open]: Auth\n";
         let scan = "Total findings: 1\n  high: 1\n";
-        let prompt = unified_system_prompt("", uow, Some(issues), Some(&f), Some(scan), None, None, None);
+        let prompt = unified_system_prompt(
+            "",
+            uow,
+            Some(issues),
+            Some(&f),
+            Some(scan),
+            None,
+            None,
+            None,
+        );
         let layer3b_pos = prompt
             .find("=== LAYER 3b: PULLED ISSUES")
             .expect("LAYER 3b not found");
@@ -2541,7 +2729,8 @@ mod tests {
     #[test]
     fn unified_prompt_layer3d_present_when_selected_rules_supplied() {
         let sel = "Total selected: 2 rule(s) across 1 repo(s)\nRules:\n  SEC-1 (all repos)\n";
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, Some(sel), None, None);
+        let prompt =
+            unified_system_prompt("", "No stories.\n", None, None, None, Some(sel), None, None);
         assert!(
             prompt.contains("=== LAYER 3d: SELECTED RULES & OPTIONS"),
             "Layer 3d header must appear when selected_rules_section is Some"
@@ -2569,7 +2758,16 @@ mod tests {
 
     #[test]
     fn unified_prompt_layer3d_renders_none_marker_when_whitespace_only() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, Some("  \n "), None, None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            None,
+            None,
+            Some("  \n "),
+            None,
+            None,
+        );
         assert!(
             prompt.contains("ZERO rules selected"),
             "whitespace-only selected rules must render the explicit ZERO marker"
@@ -2581,8 +2779,16 @@ mod tests {
     #[test]
     fn unified_prompt_layer3e_present_when_ruleset_supplied() {
         let ruleset = "SEC-NO-HARDCODED-SECRETS-1: all repos\nDOC-1: docs only\n";
-        let prompt =
-            unified_system_prompt("", "No stories.\n", None, None, None, None, Some(ruleset), None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            None,
+            None,
+            None,
+            Some(ruleset),
+            None,
+        );
         assert!(
             prompt.contains(
                 "=== LAYER 3e: PROJECT RULESET (committed rules governing this project) ==="
@@ -2615,8 +2821,16 @@ mod tests {
 
     #[test]
     fn unified_prompt_layer3e_renders_none_marker_when_whitespace_only() {
-        let prompt =
-            unified_system_prompt("", "No stories.\n", None, None, None, None, Some("  \n "), None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            None,
+            None,
+            None,
+            Some("  \n "),
+            None,
+        );
         assert!(
             prompt.contains("NONE — no committed ruleset for this project yet"),
             "whitespace-only committed ruleset must render the explicit NONE marker"
@@ -2649,7 +2863,16 @@ mod tests {
     fn unified_prompt_preamble_treats_changed_values_as_live_not_mistakes() {
         // Calibration guardrail: differing counts across turns are live updates,
         // not prior mistakes to apologize for; quote the exact count, no trends.
-        let prompt = unified_system_prompt("CATALOG", "No stories.\n", None, None, None, None, None, None);
+        let prompt = unified_system_prompt(
+            "CATALOG",
+            "No stories.\n",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(
             prompt.contains("NOT a prior") && prompt.contains("WITHOUT apologizing"),
             "preamble must tell the model that a changed value is a live update, not a mistake to apologize for"
@@ -2664,7 +2887,16 @@ mod tests {
     fn unified_prompt_preamble_forbids_inferring_selections_from_catalog() {
         // Anti-fabrication guardrail: the preamble must tell the model the Layer 2
         // catalog lists rules that EXIST, not rules the user selected.
-        let prompt = unified_system_prompt("CATALOG", "No stories.\n", None, None, None, None, None, None);
+        let prompt = unified_system_prompt(
+            "CATALOG",
+            "No stories.\n",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(
             prompt.contains("NOT rules the user has selected"),
             "preamble must forbid deriving selected-rule counts from the Layer 2 catalog"
@@ -2692,14 +2924,18 @@ mod tests {
     fn layer3d_appears_after_layer3c() {
         let scan = "Total findings: 1\n";
         let sel = "Total selected: 1 rule(s) across 1 repo(s)\nRules:\n  SEC-1 (all repos)\n";
-        let prompt =
-            unified_system_prompt("", "No stories.\n", None, None, Some(scan), Some(sel), None, None);
-        let layer3c_pos = prompt
-            .find("=== LAYER 3c:")
-            .expect("LAYER 3c not found");
-        let layer3d_pos = prompt
-            .find("=== LAYER 3d:")
-            .expect("LAYER 3d not found");
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            None,
+            Some(scan),
+            Some(sel),
+            None,
+            None,
+        );
+        let layer3c_pos = prompt.find("=== LAYER 3c:").expect("LAYER 3c not found");
+        let layer3d_pos = prompt.find("=== LAYER 3d:").expect("LAYER 3d not found");
         assert!(
             layer3c_pos < layer3d_pos,
             "LAYER 3c must precede LAYER 3d ({layer3c_pos} < {layer3d_pos})"

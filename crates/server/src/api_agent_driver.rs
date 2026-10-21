@@ -462,7 +462,10 @@ async fn run_loop(
                 }));
                 break;
             }
-            ParsedResponse::ToolCalls { raw_assistant_msg, calls } => {
+            ParsedResponse::ToolCalls {
+                raw_assistant_msg,
+                calls,
+            } => {
                 if calls.is_empty() {
                     // Model returned an assistant message with no tool calls and no text.
                     // Stop loop; return empty result.
@@ -478,12 +481,7 @@ async fn run_loop(
                 let mut results: Vec<(String, String)> = Vec::new();
 
                 for invocation in calls {
-                    let (result_text, denial) = execute_tool(
-                        driver,
-                        role,
-                        &invocation,
-                    )
-                    .await;
+                    let (result_text, denial) = execute_tool(driver, role, &invocation).await;
 
                     if let Some(d) = denial {
                         denials.push(d);
@@ -508,7 +506,11 @@ async fn run_loop(
         // Use the stable driver session_id so the outcome is traceable across multi-turn runs.
         session_id: driver.session_id.clone(),
         result: final_result,
-        cost_usd: if total_cost_usd > 0.0 { Some(total_cost_usd) } else { None },
+        cost_usd: if total_cost_usd > 0.0 {
+            Some(total_cost_usd)
+        } else {
+            None
+        },
         denials,
     })
 }
@@ -648,7 +650,10 @@ fn get_openrouter_key_from_completer(completer: &dyn LlmPort) -> anyhow::Result<
 /// `crate::llm::OpenRouterCompleter::policy_for_agent` / `registry_for_agent`.
 fn get_policy_and_registry_from_completer(
     completer: &dyn LlmPort,
-) -> anyhow::Result<(crate::provider_policy::ProviderPolicy, crate::model_registry::ModelRegistry)> {
+) -> anyhow::Result<(
+    crate::provider_policy::ProviderPolicy,
+    crate::model_registry::ModelRegistry,
+)> {
     let any = completer.as_any();
     let or = any
         .downcast_ref::<crate::llm::OpenRouterCompleter>()
@@ -683,7 +688,9 @@ async fn call_openrouter_with_tools(
     // Resolve the provider-safety constraint BEFORE building the request body — see
     // `crate::provider_policy::provider_constraint_for_request` for the fail-closed
     // contract (never an unconstrained request while safe_mode is on).
-    let safe_providers = registry.ensure_safe_providers_loaded(Some(api_key), model).await;
+    let safe_providers = registry
+        .ensure_safe_providers_loaded(Some(api_key), model)
+        .await;
     let provider_constraint =
         crate::provider_policy::provider_constraint_for_request(policy, &safe_providers, model)
             .map_err(|reason| {
@@ -877,11 +884,7 @@ fn build_anthropic_request_body(
                 let shaped = apply_grounding_cache_breakpoint(m);
                 // A shaped (array-content) first message means a grounding breakpoint was placed,
                 // so the beta header must be sent even if there is no system prompt.
-                if shaped
-                    .get("content")
-                    .map(Value::is_array)
-                    .unwrap_or(false)
-                {
+                if shaped.get("content").map(Value::is_array).unwrap_or(false) {
                     use_caching = true;
                 }
                 shaped
@@ -974,7 +977,9 @@ async fn call_anthropic_with_tools(
     let input_tokens = v["usage"]["input_tokens"].as_u64();
     let output_tokens = v["usage"]["output_tokens"].as_u64();
     let cache_read = v["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0);
-    let cache_creation = v["usage"]["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+    let cache_creation = v["usage"]["cache_creation_input_tokens"]
+        .as_u64()
+        .unwrap_or(0);
     let model_returned = v["model"].as_str().unwrap_or(model).to_string();
 
     Ok(LlmResponse {
@@ -1109,7 +1114,8 @@ fn normalize_openai_tool_call(tc: &Value) -> Option<ToolInvocation> {
     let id = tc["id"].as_str()?.to_string();
     let name = tc["function"]["name"].as_str()?.to_string();
     let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
-    let input = serde_json::from_str::<Value>(args_str).unwrap_or(Value::Object(Default::default()));
+    let input =
+        serde_json::from_str::<Value>(args_str).unwrap_or(Value::Object(Default::default()));
     Some(ToolInvocation { id, name, input })
 }
 
@@ -1205,8 +1211,7 @@ struct GateDenial {
 /// provider turn (LIFECYCLE-tasteful — see module docs). No-op when no governance log is
 /// wired.
 async fn record_agent_step(driver: &ApiAgentDriver, tool_name: &str) {
-    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref())
-    else {
+    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref()) else {
         return;
     };
     let event = camerata_persistence::GovernanceEvent::info(run_id.clone(), "agent_step", "agent")
@@ -1219,8 +1224,7 @@ async fn record_agent_step(driver: &ApiAgentDriver, tool_name: &str) {
 /// Record a `gate_allow` info event for a `gated_write` that passed Layer-1 + the worktree
 /// jail and was actually written. No-op when no governance log is wired.
 async fn record_gate_allow(driver: &ApiAgentDriver, input: &Value) {
-    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref())
-    else {
+    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref()) else {
         return;
     };
     let path = input["path"].as_str().unwrap_or("<unknown>");
@@ -1245,12 +1249,12 @@ async fn record_gate_deny(driver: &ApiAgentDriver, denial: &GateDenial) {
         reason = %denial.reason,
         "gate denied write"
     );
-    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref())
-    else {
+    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref()) else {
         return;
     };
-    let mut event = camerata_persistence::GovernanceEvent::warn(run_id.clone(), "gate_deny", "agent")
-        .with_reason(denial.reason.clone());
+    let mut event =
+        camerata_persistence::GovernanceEvent::warn(run_id.clone(), "gate_deny", "agent")
+            .with_reason(denial.reason.clone());
     if let Some(rule) = &denial.rule_id {
         event = event.with_rule_id(rule.clone());
     }
@@ -1323,17 +1327,17 @@ async fn execute_fan_out(
     } else {
         inv.input["tasks"].clone()
     };
-    let entries: Vec<camerata_gateway::fan_out::FanOutEntry> =
-        match serde_json::from_value(raw) {
-            Ok(e) => e,
-            Err(e) => {
-                let msg = format!(
-                    "DENIED: fan_out `entries` must be an array of {{repo, domain, subtask}}: {e}"
-                );
-                return (msg.clone(), Some(msg));
-            }
-        };
-    match camerata_gateway::fan_out::run_fan_out(config, driver.rule_subset.clone(), entries).await {
+    let entries: Vec<camerata_gateway::fan_out::FanOutEntry> = match serde_json::from_value(raw) {
+        Ok(e) => e,
+        Err(e) => {
+            let msg = format!(
+                "DENIED: fan_out `entries` must be an array of {{repo, domain, subtask}}: {e}"
+            );
+            return (msg.clone(), Some(msg));
+        }
+    };
+    match camerata_gateway::fan_out::run_fan_out(config, driver.rule_subset.clone(), entries).await
+    {
         Ok(results) => {
             let by_repo = camerata_gateway::fan_out::assemble_by_repo(&results);
             let mut summary = format!("fan_out complete: {} worker(s).\n", results.len());
@@ -1557,7 +1561,10 @@ fn assert_in_worktree(worktree: &Path, path: &str) -> anyhow::Result<PathBuf> {
 ///
 /// Expected input: `{file_path: "..."}` (Claude Code convention).
 fn execute_read(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
-    let raw_path = match inv.input["file_path"].as_str().or_else(|| inv.input["path"].as_str()) {
+    let raw_path = match inv.input["file_path"]
+        .as_str()
+        .or_else(|| inv.input["path"].as_str())
+    {
         Some(p) => p,
         None => return "ERROR: Read requires `file_path` in input".to_string(),
     };
@@ -1572,14 +1579,17 @@ fn execute_read(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
 ///
 /// Expected input: `{pattern: "..."}` or `{glob: "..."}`.
 fn execute_glob(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
-    let pattern = match inv.input["pattern"].as_str()
+    let pattern = match inv.input["pattern"]
+        .as_str()
         .or_else(|| inv.input["glob"].as_str())
     {
         Some(p) => p,
         None => return "ERROR: Glob requires `pattern` in input".to_string(),
     };
 
-    let base = worktree.map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+    let base = worktree
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
     let full_pattern = if pattern.starts_with('/') {
         pattern.to_string()
     } else {
@@ -1606,14 +1616,16 @@ fn execute_glob(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
 ///
 /// Expected input: `{pattern: "...", path: "..."}` or `{regex: "...", directory: "..."}`.
 fn execute_grep(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
-    let search_pattern = match inv.input["pattern"].as_str()
+    let search_pattern = match inv.input["pattern"]
+        .as_str()
         .or_else(|| inv.input["regex"].as_str())
     {
         Some(p) => p,
         None => return "ERROR: Grep requires `pattern` in input".to_string(),
     };
 
-    let search_dir = inv.input["path"].as_str()
+    let search_dir = inv.input["path"]
+        .as_str()
         .or_else(|| inv.input["directory"].as_str())
         .unwrap_or(".");
     let resolved_dir = resolve_path(search_dir, worktree);
@@ -1645,7 +1657,11 @@ fn grep_dir(dir: &Path, re: &regex::Regex, out: &mut Vec<String>, depth: usize) 
     for entry in entries.flatten() {
         let path = entry.path();
         // Skip hidden directories (e.g. .git)
-        if path.file_name().map(|n| n.to_str().unwrap_or("").starts_with('.')).unwrap_or(false) {
+        if path
+            .file_name()
+            .map(|n| n.to_str().unwrap_or("").starts_with('.'))
+            .unwrap_or(false)
+        {
             continue;
         }
         if path.is_dir() {
@@ -1671,7 +1687,8 @@ fn grep_dir(dir: &Path, re: &regex::Regex, out: &mut Vec<String>, depth: usize) 
 ///
 /// Expected input: `{path: "..."}` or `{directory: "..."}`.
 fn execute_ls(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
-    let dir_path = inv.input["path"].as_str()
+    let dir_path = inv.input["path"]
+        .as_str()
         .or_else(|| inv.input["directory"].as_str())
         .unwrap_or(".");
     let resolved = resolve_path(dir_path, worktree);
@@ -1996,7 +2013,9 @@ impl LlmPort for AnthropicNoopCompleter {
 /// ROUTES-9: store-first, env-fallback: mirrors `credentials::resolve` so a keychain-saved key
 /// wins and existing dotenv/CI setups keep working. A store read error must not silently
 /// degrade to env with no trace, so warn and fall back (matches the resolve() posture).
-fn anthropic_key_from_store_or_env(creds: &dyn crate::credentials::CredentialStore) -> Option<String> {
+fn anthropic_key_from_store_or_env(
+    creds: &dyn crate::credentials::CredentialStore,
+) -> Option<String> {
     match creds.get(crate::credentials::ANTHROPIC_API_KEY) {
         Ok(Some(k)) if !k.trim().is_empty() => return Some(k),
         Ok(_) => {}
@@ -2626,23 +2645,25 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                         child_driver_factory: Some(Arc::new(child_factory)),
                     };
 
-                    let driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), ctx.strongest_model)
-                        .with_rule_subset(rule_subset)
-                        .with_worktree(ctx.worktree.to_path_buf())
-                        .with_shape(ApiShape::Anthropic)
-                        .with_anthropic_api_key(key)
-                        // ORCHESTRATOR-ONLY: only the lead is ever built here.
-                        .as_orchestrator(true)
-                        .with_orchestrator_config(orch_config);
+                    let driver =
+                        ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), ctx.strongest_model)
+                            .with_rule_subset(rule_subset)
+                            .with_worktree(ctx.worktree.to_path_buf())
+                            .with_shape(ApiShape::Anthropic)
+                            .with_anthropic_api_key(key)
+                            // ORCHESTRATOR-ONLY: only the lead is ever built here.
+                            .as_orchestrator(true)
+                            .with_orchestrator_config(orch_config);
                     return Ok(Box::new(driver));
                 }
 
-                let mut cli_driver =
-                    camerata_agent::ClaudeCliDriver::new(ctx.session.mcp_config.display().to_string())
-                        .with_worktree(ctx.worktree)
-                        // ORCHESTRATOR-ONLY: delegate/fan_out in --allowedTools, delegate
-                        // env in the session mcp-config (delegate ON).
-                        .as_orchestrator(true);
+                let mut cli_driver = camerata_agent::ClaudeCliDriver::new(
+                    ctx.session.mcp_config.display().to_string(),
+                )
+                .with_worktree(ctx.worktree)
+                // ORCHESTRATOR-ONLY: delegate/fan_out in --allowedTools, delegate
+                // env in the session mcp-config (delegate ON).
+                .as_orchestrator(true);
                 if !ctx.strongest_model.trim().is_empty() {
                     cli_driver = cli_driver.with_model(ctx.strongest_model);
                 }
@@ -2660,9 +2681,9 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::CredentialStore as _;
     use camerata_core::Role;
     use camerata_gateway::{enforced_gate_rules, gov1_rule};
-    use crate::credentials::CredentialStore as _;
     use std::sync::Arc;
 
     // ── test helpers ─────────────────────────────────────────────────────────
@@ -2709,8 +2730,14 @@ mod tests {
             p.contains("=== END OPERATING PROTOCOL ==="),
             "system prompt must embed the governance kernel closing marker"
         );
-        assert!(p.contains("GROUND EVERY FACT"), "kernel clause 1 must be present");
-        assert!(p.contains("VERIFY BEFORE DONE"), "kernel clause 5 must be present");
+        assert!(
+            p.contains("GROUND EVERY FACT"),
+            "kernel clause 1 must be present"
+        );
+        assert!(
+            p.contains("VERIFY BEFORE DONE"),
+            "kernel clause 5 must be present"
+        );
 
         // Working discipline + if-unsure blocks.
         assert!(
@@ -2740,8 +2767,14 @@ mod tests {
         let role = test_role();
         let p = build_system_prompt(&role, "").expect("prompt is Some");
         assert!(p.contains("=== CAMERATA OPERATING PROTOCOL"));
-        assert!(!p.contains("TIER DISCIPLINE"), "no per-tier addendum for an empty model");
-        assert!(p.contains("gated_write"), "constraints block must be preserved");
+        assert!(
+            !p.contains("TIER DISCIPLINE"),
+            "no per-tier addendum for an empty model"
+        );
+        assert!(
+            p.contains("gated_write"),
+            "constraints block must be preserved"
+        );
     }
 
     /// A stub `LlmPort` that always returns a fixed final text (no tool calls).
@@ -2866,8 +2899,8 @@ mod tests {
         role: &Role,
         wt: Option<PathBuf>,
     ) -> ApiAgentDriver {
-        let mut d = ApiAgentDriver::new(completer, "stub-model")
-            .with_rule_subset(role.rule_subset.clone());
+        let mut d =
+            ApiAgentDriver::new(completer, "stub-model").with_rule_subset(role.rule_subset.clone());
         if let Some(w) = wt {
             d = d.with_worktree(w);
         }
@@ -2884,11 +2917,23 @@ mod tests {
             .collect();
 
         // Must include gated_write (the governed path).
-        assert!(names.contains(&"gated_write"), "gated_write must be in schemas");
+        assert!(
+            names.contains(&"gated_write"),
+            "gated_write must be in schemas"
+        );
 
         // Must NOT include any escape tool.
-        for escape in ["Write", "Edit", "Bash", "Task", "MultiEdit", "NotebookEdit",
-                       "shell", "exec", "run"] {
+        for escape in [
+            "Write",
+            "Edit",
+            "Bash",
+            "Task",
+            "MultiEdit",
+            "NotebookEdit",
+            "shell",
+            "exec",
+            "run",
+        ] {
             assert!(
                 !names.contains(&escape),
                 "escape tool `{escape}` must NOT appear in worker schemas"
@@ -2916,8 +2961,8 @@ mod tests {
 
         let beats = Arc::new(AtomicUsize::new(0));
         let beats_cb = beats.clone();
-        let driver = driver_with(completer, &role, Some(wt))
-            .with_on_activity(Arc::new(move || {
+        let driver =
+            driver_with(completer, &role, Some(wt)).with_on_activity(Arc::new(move || {
                 beats_cb.fetch_add(1, Ordering::SeqCst);
             }));
 
@@ -2994,7 +3039,10 @@ mod tests {
         let (result, denial) = execute_gated_write(&driver, &role, &inv);
         // Must be denied.
         assert!(denial.is_some(), "GOV-1 must deny the write: {result}");
-        assert!(result.contains("DENIED"), "result must say DENIED: {result}");
+        assert!(
+            result.contains("DENIED"),
+            "result must say DENIED: {result}"
+        );
         // File must NOT exist.
         assert!(
             !wt.join("forbidden/secret.rs").exists(),
@@ -3064,7 +3112,10 @@ mod tests {
         );
         // Even orchestrator must NOT expose shell/exec/Bash/Task.
         for escape in ["Bash", "Write", "Edit", "Task", "shell"] {
-            assert!(!names.contains(&escape), "escape tool `{escape}` must not appear even in orchestrator schemas");
+            assert!(
+                !names.contains(&escape),
+                "escape tool `{escape}` must not appear even in orchestrator schemas"
+            );
         }
     }
 
@@ -3089,17 +3140,17 @@ mod tests {
         };
         let (result, denial) = execute_tool(&driver, &role, &inv).await;
         assert!(denial.is_some(), "worker delegate call must be denied");
-        assert!(result.contains("DENIED"), "result must say DENIED: {result}");
+        assert!(
+            result.contains("DENIED"),
+            "result must say DENIED: {result}"
+        );
     }
 
     #[tokio::test]
     async fn invariant_fan_out_rejected_for_non_orchestrator_execution() {
         let role = test_role();
-        let driver = ApiAgentDriver::new(
-            Arc::new(StubCompleter("x".into())),
-            "stub",
-        )
-        .with_rule_subset(role.rule_subset.clone());
+        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
+            .with_rule_subset(role.rule_subset.clone());
 
         let inv = ToolInvocation {
             id: "fo1".to_string(),
@@ -3108,7 +3159,10 @@ mod tests {
         };
         let (result, denial) = execute_tool(&driver, &role, &inv).await;
         assert!(denial.is_some(), "worker fan_out call must be denied");
-        assert!(result.contains("DENIED"), "result must say DENIED: {result}");
+        assert!(
+            result.contains("DENIED"),
+            "result must say DENIED: {result}"
+        );
     }
 
     // ── INVARIANT 3: shell / Task never exposed ────────────────────────────────
@@ -3121,8 +3175,16 @@ mod tests {
                 .iter()
                 .filter_map(|s| s["function"]["name"].as_str())
                 .collect();
-            for forbidden in ["shell", "Task", "exec", "Bash", "Write", "Edit",
-                              "MultiEdit", "NotebookEdit"] {
+            for forbidden in [
+                "shell",
+                "Task",
+                "exec",
+                "Bash",
+                "Write",
+                "Edit",
+                "MultiEdit",
+                "NotebookEdit",
+            ] {
                 assert!(
                     !names.contains(&forbidden),
                     "`{forbidden}` must never appear in tool schemas (orchestrator={orchestrator})"
@@ -3419,10 +3481,10 @@ mod tests {
             None,                 // worktree
             false,                // orchestrator
             limiter,
-            None,                 // run_session_id
-            false, // escalation
-            None,  // on_activity — no heartbeat in this unit test
-            None, // governance — no log wired in this unit test
+            None,                            // run_session_id
+            false,                           // escalation
+            None,                            // on_activity — no heartbeat in this unit test
+            None,                            // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Cli, // this test exercises routing, not the compliance gate
         );
         assert!(
@@ -3476,10 +3538,10 @@ mod tests {
             None,
             false,
             limiter,
-            None, // run_session_id
-            false, // escalation
-            None,  // on_activity — no heartbeat in this unit test
-            None, // governance — no log wired in this unit test
+            None,                            // run_session_id
+            false,                           // escalation
+            None,                            // on_activity — no heartbeat in this unit test
+            None,                            // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Cli, // irrelevant to the openrouter branch
         );
         assert!(
@@ -3509,10 +3571,10 @@ mod tests {
             None,
             false,
             limiter,
-            None, // run_session_id
-            false, // escalation
-            None,  // on_activity — no heartbeat in this unit test
-            None, // governance — no log wired in this unit test
+            None,                            // run_session_id
+            false,                           // escalation
+            None,                            // on_activity — no heartbeat in this unit test
+            None,                            // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Cli, // irrelevant to the openrouter branch
         );
         assert!(
@@ -3563,8 +3625,15 @@ mod tests {
 
         let outcome = driver.run(&role, "write the hello function").await.unwrap();
         assert_eq!(outcome.result, "Done! I wrote src/lib.rs.");
-        assert!(outcome.denials.is_empty(), "no denials expected: {:?}", outcome.denials);
-        assert!(wt.join("src/lib.rs").exists(), "file must have been written");
+        assert!(
+            outcome.denials.is_empty(),
+            "no denials expected: {:?}",
+            outcome.denials
+        );
+        assert!(
+            wt.join("src/lib.rs").exists(),
+            "file must have been written"
+        );
     }
 
     #[tokio::test]
@@ -3627,8 +3696,14 @@ mod tests {
             .with_governance(log.clone(), "run-deny-gov-1");
 
         let outcome = driver.run(&role, "write to forbidden").await.unwrap();
-        assert!(!outcome.denials.is_empty(), "denial must still be recorded in the outcome");
-        assert!(!wt.join("forbidden/config.rs").exists(), "denied file must not exist");
+        assert!(
+            !outcome.denials.is_empty(),
+            "denial must still be recorded in the outcome"
+        );
+        assert!(
+            !wt.join("forbidden/config.rs").exists(),
+            "denied file must not exist"
+        );
 
         let events = log.by_run("run-deny-gov-1").await.expect("by_run");
         let deny = events
@@ -3637,14 +3712,20 @@ mod tests {
             .expect("a gate_deny row must be recorded in the governance log");
         assert_eq!(deny.severity, "warn");
         assert_eq!(deny.actor, "agent");
-        assert!(deny.rule_id.is_some(), "the Layer-1 rule id must be carried");
+        assert!(
+            deny.rule_id.is_some(),
+            "the Layer-1 rule id must be carried"
+        );
         // The reason must be READABLE — the gate's actual denial text — never a bare hash.
         let reason = deny.reason.as_deref().expect("reason present");
         assert!(
             !reason.chars().all(|c| c.is_ascii_hexdigit()) || reason.len() < 8,
             "reason must not look like a bare hash: {reason}"
         );
-        assert!(reason.contains(' '), "reason must be a readable phrase, not a code: {reason}");
+        assert!(
+            reason.contains(' '),
+            "reason must be a readable phrase, not a code: {reason}"
+        );
         // agent_step + gate_allow/deny both recorded — the routine trail plus the deny.
         assert!(
             events.iter().any(|e| e.kind == "agent_step"),
@@ -3681,8 +3762,15 @@ mod tests {
             .with_governance(log.clone(), "run-allow-gov-1");
 
         let outcome = driver.run(&role, "write the hello function").await.unwrap();
-        assert!(outcome.denials.is_empty(), "no denials expected: {:?}", outcome.denials);
-        assert!(wt.join("src/lib.rs").exists(), "file must have been written");
+        assert!(
+            outcome.denials.is_empty(),
+            "no denials expected: {:?}",
+            outcome.denials
+        );
+        assert!(
+            wt.join("src/lib.rs").exists(),
+            "file must have been written"
+        );
 
         let events = log.by_run("run-allow-gov-1").await.expect("by_run");
         assert!(
@@ -3715,8 +3803,7 @@ mod tests {
         let driver = ApiAgentDriver::new(Arc::new(or_completer), "openrouter/model");
         // session_id must be inherited (non-empty, matches what the completer reports).
         assert_eq!(
-            driver.session_id,
-            "my-story-id-123",
+            driver.session_id, "my-story-id-123",
             "driver must inherit the completer's session id"
         );
     }
@@ -3724,22 +3811,16 @@ mod tests {
     /// Non-OR completers (stubs) generate a per-instance session token (non-empty).
     #[test]
     fn driver_generates_session_id_for_non_or_completer() {
-        let driver = ApiAgentDriver::new(
-            Arc::new(StubCompleter("done".to_string())),
-            "stub-model",
-        );
+        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("done".to_string())), "stub-model");
         assert!(
             !driver.session_id.is_empty(),
             "session_id must be non-empty even for non-OR completers"
         );
         // Two distinct drivers must get different session ids (no collision).
-        let driver2 = ApiAgentDriver::new(
-            Arc::new(StubCompleter("done".to_string())),
-            "stub-model",
-        );
+        let driver2 =
+            ApiAgentDriver::new(Arc::new(StubCompleter("done".to_string())), "stub-model");
         assert_ne!(
-            driver.session_id,
-            driver2.session_id,
+            driver.session_id, driver2.session_id,
             "two drivers must have distinct session ids"
         );
     }
@@ -3755,7 +3836,7 @@ mod tests {
             default_policy(),
             crate::model_registry::ModelRegistry::new(),
         )
-            .with_session_id("custom-session-xyz");
+        .with_session_id("custom-session-xyz");
         assert_eq!(completer.session_id_for_agent(), "custom-session-xyz");
     }
 
@@ -3769,7 +3850,7 @@ mod tests {
             default_policy(),
             crate::model_registry::ModelRegistry::new(),
         )
-            .with_session_id("");
+        .with_session_id("");
         // Empty override must leave the auto-generated session id in place (non-empty).
         assert!(
             !completer.session_id_for_agent().is_empty(),
@@ -3780,10 +3861,8 @@ mod tests {
     /// `bust_cache_on_next_call` sets `bust_cache = true` on the driver.
     #[test]
     fn bust_cache_flag_is_settable() {
-        let mut driver = ApiAgentDriver::new(
-            Arc::new(StubCompleter("done".to_string())),
-            "stub-model",
-        );
+        let mut driver =
+            ApiAgentDriver::new(Arc::new(StubCompleter("done".to_string())), "stub-model");
         assert!(!driver.bust_cache, "bust_cache must start false");
         driver.bust_cache_on_next_call();
         assert!(driver.bust_cache, "bust_cache must be true after call");
@@ -3811,10 +3890,10 @@ mod tests {
             None,
             false,
             limiter,
-            Some("uow-story-id-42"), // run_session_id
-            false, // escalation
-            None,  // on_activity — no heartbeat in this unit test
-            None, // governance — no log wired in this unit test
+            Some("uow-story-id-42"),         // run_session_id
+            false,                           // escalation
+            None,                            // on_activity — no heartbeat in this unit test
+            None,                            // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Cli, // irrelevant to the openrouter branch
         )
         .expect("build must succeed");
@@ -3844,7 +3923,10 @@ mod tests {
         assert!(resp.or_cache_discount.is_none(), "default is None");
 
         // A response with a discount set (simulates what call_api_inner would produce).
-        let resp_cached = LlmResponse { or_cache_discount: Some(0.75), ..resp.clone() };
+        let resp_cached = LlmResponse {
+            or_cache_discount: Some(0.75),
+            ..resp.clone()
+        };
         assert_eq!(resp_cached.or_cache_discount, Some(0.75));
     }
 
@@ -3896,7 +3978,8 @@ mod tests {
         let registry = crate::model_registry::ModelRegistry::new();
         registry.seed_openrouter_entries(vec![openrouter_test_entry("openrouter/mistral-7b")]);
         let mem = crate::credentials::MemoryCredentialStore::new();
-        mem.set(crate::credentials::OPENROUTER_API_KEY, "sk-or-test").unwrap();
+        mem.set(crate::credentials::OPENROUTER_API_KEY, "sk-or-test")
+            .unwrap();
         let creds: Arc<dyn crate::credentials::CredentialStore> = Arc::new(mem);
         let factory = factory_with(registry, creds);
 
@@ -3921,9 +4004,16 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let child = factory.build_child("openrouter/mistral-7b", tmp.path(), &[]);
-        assert!(child.is_err(), "openrouter child without key must fail closed");
         assert!(
-            child.err().unwrap().to_string().contains("OPENROUTER_API_KEY"),
+            child.is_err(),
+            "openrouter child without key must fail closed"
+        );
+        assert!(
+            child
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("OPENROUTER_API_KEY"),
             "error must mention the missing OpenRouter key"
         );
     }
@@ -3943,8 +4033,15 @@ mod tests {
             .collect();
         assert!(names.contains(&"gated_write"));
         for forbidden in [
-            "delegate", "fan_out", "Task", "Bash", "Write", "Edit", "MultiEdit",
-            "NotebookEdit", "shell",
+            "delegate",
+            "fan_out",
+            "Task",
+            "Bash",
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            "shell",
         ] {
             assert!(
                 !names.contains(&forbidden),
@@ -4078,15 +4175,23 @@ mod tests {
         let schemas = build_tool_schemas_for(false, ApiShape::Anthropic);
         assert!(!schemas.is_empty());
         for s in &schemas {
-            assert!(s.get("name").and_then(|v| v.as_str()).is_some(),
-                "anthropic tool must have a top-level `name`: {s}");
-            assert!(s.get("input_schema").is_some(),
-                "anthropic tool must have `input_schema`: {s}");
+            assert!(
+                s.get("name").and_then(|v| v.as_str()).is_some(),
+                "anthropic tool must have a top-level `name`: {s}"
+            );
+            assert!(
+                s.get("input_schema").is_some(),
+                "anthropic tool must have `input_schema`: {s}"
+            );
             // Must NOT carry the OpenAI envelope.
-            assert!(s.get("function").is_none(),
-                "anthropic tool must NOT have `function`: {s}");
-            assert!(s.get("type").is_none(),
-                "anthropic tool must NOT have a `type` discriminator: {s}");
+            assert!(
+                s.get("function").is_none(),
+                "anthropic tool must NOT have `function`: {s}"
+            );
+            assert!(
+                s.get("type").is_none(),
+                "anthropic tool must NOT have a `type` discriminator: {s}"
+            );
         }
         // gated_write must still be present (allowlist unchanged across shapes).
         let names: Vec<&str> = schemas.iter().filter_map(|s| s["name"].as_str()).collect();
@@ -4102,8 +4207,10 @@ mod tests {
                 .iter()
                 .filter_map(|s| s["function"]["name"].as_str())
                 .collect();
-            let mut an_names: Vec<&str> =
-                anthropic.iter().filter_map(|s| s["name"].as_str()).collect();
+            let mut an_names: Vec<&str> = anthropic
+                .iter()
+                .filter_map(|s| s["name"].as_str())
+                .collect();
             or_names.sort_unstable();
             an_names.sort_unstable();
             assert_eq!(
@@ -4118,8 +4225,15 @@ mod tests {
         let schemas = build_tool_schemas_for(false, ApiShape::Anthropic);
         let names: Vec<&str> = schemas.iter().filter_map(|s| s["name"].as_str()).collect();
         for forbidden in [
-            "delegate", "fan_out", "Task", "Bash", "Write", "Edit", "MultiEdit",
-            "NotebookEdit", "shell",
+            "delegate",
+            "fan_out",
+            "Task",
+            "Bash",
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            "shell",
         ] {
             assert!(
                 !names.contains(&forbidden),
@@ -4168,8 +4282,14 @@ mod tests {
         assert!(body["max_tokens"].as_u64().is_some());
         // Top-level system as a cache_control text block (NOT a bare string, NOT inside messages).
         assert_eq!(body["system"][0]["type"].as_str(), Some("text"));
-        assert_eq!(body["system"][0]["text"].as_str(), Some("You are governed."));
-        assert_eq!(body["system"][0]["cache_control"]["type"].as_str(), Some("ephemeral"));
+        assert_eq!(
+            body["system"][0]["text"].as_str(),
+            Some("You are governed.")
+        );
+        assert_eq!(
+            body["system"][0]["cache_control"]["type"].as_str(),
+            Some("ephemeral")
+        );
         // Anthropic tools format (input_schema, not function) present in the body.
         assert!(body["tools"].is_array());
         assert!(body["tools"][0]["input_schema"].is_object());
@@ -4179,8 +4299,7 @@ mod tests {
 
     #[test]
     fn anthropic_request_body_no_system_no_caching() {
-        let (body, use_caching) =
-            build_anthropic_request_body("claude-opus-5", None, &[], &[]);
+        let (body, use_caching) = build_anthropic_request_body("claude-opus-5", None, &[], &[]);
         assert!(!use_caching, "no system → no caching header");
         assert!(body.get("system").is_none());
         // No tools → no tools/tool_choice keys.
@@ -4219,10 +4338,19 @@ mod tests {
         // Even without a system prompt, the grounding breakpoint activates caching.
         assert!(use_caching, "grounded first message → caching active");
         let content = &body["messages"][0]["content"];
-        assert!(content.is_array(), "first message content must be a two-block array");
+        assert!(
+            content.is_array(),
+            "first message content must be a two-block array"
+        );
         assert_eq!(content[0]["type"].as_str(), Some("text"));
-        assert_eq!(content[0]["cache_control"]["type"].as_str(), Some("ephemeral"));
-        assert!(content[0]["text"].as_str().unwrap().ends_with(LAYER2_GROUNDING_TERMINATOR));
+        assert_eq!(
+            content[0]["cache_control"]["type"].as_str(),
+            Some("ephemeral")
+        );
+        assert!(content[0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with(LAYER2_GROUNDING_TERMINATOR));
         // Second block is the volatile tail with NO cache_control.
         assert!(content[1]["text"].as_str().unwrap().contains("## Story"));
         assert!(content[1].get("cache_control").is_none());
@@ -4230,11 +4358,15 @@ mod tests {
 
     #[test]
     fn anthropic_first_user_message_unchanged_without_grounding() {
-        let messages = vec![serde_json::json!({"role": "user", "content": "plain task, no grounding"})];
+        let messages =
+            vec![serde_json::json!({"role": "user", "content": "plain task, no grounding"})];
         let (body, _use_caching) =
             build_anthropic_request_body("claude-opus-5", Some("sys"), &messages, &[]);
         // No grounding marker → first message content stays a plain string.
-        assert_eq!(body["messages"][0]["content"].as_str(), Some("plain task, no grounding"));
+        assert_eq!(
+            body["messages"][0]["content"].as_str(),
+            Some("plain task, no grounding")
+        );
     }
 
     #[test]
@@ -4341,7 +4473,11 @@ mod tests {
     #[test]
     fn default_shape_is_openrouter_back_compat() {
         let d = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "m");
-        assert_eq!(d.shape, ApiShape::OpenRouter, "default shape must stay OpenRouter");
+        assert_eq!(
+            d.shape,
+            ApiShape::OpenRouter,
+            "default shape must stay OpenRouter"
+        );
         assert!(d.anthropic_api_key.is_none());
     }
 
@@ -4356,9 +4492,12 @@ mod tests {
 
     #[test]
     fn empty_anthropic_key_is_noop() {
-        let d = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "m")
-            .with_anthropic_api_key("");
-        assert!(d.anthropic_api_key.is_none(), "empty key must not be stored");
+        let d =
+            ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "m").with_anthropic_api_key("");
+        assert!(
+            d.anthropic_api_key.is_none(),
+            "empty key must not be stored"
+        );
     }
 
     // ── Routing: build_claude_driver respects backend + key ───────────────────
@@ -4435,9 +4574,9 @@ mod tests {
             vec![gov1_rule()],
             None,
             false,
-            false, // escalation
-            None,  // on_activity
-            None,  // governance
+            false,                           // escalation
+            None,                            // on_activity
+            None,                            // governance
             crate::llm::ProjectBackend::Api, // Api backend, and no key is configured
         );
         let err = result
@@ -4478,7 +4617,11 @@ mod tests {
             None,  // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Api,
         );
-        assert!(result.is_ok(), "claude+api+key must build: {:?}", result.err().map(|e| e.to_string()));
+        assert!(
+            result.is_ok(),
+            "claude+api+key must build: {:?}",
+            result.err().map(|e| e.to_string())
+        );
     }
 
     #[test]
@@ -4504,7 +4647,11 @@ mod tests {
             None,  // governance — no log wired in this unit test
             crate::llm::ProjectBackend::Cli,
         );
-        assert!(result.is_ok(), "claude+cli must build: {:?}", result.err().map(|e| e.to_string()));
+        assert!(
+            result.is_ok(),
+            "claude+cli must build: {:?}",
+            result.err().map(|e| e.to_string())
+        );
     }
 
     // ── Child factory: claude model under an Api-backend project builds an Anthropic API child ──
@@ -4515,7 +4662,8 @@ mod tests {
 
         let registry = crate::model_registry::ModelRegistry::new();
         let mem = crate::credentials::MemoryCredentialStore::new();
-        mem.set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test").unwrap();
+        mem.set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test")
+            .unwrap();
         let creds: Arc<dyn crate::credentials::CredentialStore> = Arc::new(mem);
         let factory = ServerChildDriverFactory::new(
             registry,
@@ -4551,14 +4699,22 @@ mod tests {
             .with_shape(ApiShape::Anthropic)
             .with_anthropic_api_key("sk-ant-test");
         // orchestrator=false (default) → workers can never delegate/fan_out.
-        assert!(!driver.orchestrator, "Anthropic worker must be orchestrator=false");
-        assert!(driver.worktree.is_some(), "Anthropic worker must be jailed to a worktree");
+        assert!(
+            !driver.orchestrator,
+            "Anthropic worker must be orchestrator=false"
+        );
+        assert!(
+            driver.worktree.is_some(),
+            "Anthropic worker must be jailed to a worktree"
+        );
 
         // delegate/fan_out absent from the Anthropic worker's schemas; gated_write present.
         let schemas = build_tool_schemas_for(driver.orchestrator, driver.shape);
         let names: Vec<&str> = schemas.iter().filter_map(|s| s["name"].as_str()).collect();
         assert!(names.contains(&"gated_write"));
-        for forbidden in ["delegate", "fan_out", "Bash", "Write", "Edit", "Task", "shell"] {
+        for forbidden in [
+            "delegate", "fan_out", "Bash", "Write", "Edit", "Task", "shell",
+        ] {
             assert!(!names.contains(&forbidden), "`{forbidden}` must not appear");
         }
 

@@ -134,12 +134,15 @@ fn collect_toml_paths_sync(dir: &Path, out: &mut Vec<PathBuf>, errors: &mut Vec<
 }
 
 fn build_row(path: &Path, registry: &LinterRegistry) -> Result<ReportRow, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("read error: {e}"))?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
 
     // Extract rule id from id = "..." line.
-    let rule_id = extract_toml_field(&text, "id")
-        .unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().to_string());
+    let rule_id = extract_toml_field(&text, "id").unwrap_or_else(|| {
+        path.file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    });
 
     // Extract qualifies field for citation scanning.
     let qualifies = extract_toml_field(&text, "qualifies").unwrap_or_default();
@@ -321,7 +324,11 @@ fn extract_standalone_b_codes(text: &str, out: &mut Vec<ExtractedCitation>) {
     let n = chars.len();
     let mut i = 0_usize;
     while i + 4 <= n {
-        if chars[i] == 'B' && chars[i + 1].is_ascii_digit() && chars[i + 2].is_ascii_digit() && chars[i + 3].is_ascii_digit() {
+        if chars[i] == 'B'
+            && chars[i + 1].is_ascii_digit()
+            && chars[i + 2].is_ascii_digit()
+            && chars[i + 3].is_ascii_digit()
+        {
             // Make sure not preceded by an uppercase letter (avoid "BLE001" etc.)
             let preceded_by_upper = i > 0 && chars[i - 1].is_ascii_uppercase();
             let followed_by_alnum = i + 4 < n && chars[i + 4].is_ascii_alphanumeric();
@@ -380,12 +387,7 @@ fn extract_eslint_no_rules(text: &str, out: &mut Vec<ExtractedCitation>) {
 ///
 /// For each match of `pattern_prefix` + capture in `text`, push a citation.
 /// This avoids pulling in the `regex` crate.
-fn extract_pattern(
-    text: &str,
-    _pattern: &str,
-    tool: &str,
-    out: &mut Vec<ExtractedCitation>,
-) {
+fn extract_pattern(text: &str, _pattern: &str, tool: &str, out: &mut Vec<ExtractedCitation>) {
     // Dispatch to the specific extractor by tool.
     match tool {
         "clippy" => {
@@ -457,7 +459,8 @@ fn extract_pattern(
             let n = bytes.len();
             let mut i = 0_usize;
             while i + 6 <= n {
-                if bytes[i] == b'C' && bytes[i + 1] == b'A'
+                if bytes[i] == b'C'
+                    && bytes[i + 1] == b'A'
                     && bytes[i + 2].is_ascii_digit()
                     && bytes[i + 3].is_ascii_digit()
                     && bytes[i + 4].is_ascii_digit()
@@ -480,7 +483,9 @@ fn extract_pattern(
             let n = bytes.len();
             let mut i = 0_usize;
             while i + 7 <= n {
-                if bytes[i] == b'I' && bytes[i + 1] == b'D' && bytes[i + 2] == b'E'
+                if bytes[i] == b'I'
+                    && bytes[i + 1] == b'D'
+                    && bytes[i + 2] == b'E'
                     && bytes[i + 3].is_ascii_digit()
                     && bytes[i + 4].is_ascii_digit()
                     && bytes[i + 5].is_ascii_digit()
@@ -529,9 +534,18 @@ fn extract_pattern(
 /// Render the report as Markdown.
 fn render_markdown(rows: &[ReportRow], corpus_dir: &Path) -> String {
     let total = rows.len();
-    let resolves_count = rows.iter().filter(|r| r.primary_status() == "resolves").count();
-    let not_found_count = rows.iter().filter(|r| r.primary_status() == "not-found").count();
-    let unsourced_count = rows.iter().filter(|r| r.primary_status() == "unsourced").count();
+    let resolves_count = rows
+        .iter()
+        .filter(|r| r.primary_status() == "resolves")
+        .count();
+    let not_found_count = rows
+        .iter()
+        .filter(|r| r.primary_status() == "not-found")
+        .count();
+    let unsourced_count = rows
+        .iter()
+        .filter(|r| r.primary_status() == "unsourced")
+        .count();
 
     let mut md = String::new();
     md.push_str("# Citation Validation Report\n\n");
@@ -562,7 +576,10 @@ fn render_markdown(rows: &[ReportRow], corpus_dir: &Path) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        md.push_str(&format!("| `{}` | {} | {} |\n", row.rule_id, status, citations_text));
+        md.push_str(&format!(
+            "| `{}` | {} | {} |\n",
+            row.rule_id, status, citations_text
+        ));
     }
 
     md.push_str("\n---\n\n*Run `cargo run -p camerata-linter-registry --example generate-report` to regenerate.*\n");
@@ -606,7 +623,8 @@ mod tests {
 
     #[test]
     fn extract_citations_typescript_eslint() {
-        let text = r#"@typescript-eslint/no-explicit-any and @typescript-eslint/no-floating-promises"#;
+        let text =
+            r#"@typescript-eslint/no-explicit-any and @typescript-eslint/no-floating-promises"#;
         let cits = extract_citations(text);
         let ids: Vec<&str> = cits.iter().map(|c| c.rule_id.as_str()).collect();
         assert!(ids.contains(&"no-explicit-any"));
@@ -618,7 +636,8 @@ mod tests {
         let text = r#"react-hooks/exhaustive-deps"#;
         let cits = extract_citations(text);
         assert!(
-            cits.iter().any(|c| c.tool == "react-hooks" && c.rule_id == "exhaustive-deps"),
+            cits.iter()
+                .any(|c| c.tool == "react-hooks" && c.rule_id == "exhaustive-deps"),
             "should extract exhaustive-deps"
         );
     }

@@ -44,7 +44,8 @@ const GRANT_TEMPORARY_ACCESS_LINE: usize = 5;
 /// `architectural_executor_e2e.rs::stage_fixture_as_git_repo` exactly (duplicated per this
 /// repo's existing convention of each e2e test file owning its own fixture-staging helpers).
 fn stage_fixture_as_git_repo(dest: &Path) {
-    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/search_path_repo");
+    let fixture_root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/search_path_repo");
     copy_dir_recursive(&fixture_root, dest);
 
     let g = |args: &[&str]| {
@@ -53,13 +54,22 @@ fn stage_fixture_as_git_repo(dest: &Path) {
             .args(args)
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
-        assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "search-path-e2e@camerata.local"]);
     g(&["config", "user.name", "Camerata Search-Path E2E Test"]);
     g(&["add", "."]);
-    g(&["commit", "-q", "-m", "e2e fixture: one unpinned SECURITY DEFINER + two safe twins"]);
+    g(&[
+        "commit",
+        "-q",
+        "-m",
+        "e2e fixture: one unpinned SECURITY DEFINER + two safe twins",
+    ]);
 }
 
 fn copy_dir_recursive(src: &Path, dest: &Path) {
@@ -72,7 +82,8 @@ fn copy_dir_recursive(src: &Path, dest: &Path) {
         if ty.is_dir() {
             copy_dir_recursive(&from, &to);
         } else {
-            std::fs::copy(&from, &to).unwrap_or_else(|e| panic!("failed to copy fixture file {from:?} -> {to:?}: {e}"));
+            std::fs::copy(&from, &to)
+                .unwrap_or_else(|e| panic!("failed to copy fixture file {from:?} -> {to:?}: {e}"));
         }
     }
 }
@@ -89,7 +100,8 @@ fn typst_on_path() -> bool {
 fn selected_search_path_rule() -> Vec<SelectedRule> {
     vec![SelectedRule {
         id: RULE_SEARCH_PATH.to_string(),
-        directive: "search-path e2e: flag SECURITY DEFINER functions with no pinned search_path".to_string(),
+        directive: "search-path e2e: flag SECURITY DEFINER functions with no pinned search_path"
+            .to_string(),
         repos: Vec::new(), // project-level: applies to every scanned repo
     }]
 }
@@ -106,15 +118,15 @@ async fn run_fixture_scan(repo_dir: &Path, repo_spec: &str) -> onboard::ScanRepo
         None,       // model — unused, run_ai_review is false
         None,       // calibration_model — unused
         ScanMode::Sequential,
-        false, // thorough — unused (no AI review)
-        None,  // feedback
-        None,  // job
-        None,  // incremental_prior — full scan
-        false, // deep
-        false, // soc2_enabled
-        false, // run_ai_review — zero API spend
-        true,  // run_deterministic — the floor AND the architectural engine both run
-        None,  // ledger
+        false,                                        // thorough — unused (no AI review)
+        None,                                         // feedback
+        None,                                         // job
+        None,                                         // incremental_prior — full scan
+        false,                                        // deep
+        false,                                        // soc2_enabled
+        false,                                        // run_ai_review — zero API spend
+        true, // run_deterministic — the floor AND the architectural engine both run
+        None, // ledger
         camerata_server::llm::BackendResolution::Api, // backend gate: not under test here
         None, // corpus
         &std::collections::HashMap::new(), // chosen_options
@@ -131,15 +143,21 @@ async fn deterministic_scan_finds_the_planted_search_path_hole() {
 
     let report = run_fixture_scan(repo_dir.path(), &repo_spec).await;
 
-    assert!(!report.gated, "a local-dir scan is never gated on a GitHub token");
+    assert!(
+        !report.gated,
+        "a local-dir scan is never gated on a GitHub token"
+    );
     assert_eq!(report.repos, vec![repo_spec.clone()]);
 
     // ═══ Exactly the ONE planted finding: `grant_temporary_access` has no search_path. ═══
     // Neither safe twin (`list_own_records` — invoker + pinned; `rotate_share_link` — definer
     // + correctly pinned) produces a finding — proves the checker isn't just flagging every
     // SECURITY DEFINER function, or every function in the file.
-    let hits: Vec<&onboard::Finding> =
-        report.findings.iter().filter(|f| f.rule_id == RULE_SEARCH_PATH).collect();
+    let hits: Vec<&onboard::Finding> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == RULE_SEARCH_PATH)
+        .collect();
     assert_eq!(
         hits.len(),
         1,
@@ -148,30 +166,51 @@ async fn deterministic_scan_finds_the_planted_search_path_hole() {
     );
     let finding = hits[0];
 
-    assert_eq!(finding.severity, "high", "an unpinned SECURITY DEFINER function is high, not critical/medium");
+    assert_eq!(
+        finding.severity, "high",
+        "an unpinned SECURITY DEFINER function is high, not critical/medium"
+    );
     assert_eq!(finding.repo, repo_spec);
     assert_eq!(
         finding.path, FUNCTIONS_MIGRATION_FILE,
         "the finding must be attributed to the migration that defines the function"
     );
-    assert_eq!(finding.line, GRANT_TEMPORARY_ACCESS_LINE, "must point at the CREATE FUNCTION statement's line");
+    assert_eq!(
+        finding.line, GRANT_TEMPORARY_ACCESS_LINE,
+        "must point at the CREATE FUNCTION statement's line"
+    );
     assert!(
-        finding.snippet.contains("grant_temporary_access") || finding.detail.contains("grant_temporary_access"),
+        finding.snippet.contains("grant_temporary_access")
+            || finding.detail.contains("grant_temporary_access"),
         "finding must name the offending function, not either safe twin: {finding:?}"
     );
     assert!(
-        !finding.detail.contains("list_own_records") && !finding.detail.contains("rotate_share_link"),
+        !finding.detail.contains("list_own_records")
+            && !finding.detail.contains("rotate_share_link"),
         "finding must not conflate the offending function with either safe twin: {finding:?}"
     );
 
     // ═══ Provenance: deterministic-arch tagging (the mechanism the UI badges on) ═══
-    assert!(finding.preview, "an architectural finding uses the existing preview mechanism");
-    assert_eq!(finding.preview_tool.as_deref(), Some("camerata-arch"), "must carry the camerata-arch provenance tag");
-    assert_eq!(finding.status, "active", "no suppression/baseline in the fixture — must be active");
+    assert!(
+        finding.preview,
+        "an architectural finding uses the existing preview mechanism"
+    );
+    assert_eq!(
+        finding.preview_tool.as_deref(),
+        Some("camerata-arch"),
+        "must carry the camerata-arch provenance tag"
+    );
+    assert_eq!(
+        finding.status, "active",
+        "no suppression/baseline in the fixture — must be active"
+    );
 
     // ═══ Provenance stamp sanity (mirrors architectural_executor_e2e.rs) ═══
     assert!(!report.provenance.audited_refs.is_empty());
-    let sha = report.provenance.audited_refs[0].sha.as_deref().expect("a real one-commit git repo must yield a SHA");
+    let sha = report.provenance.audited_refs[0]
+        .sha
+        .as_deref()
+        .expect("a real one-commit git repo must yield a SHA");
     assert_eq!(sha.len(), 40);
 }
 
@@ -203,7 +242,10 @@ async fn search_path_finding_reaches_curated_findings_with_a_grounded_citation()
     let dispositions: HashMap<String, DispositionWire> = HashMap::new();
     let corpus_path = camerata_rules::corpus_path();
     let (corpus, corpus_errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-    assert!(corpus_errors.is_empty(), "the bundled rule corpus must load cleanly: {corpus_errors:?}");
+    assert!(
+        corpus_errors.is_empty(),
+        "the bundled rule corpus must load cleanly: {corpus_errors:?}"
+    );
 
     let opts = ReportOptions {
         client_name: "Acme Corp".to_string(),
@@ -250,12 +292,20 @@ async fn search_path_finding_reaches_curated_findings_with_a_grounded_citation()
     );
     assert!(!group.citation.sources.is_empty());
     assert!(
-        group.citation.sources.iter().any(|s| s.url.contains("postgresql.org")),
+        group
+            .citation
+            .sources
+            .iter()
+            .any(|s| s.url.contains("postgresql.org")),
         "expected the PostgreSQL CREATE FUNCTION security-definer citation: {:?}",
         group.citation.sources
     );
     assert!(
-        group.citation.sources.iter().any(|s| s.url.contains("supabase.com")),
+        group
+            .citation
+            .sources
+            .iter()
+            .any(|s| s.url.contains("supabase.com")),
         "expected the Supabase database-linter citation: {:?}",
         group.citation.sources
     );
@@ -263,7 +313,10 @@ async fn search_path_finding_reaches_curated_findings_with_a_grounded_citation()
     // ═══ The finding must NOT be routed to the informational appendix (Bug 4's bucketing, or ═══
     // P3's citation gate) — it is a High-severity, fully-grounded, actionable defect.
     assert!(
-        json.matrix.informational.iter().all(|f| f.rule_id != RULE_SEARCH_PATH),
+        json.matrix
+            .informational
+            .iter()
+            .all(|f| f.rule_id != RULE_SEARCH_PATH),
         "a High-severity, grounded finding must never land in the informational bucket: {:?}",
         json.matrix.informational
     );
@@ -279,6 +332,12 @@ async fn search_path_finding_reaches_curated_findings_with_a_grounded_citation()
     let pdf_bytes = report_export::compile_pdf(&json)
         .await
         .expect("typst compile must succeed for a well-formed report");
-    assert!(pdf_bytes.starts_with(b"%PDF"), "output must be a real PDF (starts with the %PDF magic bytes)");
-    assert!(pdf_bytes.len() > 1000, "a real compiled PDF is not a trivially tiny file");
+    assert!(
+        pdf_bytes.starts_with(b"%PDF"),
+        "output must be a real PDF (starts with the %PDF magic bytes)"
+    );
+    assert!(
+        pdf_bytes.len() > 1000,
+        "a real compiled PDF is not a trivially tiny file"
+    );
 }

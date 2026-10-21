@@ -116,7 +116,10 @@ async fn req_w22_initplan_options_describe_policies_not_camerata_reporting() {
          guaranteed high-severity defect"
     );
 
-    for gone in ["wrap-auth-calls-opt-in", "bundle-as-a-standard-security-finding"] {
+    for gone in [
+        "wrap-auth-calls-opt-in",
+        "bundle-as-a-standard-security-finding",
+    ] {
         assert!(
             !rule.options.iter().any(|o| o.id == gone),
             "`{gone}` describes Camerata's own report policy, not the client's policies"

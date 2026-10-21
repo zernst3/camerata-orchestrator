@@ -108,10 +108,8 @@ pub async fn sweep_at(
             // state carries WHY it ended; `fail_with_reason` is idempotent-terminal, so a run
             // that finished on its own between the snapshot and here is left untouched.
             StallDecision::Cancel => {
-                let idle_secs = crate::run::idle_ms(
-                    u128::from(run.tracker.last_activity_ms()),
-                    now_ms,
-                ) / 1_000;
+                let idle_secs =
+                    crate::run::idle_ms(u128::from(run.tracker.last_activity_ms()), now_ms) / 1_000;
                 let reason = format!(
                     "Auto-cancelled: autonomous run stalled (idle {idle_secs}s, threshold \
                      {}s) with no activity heartbeat.",
@@ -255,6 +253,10 @@ mod tests {
         assert!(cancelled.is_empty());
         let r = runs.get(&id).unwrap();
         assert!(r.done);
-        assert_eq!(r.status, RunStatus::AwaitingQa, "success terminal preserved");
+        assert_eq!(
+            r.status,
+            RunStatus::AwaitingQa,
+            "success terminal preserved"
+        );
     }
 }

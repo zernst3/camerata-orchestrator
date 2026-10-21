@@ -342,7 +342,10 @@ mod tests {
     #[test]
     fn glob_match_exact_file() {
         assert!(glob_match("supabase/config.toml", "supabase/config.toml"));
-        assert!(!glob_match("supabase/config.toml", "supabase/config.toml.bak"));
+        assert!(!glob_match(
+            "supabase/config.toml",
+            "supabase/config.toml.bak"
+        ));
     }
 
     #[test]
@@ -419,7 +422,10 @@ mod tests {
             "SEC-NO-WEAK-TOKEN-RANDOMNESS-1",
             "SEC-NO-QUERY-GRAMMAR-INJECTION-1",
         ] {
-            assert!(ids.contains(expected), "missing {expected} from registry: {ids:?}");
+            assert!(
+                ids.contains(expected),
+                "missing {expected} from registry: {ids:?}"
+            );
         }
         // ARCH-NO-CROSS-BOUNDARY-IMPORTS-1 / ARCH-API-DTOS-1 / ARCH-STRICT-LAYERING-1
         // (`ImportBoundaryChecker` + Pass 4c's `StrictLayeringCallChecker`) and
@@ -434,7 +440,10 @@ mod tests {
             "ARCH-STRICT-LAYERING-1",
             "ARCH-HANDLER-NO-DB-1",
         ] {
-            assert!(ids.contains(gated), "missing {gated} from the static registry: {ids:?}");
+            assert!(
+                ids.contains(gated),
+                "missing {gated} from the static registry: {ids:?}"
+            );
         }
     }
 
@@ -455,7 +464,10 @@ mod tests {
             .iter()
             .flat_map(|c| c.rule_ids().iter().copied())
             .collect();
-        assert!(all_ids.contains("ARCH-RESOURCE-LIFECYCLE-1"), "checker must still be registered: {all_ids:?}");
+        assert!(
+            all_ids.contains("ARCH-RESOURCE-LIFECYCLE-1"),
+            "checker must still be registered: {all_ids:?}"
+        );
     }
 
     // ── `**` glob support (Pass 4a seam amendment) ──────────────────────────────
@@ -467,7 +479,10 @@ mod tests {
 
     #[test]
     fn glob_match_double_star_matches_multiple_leading_and_trailing_segments() {
-        assert!(glob_match("**/tests/**/*.py", "a/b/tests/sub/dir/test_foo.py"));
+        assert!(glob_match(
+            "**/tests/**/*.py",
+            "a/b/tests/sub/dir/test_foo.py"
+        ));
     }
 
     #[test]
@@ -521,14 +536,20 @@ mod tests {
             ".camerata/architecture.toml".to_string(),
             "version = 1\n".to_string(),
         )];
-        let repo = RepoView { spec: "test/repo", files: &files };
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
         assert!(!DummyConfigGatedChecker.config_unsatisfied_for(&repo));
     }
 
     #[test]
     fn config_gated_checker_stays_advisory_when_repo_config_absent() {
         let files: Vec<(String, String)> = vec![("src/a.ts".to_string(), String::new())];
-        let repo = RepoView { spec: "test/repo", files: &files };
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
         assert!(DummyConfigGatedChecker.config_unsatisfied_for(&repo));
     }
 
@@ -540,7 +561,10 @@ mod tests {
         // `all_checkers_registry_covers_expected_rule_ids` above) — this is exactly the
         // divergence `checker_rule_ids_for_repo` exists to compute.
         let files: Vec<(String, String)> = vec![("README.md".to_string(), String::new())];
-        let repo = RepoView { spec: "test/repo", files: &files };
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
         let per_repo = checker_rule_ids_for_repo(&repo);
         let static_set = all_checker_rule_ids();
         for gated in [
@@ -549,8 +573,14 @@ mod tests {
             "ARCH-STRICT-LAYERING-1",
             "ARCH-HANDLER-NO-DB-1",
         ] {
-            assert!(static_set.contains(gated), "{gated} missing from static set: {static_set:?}");
-            assert!(!per_repo.contains(gated), "{gated} must be excluded per-repo when unconfigured: {per_repo:?}");
+            assert!(
+                static_set.contains(gated),
+                "{gated} missing from static set: {static_set:?}"
+            );
+            assert!(
+                !per_repo.contains(gated),
+                "{gated} must be excluded per-repo when unconfigured: {per_repo:?}"
+            );
         }
     }
 
@@ -575,8 +605,12 @@ repositories = []
 handles = ["db"]
 allowed_in = ["repositories"]
 "#;
-        let files: Vec<(String, String)> = vec![(".camerata/architecture.toml".to_string(), cfg.to_string())];
-        let repo = RepoView { spec: "test/repo", files: &files };
+        let files: Vec<(String, String)> =
+            vec![(".camerata/architecture.toml".to_string(), cfg.to_string())];
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
         assert_eq!(checker_rule_ids_for_repo(&repo), all_checker_rule_ids());
     }
 

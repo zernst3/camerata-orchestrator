@@ -66,8 +66,8 @@ pub struct BombePreview(pub Signal<bool>);
 /// them.
 pub fn provide_loading_context() {
     use_context_provider(|| Signal::new(0usize));
-    use_context_provider(|| BombeEnabled(Signal::new(true)));   // on by default
-    use_context_provider(|| BombePreview(Signal::new(false)));  // no preview
+    use_context_provider(|| BombeEnabled(Signal::new(true))); // on by default
+    use_context_provider(|| BombePreview(Signal::new(false))); // no preview
 }
 
 /// RAII guard that increments the loading count on creation and decrements
@@ -202,7 +202,11 @@ mod tests {
             let count = use_context::<LoadingCount>();
             assert_eq!(*count.read(), 0, "idle before any guard is taken");
             let guard = LoadingGuard::new();
-            assert_eq!(*count.read(), 1, "one guard in flight -> count 1 -> Bombe runs");
+            assert_eq!(
+                *count.read(),
+                1,
+                "one guard in flight -> count 1 -> Bombe runs"
+            );
             drop(guard);
             assert_eq!(*count.read(), 0, "guard dropped -> back to idle");
             rsx! { div {} }
@@ -223,9 +227,17 @@ mod tests {
             let outer = LoadingGuard::new();
             assert_eq!(*count.read(), 1);
             let inner = LoadingGuard::new();
-            assert_eq!(*count.read(), 2, "two overlapping AI calls -> count 2, still running");
+            assert_eq!(
+                *count.read(),
+                2,
+                "two overlapping AI calls -> count 2, still running"
+            );
             drop(inner);
-            assert_eq!(*count.read(), 1, "one of two finished -> STILL running (not idle yet)");
+            assert_eq!(
+                *count.read(),
+                1,
+                "one of two finished -> STILL running (not idle yet)"
+            );
             drop(outer);
             assert_eq!(*count.read(), 0, "both finished -> idle");
             rsx! { div {} }
@@ -243,7 +255,11 @@ mod tests {
         // leave the animation stuck on.
         fn maybe_fails(count: LoadingCount, fail: bool) -> Option<()> {
             let _guard = LoadingGuard::new();
-            assert_eq!(*count.read(), 1, "guard held while the fallible op is in flight");
+            assert_eq!(
+                *count.read(),
+                1,
+                "guard held while the fallible op is in flight"
+            );
             if fail {
                 return None; // early return — Drop must still run on the way out
             }
@@ -254,7 +270,11 @@ mod tests {
             provide_loading_context();
             let count = use_context::<LoadingCount>();
             assert!(maybe_fails(count, true).is_none());
-            assert_eq!(*count.read(), 0, "error path cleared the guard -- no stuck animation");
+            assert_eq!(
+                *count.read(),
+                0,
+                "error path cleared the guard -- no stuck animation"
+            );
             assert!(maybe_fails(count, false).is_some());
             assert_eq!(*count.read(), 0, "success path also cleared the guard");
             rsx! { div {} }
@@ -283,7 +303,11 @@ mod tests {
             // Mirrors scan.rs's `audit_against` / `poll_job`: guard first, "network round trip"
             // (here, a stand-in synchronous check) second, guard dropped on return either way.
             let _guard = LoadingGuard::new();
-            assert_eq!(*count.read(), 1, "Bombe is running for the whole simulated round trip");
+            assert_eq!(
+                *count.read(),
+                1,
+                "Bombe is running for the whole simulated round trip"
+            );
             "report"
         }
         fn harness() -> Element {
@@ -292,7 +316,11 @@ mod tests {
             assert_eq!(*count.read(), 0, "idle before the audit starts");
             let report = simulated_audit_against(count);
             assert_eq!(report, "report");
-            assert_eq!(*count.read(), 0, "guard dropped when audit_against returned");
+            assert_eq!(
+                *count.read(),
+                0,
+                "guard dropped when audit_against returned"
+            );
             rsx! { div {} }
         }
         let mut vdom = VirtualDom::new(harness);

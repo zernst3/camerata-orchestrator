@@ -29,7 +29,10 @@ use camerata_rules::{corpus_path, load_corpus_lenient, RuleKind};
 /// The 9 rewritten rules: `(rule id, the client-state option id its violates option now
 /// carries)`.
 const REWRITTEN: &[(&str, &str)] = &[
-    ("SUPABASE-AUTH-EDGE-JWT-1", "edge-function-disables-jwt-without-compensating-check"),
+    (
+        "SUPABASE-AUTH-EDGE-JWT-1",
+        "edge-function-disables-jwt-without-compensating-check",
+    ),
     (
         "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1",
         "definer-read-trusts-caller-supplied-id",
@@ -42,15 +45,30 @@ const REWRITTEN: &[(&str, &str)] = &[
         "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1",
         "privileged-mutating-function-without-authz-check",
     ),
-    ("SUPABASE-FUNC-SEARCH-PATH-1", "definer-function-without-pinned-search-path"),
-    ("SUPABASE-KEY-SERVICE-ROLE-CLIENT-1", "service-role-identity-in-client-bundle"),
+    (
+        "SUPABASE-FUNC-SEARCH-PATH-1",
+        "definer-function-without-pinned-search-path",
+    ),
+    (
+        "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+        "service-role-identity-in-client-bundle",
+    ),
     // Moved here from DELETED after the pre-existing W12 security gate
     // (`req_w12_security_rules_are_defect_kind_with_exactly_one_violates_option`) caught that
     // these three are security rules required to KEEP a violates option so they can report a
     // fault. Fable's delete classification had not accounted for that invariant; the test did.
-    ("SUPABASE-RLS-DISABLED-NOT-RESTORED-1", "table-rls-disabled-and-never-restored"),
-    ("SUPABASE-RLS-PERMISSIVE-TRUE-1", "anon-or-public-policy-grants-write-via-true-predicate"),
-    ("SUPABASE-STORAGE-OBJECT-POLICY-1", "unscoped-storage-write-policy-for-anon-or-public"),
+    (
+        "SUPABASE-RLS-DISABLED-NOT-RESTORED-1",
+        "table-rls-disabled-and-never-restored",
+    ),
+    (
+        "SUPABASE-RLS-PERMISSIVE-TRUE-1",
+        "anon-or-public-policy-grants-write-via-true-predicate",
+    ),
+    (
+        "SUPABASE-STORAGE-OBJECT-POLICY-1",
+        "unscoped-storage-write-policy-for-anon-or-public",
+    ),
 ];
 
 /// The 5 reduced to a single-option defect.
@@ -67,9 +85,22 @@ const DELETED: &[&str] = &[
 fn reads_as_scanner_design(label: &str) -> bool {
     let l = label.trim_start();
     const OPENERS: &[&str] = &[
-        "Flag ", "Grep ", "Regex-grep", "Treat every", "Treat materialized", "Treat the mere",
-        "Report ", "Scan ", "Hardcode ", "Ignore ", "Skip reporting", "Do not ", "Rely on",
-        "Rely solely", "Apply only", "Apply a name",
+        "Flag ",
+        "Grep ",
+        "Regex-grep",
+        "Treat every",
+        "Treat materialized",
+        "Treat the mere",
+        "Report ",
+        "Scan ",
+        "Hardcode ",
+        "Ignore ",
+        "Skip reporting",
+        "Do not ",
+        "Rely on",
+        "Rely solely",
+        "Apply only",
+        "Apply a name",
     ];
     OPENERS.iter().any(|o| l.starts_with(o))
 }
@@ -83,7 +114,11 @@ async fn req_w22_rewritten_rules_name_a_client_state() {
         let rule = corpus
             .get_by_id(rule_id)
             .unwrap_or_else(|| panic!("{rule_id} missing"));
-        assert_eq!(rule.kind, Some(RuleKind::Defect), "{rule_id} stays a defect");
+        assert_eq!(
+            rule.kind,
+            Some(RuleKind::Defect),
+            "{rule_id} stays a defect"
+        );
 
         let opt = rule
             .options
@@ -111,7 +146,11 @@ async fn req_w22_deleted_rules_are_single_option_defects() {
         let rule = corpus
             .get_by_id(rule_id)
             .unwrap_or_else(|| panic!("{rule_id} missing"));
-        assert_eq!(rule.kind, Some(RuleKind::Defect), "{rule_id} stays a defect");
+        assert_eq!(
+            rule.kind,
+            Some(RuleKind::Defect),
+            "{rule_id} stays a defect"
+        );
         assert_eq!(
             rule.options.len(),
             1,

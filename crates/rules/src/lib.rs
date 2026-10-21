@@ -1659,12 +1659,8 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
     // e.g. corpus_dir/rust/dioxus/x.toml → "rust:dioxus"
     //      corpus_dir/universal/x.toml   → "universal"
     let derived_domain: String = {
-        let parent = path
-            .parent()
-            .unwrap_or(corpus_dir);
-        let rel = parent
-            .strip_prefix(corpus_dir)
-            .unwrap_or(parent);
+        let parent = path.parent().unwrap_or(corpus_dir);
+        let rel = parent.strip_prefix(corpus_dir).unwrap_or(parent);
         let components: Vec<&str> = rel
             .components()
             .filter_map(|c| {
@@ -1688,7 +1684,11 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
     // derived value (this catches stale/mismatched fields). The derived value
     // always wins.
     if let Some(ref explicit) = raw.domain {
-        let normalised = if explicit == "*" { "universal" } else { explicit.as_str() };
+        let normalised = if explicit == "*" {
+            "universal"
+        } else {
+            explicit.as_str()
+        };
         if normalised != derived_domain {
             tracing::warn!(
                 path = %path.display(),
@@ -2480,20 +2480,22 @@ pub async fn corpus_rules_with_qualifies_misplaced_into_sources(
 pub async fn corpus_rules_losing_qualifies_text_to_sources(
     corpus_dir: &Path,
 ) -> Result<Vec<String>, RulesError> {
-    Ok(corpus_rules_with_qualifies_misplaced_into_sources(corpus_dir)
-        .await?
-        .into_iter()
-        // The reporter encodes rule-level presence in its own line; ABSENT is the harmful shape.
-        .filter(|line| line.contains("ABSENT"))
-        .map(|line| {
-            format!(
+    Ok(
+        corpus_rules_with_qualifies_misplaced_into_sources(corpus_dir)
+            .await?
+            .into_iter()
+            // The reporter encodes rule-level presence in its own line; ABSENT is the harmful shape.
+            .filter(|line| line.contains("ABSENT"))
+            .map(|line| {
+                format!(
                 "{line}: the nested `qualifies` is discarded by `RuleSource` and the rule has no \
                  rule-level one, so `Rule::summary` silently falls back to `[decision].why` \
                  instead of this authored text. Move the line ABOVE the first `[[sources]]` \
                  header."
             )
-        })
-        .collect())
+            })
+            .collect(),
+    )
 }
 
 /// GATE (W18). Every `[[sources]]` block in the corpus that authors a `qualifies` key, as
@@ -2732,7 +2734,11 @@ pub fn rules_with_invalid_severity_floor(set: &RuleSet) -> Vec<String> {
 pub fn rules_declaring_min_severity(set: &RuleSet) -> Vec<String> {
     let mut found: Vec<String> = set
         .iter()
-        .filter_map(|r| r.min_severity.as_deref().map(|c| format!("{} ({c})", r.id.0)))
+        .filter_map(|r| {
+            r.min_severity
+                .as_deref()
+                .map(|c| format!("{} ({c})", r.id.0))
+        })
         .collect();
     found.sort();
     found
@@ -2808,13 +2814,21 @@ fn severity_rank(s: &str) -> u8 {
 /// no high `min_severity` therefore CANNOT emit high+ — its deviations clamp to medium — and is
 /// correctly excluded.
 pub fn rule_can_emit_high_plus(rule: &Rule) -> bool {
-    if rule.min_severity.as_deref().is_some_and(|s| severity_rank(s) >= 3) {
+    if rule
+        .min_severity
+        .as_deref()
+        .is_some_and(|s| severity_rank(s) >= 3)
+    {
         return true;
     }
     if rule.options.iter().any(|o| o.violates) {
         return true;
     }
-    if rule.deviation_ceiling.as_deref().is_some_and(|s| severity_rank(s) >= 3) {
+    if rule
+        .deviation_ceiling
+        .as_deref()
+        .is_some_and(|s| severity_rank(s) >= 3)
+    {
         return true;
     }
     if rule.is_defect_kind() {
@@ -3565,7 +3579,11 @@ mod tests {
             "agentic",
             EnforcementKind::Mechanical,
         ));
-        set.push(make_rule("SPIRIT-OPTIMIZE-1", "universal", EnforcementKind::Prose));
+        set.push(make_rule(
+            "SPIRIT-OPTIMIZE-1",
+            "universal",
+            EnforcementKind::Prose,
+        ));
         set.push(make_rule(
             "ARCH-STRICT-LAYERING-1",
             "api-layer",
@@ -3892,7 +3910,10 @@ mod tests {
                 EnforcementKind::Architectural,
                 "{id} must be the Architectural tier"
             );
-            assert!(rule.opt_in_only, "{id} must be opt-in only (never pre-checked)");
+            assert!(
+                rule.opt_in_only,
+                "{id} must be opt-in only (never pre-checked)"
+            );
             // The caveat that distinguishes these from the usual SSOT layer-2+4
             // pattern must be present in the rule summary.
             assert!(
@@ -4365,15 +4386,22 @@ mod tests {
             why = "Trusted team."
         "#;
         let rule = parse_rule(src);
-        assert!(rule.has_escalating_option(), "the rule offers an escalating option");
+        assert!(
+            rule.has_escalating_option(),
+            "the rule offers an escalating option"
+        );
 
         // Default (no explicit selection) → resolves to the escalate option → spec is active.
-        let by_default = rule.selected_escalation(None).expect("default option escalates");
+        let by_default = rule
+            .selected_escalation(None)
+            .expect("default option escalates");
         assert_eq!(by_default.severity, EscalationSeverity::HardPause);
         assert!(by_default.condition.contains("existing test"));
 
         // Explicitly choosing the escalate option → active.
-        assert!(rule.selected_escalation(Some("escalate-on-test-edit")).is_some());
+        assert!(rule
+            .selected_escalation(Some("escalate-on-test-edit"))
+            .is_some());
 
         // THE KEY CORRECTNESS POINT: choosing the NON-escalating option → no escalation.
         assert!(
@@ -4459,7 +4487,10 @@ mod tests {
             assert_eq!(rule.enforcement, EnforcementKind::Mechanical);
             assert_eq!(rule.domain, "ci-cd");
             assert!(rule.is_opt_in_only(), "CodeQL rule is opt_in_only");
-            assert!(rule.is_layer3_only(), "CodeQL is layer-3 only (heavy DB build)");
+            assert!(
+                rule.is_layer3_only(),
+                "CodeQL is layer-3 only (heavy DB build)"
+            );
             assert!(rule.is_grounded(), "CodeQL rule is grounded");
             assert!(!rule.has_default(), "no default → forces a tier choice");
             assert_eq!(rule.options.len(), 2, "two tier options");
@@ -4545,9 +4576,7 @@ mod tests {
         .expect("write toml");
 
         let set = load_corpus(corpus_dir).await.expect("corpus loads");
-        let rule = set
-            .get_by_id("RUST-DIOXUS-TEST-1")
-            .expect("rule loaded");
+        let rule = set.get_by_id("RUST-DIOXUS-TEST-1").expect("rule loaded");
         assert_eq!(
             rule.domain, "rust:dioxus",
             "domain derived from rust/dioxus/ folder"
@@ -5472,8 +5501,7 @@ mod tests {
                 ));
             }
 
-            let flagged: Vec<&RuleOption> =
-                rule.options.iter().filter(|o| o.violates).collect();
+            let flagged: Vec<&RuleOption> = rule.options.iter().filter(|o| o.violates).collect();
             if flagged.len() != 1 {
                 problems.push(format!(
                     "{id}: {} options marked `violates`, must be exactly 1 (flagged: {:?})",
@@ -6047,7 +6075,10 @@ mod tests {
             // "Flag as medium-to-high severity (scaled by how sensitive the extra field is)"
             // — an explicit RANGE, whose bottom is the floor and whose top is the ceiling
             // W5 already transcribed.
-            ("SUPABASE-REALTIME-PRESENCE-IDENTITY-1", "medium-to-high range"),
+            (
+                "SUPABASE-REALTIME-PRESENCE-IDENTITY-1",
+                "medium-to-high range",
+            ),
             // "a credential … is HIGH … regulated PII … is calibrated MEDIUM; treating it as
             // HIGH would inflate it past genuinely credential-bearing findings."
             ("SEC-NO-SENSITIVE-DATA-IN-LOGS-1", "high + medium branches"),

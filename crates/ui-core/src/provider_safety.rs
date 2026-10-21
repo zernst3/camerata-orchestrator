@@ -225,7 +225,9 @@ mod tests {
 
     #[test]
     fn confirm_text_warns_about_client_code() {
-        assert!(SAFE_MODE_OFF_CONFIRM_TEXT.to_lowercase().contains("client code"));
+        assert!(SAFE_MODE_OFF_CONFIRM_TEXT
+            .to_lowercase()
+            .contains("client code"));
     }
 
     // ── ProviderOption::is_safe ────────────────────────────────────────────────
@@ -296,7 +298,10 @@ mod tests {
         assert!(rows_no_pin[0].selected, "Auto selected when pin is None");
 
         let rows_pinned = build_provider_rows(&providers, true, Some("deepinfra"));
-        assert!(!rows_pinned[0].selected, "Auto NOT selected when a pin is set");
+        assert!(
+            !rows_pinned[0].selected,
+            "Auto NOT selected when a pin is set"
+        );
     }
 
     // ── build_provider_rows: safety-badge / disabling ──────────────────────────
@@ -322,10 +327,22 @@ mod tests {
             provider("deepseek", true, false),
         ];
         let rows = build_provider_rows(&providers, true, None);
-        let deepinfra = rows.iter().find(|r| r.slug.as_deref() == Some("deepinfra")).unwrap();
-        let deepseek = rows.iter().find(|r| r.slug.as_deref() == Some("deepseek")).unwrap();
-        assert!(deepinfra.selectable, "safe provider stays selectable in safe mode");
-        assert!(!deepseek.selectable, "unsafe provider must be disabled in safe mode");
+        let deepinfra = rows
+            .iter()
+            .find(|r| r.slug.as_deref() == Some("deepinfra"))
+            .unwrap();
+        let deepseek = rows
+            .iter()
+            .find(|r| r.slug.as_deref() == Some("deepseek"))
+            .unwrap();
+        assert!(
+            deepinfra.selectable,
+            "safe provider stays selectable in safe mode"
+        );
+        assert!(
+            !deepseek.selectable,
+            "unsafe provider must be disabled in safe mode"
+        );
     }
 
     #[test]
@@ -336,7 +353,10 @@ mod tests {
             provider("streamlake", false, true),
         ];
         let rows = build_provider_rows(&providers, false, None);
-        assert!(rows.iter().all(|r| r.selectable), "testing mode: nothing is disabled");
+        assert!(
+            rows.iter().all(|r| r.selectable),
+            "testing mode: nothing is disabled"
+        );
     }
 
     // ── build_provider_rows: selection + pin round-trip ────────────────────────
@@ -348,8 +368,14 @@ mod tests {
             provider("novita", false, false),
         ];
         let rows = build_provider_rows(&providers, true, Some("novita"));
-        let deepinfra = rows.iter().find(|r| r.slug.as_deref() == Some("deepinfra")).unwrap();
-        let novita = rows.iter().find(|r| r.slug.as_deref() == Some("novita")).unwrap();
+        let deepinfra = rows
+            .iter()
+            .find(|r| r.slug.as_deref() == Some("deepinfra"))
+            .unwrap();
+        let novita = rows
+            .iter()
+            .find(|r| r.slug.as_deref() == Some("novita"))
+            .unwrap();
         assert!(!deepinfra.selected);
         assert!(novita.selected);
     }
@@ -358,7 +384,10 @@ mod tests {
     fn stale_pin_not_in_providers_selects_nothing() {
         let providers = vec![provider("deepinfra", false, false)];
         let rows = build_provider_rows(&providers, true, Some("not-a-real-slug"));
-        assert!(rows.iter().all(|r| !r.selected), "no row fabricates a match for a stale pin");
+        assert!(
+            rows.iter().all(|r| !r.selected),
+            "no row fabricates a match for a stale pin"
+        );
     }
 
     #[test]
@@ -389,7 +418,11 @@ mod tests {
     #[test]
     fn unavailable_iff_empty() {
         assert!(provider_data_unavailable(&[]));
-        assert!(!provider_data_unavailable(&[provider("deepinfra", false, false)]));
+        assert!(!provider_data_unavailable(&[provider(
+            "deepinfra",
+            false,
+            false
+        )]));
     }
 
     // ── ProviderEndpointsResp deserialization (the wire contract) ─────────────

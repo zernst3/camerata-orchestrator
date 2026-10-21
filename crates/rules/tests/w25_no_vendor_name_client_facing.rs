@@ -48,7 +48,10 @@ async fn req_w25_no_client_facing_field_names_the_vendor() {
         }
         for s in &rule.sources {
             if names_vendor(&s.title) {
-                flag(&rule.id.0, format!("source `{}`", s.title.chars().take(40).collect::<String>()));
+                flag(
+                    &rule.id.0,
+                    format!("source `{}`", s.title.chars().take(40).collect::<String>()),
+                );
             }
         }
         for o in &rule.options {

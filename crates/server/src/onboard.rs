@@ -31,11 +31,11 @@ pub use audit::{audit_content, audit_files};
 pub use files::{read_local_repo_files, ExtractedRepo};
 pub use greenfield::{scaffold_greenfield_blocking, GreenfieldResult};
 pub use propose::{detect_stack, propose_corpus_rules, propose_rules};
+#[allow(unused_imports)]
+pub(crate) use report::csv_escape;
 pub use report::{
     build_report, create_issue, create_tech_debt_ticket, tech_debt_csv, tech_debt_issue_body,
 };
-#[allow(unused_imports)]
-pub(crate) use report::csv_escape;
 pub use self_ref::{
     corpus_texts_from_ruleset, is_governance_or_corpus_artifact, is_self_referential_snippet,
     suppress_self_referential,
@@ -44,8 +44,7 @@ pub use self_ref::{
 // Pull private/crate-internal helpers into scope for the orchestration functions and
 // test module (via `use super::*`).
 pub(crate) use audit::{
-    build_rule_alternatives, classify_repo_findings, is_ci_tier_rule,
-    is_semantic_multi_option_rule,
+    build_rule_alternatives, classify_repo_findings, is_ci_tier_rule, is_semantic_multi_option_rule,
 };
 // Re-export camerata_gateway test-scope primitives so the test module's `use super::*`
 // can reach them directly (they're used in inline test assertions).
@@ -872,9 +871,8 @@ impl ScanReport {
         // one audit covers the PDF, the workbook and the JSON rather than needing a check
         // per renderer. Recorded into the ledger so `camerata integrity-gate` can judge it
         // from a ledger read off disk, days later and elsewhere.
-        let hygiene = crate::scan_ledger::PathHygiene::audit(
-            self.findings.iter().map(|f| f.path.as_str()),
-        );
+        let hygiene =
+            crate::scan_ledger::PathHygiene::audit(self.findings.iter().map(|f| f.path.as_str()));
         self.ledger.record_path_hygiene(hygiene);
         SealedReport(self)
     }
@@ -1321,8 +1319,7 @@ pub async fn audit_repos(
     // blocked, or AI-errored run carries an empty/stale-shaped `findings` set that must never be
     // mistaken for "the AI looked and found nothing" — so it is filtered out here exactly like a
     // rule-set mismatch is, and every file is treated as changed (a full AI audit) below.
-    let effective_prior =
-        incremental_prior.filter(|m| m.matches_rules(&rules_fp) && m.ai_covered);
+    let effective_prior = incremental_prior.filter(|m| m.matches_rules(&rules_fp) && m.ai_covered);
     let mut manifest_builder =
         crate::scan_cache::ManifestBuilder::new().with_rules_fingerprint(rules_fp.clone());
     let mut all_findings = Vec::new();
@@ -1346,8 +1343,10 @@ pub async fn audit_repos(
     // Per-rule alternative recommendations, accumulated across every repo this scan touches
     // (see `ScanReport::recommendations`'s doc comment for the last-repo-wins simplification
     // when a project-level rule is scanned in more than one repo).
-    let mut recommendations: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation> =
-        std::collections::HashMap::new();
+    let mut recommendations: std::collections::HashMap<
+        String,
+        crate::ai_audit::RuleRecommendation,
+    > = std::collections::HashMap::new();
     // W6: any pass that failed/timed out for a repo, across the whole scan — see
     // `ScanReport::failed_passes`'s doc comment. Never omitted from the export.
     let mut all_failed_passes: Vec<crate::ai_audit::FailedPass> = Vec::new();
@@ -1509,8 +1508,10 @@ pub async fn audit_repos(
                 // here was an accounting bug — see that function's doc comment — because it
                 // made `ARCH-RESOURCE-LIFECYCLE-1`'s unconditionally-real checker misclassify
                 // as "no wired detector" the moment the semantic phase didn't also flag it).
-                let repo_view =
-                    camerata_checks::arch_checker::RepoView { spec, files: &files };
+                let repo_view = camerata_checks::arch_checker::RepoView {
+                    spec,
+                    files: &files,
+                };
                 let ledger_checker_rule_ids =
                     camerata_checks::arch_checker::ledger_detector_rule_ids_for_repo(&repo_view);
                 let semantic: Vec<(String, String)> = semantic_rule_ids_for_repo(selected, spec);
@@ -1615,7 +1616,10 @@ pub async fn audit_repos(
                     // place its `ran`/`findings_emitted` facts get recorded — `RuleTier::Semantic`,
                     // never silently "verified clean" via mere selection, and never double-counted
                     // here as an Architectural not-run.
-                    for rid in repo_selected_ids.iter().filter(|r| is_ci_tier_rule(r, corpus)) {
+                    for rid in repo_selected_ids
+                        .iter()
+                        .filter(|r| is_ci_tier_rule(r, corpus))
+                    {
                         let emitted = arch.iter().filter(|f| f.rule_id == *rid).count();
                         match crate::mechanical_gate::detector_channel(
                             rid,
@@ -1718,7 +1722,10 @@ pub async fn audit_repos(
                     // recording further down (which correctly reports "AI/semantic review not
                     // requested" when `run_ai_review` is also off, or a real semantic result
                     // otherwise).
-                    for rid in repo_selected_ids.iter().filter(|r| is_ci_tier_rule(r, corpus)) {
+                    for rid in repo_selected_ids
+                        .iter()
+                        .filter(|r| is_ci_tier_rule(r, corpus))
+                    {
                         let has_detector = crate::mechanical_gate::detector_channel(
                             rid,
                             &ledger_checker_rule_ids,
@@ -1794,8 +1801,7 @@ pub async fn audit_repos(
                         // true (0 files freshly evaluated) rather than leaving these rules to
                         // default-"clean" via mere selection.
                         for (rid, _) in &semantic {
-                            let emitted =
-                                part.carried.iter().filter(|f| &f.rule_id == rid).count();
+                            let emitted = part.carried.iter().filter(|f| &f.rule_id == rid).count();
                             pipeline_ledger.record_rule(
                                 rid.clone(),
                                 crate::scan_ledger::RuleTier::Semantic,
@@ -2007,16 +2013,17 @@ pub async fn audit_repos(
                 // usage into the SAME `meter` as calibration/audit, so its spend is never
                 // invisible to the actual-vs-estimated readout.
                 if run_ai_review && !repo_findings.is_empty() {
-                    let (fixed_findings, fix_failed_passes) = crate::ai_audit::generate_fix_specifics(
-                        &llm,
-                        spec,
-                        repo_findings,
-                        &files,
-                        calibration_model.or(model),
-                        Some(&meter),
-                        corpus,
-                    )
-                    .await;
+                    let (fixed_findings, fix_failed_passes) =
+                        crate::ai_audit::generate_fix_specifics(
+                            &llm,
+                            spec,
+                            repo_findings,
+                            &files,
+                            calibration_model.or(model),
+                            Some(&meter),
+                            corpus,
+                        )
+                        .await;
                     repo_findings = fixed_findings;
                     // C6-B3: same disclosure mechanism as the alternative-recommendation and
                     // hour-estimation sub-passes above — a per-finding fix-generation give-up
@@ -2147,16 +2154,18 @@ pub async fn audit_repos(
     // Computed once and shared with provenance below, so the gate and the export can never
     // disagree about whether a model ran.
     let ai_ran_for_ledger = report.actual_usage.as_ref().is_some_and(|u| u.calls > 0);
-    report.ledger.record_input(crate::scan_ledger::ScanInputFacts {
-        files_scanned: files_total,
-        files_excluded: files_excluded_total,
-        code_chars: code_chars_total,
-        engine_artifacts_admitted: engine_artifacts_total,
-        // The RESOLVED model, not the caller's raw pick. Recording the pick is what made
-        // `None` ambiguous between "no model ran" and "nobody wrote it down", and left the
-        // 2026-10-16 before/after comparison unfalsifiable. See `resolve_audit_model`.
-        audit_model: ai_ran_for_ledger.then(|| crate::ai_audit::resolve_audit_model(model)),
-    });
+    report
+        .ledger
+        .record_input(crate::scan_ledger::ScanInputFacts {
+            files_scanned: files_total,
+            files_excluded: files_excluded_total,
+            code_chars: code_chars_total,
+            engine_artifacts_admitted: engine_artifacts_total,
+            // The RESOLVED model, not the caller's raw pick. Recording the pick is what made
+            // `None` ambiguous between "no model ran" and "nobody wrote it down", and left the
+            // 2026-10-16 before/after comparison unfalsifiable. See `resolve_audit_model`.
+            audit_model: ai_ran_for_ledger.then(|| crate::ai_audit::resolve_audit_model(model)),
+        });
     // W19: record the model that ACTUALLY ran, resolved, not the caller's raw pick — but
     // only when the AI tier ran at all. A floor-only or compliance-blocked run made zero
     // model calls, and naming a model there would be a different lie from the one being
@@ -2192,7 +2201,10 @@ pub async fn audit_repos(
     // a later AI-on scan ignores its (empty/partial) AI findings as a baseline rather than
     // trusting them (see `effective_prior` above).
     let ai_covered = run_ai_review && report.ai_error.is_none();
-    (report, manifest_builder.with_ai_covered(ai_covered).finish())
+    (
+        report,
+        manifest_builder.with_ai_covered(ai_covered).finish(),
+    )
 }
 
 /// P4 (floor findings get finding-level treatment): whether a committed-secret finding ALSO
@@ -2359,7 +2371,9 @@ mod tests {
         let selected = vec![sel("SEC-NO-HARDCODED-SECRETS-1", &[])];
         let semantic = semantic_rule_ids_for_repo(&selected, "acme/api");
         assert!(
-            semantic.iter().any(|(id, _)| id == "SEC-NO-HARDCODED-SECRETS-1"),
+            semantic
+                .iter()
+                .any(|(id, _)| id == "SEC-NO-HARDCODED-SECRETS-1"),
             "a CI-tier rule with an existing deterministic detector must still reach the \
              model's rule set: {semantic:?}"
         );
@@ -2383,7 +2397,9 @@ mod tests {
         let selected = vec![sel("SUPABASE-RLS-ENABLED-1", &[])];
         let semantic = semantic_rule_ids_for_repo(&selected, "acme/api");
         assert!(
-            semantic.iter().any(|(id, _)| id == "SUPABASE-RLS-ENABLED-1"),
+            semantic
+                .iter()
+                .any(|(id, _)| id == "SUPABASE-RLS-ENABLED-1"),
             "a CI-tier rule with a registered architectural checker must still reach the \
              model's rule set: {semantic:?}"
         );
@@ -2631,12 +2647,7 @@ mod tests {
     /// evidence.
     #[test]
     fn cross_family_merge_collapses_a_deterministic_and_model_finding_sharing_one_rule_id() {
-        let mut det = structural_site(
-            "acme/api",
-            "handler.rs",
-            50,
-            "SEC-NO-HARDCODED-SECRETS-1",
-        );
+        let mut det = structural_site("acme/api", "handler.rs", 50, "SEC-NO-HARDCODED-SECRETS-1");
         det.severity = "medium".to_string();
         det.detail = "deterministic-detected-secret".to_string();
         // `confidence: None` (the `structural_site` default) + a non-`AI-` rule id ->
@@ -3039,9 +3050,18 @@ mod tests {
 
         // Three of the five are DIRECTORIES. Excluding the directory entry while admitting
         // everything inside it would be the larger problem for a cargo target or a venv.
-        assert!(is_noise_path(".camerata-shared-target/debug/build/x.rs", none));
-        assert!(is_noise_path(".camerata-venv/lib/python3.12/site-packages/x.py", none));
-        assert!(is_noise_path(".camerata-worktrees/agent-3/src/main.rs", none));
+        assert!(is_noise_path(
+            ".camerata-shared-target/debug/build/x.rs",
+            none
+        ));
+        assert!(is_noise_path(
+            ".camerata-venv/lib/python3.12/site-packages/x.py",
+            none
+        ));
+        assert!(is_noise_path(
+            ".camerata-worktrees/agent-3/src/main.rs",
+            none
+        ));
 
         // Not only at the repo root — a nested checkout writes these too.
         assert!(is_noise_path("vendor/sub/.camerata-scan-cache.json", none));
@@ -3129,7 +3149,10 @@ mod tests {
                  legitimately cannot, it needs its own exclusion AND a note on why the prefix \
                  convention did not hold."
             );
-            assert!(is_engine_artifact(literal), "`{literal}` must match the prefix rule");
+            assert!(
+                is_engine_artifact(literal),
+                "`{literal}` must match the prefix rule"
+            );
         }
     }
 
@@ -3689,7 +3712,10 @@ mod tests {
         assert!(
             recommended_supabase.is_empty(),
             "no supabase rule should be recommended for a plain React repo: {:?}",
-            recommended_supabase.iter().map(|r| &r.id).collect::<Vec<_>>()
+            recommended_supabase
+                .iter()
+                .map(|r| &r.id)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -4164,7 +4190,9 @@ mod tests {
             "CONVENTIONS.md in files_written"
         );
         assert!(
-            result.files_written.contains(&".camerata/rules.json".to_string()),
+            result
+                .files_written
+                .contains(&".camerata/rules.json".to_string()),
             ".camerata/rules.json in files_written"
         );
 
@@ -4294,12 +4322,18 @@ mod tests {
             true,  // run_deterministic on
             None,
             crate::llm::BackendResolution::Api,
-            None, // corpus
+            None,                              // corpus
             &std::collections::HashMap::new(), // chosen_options — no project-level choice made
         )
         .await;
-        assert!(!report.gated, "a no-default, unchosen rule must not trip the GitHub gate");
-        assert!(!report.blocked, "a no-default, unchosen rule must not trip the compliance gate");
+        assert!(
+            !report.gated,
+            "a no-default, unchosen rule must not trip the GitHub gate"
+        );
+        assert!(
+            !report.blocked,
+            "a no-default, unchosen rule must not trip the compliance gate"
+        );
         assert_eq!(
             report.files_scanned, 1,
             "the scan must actually run over the repo, not short-circuit"
@@ -4325,22 +4359,22 @@ mod tests {
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, _manifest) = audit_repos(
             &sources,
-            &[],            // no semantic rules
-            Vec::new(),     // no extra notes
-            None,           // model
-            None,           // calibration model
+            &[],        // no semantic rules
+            Vec::new(), // no extra notes
+            None,       // model
+            None,       // calibration model
             crate::ai_audit::ScanMode::Parallel,
-            false,          // thorough
-            None,           // feedback
-            None,           // job
-            None,           // incremental_prior
-            false,          // deep
-            true,           // soc2_enabled
-            false,          // run_ai_review  -> AI path fully skipped (no model call)
-            true,           // run_deterministic -> floor runs
-            None,           // usage_ledger
+            false,                              // thorough
+            None,                               // feedback
+            None,                               // job
+            None,                               // incremental_prior
+            false,                              // deep
+            true,                               // soc2_enabled
+            false, // run_ai_review  -> AI path fully skipped (no model call)
+            true,  // run_deterministic -> floor runs
+            None,  // usage_ledger
             crate::llm::BackendResolution::Api, // backend gate: not under test here
-            None,           // corpus
+            None,  // corpus
             &std::collections::HashMap::new(), // chosen_options
         )
         .await;
@@ -4382,12 +4416,12 @@ mod tests {
             None,
             false,
             true,
-            false, // run_ai_review off (token-free)
-            false, // run_deterministic off -> floor skipped
-            None,  // usage_ledger
+            false,                              // run_ai_review off (token-free)
+            false,                              // run_deterministic off -> floor skipped
+            None,                               // usage_ledger
             crate::llm::BackendResolution::Api, // backend gate: not under test here
-            None,  // corpus
-            &std::collections::HashMap::new(), // chosen_options
+            None,                               // corpus
+            &std::collections::HashMap::new(),  // chosen_options
         )
         .await;
         assert!(
@@ -4437,8 +4471,8 @@ mod tests {
             true,  // run_deterministic on → floor runs
             None,
             crate::llm::BackendResolution::Api, // backend gate: not under test here
-            None, // corpus
-            &std::collections::HashMap::new(), // chosen_options
+            None,                               // corpus
+            &std::collections::HashMap::new(),  // chosen_options
         )
         .await;
         let progress = jobs.det_progress(&jid).unwrap();
@@ -4493,10 +4527,11 @@ mod tests {
             true, // ...but forced off internally by the Blocked gate; run_deterministic still runs
             None,
             crate::llm::BackendResolution::Blocked {
-                message: "This project is API-only (CLI disabled). Add an Anthropic API key to run."
-                    .to_string(),
+                message:
+                    "This project is API-only (CLI disabled). Add an Anthropic API key to run."
+                        .to_string(),
             },
-            None, // corpus
+            None,                              // corpus
             &std::collections::HashMap::new(), // chosen_options
         )
         .await;
@@ -4508,8 +4543,14 @@ mod tests {
             "the deterministic floor must still catch the planted secret when Blocked: {:?}",
             report.findings
         );
-        assert!(report.files_scanned > 0, "the floor pass must have actually read the repo");
-        assert!(!report.gated, "Blocked is a distinct condition from the GitHub-not-connected gate");
+        assert!(
+            report.files_scanned > 0,
+            "the floor pass must have actually read the repo"
+        );
+        assert!(
+            !report.gated,
+            "Blocked is a distinct condition from the GitHub-not-connected gate"
+        );
         assert!(
             !report.blocked,
             "a real (partial) result — the floor ran — must not ALSO be flagged as the \
@@ -4550,10 +4591,11 @@ mod tests {
             false, // ...and NOTHING local requested either
             None,
             crate::llm::BackendResolution::Blocked {
-                message: "This project is API-only (CLI disabled). Add an Anthropic API key to run."
-                    .to_string(),
+                message:
+                    "This project is API-only (CLI disabled). Add an Anthropic API key to run."
+                        .to_string(),
             },
-            None, // corpus
+            None,                              // corpus
             &std::collections::HashMap::new(), // chosen_options
         )
         .await;
@@ -4562,8 +4604,14 @@ mod tests {
             "nothing local was requested — zero findings is correct here: {:?}",
             report.findings
         );
-        assert_eq!(report.files_scanned, 0, "no file was read — nothing local was requested");
-        assert!(!report.gated, "Blocked is a distinct condition from the GitHub-not-connected gate");
+        assert_eq!(
+            report.files_scanned, 0,
+            "no file was read — nothing local was requested"
+        );
+        assert!(
+            !report.gated,
+            "Blocked is a distinct condition from the GitHub-not-connected gate"
+        );
         assert!(
             report.blocked,
             "the explicit compliance-block flag must be set when truly nothing ran, so the UI \
@@ -4614,7 +4662,7 @@ mod tests {
             crate::llm::BackendResolution::Blocked {
                 message: "blocked".to_string(),
             },
-            None, // corpus
+            None,                              // corpus
             &std::collections::HashMap::new(), // chosen_options
         )
         .await;
@@ -4653,7 +4701,7 @@ mod tests {
             true,  // run_deterministic on — the floor still runs
             None,
             crate::llm::BackendResolution::Api,
-            None, // corpus
+            None,                              // corpus
             &std::collections::HashMap::new(), // chosen_options
         )
         .await;
@@ -4665,8 +4713,14 @@ mod tests {
             "an Api resolution must not affect the deterministic floor: {:?}",
             report.findings
         );
-        assert!(!report.blocked, "Api (not Blocked) must never mark the scan as blocked");
-        assert!(report.ai_blocked_reason.is_none(), "Api must never carry a block reason");
+        assert!(
+            !report.blocked,
+            "Api (not Blocked) must never mark the scan as blocked"
+        );
+        assert!(
+            report.ai_blocked_reason.is_none(),
+            "Api must never carry a block reason"
+        );
     }
 
     // ── ai_covered: incremental-cache "poisoned by an AI-less run" fix ─────────
@@ -4698,7 +4752,7 @@ mod tests {
             false,
             None,
             None,
-            None,  // incremental_prior: first-ever scan
+            None, // incremental_prior: first-ever scan
             false,
             true,
             false, // run_ai_review off — the toggle was off for this run
@@ -4714,7 +4768,10 @@ mod tests {
             "an AI-off run's manifest must be stamped ai_covered = false"
         );
         assert!(
-            manifest.files.get("me/api").is_some_and(|m| m.contains_key("config.rs")),
+            manifest
+                .files
+                .get("me/api")
+                .is_some_and(|m| m.contains_key("config.rs")),
             "file fingerprints must still be recorded even though the AI didn't run: {:?}",
             manifest.files
         );
@@ -4882,7 +4939,10 @@ mod tests {
         .await;
 
         assert!(
-            report.findings.iter().any(|f| f.rule_id == "ARCH-CARRIED-1"),
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "ARCH-CARRIED-1"),
             "the cached AI finding must be carried forward into the report: {:?}",
             report.findings
         );
@@ -4928,7 +4988,10 @@ mod tests {
         );
         let legacy: crate::scan_cache::ScanManifest =
             serde_json::from_str(&legacy_json).expect("legacy manifest JSON must still parse");
-        assert!(!legacy.ai_covered, "sanity: self-heals to false at the deserialize step");
+        assert!(
+            !legacy.ai_covered,
+            "sanity: self-heals to false at the deserialize step"
+        );
 
         let (report, manifest) = audit_repos(
             &sources,
@@ -5180,8 +5243,14 @@ mod tests {
         let r = make_ci_security_rule(true /* opt_in_only */);
         let (recommended, is_auto_recommended) =
             compute_proposed_flags(&r, false /* not stack-relevant */);
-        assert!(!recommended, "not stack-relevant + opt_in_only must not be recommended");
-        assert!(!is_auto_recommended, "not stack-relevant + opt_in_only must not be auto-recommended");
+        assert!(
+            !recommended,
+            "not stack-relevant + opt_in_only must not be recommended"
+        );
+        assert!(
+            !is_auto_recommended,
+            "not stack-relevant + opt_in_only must not be auto-recommended"
+        );
     }
 
     // ── is_test_or_fixture_path ───────────────────────────────────────────────
@@ -5189,42 +5258,105 @@ mod tests {
     #[test]
     fn test_path_classifier_false_cases() {
         // Production paths must not be classified as test paths.
-        assert!(!is_test_or_fixture_path("src/auth.rs"), "src/auth.rs is production");
-        assert!(!is_test_or_fixture_path("src/config.rs"), "src/config.rs is production");
-        assert!(!is_test_or_fixture_path("crates/api/src/handlers.rs"), "nested production path");
-        assert!(!is_test_or_fixture_path("apps/ui/src/page.tsx"), "JS production file");
-        assert!(!is_test_or_fixture_path("migrations/001_init.sql"), "migrations are production");
+        assert!(
+            !is_test_or_fixture_path("src/auth.rs"),
+            "src/auth.rs is production"
+        );
+        assert!(
+            !is_test_or_fixture_path("src/config.rs"),
+            "src/config.rs is production"
+        );
+        assert!(
+            !is_test_or_fixture_path("crates/api/src/handlers.rs"),
+            "nested production path"
+        );
+        assert!(
+            !is_test_or_fixture_path("apps/ui/src/page.tsx"),
+            "JS production file"
+        );
+        assert!(
+            !is_test_or_fixture_path("migrations/001_init.sql"),
+            "migrations are production"
+        );
         assert!(!is_test_or_fixture_path("lib/utils.py"), "plain Python lib");
-        assert!(!is_test_or_fixture_path("app.rs"), "bare filename with no test indicators");
+        assert!(
+            !is_test_or_fixture_path("app.rs"),
+            "bare filename with no test indicators"
+        );
         // GATE-F7: examples are shipped/executed code — NOT test scope.
-        assert!(!is_test_or_fixture_path("examples/demo.rs"), "examples/ is production (GATE-F7)");
+        assert!(
+            !is_test_or_fixture_path("examples/demo.rs"),
+            "examples/ is production (GATE-F7)"
+        );
     }
 
     #[test]
     fn test_path_classifier_true_cases() {
         // Directory-segment matches.
-        assert!(is_test_or_fixture_path("tests/auth_test.rs"), "tests/ segment");
+        assert!(
+            is_test_or_fixture_path("tests/auth_test.rs"),
+            "tests/ segment"
+        );
         assert!(is_test_or_fixture_path("test/helpers.ts"), "test/ segment");
-        assert!(is_test_or_fixture_path("testdata/sample.json"), "testdata/ segment");
-        assert!(is_test_or_fixture_path("fixtures/keys.env"), "fixtures/ segment");
-        assert!(is_test_or_fixture_path("crates/x/src/fixtures/keys.py"), "nested fixtures/");
-        assert!(is_test_or_fixture_path("__tests__/auth.test.ts"), "__tests__/ segment");
+        assert!(
+            is_test_or_fixture_path("testdata/sample.json"),
+            "testdata/ segment"
+        );
+        assert!(
+            is_test_or_fixture_path("fixtures/keys.env"),
+            "fixtures/ segment"
+        );
+        assert!(
+            is_test_or_fixture_path("crates/x/src/fixtures/keys.py"),
+            "nested fixtures/"
+        );
+        assert!(
+            is_test_or_fixture_path("__tests__/auth.test.ts"),
+            "__tests__/ segment"
+        );
         // GATE-F7: `examples/` is NO LONGER test scope — example code is shipped/executed,
         // so the brownfield audit classifies it as production (asserted in the false-cases test).
-        assert!(is_test_or_fixture_path("benches/bench.rs"), "benches/ segment");
+        assert!(
+            is_test_or_fixture_path("benches/bench.rs"),
+            "benches/ segment"
+        );
 
         // Filename-pattern matches.
-        assert!(is_test_or_fixture_path("tests/auth_test.rs"), "*_test.rs (Rust/Go style)");
-        assert!(is_test_or_fixture_path("src/auth_test.go"), "*_test.go in production dir");
-        assert!(is_test_or_fixture_path("app.test.ts"), "*.test.ts (JS/TS style)");
-        assert!(is_test_or_fixture_path("app.spec.ts"), "*.spec.ts (JS/TS style)");
+        assert!(
+            is_test_or_fixture_path("tests/auth_test.rs"),
+            "*_test.rs (Rust/Go style)"
+        );
+        assert!(
+            is_test_or_fixture_path("src/auth_test.go"),
+            "*_test.go in production dir"
+        );
+        assert!(
+            is_test_or_fixture_path("app.test.ts"),
+            "*.test.ts (JS/TS style)"
+        );
+        assert!(
+            is_test_or_fixture_path("app.spec.ts"),
+            "*.spec.ts (JS/TS style)"
+        );
         assert!(is_test_or_fixture_path("src/auth.spec.tsx"), "*.spec.tsx");
-        assert!(is_test_or_fixture_path("test_secrets.py"), "test_*.py (Python unittest)");
-        assert!(is_test_or_fixture_path("conftest.py"), "conftest.py (pytest)");
+        assert!(
+            is_test_or_fixture_path("test_secrets.py"),
+            "test_*.py (Python unittest)"
+        );
+        assert!(
+            is_test_or_fixture_path("conftest.py"),
+            "conftest.py (pytest)"
+        );
 
         // Case-insensitive segment match.
-        assert!(is_test_or_fixture_path("Tests/config.rs"), "Tests/ (capital T)");
-        assert!(is_test_or_fixture_path("FIXTURES/creds.json"), "FIXTURES/ (all caps)");
+        assert!(
+            is_test_or_fixture_path("Tests/config.rs"),
+            "Tests/ (capital T)"
+        );
+        assert!(
+            is_test_or_fixture_path("FIXTURES/creds.json"),
+            "FIXTURES/ (all caps)"
+        );
     }
 
     #[test]
@@ -5369,7 +5501,7 @@ mod tests {
             "\n",
             "fn do_thing() {}\n",
             "\n",
-            "#[cfg(test)]\n",   // line 6
+            "#[cfg(test)]\n", // line 6
             "mod tests {\n",
             "    #[test]\n",
             "    fn test_detection() {\n",
@@ -5394,7 +5526,11 @@ mod tests {
                 "production secret must be critical: {:?}",
                 f
             );
-            assert!(!f.in_test, "production finding must have in_test=false: {:?}", f);
+            assert!(
+                !f.in_test,
+                "production finding must have in_test=false: {:?}",
+                f
+            );
             assert!(
                 !f.needs_review,
                 "production finding must have needs_review=false: {:?}",
@@ -5403,8 +5539,7 @@ mod tests {
         }
         for f in &test_findings {
             assert_eq!(
-                f.severity,
-                TEST_PATH_SEVERITY,
+                f.severity, TEST_PATH_SEVERITY,
                 "test finding must be low: {:?}",
                 f
             );
@@ -5465,7 +5600,10 @@ mod tests {
             ..Finding::default()
         };
         let json = serde_json::to_string(&f).unwrap();
-        assert!(json.contains(r#""confidence":"needs-review""#), "json={json}");
+        assert!(
+            json.contains(r#""confidence":"needs-review""#),
+            "json={json}"
+        );
         assert!(json.contains(r#""effort":"high""#), "json={json}");
         let back: Finding = serde_json::from_str(&json).unwrap();
         assert_eq!(back.confidence.as_deref(), Some("needs-review"));
@@ -5504,7 +5642,10 @@ mod tests {
             thorough: true,
             deep: false,
             rules_fingerprint: "fp-abc123".to_string(),
-            audited_rule_ids: vec!["SEC-NO-HARDCODED-SECRETS-1".to_string(), "ARCH-1".to_string()],
+            audited_rule_ids: vec![
+                "SEC-NO-HARDCODED-SECRETS-1".to_string(),
+                "ARCH-1".to_string(),
+            ],
             camerata_version: env!("CARGO_PKG_VERSION").to_string(),
             osv_scanner_version: Some("v1.9.2".to_string()),
             started_at: "2026-07-23T00:00:00+00:00".to_string(),
@@ -5512,7 +5653,10 @@ mod tests {
         };
         let json = serde_json::to_string(&prov).unwrap();
         let back: ScanProvenance = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, prov, "ScanProvenance must round-trip byte-for-byte via serde");
+        assert_eq!(
+            back, prov,
+            "ScanProvenance must round-trip byte-for-byte via serde"
+        );
         // The dirty flag specifically — the doc's explicit callout ("a dirty tree does NOT
         // block the scan, only disclosed") depends on this surviving the wire.
         assert!(back.audited_refs[0].dirty);
@@ -5566,17 +5710,14 @@ mod tests {
         git_init(root);
 
         // Write .gitignore so secrets.env is gitignored.
-        std::fs::write(root.join(".gitignore"), "secrets.env\n")
-            .expect("write .gitignore");
+        std::fs::write(root.join(".gitignore"), "secrets.env\n").expect("write .gitignore");
         // Write the secret file — gitignored, so should NOT appear in output.
         // Split token across concat!() so the scanner (if it were run) can't see the literal.
         let secret_content = concat!("TOKEN=", "ghp_00000000000000000000000000000000000000\n");
-        std::fs::write(root.join("secrets.env"), secret_content)
-            .expect("write secrets.env");
+        std::fs::write(root.join("secrets.env"), secret_content).expect("write secrets.env");
         // Write a normal source file that SHOULD appear.
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
-        std::fs::write(root.join("src/main.rs"), "fn main() {}\n")
-            .expect("write main.rs");
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write main.rs");
 
         let extracted = read_local_repo_files(root).expect("scan ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
@@ -5606,8 +5747,7 @@ mod tests {
         std::fs::write(root.join(".env"), env_content).expect("write .env");
         // A clean Rust file so there are multiple files.
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
-        std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n")
-            .expect("write lib.rs");
+        std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib.rs");
 
         let extracted = read_local_repo_files(root).expect("scan ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
@@ -5718,8 +5858,10 @@ mod tests {
         let root = dir.path();
         git_init(root);
 
-        let secret_content =
-            concat!("NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=sb_secret_", "FAKE_DO_NOT_USE\n");
+        let secret_content = concat!(
+            "NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=sb_secret_",
+            "FAKE_DO_NOT_USE\n"
+        );
         std::fs::write(root.join(".env.production"), secret_content)
             .expect("write .env.production");
         git_add(root, &[".env.production"]);
@@ -5727,8 +5869,7 @@ mod tests {
         // NOW gitignore it — a real (if mistaken) attempt to stop tracking it going forward.
         // The file remains in the index; git status would show it as still-tracked-but-
         // matches-gitignore, not untracked.
-        std::fs::write(root.join(".gitignore"), ".env.production\n")
-            .expect("write .gitignore");
+        std::fs::write(root.join(".gitignore"), ".env.production\n").expect("write .gitignore");
 
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
         std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib.rs");
@@ -5744,7 +5885,10 @@ mod tests {
             .iter()
             .find(|(p, _)| p == ".env.production")
             .expect("file present");
-        assert!(content.contains("sb_secret_"), "the union'd file must carry real content, not a stub");
+        assert!(
+            content.contains("sb_secret_"),
+            "the union'd file must carry real content, not a stub"
+        );
     }
 
     #[test]
@@ -5815,16 +5959,26 @@ mod tests {
         let extracted = read_local_repo_files(root).expect("scan ok");
         let findings = audit_files("test/repo", &extracted.files);
 
-        for path in ["k8s/deploy.yaml", "secrets.json", "config/app.properties", ".env.staging"] {
+        for path in [
+            "k8s/deploy.yaml",
+            "secrets.json",
+            "config/app.properties",
+            ".env.staging",
+        ] {
             assert!(
                 extracted.files.iter().any(|(p, _)| p == path),
                 "{path} must be admitted into the scanned file list: {:?}",
                 extracted.files.iter().map(|(p, _)| p).collect::<Vec<_>>()
             );
             assert!(
-                findings.iter().any(|f| f.path == path && f.rule_id == "SEC-NO-VENDOR-TOKEN-1"),
+                findings
+                    .iter()
+                    .any(|f| f.path == path && f.rule_id == "SEC-NO-VENDOR-TOKEN-1"),
                 "expected a SEC-NO-VENDOR-TOKEN-1 finding in {path}: {:?}",
-                findings.iter().filter(|f| f.path == path).collect::<Vec<_>>()
+                findings
+                    .iter()
+                    .filter(|f| f.path == path)
+                    .collect::<Vec<_>>()
             );
         }
     }
@@ -5840,15 +5994,21 @@ mod tests {
         let root = dir.path();
         git_init(root);
 
-        std::fs::write(root.join(".editorconfig"), "root = true\n[*]\nindent_style = space\n")
-            .expect("write .editorconfig");
+        std::fs::write(
+            root.join(".editorconfig"),
+            "root = true\n[*]\nindent_style = space\n",
+        )
+        .expect("write .editorconfig");
         std::fs::write(
             root.join("app.conf"),
             "listen_port = 8080\nlog_level = info\n",
         )
         .expect("write app.conf");
-        std::fs::write(root.join("notes.txt"), "TODO: rename this module someday.\n")
-            .expect("write notes.txt");
+        std::fs::write(
+            root.join("notes.txt"),
+            "TODO: rename this module someday.\n",
+        )
+        .expect("write notes.txt");
         std::fs::write(root.join(".npmrc"), "save-exact=true\nengine-strict=true\n")
             .expect("write .npmrc");
         std::fs::create_dir_all(root.join("config")).expect("mkdir config");
@@ -5868,7 +6028,13 @@ mod tests {
 
         // File-count sanity: the benign config files WERE admitted (so an empty-findings
         // result below is a genuine "scanned clean", not "silently skipped").
-        for path in [".editorconfig", "app.conf", "notes.txt", ".npmrc", "config/app.properties"] {
+        for path in [
+            ".editorconfig",
+            "app.conf",
+            "notes.txt",
+            ".npmrc",
+            "config/app.properties",
+        ] {
             assert!(
                 admitted_paths.contains(&path),
                 "{path} must be admitted: {admitted_paths:?}"
@@ -5881,7 +6047,13 @@ mod tests {
         );
 
         let floor_findings = audit_files("test/repo", &extracted.files);
-        let config_paths = [".editorconfig", "app.conf", "notes.txt", ".npmrc", "config/app.properties"];
+        let config_paths = [
+            ".editorconfig",
+            "app.conf",
+            "notes.txt",
+            ".npmrc",
+            "config/app.properties",
+        ];
         let floor_noise: Vec<_> = floor_findings
             .iter()
             .filter(|f| config_paths.contains(&f.path.as_str()))
@@ -5921,8 +6093,7 @@ mod tests {
             .expect("write node_modules/foo.ts");
         // Write a clean source file (must be included).
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
-        std::fs::write(root.join("src/main.rs"), "fn main() {}\n")
-            .expect("write main.rs");
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write main.rs");
 
         let extracted = read_local_repo_files(root).expect("non-git fallback ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
@@ -6039,10 +6210,12 @@ mod tests {
             "\nAnd here is a planted real credential: ghp_",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
         );
-        let files = vec![("CONVENTIONS.md".to_string(), conventions_content.to_string())];
+        let files = vec![(
+            "CONVENTIONS.md".to_string(),
+            conventions_content.to_string(),
+        )];
         // The corpus describes "verify=False" in a rule summary.
-        let corpus_texts =
-            vec!["Do not set verify=False in TLS configuration.".to_string()];
+        let corpus_texts = vec!["Do not set verify=False in TLS configuration.".to_string()];
 
         let mut findings = vec![
             Finding {
@@ -6062,8 +6235,7 @@ mod tests {
                 rule_id: "SEC-NO-VENDOR-TOKEN-1".to_string(),
                 severity: "critical".to_string(),
                 // Split the token so the scan can't fire on this test file itself.
-                snippet: concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-                    .to_string(),
+                snippet: concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").to_string(),
                 detail: "Vendor token detected".to_string(),
                 ..Finding::default()
             },

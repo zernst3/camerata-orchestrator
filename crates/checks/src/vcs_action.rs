@@ -105,9 +105,9 @@ impl VcsTarget {
             (VcsTarget::CommitMessage, VcsAction::Commit { message }) => {
                 Some(std::borrow::Cow::Borrowed(message))
             }
-            (VcsTarget::CommitSubject, VcsAction::Commit { message }) => {
-                Some(std::borrow::Cow::Borrowed(message.lines().next().unwrap_or("")))
-            }
+            (VcsTarget::CommitSubject, VcsAction::Commit { message }) => Some(
+                std::borrow::Cow::Borrowed(message.lines().next().unwrap_or("")),
+            ),
             (VcsTarget::CommitBody, VcsAction::Commit { message }) => {
                 // Body = everything after the first newline.  When there is no
                 // newline the body is empty (""), not absent (None), so
@@ -230,9 +230,9 @@ impl Matcher {
                 is_substantive(text, *min_non_blank_chars)
                     && contains_story_id(text, story_id_prefix, *story_id_separator)
             }
-            Matcher::Substantive { min_non_blank_chars } => {
-                is_substantive(text, *min_non_blank_chars)
-            }
+            Matcher::Substantive {
+                min_non_blank_chars,
+            } => is_substantive(text, *min_non_blank_chars),
         }
     }
 
@@ -315,7 +315,10 @@ fn is_substantive(text: &str, min_non_blank_chars: usize) -> bool {
         // A zero-minimum is vacuously true.
         return true;
     }
-    let count: usize = text.lines().map(|l| l.chars().filter(|c| !c.is_whitespace()).count()).sum();
+    let count: usize = text
+        .lines()
+        .map(|l| l.chars().filter(|c| !c.is_whitespace()).count())
+        .sum();
     count >= min_non_blank_chars
 }
 
@@ -412,8 +415,8 @@ impl ProcessRule {
     /// Conventional-commit shape on the commit subject, with the common type set.
     pub fn conventional_commits() -> Self {
         Self::conventional_commits_with_types(&[
-            "feat", "fix", "chore", "docs", "refactor", "test", "perf", "build", "ci",
-            "style", "revert",
+            "feat", "fix", "chore", "docs", "refactor", "test", "perf", "build", "ci", "style",
+            "revert",
         ])
     }
 
@@ -662,10 +665,13 @@ pub struct ConventionalCommitConfig {
 }
 
 fn default_conventional_types() -> Vec<String> {
-    ["feat", "fix", "chore", "docs", "refactor", "test", "perf", "build", "ci", "style", "revert"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    [
+        "feat", "fix", "chore", "docs", "refactor", "test", "perf", "build", "ci", "style",
+        "revert",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 impl Default for ConventionalCommitConfig {
@@ -856,9 +862,7 @@ pub fn build_rules(config: &ProcessRuleConfig) -> Vec<ProcessRule> {
                         description: format!(
                             "Commit body and PR body must contain at least {} non-blank \
                              characters and a story-id reference ({}{}digits).",
-                            cfg.min_body_chars,
-                            fmt.prefix,
-                            fmt.separator,
+                            cfg.min_body_chars, fmt.prefix, fmt.separator,
                         ),
                         applies_to: body_targets,
                         matcher: Matcher::SubstantiveWithStoryId {
@@ -896,8 +900,7 @@ pub fn build_rules(config: &ProcessRuleConfig) -> Vec<ProcessRule> {
                         description: format!(
                             "Commit subject and PR title must contain a story-id reference \
                              ({}{}digits) when id_location=subject.",
-                            fmt.prefix,
-                            fmt.separator,
+                            fmt.prefix, fmt.separator,
                         ),
                         applies_to: id_targets,
                         matcher: Matcher::SubstantiveWithStoryId {
@@ -937,8 +940,7 @@ pub fn build_rules(config: &ProcessRuleConfig) -> Vec<ProcessRule> {
                         description: format!(
                             "Commit message or PR content must contain a story-id reference \
                              ({}{}digits) in the subject or body (id_location=either).",
-                            fmt.prefix,
-                            fmt.separator,
+                            fmt.prefix, fmt.separator,
                         ),
                         applies_to: id_targets,
                         matcher: Matcher::SubstantiveWithStoryId {
@@ -1022,7 +1024,9 @@ pub struct BypassRecord {
 
 /// Error returned when a bypass is attempted without a reason.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("bypass rejected: a non-empty reason is required (mirror of the suppression-waiver invariant)")]
+#[error(
+    "bypass rejected: a non-empty reason is required (mirror of the suppression-waiver invariant)"
+)]
 pub struct BypassReasonRequired;
 
 /// The gate result when bypass is in play.
@@ -1277,7 +1281,10 @@ mod tests {
         let req = substantive.requirement();
         assert!(req.contains("20"), "should mention the min char count");
         assert!(req.contains("AB"), "should mention the prefix");
-        assert!(req.contains('#'.to_string().as_str()), "should mention the separator");
+        assert!(
+            req.contains('#'.to_string().as_str()),
+            "should mention the separator"
+        );
     }
 
     // ── PROCESS-COMMIT-DOC-1 ────────────────────────────────────────────────────
@@ -1295,7 +1302,10 @@ mod tests {
             message: "feat: add export endpoint\n\nImplements the export flow. Refs #42."
                 .to_string(),
         };
-        assert!(gate(&rules, &action).is_ok(), "body is substantive and has story id");
+        assert!(
+            gate(&rules, &action).is_ok(),
+            "body is substantive and has story id"
+        );
     }
 
     #[test]
@@ -1351,7 +1361,10 @@ mod tests {
             title: "Add export endpoint".to_string(),
             body: "Implements the CSV export feature. Closes #99.".to_string(),
         };
-        assert!(gate(&rules, &action).is_ok(), "PR with body + story id should pass");
+        assert!(
+            gate(&rules, &action).is_ok(),
+            "PR with body + story id should pass"
+        );
     }
 
     #[test]
@@ -1421,9 +1434,15 @@ mod tests {
         assert!(is_substantive("hello world", 10), "11 non-blank chars");
         assert!(!is_substantive("hello", 10), "only 5 non-blank chars");
         assert!(is_substantive("   lots   of   spaces   here   ", 4));
-        assert!(!is_substantive("   ", 1), "whitespace only fails any positive min");
+        assert!(
+            !is_substantive("   ", 1),
+            "whitespace only fails any positive min"
+        );
         assert!(is_substantive("", 0), "zero-min is always satisfied");
-        assert!(!is_substantive("", 1), "empty string has zero non-blank chars");
+        assert!(
+            !is_substantive("", 1),
+            "empty string has zero non-blank chars"
+        );
     }
 
     // ── contains_story_id helper ─────────────────────────────────────────────
@@ -1465,7 +1484,11 @@ mod tests {
             message: "feat: subject only".to_string(),
         };
         let body = VcsTarget::CommitBody.extract(&action).unwrap();
-        assert_eq!(body.as_ref(), "", "subject-only commit has an empty body, not None");
+        assert_eq!(
+            body.as_ref(),
+            "",
+            "subject-only commit has an empty body, not None"
+        );
     }
 
     // ── VcsTarget::extract edge cases ────────────────────────────────────────
@@ -1584,8 +1607,14 @@ mod tests {
                 enabled: true,
                 prefix: "AB".to_string(),
             },
-            conventional_commit: ConventionalCommitConfig { enabled: false, ..Default::default() },
-            commit_doc: CommitDocConfig { enabled: false, ..Default::default() },
+            conventional_commit: ConventionalCommitConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            commit_doc: CommitDocConfig {
+                enabled: false,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let rules = build_rules(&config);
@@ -1595,7 +1624,10 @@ mod tests {
         let passing = VcsAction::Commit {
             message: "AB#123 fix the thing".to_string(),
         };
-        assert!(gate(&rules, &passing).is_ok(), "AB#123 must pass the ADO rule");
+        assert!(
+            gate(&rules, &passing).is_ok(),
+            "AB#123 must pass the ADO rule"
+        );
 
         // A plain #123 (GitHub style) does NOT satisfy the AB# rule.
         let failing = VcsAction::Commit {
@@ -1617,7 +1649,10 @@ mod tests {
                 require_story_id: false,
                 ..Default::default()
             },
-            conventional_commit: ConventionalCommitConfig { enabled: false, ..Default::default() },
+            conventional_commit: ConventionalCommitConfig {
+                enabled: false,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let rules = build_rules(&config);
@@ -1645,7 +1680,10 @@ mod tests {
                 require_story_id: false,
                 ..Default::default()
             },
-            conventional_commit: ConventionalCommitConfig { enabled: false, ..Default::default() },
+            conventional_commit: ConventionalCommitConfig {
+                enabled: false,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let rules = build_rules(&config);
@@ -1666,7 +1704,10 @@ mod tests {
                 enabled: true,
                 types: vec!["feat".to_string(), "wip".to_string()],
             },
-            commit_doc: CommitDocConfig { enabled: false, ..Default::default() },
+            commit_doc: CommitDocConfig {
+                enabled: false,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let rules = build_rules(&config);
@@ -1675,13 +1716,19 @@ mod tests {
         let action = VcsAction::Commit {
             message: "wip: in progress".to_string(),
         };
-        assert!(gate(&rules, &action).is_ok(), "custom type 'wip' must be accepted");
+        assert!(
+            gate(&rules, &action).is_ok(),
+            "custom type 'wip' must be accepted"
+        );
 
         // "chore" is in the default set but not this custom set — it must fail.
         let unknown = VcsAction::Commit {
             message: "chore: cleanup".to_string(),
         };
-        assert!(gate(&rules, &unknown).is_err(), "'chore' not in custom type set must fail");
+        assert!(
+            gate(&rules, &unknown).is_err(),
+            "'chore' not in custom type set must fail"
+        );
     }
 
     #[test]
@@ -1691,17 +1738,27 @@ mod tests {
                 enabled: true,
                 prefixes: vec!["feature/".to_string(), "release/".to_string()],
             },
-            conventional_commit: ConventionalCommitConfig { enabled: false, ..Default::default() },
-            commit_doc: CommitDocConfig { enabled: false, ..Default::default() },
+            conventional_commit: ConventionalCommitConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            commit_doc: CommitDocConfig {
+                enabled: false,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let rules = build_rules(&config);
         assert!(rules.iter().any(|r| r.id == "PROCESS-BRANCH-NAMING-1"));
 
-        let ok_branch = VcsAction::Branch { name: "feature/my-thing".to_string() };
+        let ok_branch = VcsAction::Branch {
+            name: "feature/my-thing".to_string(),
+        };
         assert!(gate(&rules, &ok_branch).is_ok());
 
-        let bad_branch = VcsAction::Branch { name: "my-thing".to_string() };
+        let bad_branch = VcsAction::Branch {
+            name: "my-thing".to_string(),
+        };
         assert!(gate(&rules, &bad_branch).is_err());
     }
 
@@ -1747,10 +1804,19 @@ mod tests {
         // A legacy/partial JSON document must deserialize with correct defaults.
         let json = r#"{"commit_doc": {"enabled": true}}"#;
         let config: ProcessRuleConfig = serde_json::from_str(json).expect("must deserialize");
-        assert_eq!(config.commit_doc.min_body_chars, 20, "default min_body_chars");
-        assert!(config.commit_doc.require_story_id, "default require_story_id");
+        assert_eq!(
+            config.commit_doc.min_body_chars, 20,
+            "default min_body_chars"
+        );
+        assert!(
+            config.commit_doc.require_story_id,
+            "default require_story_id"
+        );
         assert!(!config.ado_link.enabled, "default ado_link disabled");
-        assert!(!config.branch_naming.enabled, "default branch_naming disabled");
+        assert!(
+            !config.branch_naming.enabled,
+            "default branch_naming disabled"
+        );
     }
 
     // ── Bypass mechanism ──────────────────────────────────────────────────────
@@ -1759,14 +1825,18 @@ mod tests {
     fn bypass_without_reason_is_rejected() {
         let rules = [ProcessRule::conventional_commits()];
         let action = commit("just a random message");
-        let req = BypassRequest { reason: String::new() };
+        let req = BypassRequest {
+            reason: String::new(),
+        };
         assert!(
             gate_or_bypass(&rules, &action, Some(&req)).is_err(),
             "reason-less bypass must return Err(BypassReasonRequired)"
         );
 
         // Whitespace-only is also rejected.
-        let req_ws = BypassRequest { reason: "   ".to_string() };
+        let req_ws = BypassRequest {
+            reason: "   ".to_string(),
+        };
         assert!(
             gate_or_bypass(&rules, &action, Some(&req_ws)).is_err(),
             "whitespace-only reason must also be rejected"
@@ -1792,12 +1862,16 @@ mod tests {
             GateOrBypassResult::Bypassed(record) => {
                 assert_eq!(record.reason, req.reason, "reason must be preserved");
                 assert!(
-                    record.suppressed_rule_ids.contains(&"PROCESS-CONVENTIONAL-COMMIT-1".to_string()),
+                    record
+                        .suppressed_rule_ids
+                        .contains(&"PROCESS-CONVENTIONAL-COMMIT-1".to_string()),
                     "conventional commit violation must be recorded: {:?}",
                     record.suppressed_rule_ids
                 );
                 assert!(
-                    record.suppressed_rule_ids.contains(&"PROCESS-ADO-LINK-1".to_string()),
+                    record
+                        .suppressed_rule_ids
+                        .contains(&"PROCESS-ADO-LINK-1".to_string()),
                     "ADO link violation must be recorded: {:?}",
                     record.suppressed_rule_ids
                 );
@@ -1812,10 +1886,12 @@ mod tests {
         // bypass request is supplied.
         let rules = [ProcessRule::conventional_commits()];
         let action = commit("feat: add export");
-        let req = BypassRequest { reason: "unnecessary but harmless".to_string() };
+        let req = BypassRequest {
+            reason: "unnecessary but harmless".to_string(),
+        };
 
-        let result = gate_or_bypass(&rules, &action, Some(&req))
-            .expect("must not error on a valid reason");
+        let result =
+            gate_or_bypass(&rules, &action, Some(&req)).expect("must not error on a valid reason");
         assert_eq!(
             result,
             GateOrBypassResult::Passed,
@@ -1856,7 +1932,10 @@ mod tests {
                 id_location: loc,
                 story_id_format: StoryIdFormat::default(), // bare #<num>
             },
-            conventional_commit: ConventionalCommitConfig { enabled: false, ..Default::default() },
+            conventional_commit: ConventionalCommitConfig {
+                enabled: false,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -1878,7 +1957,8 @@ mod tests {
 
         // Story-id in body: must pass.
         let in_body = VcsAction::Commit {
-            message: "fix: handle null\n\nFixes the null pointer handler path. Refs #42.".to_string(),
+            message: "fix: handle null\n\nFixes the null pointer handler path. Refs #42."
+                .to_string(),
         };
         assert!(
             gate(&rules, &in_body).is_ok(),
@@ -1894,7 +1974,8 @@ mod tests {
 
         // Story-id in subject: must pass (body is substantive but has no story-id).
         let id_in_subject = VcsAction::Commit {
-            message: "fix: #42 handle null pointer\n\nFixes the null pointer handler path here.".to_string(),
+            message: "fix: #42 handle null pointer\n\nFixes the null pointer handler path here."
+                .to_string(),
         };
         assert!(
             gate(&rules, &id_in_subject).is_ok(),
@@ -1903,7 +1984,8 @@ mod tests {
 
         // Story-id only in body: must fail (subject lacks the required #<num>).
         let id_in_body_only = VcsAction::Commit {
-            message: "fix: handle null pointer\n\nFixes the null pointer. Refs #42. Long enough.".to_string(),
+            message: "fix: handle null pointer\n\nFixes the null pointer. Refs #42. Long enough."
+                .to_string(),
         };
         assert!(
             gate(&rules, &id_in_body_only).is_err(),
@@ -1919,7 +2001,8 @@ mod tests {
 
         // Story-id in subject only: must pass.
         let id_in_subject = VcsAction::Commit {
-            message: "fix: #42 handle null pointer\n\nFixes the null pointer handler path here.".to_string(),
+            message: "fix: #42 handle null pointer\n\nFixes the null pointer handler path here."
+                .to_string(),
         };
         assert!(
             gate(&rules, &id_in_subject).is_ok(),
@@ -1928,7 +2011,8 @@ mod tests {
 
         // Story-id in body only: must pass.
         let id_in_body = VcsAction::Commit {
-            message: "fix: handle null pointer\n\nFixes the null pointer handler path. Refs #42.".to_string(),
+            message: "fix: handle null pointer\n\nFixes the null pointer handler path. Refs #42."
+                .to_string(),
         };
         assert!(
             gate(&rules, &id_in_body).is_ok(),
@@ -1937,7 +2021,8 @@ mod tests {
 
         // Story-id in neither: must fail.
         let id_nowhere = VcsAction::Commit {
-            message: "fix: handle null pointer\n\nFixes the null pointer handler path here.".to_string(),
+            message: "fix: handle null pointer\n\nFixes the null pointer handler path here."
+                .to_string(),
         };
         assert!(
             gate(&rules, &id_nowhere).is_err(),
@@ -1983,8 +2068,14 @@ mod tests {
                 id_location: IdLocation::Subject,
                 story_id_format: StoryIdFormat::default(),
             },
-            conventional_commit: ConventionalCommitConfig { enabled: false, ..Default::default() },
-            pr: PrCoverage { apply_body_rule: true, apply_id_rule: true },
+            conventional_commit: ConventionalCommitConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            pr: PrCoverage {
+                apply_body_rule: true,
+                apply_id_rule: true,
+            },
             ..Default::default()
         };
         let rules = build_rules(&config);
@@ -2055,7 +2146,8 @@ mod tests {
         let rules = [rule];
 
         let passing = VcsAction::Commit {
-            message: "fix: null check\n\nFixes the null pointer issue. #42 closes this.".to_string(),
+            message: "fix: null check\n\nFixes the null pointer issue. #42 closes this."
+                .to_string(),
         };
         assert!(
             gate(&rules, &passing).is_ok(),
@@ -2074,13 +2166,18 @@ mod tests {
         // PrFullContent = title + "\n" + body.
         let full = VcsTarget::PrFullContent.extract(&action).unwrap();
         assert!(full.contains("Fix the thing"), "must include title");
-        assert!(full.contains("Detailed explanation #42."), "must include body");
+        assert!(
+            full.contains("Detailed explanation #42."),
+            "must include body"
+        );
         assert!(full.contains('\n'), "title and body separated by newline");
     }
 
     #[test]
     fn pr_full_content_returns_none_for_commit_action() {
-        let action = VcsAction::Commit { message: "any".to_string() };
+        let action = VcsAction::Commit {
+            message: "any".to_string(),
+        };
         assert!(
             VcsTarget::PrFullContent.extract(&action).is_none(),
             "PrFullContent must return None for Commit actions"

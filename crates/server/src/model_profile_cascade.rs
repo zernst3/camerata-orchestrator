@@ -109,7 +109,11 @@ fn best_free_coder(registry: &ModelRegistry) -> Option<String> {
         .all_entries()
         .into_iter()
         .filter(|e| e.free && e.tool_use && e.provider != "claude")
-        .max_by(|a, b| a.coding.partial_cmp(&b.coding).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|a, b| {
+            a.coding
+                .partial_cmp(&b.coding)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .map(|e| e.id)
 }
 
@@ -124,7 +128,11 @@ fn smallest_free_model(registry: &ModelRegistry) -> Option<String> {
     if free.is_empty() {
         return None;
     }
-    free.sort_by(|a, b| a.coding.partial_cmp(&b.coding).unwrap_or(std::cmp::Ordering::Equal));
+    free.sort_by(|a, b| {
+        a.coding
+            .partial_cmp(&b.coding)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Some(free[0].id.clone())
 }
 

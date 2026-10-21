@@ -214,6 +214,9 @@ mod tests {
             "vision": true
         }"#;
         let entry: RegistryEntry = serde_json::from_str(json).unwrap();
-        assert!(entry.price_known, "pre-existing JSON with no price_known field must default to true");
+        assert!(
+            entry.price_known,
+            "pre-existing JSON with no price_known field must default to true"
+        );
     }
 }

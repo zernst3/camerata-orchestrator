@@ -55,7 +55,10 @@ fn outcome_to_json(outcome: &TurnOutcome) -> serde_json::Value {
             "summary": summary,
             "decision": decision_to_json(decision),
         }),
-        TurnOutcome::NeedsApproval { consequence, decision } => serde_json::json!({
+        TurnOutcome::NeedsApproval {
+            consequence,
+            decision,
+        } => serde_json::json!({
             "ok": true,
             "kind": "needs_approval",
             "consequence": consequence,
@@ -69,7 +72,9 @@ fn outcome_to_json(outcome: &TurnOutcome) -> serde_json::Value {
     }
 }
 
-fn decision_to_json(decision: &camerata_orchestrator_core::turn::DecisionSummary) -> serde_json::Value {
+fn decision_to_json(
+    decision: &camerata_orchestrator_core::turn::DecisionSummary,
+) -> serde_json::Value {
     serde_json::json!({
         "class": decision.class.as_str(),
         "confidence": decision.confidence.as_str(),
@@ -123,14 +128,19 @@ pub async fn orchestrator_message(
         state: state.clone(),
         repo,
     };
-    let recorder = RealDecisionRecorder { state: state.clone() };
+    let recorder = RealDecisionRecorder {
+        state: state.clone(),
+    };
     let deps = TurnDeps {
         llm: &llm,
         executor: &executor,
         recorder: &recorder,
     };
 
-    let turn_id = format!("orchestrator-turn-{}", chrono::Utc::now().timestamp_millis());
+    let turn_id = format!(
+        "orchestrator-turn-{}",
+        chrono::Utc::now().timestamp_millis()
+    );
     match camerata_orchestrator_core::turn::handle_turn(&deps, &repo_dir, &turn_id, &req.message)
         .await
     {
@@ -140,7 +150,11 @@ pub async fn orchestrator_message(
 }
 
 fn honest_error(status: axum::http::StatusCode, error: String) -> Response {
-    (status, Json(serde_json::json!({ "ok": false, "error": error }))).into_response()
+    (
+        status,
+        Json(serde_json::json!({ "ok": false, "error": error })),
+    )
+        .into_response()
 }
 
 // ─── RealTurnLlm: the real LLM seam ─────────────────────────────────────────────
@@ -185,11 +199,9 @@ impl TurnLlm for RealTurnLlm {
             spec.summary
         );
         let req = LlmRequest::new(prompt).with_system(INTERPRET_SYSTEM_PROMPT);
-        let resp = self
-            .llm
-            .complete(req)
-            .await
-            .map_err(|e| anyhow::anyhow!("live LLM required to interpret the change request: {e}"))?;
+        let resp = self.llm.complete(req).await.map_err(|e| {
+            anyhow::anyhow!("live LLM required to interpret the change request: {e}")
+        })?;
         parse_interpretation(&resp.text)
     }
 }
@@ -209,12 +221,14 @@ fn parse_interpretation(text: &str) -> anyhow::Result<Interpretation> {
     if needs_clarification {
         let questions: Vec<String> = v["questions"]
             .as_array()
-            .map(|arr| arr.iter().filter_map(|q| q.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|q| q.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         if questions.is_empty() {
-            anyhow::bail!(
-                "model set needs_clarification=true but returned no questions: {text}"
-            );
+            anyhow::bail!("model set needs_clarification=true but returned no questions: {text}");
         }
         return Ok(Interpretation::Clarify(questions));
     }
@@ -232,7 +246,10 @@ fn parse_interpretation(text: &str) -> anyhow::Result<Interpretation> {
                 .filter_map(|t| {
                     let path = t["path"].as_str()?.to_string();
                     let adds_dependency = t["adds_dependency"].as_bool();
-                    Some(TouchedArea { path, adds_dependency })
+                    Some(TouchedArea {
+                        path,
+                        adds_dependency,
+                    })
                 })
                 .collect()
         })

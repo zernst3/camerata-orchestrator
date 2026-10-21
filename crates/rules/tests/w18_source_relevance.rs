@@ -105,7 +105,9 @@ relevance = "W18-SENTINEL: cmd/go documents the //go:build directive, which is w
 "#;
     let dir = synthetic_corpus(&[("w18-relevance-1.toml", body.to_string())]);
     let set = load_corpus(dir.path()).await.expect("fixture loads");
-    let rule = set.get_by_id("W18-RELEVANCE-1").expect("fixture rule loads");
+    let rule = set
+        .get_by_id("W18-RELEVANCE-1")
+        .expect("fixture rule loads");
 
     let rendered = format!("{:?}", rule.sources);
     assert!(
@@ -115,7 +117,10 @@ relevance = "W18-SENTINEL: cmd/go documents the //go:build directive, which is w
     );
 
     // And it landed in `relevance`, not in some other field that happens to hold the bytes.
-    let source = rule.sources.first().expect("the fixture authors one source");
+    let source = rule
+        .sources
+        .first()
+        .expect("the fixture authors one source");
     assert_eq!(
         source.relevance.as_deref(),
         Some(
@@ -337,7 +342,9 @@ relevance = "A note about THIS source, in the field that holds it."
         "the no-rule-level shape must fire: {offenders:#?}"
     );
     assert!(
-        offenders.iter().any(|o| o.contains("W18-NESTED-ANNOTATED-1")),
+        offenders
+            .iter()
+            .any(|o| o.contains("W18-NESTED-ANNOTATED-1")),
         "the per-source-annotation shape — the one the 19 were, which the pre-W18 gates let \
          through — must now fire: {offenders:#?}"
     );

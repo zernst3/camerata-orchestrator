@@ -175,7 +175,8 @@ Be specific: name the repo and the contract clause that is violated. Do not incl
 fn l3_system_prompt() -> String {
     format!(
         "{}\n\n{}",
-        camerata_app_core::GOVERNANCE_KERNEL_READONLY, L3_SYSTEM_PROMPT
+        camerata_app_core::GOVERNANCE_KERNEL_READONLY,
+        L3_SYSTEM_PROMPT
     )
 }
 
@@ -184,7 +185,8 @@ fn l3_system_prompt() -> String {
 fn integration_system_prompt() -> String {
     format!(
         "{}\n\n{}",
-        camerata_app_core::GOVERNANCE_KERNEL_READONLY, INTEGRATION_SYSTEM_PROMPT
+        camerata_app_core::GOVERNANCE_KERNEL_READONLY,
+        INTEGRATION_SYSTEM_PROMPT
     )
 }
 
@@ -490,7 +492,10 @@ mod tests {
     fn integration_prompt_includes_contract_and_repos() {
         let outputs = [
             ("backend", "GET /users returns [{id, name}]"),
-            ("frontend", "const res = await fetch('/users'); res[0].email"),
+            (
+                "frontend",
+                "const res = await fetch('/users'); res[0].email",
+            ),
         ];
         let input = IntegrationGateReviewInput {
             contract: "GET /api/users returns [{id, name, email}]",
@@ -560,8 +565,9 @@ mod tests {
                 self
             }
         }
-        let result =
-            check_integration_gate_live(&PanicLlm, None, &[], "claude-sonnet-5").await.unwrap();
+        let result = check_integration_gate_live(&PanicLlm, None, &[], "claude-sonnet-5")
+            .await
+            .unwrap();
         assert_eq!(result, LiveGateResult::NoContractRequired);
     }
 
@@ -652,12 +658,18 @@ mod tests {
         let crosses_boundary = true;
         let contract = "  ";
         let bundle_would_exist = crosses_boundary && !contract.trim().is_empty();
-        assert!(!bundle_would_exist, "no bundle when contract is whitespace-only");
+        assert!(
+            !bundle_would_exist,
+            "no bundle when contract is whitespace-only"
+        );
 
         // Real boundary + real contract → bundle IS created.
         let crosses_boundary = true;
         let contract = "GET /api/users returns [{id}]";
         let bundle_would_exist = crosses_boundary && !contract.trim().is_empty();
-        assert!(bundle_would_exist, "bundle IS created for real cross-boundary + contract");
+        assert!(
+            bundle_would_exist,
+            "bundle IS created for real cross-boundary + contract"
+        );
     }
 }

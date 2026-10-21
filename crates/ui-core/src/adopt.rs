@@ -217,13 +217,12 @@ impl SplitRule {
     /// How an option reads in the picker: its label, plus its site count when the producer
     /// counted. An uncounted option is its bare label — never a fabricated zero.
     pub fn option_line(&self, option_id: &str) -> Option<String> {
-        self.options
-            .iter()
-            .find(|(id, _, _)| id == option_id)
-            .map(|(_, label, sites)| match sites {
+        self.options.iter().find(|(id, _, _)| id == option_id).map(
+            |(_, label, sites)| match sites {
                 Some(n) => format!("{label} ({n} sites)"),
                 None => label.clone(),
-            })
+            },
+        )
     }
 }
 
@@ -520,10 +519,7 @@ impl CommitPlan {
                 Some(option_id) => adopted.push(AdoptedRule {
                     rule_id: r.rule_id.clone(),
                     option_id: option_id.to_string(),
-                    label: r
-                        .label_of(option_id)
-                        .unwrap_or(option_id)
-                        .to_string(),
+                    label: r.label_of(option_id).unwrap_or(option_id).to_string(),
                     opened: model.was_opened(&key),
                 }),
                 None => skipped += 1,
@@ -568,9 +564,7 @@ impl CommitGate {
     pub fn hint(self, destination_repo: &str) -> Option<String> {
         match self {
             CommitGate::Armed => None,
-            CommitGate::NothingToCommit => {
-                Some("Nothing is selected to write.".to_string())
-            }
+            CommitGate::NothingToCommit => Some("Nothing is selected to write.".to_string()),
             CommitGate::AwaitingDestination => Some(format!(
                 "Type {destination_repo} to confirm the destination."
             )),
@@ -692,11 +686,7 @@ pub fn merge_adoptions(
     for rule in adopted {
         let want = rule.rule_id.trim().to_ascii_uppercase();
         let mut found = false;
-        for list in [
-            &mut out.selections,
-            &mut out.cross_repo,
-            &mut out.process,
-        ] {
+        for list in [&mut out.selections, &mut out.cross_repo, &mut out.process] {
             if let Some(sel) = list
                 .iter_mut()
                 .find(|s| s.rule_id.trim().to_ascii_uppercase() == want)
@@ -817,23 +807,52 @@ mod tests {
     #[test]
     fn req_pass2_14_a_convention_with_live_deviations_is_still_adoptable() {
         let rows = vec![
-            deviation("me/api", "API-VERSIONING-1", 2, Some(47), Some("versioned"), "URI-versioned endpoints"),
-            deviation("me/api", "API-VERSIONING-1", 2, Some(47), Some("versioned"), "URI-versioned endpoints"),
+            deviation(
+                "me/api",
+                "API-VERSIONING-1",
+                2,
+                Some(47),
+                Some("versioned"),
+                "URI-versioned endpoints",
+            ),
+            deviation(
+                "me/api",
+                "API-VERSIONING-1",
+                2,
+                Some(47),
+                Some("versioned"),
+                "URI-versioned endpoints",
+            ),
         ];
         let all = adoptable_conventions(&rows);
-        assert_eq!(all.len(), 1, "one convention per (repo, rule), not per row: {all:?}");
+        assert_eq!(
+            all.len(),
+            1,
+            "one convention per (repo, rule), not per row: {all:?}"
+        );
         let c = &all[0];
         assert_eq!(c.deviating_sites, 2, "the count is carried");
         assert!(c.is_adoptable(), "live deviations must NOT block adoption");
         assert_eq!(c.blocked_reason(), None);
-        assert_eq!(c.status_line(), "observed with 2 exceptions", "§13's exact phrase");
+        assert_eq!(
+            c.status_line(),
+            "observed with 2 exceptions",
+            "§13's exact phrase"
+        );
 
         // It reaches the plan under the opt-out default, and the gate arms over it.
         let model = AdoptionModel::new();
         let plan = CommitPlan::conventions(&all, &model, "me/api");
-        assert_eq!(plan.adopted_count(), 1, "a deviating convention is in the commit: {plan:?}");
+        assert_eq!(
+            plan.adopted_count(),
+            1,
+            "a deviating convention is in the commit: {plan:?}"
+        );
         assert_eq!(plan.adopted[0].option_id, "versioned");
-        assert!(commit_gate(&plan, "me/api").is_armed(), "and it can actually be committed");
+        assert!(
+            commit_gate(&plan, "me/api").is_armed(),
+            "and it can actually be committed"
+        );
     }
 
     /// req_pass2_14: a deviation-backed convention is adoptable at ANY ratio — the design's
@@ -866,7 +885,14 @@ mod tests {
     /// the rule's default option.
     #[test]
     fn req_pass2_14_a_convention_with_no_authored_option_is_not_written() {
-        let rows = vec![deviation("me/api", "R-1", 2, Some(9), None, "something the model saw")];
+        let rows = vec![deviation(
+            "me/api",
+            "R-1",
+            2,
+            Some(9),
+            None,
+            "something the model saw",
+        )];
         let all = adoptable_conventions(&rows);
         assert_eq!(all.len(), 1, "still LISTED — the curator should see it");
         assert!(!all[0].is_adoptable());
@@ -889,8 +915,10 @@ mod tests {
             convention("me/web", "B-RULE", "b", "B convention"),
         ];
         let all = adoptable_conventions(&rows);
-        let keys: Vec<(String, String)> =
-            all.iter().map(|c| (c.repo.clone(), c.rule_id.clone())).collect();
+        let keys: Vec<(String, String)> = all
+            .iter()
+            .map(|c| (c.repo.clone(), c.rule_id.clone()))
+            .collect();
         assert_eq!(
             keys,
             vec![
@@ -900,7 +928,10 @@ mod tests {
             ],
             "stable (repo, rule) order"
         );
-        assert_eq!(all[0].deviating_sites, 3, "the deviation-backed one carries its count");
+        assert_eq!(
+            all[0].deviating_sites, 3,
+            "the deviation-backed one carries its count"
+        );
         assert_eq!(all[1].deviating_sites, 0, "the clean one reports none");
         assert_eq!(all[1].status_line(), "observed, no exceptions");
     }
@@ -937,8 +968,14 @@ mod tests {
         ];
         let all = adoptable_conventions(&rows);
         let mut model = AdoptionModel::new();
-        assert!(model.is_adopted(&adoption_key("me/api", "R-1")), "untouched = adopted");
-        assert_eq!(CommitPlan::conventions(&all, &model, "me/api").adopted_count(), 3);
+        assert!(
+            model.is_adopted(&adoption_key("me/api", "R-1")),
+            "untouched = adopted"
+        );
+        assert_eq!(
+            CommitPlan::conventions(&all, &model, "me/api").adopted_count(),
+            3
+        );
 
         model.set_adopted(&adoption_key("me/api", "R-2"), false);
         let plan = CommitPlan::conventions(&all, &model, "me/api");
@@ -986,7 +1023,11 @@ mod tests {
                 expected,
                 "after opening R-{i} exactly {expected} remain unopened: {plan:?}"
             );
-            assert_eq!(plan.adopted_count(), 5, "opening changes nothing about adoption");
+            assert_eq!(
+                plan.adopted_count(),
+                5,
+                "opening changes nothing about adoption"
+            );
         }
         assert_eq!(
             CommitPlan::conventions(&all, &model, "me/api").unopened_warning(),
@@ -1082,7 +1123,10 @@ mod tests {
             "25 conventions were adopted by default and not opened. Adoption is opt-out, so \
              these were selected for you."
         );
-        assert!(plan.counts_line().contains("me/api"), "the destination is named");
+        assert!(
+            plan.counts_line().contains("me/api"),
+            "the destination is named"
+        );
     }
 
     /// req_pass2_14: the sentences agree in number with one item.
@@ -1091,9 +1135,16 @@ mod tests {
         let rows = vec![convention("me/api", "R-1", "a", "A")];
         let all = adoptable_conventions(&rows);
         let plan = CommitPlan::conventions(&all, &AdoptionModel::new(), "me/api");
-        assert!(plan.headline().contains("1 convention into"), "{}", plan.headline());
+        assert!(
+            plan.headline().contains("1 convention into"),
+            "{}",
+            plan.headline()
+        );
         let warn = plan.unopened_warning().expect("one unopened");
-        assert!(warn.starts_with("1 convention was adopted by default"), "{warn}");
+        assert!(
+            warn.starts_with("1 convention was adopted by default"),
+            "{warn}"
+        );
     }
 
     // ── The gate ─────────────────────────────────────────────────────────────
@@ -1112,19 +1163,23 @@ mod tests {
         ];
         let all = adoptable_conventions(&rows);
         let plan = CommitPlan::conventions(&all, &AdoptionModel::new(), "acme/payments-api");
-        assert_eq!(plan.adopted_count(), 1, "precondition: there is something to write");
+        assert_eq!(
+            plan.adopted_count(),
+            1,
+            "precondition: there is something to write"
+        );
 
         for wrong in [
-            "",                        // nothing typed
-            "   ",                     // whitespace only
-            "acme/payments-web",       // THE OTHER REPO IN THE SAME SCAN — the dangerous one
-            "payments-api",            // the repo without its owner
-            "acme",                    // the owner alone
-            "acme/payments",           // a prefix
-            "acme/payments-api2",      // a superstring
-            "acme/payments-api/",      // a trailing slash
-            "acme /payments-api",      // interior whitespace
-            "yes",                     // the checkbox reflex
+            "",                   // nothing typed
+            "   ",                // whitespace only
+            "acme/payments-web",  // THE OTHER REPO IN THE SAME SCAN — the dangerous one
+            "payments-api",       // the repo without its owner
+            "acme",               // the owner alone
+            "acme/payments",      // a prefix
+            "acme/payments-api2", // a superstring
+            "acme/payments-api/", // a trailing slash
+            "acme /payments-api", // interior whitespace
+            "yes",                // the checkbox reflex
             "confirm",
             "AGENTS.md",
         ] {
@@ -1133,12 +1188,19 @@ mod tests {
                 !gate.is_armed(),
                 "typing {wrong:?} must NOT arm the commit (gate was {gate:?})"
             );
-            assert!(gate.hint("acme/payments-api").is_some(), "and must say why: {wrong:?}");
+            assert!(
+                gate.hint("acme/payments-api").is_some(),
+                "and must say why: {wrong:?}"
+            );
         }
 
         // Only the destination arms it — with surrounding whitespace and case forgiven,
         // because neither can be produced without reading the whole name.
-        for right in ["acme/payments-api", "  acme/payments-api  ", "ACME/Payments-API"] {
+        for right in [
+            "acme/payments-api",
+            "  acme/payments-api  ",
+            "ACME/Payments-API",
+        ] {
             assert!(
                 commit_gate(&plan, right).is_armed(),
                 "typing {right:?} must arm the commit"
@@ -1201,13 +1263,27 @@ mod tests {
         assert_eq!(plan.skipped, 1, "and the untouched rule is accounted for");
         assert_eq!(commit_gate(&plan, "me/api"), CommitGate::NothingToCommit);
 
-        model.set_recommendation(&adoption_key("me/api", "ERROR-HANDLING-1"), Some("result".into()));
+        model.set_recommendation(
+            &adoption_key("me/api", "ERROR-HANDLING-1"),
+            Some("result".into()),
+        );
         let plan = CommitPlan::recommendations(&all, &model, "me/api");
         assert_eq!(plan.adopted_count(), 1);
         assert_eq!(plan.adopted[0].option_id, "result");
-        assert_eq!(plan.adopted[0].label, "Result types", "the AUTHORED label, not the id");
-        assert_eq!(plan.unopened_count(), 1, "and it carries the same openness honesty");
-        assert!(plan.headline().contains("1 recommendation into"), "{}", plan.headline());
+        assert_eq!(
+            plan.adopted[0].label, "Result types",
+            "the AUTHORED label, not the id"
+        );
+        assert_eq!(
+            plan.unopened_count(),
+            1,
+            "and it carries the same openness honesty"
+        );
+        assert!(
+            plan.headline().contains("1 recommendation into"),
+            "{}",
+            plan.headline()
+        );
 
         // The same gate, with the same refusals.
         assert!(!commit_gate(&plan, "me/web").is_armed());
@@ -1232,7 +1308,10 @@ mod tests {
             ]),
         )];
         let all = split_rules(&rows);
-        assert_eq!(all[0].option_line("a").as_deref(), Some("Counted (4 sites)"));
+        assert_eq!(
+            all[0].option_line("a").as_deref(),
+            Some("Counted (4 sites)")
+        );
         assert_eq!(all[0].option_line("b").as_deref(), Some("Uncounted"));
     }
 
@@ -1262,7 +1341,10 @@ mod tests {
         });
         let current: ProjectRulesetView =
             serde_json::from_value(wire).expect("the server shape deserializes");
-        assert_eq!(current.selections[0].applied_hash.as_deref(), Some("sha-abc"));
+        assert_eq!(
+            current.selections[0].applied_hash.as_deref(),
+            Some("sha-abc")
+        );
 
         let merged = merge_adoptions(
             &current,
@@ -1275,9 +1357,20 @@ mod tests {
             }],
         );
         let sel = &merged.selections[0];
-        assert_eq!(sel.rule_id, "EXISTING-1", "the untouched selection survives");
-        assert_eq!(sel.chosen_option.as_deref(), Some("old"), "its option is untouched");
-        assert_eq!(sel.repos, vec!["me/web".to_string()], "its repos are untouched");
+        assert_eq!(
+            sel.rule_id, "EXISTING-1",
+            "the untouched selection survives"
+        );
+        assert_eq!(
+            sel.chosen_option.as_deref(),
+            Some("old"),
+            "its option is untouched"
+        );
+        assert_eq!(
+            sel.repos,
+            vec!["me/web".to_string()],
+            "its repos are untouched"
+        );
         assert_eq!(
             sel.applied_hash.as_deref(),
             Some("sha-abc"),
@@ -1326,7 +1419,10 @@ mod tests {
             }],
         );
         assert_eq!(merged.selections.len(), 1, "no duplicate: {merged:?}");
-        assert_eq!(merged.selections[0].chosen_option.as_deref(), Some("versioned"));
+        assert_eq!(
+            merged.selections[0].chosen_option.as_deref(),
+            Some("versioned")
+        );
         assert_eq!(
             merged.selections[0].repos,
             vec!["me/web".to_string(), "me/api".to_string()],
@@ -1375,7 +1471,10 @@ mod tests {
         );
         assert!(merged.selections.is_empty(), "nothing appended: {merged:?}");
         assert_eq!(merged.cross_repo[0].chosen_option.as_deref(), Some("new"));
-        assert_eq!(merged.process[0].chosen_option.as_deref(), Some("conventional"));
+        assert_eq!(
+            merged.process[0].chosen_option.as_deref(),
+            Some("conventional")
+        );
     }
 
     /// req_pass2_14: adopting the same convention twice (a double-click, a retry after a
@@ -1425,8 +1524,22 @@ mod tests {
                 opened: true,
             }],
         );
-        let ids: Vec<&str> = merged.selections.iter().map(|s| s.rule_id.as_str()).collect();
-        assert_eq!(ids, vec!["KEEP-1", "KEEP-2", "KEEP-3", "KEEP-4", "KEEP-5", "BRAND-NEW"]);
+        let ids: Vec<&str> = merged
+            .selections
+            .iter()
+            .map(|s| s.rule_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "KEEP-1",
+                "KEEP-2",
+                "KEEP-3",
+                "KEEP-4",
+                "KEEP-5",
+                "BRAND-NEW"
+            ]
+        );
         assert_eq!(merged.cross_repo.len(), 1);
         assert_eq!(merged.process.len(), 1);
     }

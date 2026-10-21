@@ -48,9 +48,8 @@ pub fn scaffold_greenfield_blocking(
     }
 
     // 1. Create the root directory (and any parents the caller chose to nest under).
-    std::fs::create_dir_all(dest).map_err(|e| {
-        anyhow::anyhow!("could not create {}: {e}", dest.display())
-    })?;
+    std::fs::create_dir_all(dest)
+        .map_err(|e| anyhow::anyhow!("could not create {}: {e}", dest.display()))?;
 
     // 2. `git init` the new directory.
     let git_init = std::process::Command::new("git")

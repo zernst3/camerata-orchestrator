@@ -31,7 +31,10 @@ use crate::dep_audit::DEP_AUDIT_RULE_ID;
 /// contract in the module doc. Defaults to `ClientOwned` — the normal, actionable case.
 pub fn ownership_of(rule_id: &str, captures: &BTreeMap<String, String>) -> Ownership {
     // A detector tagged the resource as living in a platform-owned schema.
-    if captures.get("platform_schema").is_some_and(|s| !s.trim().is_empty()) {
+    if captures
+        .get("platform_schema")
+        .is_some_and(|s| !s.trim().is_empty())
+    {
         return Ownership::PlatformManaged;
     }
     // A known-vulnerable dependency: fixable (ClientOwned) IFF a patched version exists — an
@@ -78,18 +81,27 @@ mod tests {
     use super::*;
 
     fn caps(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn default_is_client_owned() {
-        assert_eq!(ownership_of("ARCH-STRICT-LAYERING-1", &caps(&[])), Ownership::ClientOwned);
+        assert_eq!(
+            ownership_of("ARCH-STRICT-LAYERING-1", &caps(&[])),
+            Ownership::ClientOwned
+        );
         assert!(ownership_action(Ownership::ClientOwned).is_none());
     }
 
     #[test]
     fn platform_schema_capture_makes_it_platform_managed() {
-        let o = ownership_of("SUPABASE-RLS-ENABLED-1", &caps(&[("platform_schema", "auth")]));
+        let o = ownership_of(
+            "SUPABASE-RLS-ENABLED-1",
+            &caps(&[("platform_schema", "auth")]),
+        );
         assert_eq!(o, Ownership::PlatformManaged);
         assert!(!o.is_client_fixable());
         assert!(ownership_action(o).unwrap().contains("platform-managed"));
@@ -122,7 +134,10 @@ mod tests {
         // If somehow both signals are present, platform-managed (fully unfixable) takes priority.
         let o = ownership_of(
             DEP_AUDIT_RULE_ID,
-            &caps(&[("platform_schema", "storage"), ("osv_fixed_version", "9.9.9")]),
+            &caps(&[
+                ("platform_schema", "storage"),
+                ("osv_fixed_version", "9.9.9"),
+            ]),
         );
         assert_eq!(o, Ownership::PlatformManaged);
     }
@@ -135,7 +150,10 @@ mod tests {
             Ownership::Generated,
             Ownership::Vendored,
         ] {
-            assert!(ownership_action(o).is_some(), "{o:?} must carry a client action");
+            assert!(
+                ownership_action(o).is_some(),
+                "{o:?} must carry a client action"
+            );
         }
     }
 }

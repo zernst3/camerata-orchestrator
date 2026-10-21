@@ -143,10 +143,16 @@ struct ModelsResp {
 impl ModelsResp {
     /// Return models grouped by provider for `<optgroup>` rendering.
     fn grouped(&self) -> Vec<(&'static str, Vec<&ModelOption>)> {
-        let claude: Vec<&ModelOption> =
-            self.models.iter().filter(|m| m.provider == "claude").collect();
-        let openrouter: Vec<&ModelOption> =
-            self.models.iter().filter(|m| m.provider == "openrouter").collect();
+        let claude: Vec<&ModelOption> = self
+            .models
+            .iter()
+            .filter(|m| m.provider == "claude")
+            .collect();
+        let openrouter: Vec<&ModelOption> = self
+            .models
+            .iter()
+            .filter(|m| m.provider == "openrouter")
+            .collect();
         let mut groups = Vec::new();
         if !claude.is_empty() {
             groups.push(("Claude (subscription)", claude));
@@ -232,7 +238,12 @@ async fn fetch_models() -> Option<ModelsResp> {
             } else {
                 format!("{}  {}", e.display, parts.join(" · "))
             };
-            ModelOption { label, id: e.id, provider: e.provider, free: e.free }
+            ModelOption {
+                label,
+                id: e.id,
+                provider: e.provider,
+                free: e.free,
+            }
         })
         .collect();
 
@@ -421,7 +432,11 @@ async fn chat_escalation(id: &str, message: &str, model: &str) -> Option<Escalat
 /// escalation (including the server's `translated_directive`) on success.
 async fn answer_escalation(id: &str, answer: &str, action: &str) -> Option<EscalationView> {
     reqwest::Client::new()
-        .post(format!("{}/api/escalations/{}/answer", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/escalations/{}/answer",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({ "answer": answer, "action": action }))
         .send()
         .await
@@ -447,7 +462,11 @@ async fn set_enabled(id: &str, enabled: bool) -> Option<RoutineView> {
 /// updated routine (now `provisioned`, still stopped).
 async fn provision(id: &str) -> Option<RoutineView> {
     reqwest::Client::new()
-        .post(format!("{}/api/routines/{}/provision", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/routines/{}/provision",
+            crate::bff_base(),
+            id
+        ))
         .send()
         .await
         .ok()?
@@ -658,11 +677,8 @@ pub fn RoutineDashboard() -> Element {
     }
 
     // Load routine templates (preset configurations).
-    let templates: Vec<RoutineTemplate> = templates_res
-        .read()
-        .clone()
-        .flatten()
-        .unwrap_or_default();
+    let templates: Vec<RoutineTemplate> =
+        templates_res.read().clone().flatten().unwrap_or_default();
 
     // Group routines by project for display: each row carries an optional header that is
     // shown on the FIRST routine of each group. Routines run globally regardless of
@@ -1531,7 +1547,11 @@ mod tests {
             default: "c1".into(),
         };
         let groups = resp.grouped();
-        assert_eq!(groups.len(), 1, "no OpenRouter models -> no OpenRouter group");
+        assert_eq!(
+            groups.len(),
+            1,
+            "no OpenRouter models -> no OpenRouter group"
+        );
         assert_eq!(groups[0].0, "Claude (subscription)");
     }
 
@@ -1666,7 +1686,11 @@ mod tests {
         assert_eq!(resp.default, "claude-x");
         let claude = resp.models.iter().find(|m| m.id == "claude-x").unwrap();
         // Label is enriched: price, tool-use, context, cache.
-        assert!(claude.label.contains("$15/M"), "label was: {}", claude.label);
+        assert!(
+            claude.label.contains("$15/M"),
+            "label was: {}",
+            claude.label
+        );
         assert!(claude.label.contains("tool-use"));
         assert!(claude.label.contains("200K"));
         assert!(claude.label.contains("cache"));
@@ -2044,7 +2068,10 @@ mod tests {
 
         let (prompt, authored_by) = drafted.expect("draft returns a tuple");
         assert_eq!(prompt, "scaffolded prompt");
-        assert_eq!(authored_by, "scaffold", "missing authored_by defaults to scaffold");
+        assert_eq!(
+            authored_by, "scaffold",
+            "missing authored_by defaults to scaffold"
+        );
     }
 
     // ── Tier 1: render test (dioxus-ssr) ────────────────────────────────────────

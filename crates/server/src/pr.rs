@@ -355,7 +355,10 @@ pub async fn list_pr_comments(
         ))
         .await?;
     if !(200..300).contains(&review.status) {
-        anyhow::bail!("GitHub PR #{number} review comments: HTTP {}", review.status);
+        anyhow::bail!(
+            "GitHub PR #{number} review comments: HTTP {}",
+            review.status
+        );
     }
     comments.extend(parse_pr_comments(&review.body, true)?);
     Ok(comments)
@@ -367,9 +370,7 @@ pub async fn list_pr_comments(
 pub async fn pr_checks(repo: &str, head_sha: &str, token: &str) -> anyhow::Result<PrChecks> {
     let t = transport(token)?;
     let runs = t
-        .get(&format!(
-            "{API}/repos/{repo}/commits/{head_sha}/check-runs"
-        ))
+        .get(&format!("{API}/repos/{repo}/commits/{head_sha}/check-runs"))
         .await?;
     let runs_body = if (200..300).contains(&runs.status) {
         runs.body
@@ -421,7 +422,12 @@ pub fn pr_resolution_plan(uow: &UnitOfWork) -> PrResolution {
     if let Some(number) = uow.pr_number {
         return PrResolution::UseStored(number);
     }
-    match uow.branch.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+    match uow
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    {
         Some(branch) => PrResolution::SearchHead(branch.to_string()),
         None => PrResolution::None,
     }
@@ -601,7 +607,10 @@ mod tests {
     fn pr_checks_is_empty_distinguishes_no_checks_from_all_passed() {
         let none = PrChecks::default();
         assert!(none.is_empty());
-        let passed = PrChecks { passed: 2, ..Default::default() };
+        let passed = PrChecks {
+            passed: 2,
+            ..Default::default()
+        };
         assert!(!passed.is_empty());
     }
 
@@ -669,13 +678,20 @@ mod tests {
             "with no stored number the plan must head-search (the PR-made-in-GitHub path)"
         );
         // The backfill that resolve_pr_for_uow performs after find_pr_by_head returns 42.
-        store.set_pr("o/r#7", Some(42), Some("https://github.com/o/r/pull/42".to_string()));
+        store.set_pr(
+            "o/r#7",
+            Some(42),
+            Some("https://github.com/o/r/pull/42".to_string()),
+        );
         let after = store.get_or_create("o/r#7");
         assert_eq!(
             pr_resolution_plan(&after),
             PrResolution::UseStored(42),
             "after backfill the stored number must win — discovery is idempotent"
         );
-        assert_eq!(after.pr_url.as_deref(), Some("https://github.com/o/r/pull/42"));
+        assert_eq!(
+            after.pr_url.as_deref(),
+            Some("https://github.com/o/r/pull/42")
+        );
     }
 }

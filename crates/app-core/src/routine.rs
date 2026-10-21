@@ -697,7 +697,10 @@ mod tests {
         assert!(templates.len() >= 2);
         // Each has a unique id.
         let ids: Vec<_> = templates.iter().map(|t| &t.id).collect();
-        assert_eq!(ids.len(), ids.iter().collect::<std::collections::HashSet<_>>().len());
+        assert_eq!(
+            ids.len(),
+            ids.iter().collect::<std::collections::HashSet<_>>().len()
+        );
         // Each has required fields non-empty.
         for t in templates {
             assert!(!t.id.is_empty());
@@ -717,7 +720,10 @@ mod tests {
         let routine = instantiate_from_template(template);
 
         // Basic structure is valid.
-        assert!(routine.id.is_empty(), "instantiation doesn't assign an id yet");
+        assert!(
+            routine.id.is_empty(),
+            "instantiation doesn't assign an id yet"
+        );
         assert_eq!(routine.name, template.name, "name matches template");
         assert_eq!(routine.schedule, template.schedule);
         assert_eq!(routine.scope, template.scope);
@@ -725,7 +731,10 @@ mod tests {
         // Sensible defaults for a new routine.
         assert!(!routine.enabled, "templates start disabled");
         assert!(!routine.provisioned, "templates start unprovisioned");
-        assert!(routine.intent.is_empty(), "intent left for architect to fill");
+        assert!(
+            routine.intent.is_empty(),
+            "intent left for architect to fill"
+        );
         assert!(routine.project_id.is_none(), "no project assigned");
         assert!(routine.last_run.is_none(), "never been run");
         assert_eq!(routine.status, RoutineStatus::Idle);
@@ -777,9 +786,11 @@ mod tests {
         };
 
         // Serialize both and verify they match (id is already empty, so this is direct).
-        let tmpl_json =
-            serde_json::to_string(&from_template).expect("from_template serializes");
+        let tmpl_json = serde_json::to_string(&from_template).expect("from_template serializes");
         let hand_json = serde_json::to_string(&hand_built).expect("hand_built serializes");
-        assert_eq!(tmpl_json, hand_json, "instantiated and hand-built routines serialize identically");
+        assert_eq!(
+            tmpl_json, hand_json,
+            "instantiated and hand-built routines serialize identically"
+        );
     }
 }

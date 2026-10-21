@@ -28,8 +28,8 @@
 //! `#bg-bombe-machine` element.  All animations are gated on `.bombe-running` so
 //! idle cost is zero.
 
-use dioxus::prelude::*;
 use crate::loading::{BombeEnabled, BombePreview, LoadingCount};
+use dioxus::prelude::*;
 
 /// Total rotors = 3 blocks × 12 columns × 3 rows = 108.
 const BLOCKS: usize = 3;

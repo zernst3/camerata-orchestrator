@@ -49,8 +49,7 @@ pub fn corpus_dir() -> PathBuf {
         return PathBuf::from(p);
     }
     // tools/corpus-verifier -> repo root -> crates/rules/principles
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../crates/rules/principles")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/rules/principles")
 }
 
 /// The repo root, derived from this crate's manifest dir (`tools/corpus-verifier`).
@@ -74,8 +73,8 @@ pub fn locate_rule(corpus_dir: &Path, rule_id: &str) -> Result<PathBuf> {
         .with_context(|| format!("scanning corpus at {}", corpus_dir.display()))?;
 
     for path in &paths {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         // A cheap pre-filter avoids fully parsing every file, then a precise
         // parse confirms the `id` field (not a substring match).
         if !text.contains(rule_id) {
@@ -581,7 +580,10 @@ pub async fn self_source(
     vcs.commit(&edited_paths, &message)?;
     vcs.push(&branch)?;
 
-    let title = format!("verify(corpus): self-source {} meta rules ({scope})", targets.len());
+    let title = format!(
+        "verify(corpus): self-source {} meta rules ({scope})",
+        targets.len()
+    );
     let body = format!(
         "Self-sources {} maintainer-authored meta rules ({scope}) to `verified` (against = self-sourced).\n\nVerified by **{by}** on {at}.\n\nRules:\n{}\n",
         targets.len(),
@@ -702,7 +704,11 @@ why = "Because reasons."
         let rule = load_one_from_dir(tmp.path(), "FIXTURE-RULE-1").await;
         let prov = rule.verified.unwrap();
         assert_eq!(prov.at, "2026-06-21");
-        assert_eq!(prov.against, vec!["new 2.0"], "stale against fully replaced");
+        assert_eq!(
+            prov.against,
+            vec!["new 2.0"],
+            "stale against fully replaced"
+        );
     }
 
     #[tokio::test]
@@ -864,10 +870,18 @@ enforcement="mechanical""#,
     #[tokio::test]
     async fn self_source_rejects_non_meta_domain() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = self_source(tmp.path(), Some("rust"), "zach", "2026-06-20", &DryRunVcs::new())
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("not a maintainer-authored meta domain"));
+        let err = self_source(
+            tmp.path(),
+            Some("rust"),
+            "zach",
+            "2026-06-20",
+            &DryRunVcs::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("not a maintainer-authored meta domain"));
     }
 
     #[test]

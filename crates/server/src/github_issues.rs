@@ -560,8 +560,8 @@ pub fn parse_issue_assignees(json: &str) -> anyhow::Result<Vec<String>> {
         #[serde(default)]
         assignees: Vec<RawUser>,
     }
-    let raw: IssueAssignees = serde_json::from_str(json)
-        .map_err(|e| anyhow::anyhow!("parse_issue_assignees: {e}"))?;
+    let raw: IssueAssignees =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("parse_issue_assignees: {e}"))?;
     Ok(raw.assignees.into_iter().filter_map(|u| u.login).collect())
 }
 
@@ -833,8 +833,7 @@ pub async fn add_labels_to_issue(
     }
     let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
     let url = format!("https://api.github.com/repos/{owner}/{repo}/issues/{number}/labels");
-    let payload =
-        serde_json::to_string(&serde_json::json!({ "labels": labels }))?;
+    let payload = serde_json::to_string(&serde_json::json!({ "labels": labels }))?;
     let resp = transport.post(&url, &payload).await?;
     if !(200..300).contains(&resp.status) {
         anyhow::bail!(
@@ -939,7 +938,10 @@ mod tests {
         assert_eq!(issues.len(), 2, "the PR must be filtered out");
         // The Epic itself has no parent.
         assert_eq!(issues[0].number, 10);
-        assert_eq!(issues[0].parent_number, None, "top-level Epic has no parent");
+        assert_eq!(
+            issues[0].parent_number, None,
+            "top-level Epic has no parent"
+        );
         // The child carries the parent's number.
         assert_eq!(issues[1].number, 11);
         assert_eq!(

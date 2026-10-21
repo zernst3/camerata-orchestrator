@@ -61,8 +61,8 @@ use camerata_worktracker::investigation::DecisionRecord;
 
 use crate::api_agent_driver::build_agent_driver;
 use crate::llm::LlmPort;
-use crate::run::{live_mode_enabled, GateEvent, RunStatus, RunStore};
 use crate::review_agent::{run_l3_review, L3ReviewInput, ReviewVerdict};
+use crate::run::{live_mode_enabled, GateEvent, RunStatus, RunStore};
 use crate::uow::UowStore;
 
 /// One in-scope escalation for a governed dev run: a SELECTED rule whose SELECTED option carries an
@@ -160,9 +160,17 @@ async fn record_escalation_raised(
 ) {
     // HardPause is the more consequential outcome (the run stops); SoftFlag is routine.
     let event = if severity_label == "hard-pause" {
-        camerata_persistence::GovernanceEvent::warn(run_id.to_string(), "escalation_raised", "agent")
+        camerata_persistence::GovernanceEvent::warn(
+            run_id.to_string(),
+            "escalation_raised",
+            "agent",
+        )
     } else {
-        camerata_persistence::GovernanceEvent::info(run_id.to_string(), "escalation_raised", "agent")
+        camerata_persistence::GovernanceEvent::info(
+            run_id.to_string(),
+            "escalation_raised",
+            "agent",
+        )
     }
     .with_story_id(story_id.to_string())
     .with_rule_id(req.rule_id.clone())
@@ -368,9 +376,7 @@ async fn run_l3_if_enabled(
                     layer: "layer-3".to_string(),
                     verdict: "error".to_string(),
                     rule: None,
-                    detail: format!(
-                        "Layer-3 reviewer error (treating as pass — advisory): {e}"
-                    ),
+                    detail: format!("Layer-3 reviewer error (treating as pass — advisory): {e}"),
                     content_hash: None,
                 },
             );
@@ -419,10 +425,7 @@ async fn run_integration_gate_if_needed(
     // TODO(#105-followup): for true multi-repo fan-out, collect assembled diffs from
     // all repos in the fan_out result and pass each as a separate entry here.
     // For now use the single available worktree diff.
-    let repo_name = dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("repo");
+    let repo_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
     let repo_outputs: Vec<(&str, &str)> = vec![(repo_name, diff.as_str())];
     // Superseded by `run_multi_repo_integration_gate` (which runs the deterministic
     // engine first); this single-repo advisory path only runs when an LLM is present.
@@ -572,10 +575,7 @@ pub async fn run_multi_repo_integration_gate(
                     layer: "integration-gate".to_string(),
                     verdict: "review".to_string(),
                     rule: Some(item.rule_id.clone()),
-                    detail: format!(
-                        "REVIEW-TIER (human QA, NOT passed): {}",
-                        item.detail
-                    ),
+                    detail: format!("REVIEW-TIER (human QA, NOT passed): {}", item.detail),
                     content_hash: None,
                 },
             );
@@ -659,9 +659,7 @@ pub async fn run_multi_repo_integration_gate(
     for rw in repo_worktrees {
         let dir = rw.dir.clone();
         let base = rw.base_commit.clone();
-        diff_futs.push(async move {
-            worktree_diff_from_base(&dir, &base).await
-        });
+        diff_futs.push(async move { worktree_diff_from_base(&dir, &base).await });
     }
     // Run all diffs concurrently.
     let diffs: Vec<String> = futures::future::join_all(diff_futs).await;
@@ -1088,10 +1086,7 @@ pub async fn execute_dev_implement_run(
         return;
     }
 
-    let approved_count = decisions
-        .iter()
-        .filter(|d| d.outcome.is_approved())
-        .count();
+    let approved_count = decisions.iter().filter(|d| d.outcome.is_approved()).count();
     event(
         &runs,
         "info",
@@ -1189,8 +1184,13 @@ pub async fn execute_dev_implement_run(
         .filter(|d| d.as_path() != dir.as_path())
         .cloned()
         .collect();
-    let spawn = match prepare_session(&gateway_bin, &role, Some(dir.as_path()), &sibling_read_dirs, None)
-    {
+    let spawn = match prepare_session(
+        &gateway_bin,
+        &role,
+        Some(dir.as_path()),
+        &sibling_read_dirs,
+        None,
+    ) {
         Ok(s) => s,
         Err(e) => {
             fail(
@@ -1369,19 +1369,30 @@ pub async fn execute_dev_implement_run(
                     uow.append_history(&story_id, "dev_implement", &flag);
                     // Phase H2: record the raise even though the run continues — the agent's
                     // own justification is the durable audit value here, not the outcome.
-                    record_escalation_raised(&governance_log, &run_id, &story_id, &req, "soft-flag")
-                        .await;
+                    record_escalation_raised(
+                        &governance_log,
+                        &run_id,
+                        &story_id,
+                        &req,
+                        "soft-flag",
+                    )
+                    .await;
                     // Clear the sink so this same flag is not re-read on the next pass.
-                    let _ = std::fs::remove_file(
-                        spawn._dir.path().join("escalation-requests.jsonl"),
-                    );
+                    let _ =
+                        std::fs::remove_file(spawn._dir.path().join("escalation-requests.jsonl"));
                 }
                 camerata_rules::EscalationSeverity::HardPause => {
                     // Phase H2: record the raise + the agent's REASONING (its justification)
                     // before we act on it — this is the audit-trail value Zach specifically
                     // wants captured, independent of how the human later resolves it.
-                    record_escalation_raised(&governance_log, &run_id, &story_id, &req, "hard-pause")
-                        .await;
+                    record_escalation_raised(
+                        &governance_log,
+                        &run_id,
+                        &story_id,
+                        &req,
+                        "hard-pause",
+                    )
+                    .await;
                     // PAUSE for human review: checkpoint + UoW review escalation + AwaitingReview,
                     // the SAME engine the test-tamper backstop uses. The worktree is left intact.
                     let just = if req.justification.trim().is_empty() {
@@ -1469,7 +1480,17 @@ pub async fn execute_dev_implement_run(
             );
             // Layer-3 (opt-in agentic code review, R7) still applies even when L2 is
             // skipped, as long as the bundle is present.
-            if let Some(l3_bounce_reasons) = run_l3_if_enabled(&runs, &run_id, &next_seq, &l3, &dir, &base_commit, iteration).await {
+            if let Some(l3_bounce_reasons) = run_l3_if_enabled(
+                &runs,
+                &run_id,
+                &next_seq,
+                &l3,
+                &dir,
+                &base_commit,
+                iteration,
+            )
+            .await
+            {
                 if !l3_bounce_reasons.is_empty() {
                     // L3 bounced: send back to the agent for a revise pass.
                     iteration += 1;
@@ -1480,7 +1501,11 @@ pub async fn execute_dev_implement_run(
                         ));
                     }
                     // Snapshot the iteration before bouncing.
-                    let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                    let _ = crate::workspace::snapshot_worktree(
+                        &dir,
+                        &format!("dev-implement iteration {}", iteration - 1),
+                    )
+                    .await;
                     // LIFECYCLE-5: feed the L3 reviewer's reasons into the next pass's prompt tail.
                     task = append_bounce_feedback(
                         &base_task,
@@ -1498,7 +1523,8 @@ pub async fn execute_dev_implement_run(
             // from ALL in-scope repos and pass them together. Single-repo path: build
             // a synthetic single-entry slice from the primary dir + base_commit so the
             // same code path handles both cases.
-            let effective_worktrees: std::borrow::Cow<[RepoWorktree]> = if repo_worktrees.is_empty() {
+            let effective_worktrees: std::borrow::Cow<[RepoWorktree]> = if repo_worktrees.is_empty()
+            {
                 std::borrow::Cow::Owned(vec![RepoWorktree {
                     repo: repo.clone(),
                     branch: target_branch.clone(),
@@ -1509,8 +1535,15 @@ pub async fn execute_dev_implement_run(
                 std::borrow::Cow::Borrowed(&repo_worktrees)
             };
             if let Some(gate_result) = run_multi_repo_integration_gate(
-                &runs, &run_id, &next_seq, &integration_gate, &effective_worktrees, iteration,
-            ).await {
+                &runs,
+                &run_id,
+                &next_seq,
+                &integration_gate,
+                &effective_worktrees,
+                iteration,
+            )
+            .await
+            {
                 if let Err(reason) = gate_result {
                     iteration += 1;
                     if iteration >= max_iterations {
@@ -1518,7 +1551,11 @@ pub async fn execute_dev_implement_run(
                             "integration gate still failing after {iteration} pass(es): {reason}"
                         ));
                     }
-                    let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                    let _ = crate::workspace::snapshot_worktree(
+                        &dir,
+                        &format!("dev-implement iteration {}", iteration - 1),
+                    )
+                    .await;
                     // LIFECYCLE-5: feed the integration-gate mismatch reason into the next pass.
                     task = append_bounce_feedback(
                         &base_task,
@@ -1539,7 +1576,11 @@ pub async fn execute_dev_implement_run(
         match &check_result {
             Ok(outcome) if outcome.violated.is_empty() => {
                 // Clean L2 pass. Run L3 if enabled before declaring victory.
-                event(&runs, "pass", "Stage 1/1 passed layer-2 checks.".to_string());
+                event(
+                    &runs,
+                    "pass",
+                    "Stage 1/1 passed layer-2 checks.".to_string(),
+                );
                 runs.push_event(
                     &run_id,
                     GateEvent {
@@ -1547,9 +1588,7 @@ pub async fn execute_dev_implement_run(
                         layer: "stage".to_string(),
                         verdict: "info".to_string(),
                         rule: None,
-                        detail: format!(
-                            "Stage 1/1 finished: clean=true, bounced={iteration}."
-                        ),
+                        detail: format!("Stage 1/1 finished: clean=true, bounced={iteration}."),
                         content_hash: None,
                     },
                 );
@@ -1557,7 +1596,17 @@ pub async fn execute_dev_implement_run(
                 // enabled. The reviewer sees story + rules + diff — no agent transcripts.
                 // It bounces exactly like L2: reasons go back to the developer for a
                 // revise pass. The bounce count is shared with L2.
-                if let Some(l3_bounce_reasons) = run_l3_if_enabled(&runs, &run_id, &next_seq, &l3, &dir, &base_commit, iteration).await {
+                if let Some(l3_bounce_reasons) = run_l3_if_enabled(
+                    &runs,
+                    &run_id,
+                    &next_seq,
+                    &l3,
+                    &dir,
+                    &base_commit,
+                    iteration,
+                )
+                .await
+                {
                     if !l3_bounce_reasons.is_empty() {
                         iteration += 1;
                         if iteration >= max_iterations {
@@ -1567,7 +1616,11 @@ pub async fn execute_dev_implement_run(
                             ));
                         }
                         // Snapshot the iteration before bouncing.
-                        let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                        let _ = crate::workspace::snapshot_worktree(
+                            &dir,
+                            &format!("dev-implement iteration {}", iteration - 1),
+                        )
+                        .await;
                         // LIFECYCLE-5: feed the L3 reviewer's reasons into the next pass's prompt tail.
                         task = append_bounce_feedback(
                             &base_task,
@@ -1584,19 +1637,27 @@ pub async fn execute_dev_implement_run(
                 // Integration gate (R3.e): runs after clean L3 (or when L3 is absent).
                 // Multi-repo path (R3.f): when repo_worktrees is populated, collect
                 // diffs from ALL in-scope repos. Single-repo: synthetic single-entry.
-                let effective_worktrees: std::borrow::Cow<[RepoWorktree]> = if repo_worktrees.is_empty() {
-                    std::borrow::Cow::Owned(vec![RepoWorktree {
-                        repo: repo.clone(),
-                        branch: target_branch.clone(),
-                        dir: dir.clone(),
-                        base_commit: base_commit.clone(),
-                    }])
-                } else {
-                    std::borrow::Cow::Borrowed(&repo_worktrees)
-                };
+                let effective_worktrees: std::borrow::Cow<[RepoWorktree]> =
+                    if repo_worktrees.is_empty() {
+                        std::borrow::Cow::Owned(vec![RepoWorktree {
+                            repo: repo.clone(),
+                            branch: target_branch.clone(),
+                            dir: dir.clone(),
+                            base_commit: base_commit.clone(),
+                        }])
+                    } else {
+                        std::borrow::Cow::Borrowed(&repo_worktrees)
+                    };
                 if let Some(gate_result) = run_multi_repo_integration_gate(
-                    &runs, &run_id, &next_seq, &integration_gate, &effective_worktrees, iteration,
-                ).await {
+                    &runs,
+                    &run_id,
+                    &next_seq,
+                    &integration_gate,
+                    &effective_worktrees,
+                    iteration,
+                )
+                .await
+                {
                     if let Err(reason) = gate_result {
                         iteration += 1;
                         if iteration >= max_iterations {
@@ -1604,12 +1665,18 @@ pub async fn execute_dev_implement_run(
                                 "integration gate still failing after {iteration} pass(es): {reason}"
                             ));
                         }
-                        let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                        let _ = crate::workspace::snapshot_worktree(
+                            &dir,
+                            &format!("dev-implement iteration {}", iteration - 1),
+                        )
+                        .await;
                         // LIFECYCLE-5: feed the integration-gate mismatch reason into the next pass.
                         task = append_bounce_feedback(
                             &base_task,
                             iteration,
-                            &format!("Integration gate (R3.e) bounced — contract mismatch:\n{reason}"),
+                            &format!(
+                                "Integration gate (R3.e) bounced — contract mismatch:\n{reason}"
+                            ),
                         );
                         // Bounce: re-run the agent to fix the contract mismatch.
                         continue;
@@ -1632,9 +1699,7 @@ pub async fn execute_dev_implement_run(
                         layer: "layer-2".to_string(),
                         verdict: "fail".to_string(),
                         rule: Some(rule_summary.clone()),
-                        detail: format!(
-                            "Stage 1/1 failed layer-2: {rule_summary}."
-                        ),
+                        detail: format!("Stage 1/1 failed layer-2: {rule_summary}."),
                         content_hash: None,
                     },
                 );
@@ -1707,7 +1772,11 @@ pub async fn execute_dev_implement_run(
                     .with_detail(serde_json::json!({ "diagnostics": diagnostics }).to_string()),
                 )
                 .await;
-                let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                let _ = crate::workspace::snapshot_worktree(
+                    &dir,
+                    &format!("dev-implement iteration {}", iteration - 1),
+                )
+                .await;
                 // LIFECYCLE-5: feed the failure back into the NEXT pass's prompt at the tail.
                 // The Layer-2 check emits the violated rule ids AND the verbatim toolchain
                 // diagnostics (stack-agnostic: whatever the detected toolchain flagged — Rust
@@ -1786,11 +1855,18 @@ pub async fn execute_dev_implement_run(
             .join(", ");
 
         // Log that the check ran (so a clean run shows the guard was applied, not skipped).
-        let guard_verdict = if tamper_findings.is_empty() { "pass" } else { "fail" };
+        let guard_verdict = if tamper_findings.is_empty() {
+            "pass"
+        } else {
+            "fail"
+        };
         let guard_detail = if tamper_findings.is_empty() {
             "AGENTIC-NO-TEST-TAMPER-1: no existing tests modified or deleted.".to_string()
         } else {
-            format!("AGENTIC-NO-TEST-TAMPER-1: {} — {listed}", esc_spec.condition)
+            format!(
+                "AGENTIC-NO-TEST-TAMPER-1: {} — {listed}",
+                esc_spec.condition
+            )
         };
         runs.push_event(
             &run_id,
@@ -1941,7 +2017,11 @@ pub async fn execute_dev_implement_run(
     if let Err(e) = crate::vcs_choke::gated_commit(&vcs_config, &commit_msg) {
         // The machine message failed the project's gate. Fail closed — this is a bug in the
         // message generator or a run missing a usable story id, not a reason to commit past it.
-        fail(&runs, &uow, format!("VCS-action gate blocked the machine commit: {e}"));
+        fail(
+            &runs,
+            &uow,
+            format!("VCS-action gate blocked the machine commit: {e}"),
+        );
         return;
     }
 
@@ -1967,7 +2047,11 @@ pub async fn execute_dev_implement_run(
     // commit above is local; a cancel here stops us short of publishing the branch, and the
     // run stays in its terminal Cancelled state (never advances to AwaitingQa).
     if runs.is_cancelled(&run_id) {
-        cancelled_stop(&runs, &uow, "before push (implementation committed locally)");
+        cancelled_stop(
+            &runs,
+            &uow,
+            "before push (implementation committed locally)",
+        );
         return;
     }
 
@@ -2015,9 +2099,7 @@ pub async fn execute_dev_implement_run(
             event(
                 &runs,
                 "info",
-                format!(
-                    "No GitHub token: committed locally — push `{target_branch}` when ready."
-                ),
+                format!("No GitHub token: committed locally — push `{target_branch}` when ready."),
             );
             uow.append_history(
                 &story_id,
@@ -2122,8 +2204,14 @@ mod tests {
 
         // Story identity.
         assert!(p.contains("acme/api#42"), "prompt must include story_id");
-        assert!(p.contains("camerata/story-42"), "prompt must include branch");
-        assert!(p.contains("Add user login"), "prompt must include story title");
+        assert!(
+            p.contains("camerata/story-42"),
+            "prompt must include branch"
+        );
+        assert!(
+            p.contains("Add user login"),
+            "prompt must include story title"
+        );
         assert!(
             p.contains("Support email/password login"),
             "prompt must include story description"
@@ -2176,7 +2264,10 @@ mod tests {
             "prompt must embed the governance kernel"
         );
         assert!(p.contains("=== END OPERATING PROTOCOL ==="));
-        assert!(p.contains("GROUND EVERY FACT"), "kernel clause must be present");
+        assert!(
+            p.contains("GROUND EVERY FACT"),
+            "kernel clause must be present"
+        );
 
         // The ordered procedure's mandatory self-review step.
         assert!(
@@ -2212,7 +2303,8 @@ mod tests {
     /// Layer-1/Layer-2 prefix never has volatile content leak above it.
     #[test]
     fn implement_prompt_orders_layers_kernel_then_grounding_then_story() {
-        let grounding = "=== PROJECT GROUNDING ===\nrepo digest here\n=== END PROJECT GROUNDING ===";
+        let grounding =
+            "=== PROJECT GROUNDING ===\nrepo digest here\n=== END PROJECT GROUNDING ===";
         let p = implement_prompt(
             "s/r#9",
             "MY-STORY-TITLE",
@@ -2235,7 +2327,9 @@ mod tests {
             "Layer 2 (grounding) must precede Layer 3 (story)"
         );
         // The whole grounding block is above the story: no volatile content leaks up.
-        let i_grounding_end = p.find("=== END PROJECT GROUNDING ===").expect("grounding end");
+        let i_grounding_end = p
+            .find("=== END PROJECT GROUNDING ===")
+            .expect("grounding end");
         assert!(
             i_grounding_end < i_story,
             "the story (Layer 3) must sit entirely below the grounding block"
@@ -2265,7 +2359,10 @@ mod tests {
         let end = "=== END PROJECT GROUNDING ===";
         let a_prefix_len = a.find(end).unwrap() + end.len();
         let b_prefix_len = b.find(end).unwrap() + end.len();
-        assert_eq!(a_prefix_len, b_prefix_len, "prefix boundary must be at the same byte offset");
+        assert_eq!(
+            a_prefix_len, b_prefix_len,
+            "prefix boundary must be at the same byte offset"
+        );
         assert_eq!(
             &a[..a_prefix_len],
             &b[..b_prefix_len],
@@ -2371,7 +2468,11 @@ mod tests {
         )
         .unwrap();
         let props = read_memory_proposals(dir.path());
-        assert_eq!(props.len(), 2, "ALL proposals are read (agent may propose several)");
+        assert_eq!(
+            props.len(),
+            2,
+            "ALL proposals are read (agent may propose several)"
+        );
         assert_eq!(props[0].text, "The auth flow assumes X.");
         assert_eq!(
             memory_kind_from_str(&props[0].kind),
@@ -2436,7 +2537,9 @@ mod tests {
             .map(|(i, _)| &args[i + 1])
             .collect();
         assert!(
-            add_dirs.iter().any(|d| **d == sibling.display().to_string()),
+            add_dirs
+                .iter()
+                .any(|d| **d == sibling.display().to_string()),
             "the sibling project repo must be readable via --add-dir"
         );
 
@@ -2485,17 +2588,29 @@ mod tests {
         let second = append_bounce_feedback(&base, 1, feedback);
 
         // It differs from the first prompt.
-        assert_ne!(second, base, "the bounce prompt must differ from the first pass");
+        assert_ne!(
+            second, base,
+            "the bounce prompt must differ from the first pass"
+        );
         // The base prompt is a PREFIX (cache-friendly tail placement): the whole base is
         // still present, unchanged, at the head of the second prompt.
-        assert!(second.starts_with(&base), "base prompt must remain the cached prefix");
+        assert!(
+            second.starts_with(&base),
+            "base prompt must remain the cached prefix"
+        );
         // The rule id + verbatim error text are present.
-        assert!(second.contains("RUST-CLIPPY"), "violated rule id must be fed back");
+        assert!(
+            second.contains("RUST-CLIPPY"),
+            "violated rule id must be fed back"
+        );
         assert!(
             second.contains("error[E0308]: mismatched types"),
             "verbatim toolchain error text must be fed back"
         );
-        assert!(second.contains("src/auth.rs:12:5"), "error location must be fed back");
+        assert!(
+            second.contains("src/auth.rs:12:5"),
+            "error location must be fed back"
+        );
         // The feedback sits at the TAIL (after the base prompt), not in the middle.
         let feedback_pos = second.find("error[E0308]").unwrap();
         assert!(
@@ -2503,7 +2618,10 @@ mod tests {
             "the error feedback must be appended AFTER the base prompt (tail placement)"
         );
         // The revise header is present so the agent knows this is a correction pass.
-        assert!(second.contains("REVISE"), "the revise header must be present");
+        assert!(
+            second.contains("REVISE"),
+            "the revise header must be present"
+        );
     }
 
     /// LIFECYCLE-5 (CheckRunner full-diagnostics): the L2 bounce feedback assembled at
@@ -2537,7 +2655,10 @@ mod tests {
         );
         let second = append_bounce_feedback(&base, 1, &l2_feedback);
 
-        assert!(second.starts_with(&base), "base prompt must remain the cached prefix");
+        assert!(
+            second.starts_with(&base),
+            "base prompt must remain the cached prefix"
+        );
         // The FULL diagnostic body (panic message + assertion + file:line), not just the id.
         assert!(second.contains("RUST-TEST"), "rule id must be present");
         assert!(
@@ -2547,7 +2668,10 @@ mod tests {
         // Diagnostics ride the tail: the panic text lands AFTER the rule-id citation.
         let ids_pos = second.find("RUST-TEST").unwrap();
         let diag_pos = second.find("assertion failed").unwrap();
-        assert!(diag_pos > ids_pos, "diagnostics must be appended after the rule ids");
+        assert!(
+            diag_pos > ids_pos,
+            "diagnostics must be appended after the rule ids"
+        );
     }
 
     /// LIFECYCLE-5 truncation: diagnostics larger than the cap are bounded by
@@ -2605,8 +2729,14 @@ mod tests {
             "Integration gate (R3.e) bounced — contract mismatch:\nbackend omits email field",
         ] {
             let out = append_bounce_feedback(&base, 1, feedback);
-            assert!(out.contains(feedback), "the check's own output must pass through verbatim: {feedback}");
-            assert!(out.starts_with(&base), "base stays the prefix for {feedback}");
+            assert!(
+                out.contains(feedback),
+                "the check's own output must pass through verbatim: {feedback}"
+            );
+            assert!(
+                out.starts_with(&base),
+                "base stays the prefix for {feedback}"
+            );
         }
     }
 
@@ -2624,10 +2754,8 @@ mod tests {
     async fn gate_unchanged_live_mode_off_fails_honestly_without_fake_implementation() {
         std::env::remove_var("CAMERATA_LIVE_BUILD");
 
-        let dir = std::env::temp_dir().join(format!(
-            "cam-devimpl-gate-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cam-devimpl-gate-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -2661,7 +2789,7 @@ mod tests {
             std::sync::Arc::new(crate::rate_limit::ProviderRateLimiter::new()),
             crate::escalation::EscalationStore::new(),
             crate::checkpoint::CheckpointStore::new(),
-            None, // no active test-tamper escalation (unreached here: live mode is off)
+            None,       // no active test-tamper escalation (unreached here: live mode is off)
             Vec::new(), // no in-scope agent-driven escalations in this test
             crate::project::ProjectStore::new(),
             None, // no project to capture memory into in this test
@@ -2692,9 +2820,7 @@ mod tests {
         // Critically: NO event should claim the implementation was committed or pushed,
         // because nothing was done.
         assert!(
-            !run.events
-                .iter()
-                .any(|e| e.detail.contains("Committed")),
+            !run.events.iter().any(|e| e.detail.contains("Committed")),
             "must not claim a commit happened in live-mode-off"
         );
 
@@ -2726,14 +2852,23 @@ mod tests {
                 .to_string(),
         };
 
-        record_escalation_raised(&governance_log, "run-esc-1", "acme/api#7", &req, "hard-pause")
-            .await;
+        record_escalation_raised(
+            &governance_log,
+            "run-esc-1",
+            "acme/api#7",
+            &req,
+            "hard-pause",
+        )
+        .await;
 
         let events = log.by_run("run-esc-1").await.expect("by_run");
         assert_eq!(events.len(), 1);
         let ev = &events[0];
         assert_eq!(ev.kind, "escalation_raised");
-        assert_eq!(ev.severity, "warn", "hard-pause escalations are warn-severity");
+        assert_eq!(
+            ev.severity, "warn",
+            "hard-pause escalations are warn-severity"
+        );
         assert_eq!(ev.actor, "agent");
         assert_eq!(ev.story_id.as_deref(), Some("acme/api#7"));
         assert_eq!(ev.rule_id.as_deref(), Some("ARCH-ONE-WAY-DOOR-1"));
@@ -2761,14 +2896,23 @@ mod tests {
             justification: "logged for visibility; continuing".to_string(),
         };
 
-        record_escalation_raised(&governance_log, "run-esc-2", "acme/api#8", &req, "soft-flag")
-            .await;
+        record_escalation_raised(
+            &governance_log,
+            "run-esc-2",
+            "acme/api#8",
+            &req,
+            "soft-flag",
+        )
+        .await;
 
         let events = log.by_run("run-esc-2").await.expect("by_run");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "escalation_raised");
         assert_eq!(events[0].severity, "info");
-        assert_eq!(events[0].reason.as_deref(), Some("logged for visibility; continuing"));
+        assert_eq!(
+            events[0].reason.as_deref(),
+            Some("logged for visibility; continuing")
+        );
     }
 
     // ── 4. Branch handling ──────────────────────────────────────────────────────
@@ -2821,10 +2965,7 @@ mod tests {
     /// (cannot compute a meaningful diff without a base).
     #[tokio::test]
     async fn worktree_diff_empty_base_returns_empty() {
-        let dir = std::env::temp_dir().join(format!(
-            "cam-diff-empty-base-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("cam-diff-empty-base-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let diff = worktree_diff_from_base(&dir, "").await;
         assert!(diff.is_empty(), "empty base_commit must return empty diff");
@@ -2835,10 +2976,7 @@ mod tests {
     /// (no changes since HEAD).
     #[tokio::test]
     async fn worktree_diff_from_base_clean_tree_empty() {
-        let dir = std::env::temp_dir().join(format!(
-            "cam-diff-base-clean-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("cam-diff-base-clean-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let _ = tokio::process::Command::new("git")
@@ -2885,10 +3023,8 @@ mod tests {
     /// When new commits are added after `base_commit`, the diff is non-empty.
     #[tokio::test]
     async fn worktree_diff_from_base_shows_commits_since_base() {
-        let dir = std::env::temp_dir().join(format!(
-            "cam-diff-base-commits-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cam-diff-base-commits-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let _ = tokio::process::Command::new("git")
@@ -2987,12 +3123,8 @@ mod tests {
             },
         ];
         let result = run_multi_repo_integration_gate(
-            &runs,
-            &run_id,
-            &next_seq,
-            &None, // no bundle — gate skipped
-            &worktrees,
-            0,
+            &runs, &run_id, &next_seq, &None, // no bundle — gate skipped
+            &worktrees, 0,
         )
         .await;
         assert!(
@@ -3031,7 +3163,9 @@ mod tests {
             on_delta(&r.text);
             Ok(r)
         }
-        fn as_any(&self) -> &dyn std::any::Any { self }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     /// A stub LLM that returns "MISMATCH\n- contract violation" — tests the bounce path.
@@ -3064,7 +3198,9 @@ mod tests {
             on_delta(&r.text);
             Ok(r)
         }
-        fn as_any(&self) -> &dyn std::any::Any { self }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     /// Multi-repo integration gate with PASS verdict → Some(Ok(())).
@@ -3100,11 +3236,13 @@ mod tests {
                 base_commit: String::new(),
             },
         ];
-        let result = run_multi_repo_integration_gate(
-            &runs, &run_id, &next_seq, &bundle, &worktrees, 0,
-        )
-        .await;
-        assert!(result.is_some(), "gate must return Some when bundle is present");
+        let result =
+            run_multi_repo_integration_gate(&runs, &run_id, &next_seq, &bundle, &worktrees, 0)
+                .await;
+        assert!(
+            result.is_some(),
+            "gate must return Some when bundle is present"
+        );
         assert!(
             matches!(result.unwrap(), Ok(())),
             "PASS verdict must map to Some(Ok(()))"
@@ -3112,7 +3250,9 @@ mod tests {
         // Gate events were emitted: info + pass.
         let run = runs.get(&run_id).unwrap();
         assert!(
-            run.events.iter().any(|e| e.layer == "integration-gate" && e.verdict == "pass"),
+            run.events
+                .iter()
+                .any(|e| e.layer == "integration-gate" && e.verdict == "pass"),
             "must emit a pass gate event"
         );
     }
@@ -3133,18 +3273,15 @@ mod tests {
             model: "claude-sonnet-5".to_string(),
             llm: Some(llm),
         });
-        let worktrees = vec![
-            RepoWorktree {
-                repo: "acme/api".to_string(),
-                branch: "camerata/story-42".to_string(),
-                dir: std::path::PathBuf::from("/tmp/api"),
-                base_commit: String::new(),
-            },
-        ];
-        let result = run_multi_repo_integration_gate(
-            &runs, &run_id, &next_seq, &bundle, &worktrees, 0,
-        )
-        .await;
+        let worktrees = vec![RepoWorktree {
+            repo: "acme/api".to_string(),
+            branch: "camerata/story-42".to_string(),
+            dir: std::path::PathBuf::from("/tmp/api"),
+            base_commit: String::new(),
+        }];
+        let result =
+            run_multi_repo_integration_gate(&runs, &run_id, &next_seq, &bundle, &worktrees, 0)
+                .await;
         assert!(result.is_some());
         let inner = result.unwrap();
         assert!(inner.is_err(), "MISMATCH must map to Some(Err(_))");
@@ -3154,7 +3291,9 @@ mod tests {
         );
         let run = runs.get(&run_id).unwrap();
         assert!(
-            run.events.iter().any(|e| e.layer == "integration-gate" && e.verdict == "fail"),
+            run.events
+                .iter()
+                .any(|e| e.layer == "integration-gate" && e.verdict == "fail"),
             "must emit a fail gate event"
         );
     }
@@ -3205,8 +3344,12 @@ mod tests {
         let seq = std::sync::atomic::AtomicUsize::new(0);
         let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let result =
-            run_multi_repo_integration_gate(&runs, &run_id, &next_seq, &bundle, &worktrees, 0).await;
-        assert!(matches!(result, Some(Ok(()))), "matching pair passes deterministically");
+            run_multi_repo_integration_gate(&runs, &run_id, &next_seq, &bundle, &worktrees, 0)
+                .await;
+        assert!(
+            matches!(result, Some(Ok(()))),
+            "matching pair passes deterministically"
+        );
 
         // DRIFTING pair: consumer calls a route the producer never exposes.
         let ui2 = repo(&[("client.js", "axios.post('/members/csv', body)\n")]);
@@ -3266,7 +3409,8 @@ mod tests {
         let seq = std::sync::atomic::AtomicUsize::new(0);
         let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let result =
-            run_multi_repo_integration_gate(&runs, &run_id, &next_seq, &bundle, &worktrees, 0).await;
+            run_multi_repo_integration_gate(&runs, &run_id, &next_seq, &bundle, &worktrees, 0)
+                .await;
         // No deterministic FAIL, but a review-tier event must be present.
         assert!(matches!(result, Some(Ok(()))), "no mechanical failure");
         let run = runs.get(&run_id).unwrap();
@@ -3301,10 +3445,11 @@ mod tests {
             dir: std::path::PathBuf::from("/tmp/api"),
             base_commit: String::new(),
         }];
-        let result = run_multi_repo_integration_gate(
-            &runs, &run_id, &next_seq, &bundle, &single, 0,
-        )
-        .await;
-        assert!(matches!(result, Some(Ok(()))), "single-entry gate must pass with PASS LLM");
+        let result =
+            run_multi_repo_integration_gate(&runs, &run_id, &next_seq, &bundle, &single, 0).await;
+        assert!(
+            matches!(result, Some(Ok(()))),
+            "single-entry gate must pass with PASS LLM"
+        );
     }
 }

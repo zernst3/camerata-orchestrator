@@ -17,16 +17,16 @@ use dioxus::prelude::*;
 
 use corpus_verifier::{
     corpus_dir, list_grounded, self_source, today, verified_block_preview, verify_one, DryRunVcs,
-    GitVcs,
-    GroundedRow,
+    GitVcs, GroundedRow,
 };
 
 fn main() {
     use dioxus::desktop::{Config, WindowBuilder};
     dioxus::LaunchBuilder::desktop()
-        .with_cfg(Config::new().with_window(
-            WindowBuilder::new().with_title("Corpus Verifier (maintainer tool)"),
-        ))
+        .with_cfg(
+            Config::new()
+                .with_window(WindowBuilder::new().with_title("Corpus Verifier (maintainer tool)")),
+        )
         .launch(App);
 }
 
@@ -151,9 +151,25 @@ fn VerifyForm(row: GroundedRow) -> Element {
             // Dry-run edits the TOML locally and reports the planned PR without
             // pushing; unchecking it fires the real branch -> push -> PR via GitVcs.
             let outcome = if dry_v {
-                verify_one(&corpus_dir(), &rule_id, &by_v, &at_v, against_v, &DryRunVcs::new()).await
+                verify_one(
+                    &corpus_dir(),
+                    &rule_id,
+                    &by_v,
+                    &at_v,
+                    against_v,
+                    &DryRunVcs::new(),
+                )
+                .await
             } else {
-                verify_one(&corpus_dir(), &rule_id, &by_v, &at_v, against_v, &GitVcs::new()).await
+                verify_one(
+                    &corpus_dir(),
+                    &rule_id,
+                    &by_v,
+                    &at_v,
+                    against_v,
+                    &GitVcs::new(),
+                )
+                .await
             };
             result.set(Some(match outcome {
                 Ok(o) => Ok(if dry_v {
@@ -240,9 +256,23 @@ fn BulkMetaView() -> Element {
                 Some(dom.trim().to_owned())
             };
             let outcome = if dry_v {
-                self_source(&corpus_dir(), scope.as_deref(), &by_v, &today(), &DryRunVcs::new()).await
+                self_source(
+                    &corpus_dir(),
+                    scope.as_deref(),
+                    &by_v,
+                    &today(),
+                    &DryRunVcs::new(),
+                )
+                .await
             } else {
-                self_source(&corpus_dir(), scope.as_deref(), &by_v, &today(), &GitVcs::new()).await
+                self_source(
+                    &corpus_dir(),
+                    scope.as_deref(),
+                    &by_v,
+                    &today(),
+                    &GitVcs::new(),
+                )
+                .await
             };
             result.set(Some(match outcome {
                 Ok(o) => Ok(if dry_v {

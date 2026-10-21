@@ -272,7 +272,8 @@ impl JobStore {
     /// expected to check `is_cancel_requested` periodically and stop early.
     pub fn request_cancel(&self, id: &str) {
         if let Some(meta) = self.job_meta.lock().unwrap().get(id) {
-            meta.cancel_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+            meta.cancel_requested
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -321,8 +322,8 @@ impl JobStore {
             j.status = "done".to_string();
             j.report = Some(report);
             j.batch_id = None; // batch completed — id no longer informative
-            // ROUTES-5: stamp completion time so latest_deep_report can pick the newest
-            // deep report within a project deterministically (not by HashMap order).
+                               // ROUTES-5: stamp completion time so latest_deep_report can pick the newest
+                               // deep report within a project deterministically (not by HashMap order).
             j.completed_at_ms = Some(now_ms);
         });
     }
@@ -518,7 +519,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["deterministic"]["done"].as_u64(), Some(1));
         assert_eq!(v["deterministic"]["total"].as_u64(), Some(1));
-        assert_eq!(v["deterministic"]["tools"][0]["tool"].as_str(), Some("floor"));
+        assert_eq!(
+            v["deterministic"]["tools"][0]["tool"].as_str(),
+            Some("floor")
+        );
         assert_eq!(v["deterministic"]["tools"][0]["findings"].as_u64(), Some(2));
     }
 
@@ -566,14 +570,28 @@ mod tests {
         let a = store.create("audit", None);
         store.cancel(&a);
         store.finish(&a, ScanReport::gated(&["me/api".to_string()]));
-        assert_eq!(store.get(&a).unwrap().status, "cancelled", "finish must not clobber cancel");
-        assert!(store.get(&a).unwrap().report.is_none(), "no report written onto a cancelled job");
+        assert_eq!(
+            store.get(&a).unwrap().status,
+            "cancelled",
+            "finish must not clobber cancel"
+        );
+        assert!(
+            store.get(&a).unwrap().report.is_none(),
+            "no report written onto a cancelled job"
+        );
 
         let b = store.create("audit", None);
         store.cancel(&b);
         store.fail(&b, "late error");
-        assert_eq!(store.get(&b).unwrap().status, "cancelled", "fail must not clobber cancel");
-        assert!(store.get(&b).unwrap().message.is_none(), "no failure message onto a cancelled job");
+        assert_eq!(
+            store.get(&b).unwrap().status,
+            "cancelled",
+            "fail must not clobber cancel"
+        );
+        assert!(
+            store.get(&b).unwrap().message.is_none(),
+            "no failure message onto a cancelled job"
+        );
     }
 
     #[test]
@@ -600,7 +618,10 @@ mod tests {
             .as_millis();
         let idle = store.idle_ms(&id, after_ms).unwrap();
         // idle should be very small (just updated)
-        assert!(idle < after_ms - before_ms + 10, "idle should be near 0 after touch");
+        assert!(
+            idle < after_ms - before_ms + 10,
+            "idle should be near 0 after touch"
+        );
     }
 
     /// `declare_tools` pre-registers the full pipeline upfront so `total` reflects the true

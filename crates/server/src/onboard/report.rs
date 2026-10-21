@@ -1,8 +1,8 @@
 //! Report-building functions: assemble `ScanReport`, render CSV/issue-body output,
 //! create GitHub issues, and merge deep-tier reports.
 
-use super::{Finding, RepoStack, ScanProvenance, ScanReport};
 use super::propose::propose_rules;
+use super::{Finding, RepoStack, ScanProvenance, ScanReport};
 
 /// Build a report from already-aggregated findings + per-repo stacks. Pure.
 pub fn build_report(

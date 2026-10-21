@@ -474,9 +474,15 @@ mod tests {
             .expect("clarification exists");
         assert!(!answered.is_open());
         assert_eq!(answered.state, ClarifyState::Answered);
-        let sel = answered.answer_selection.as_ref().expect("structured answer");
+        let sel = answered
+            .answer_selection
+            .as_ref()
+            .expect("structured answer");
         assert_eq!(sel.selected, vec!["Member timezone".to_string()]);
-        assert_eq!(sel.free_text.as_deref(), Some("but default to org tz if unknown"));
+        assert_eq!(
+            sel.free_text.as_deref(),
+            Some("but default to org tz if unknown")
+        );
         // The summary reflects selected labels + free-text.
         assert_eq!(
             answered.answer.as_deref(),
@@ -492,9 +498,18 @@ mod tests {
             "Which columns to include?",
             "you",
             vec![
-                ClarifyOption { label: "Name".into(), description: "d".into() },
-                ClarifyOption { label: "Email".into(), description: "d".into() },
-                ClarifyOption { label: "Phone".into(), description: "d".into() },
+                ClarifyOption {
+                    label: "Name".into(),
+                    description: "d".into(),
+                },
+                ClarifyOption {
+                    label: "Email".into(),
+                    description: "d".into(),
+                },
+                ClarifyOption {
+                    label: "Phone".into(),
+                    description: "d".into(),
+                },
             ],
             true,
             false,
@@ -556,8 +571,14 @@ mod tests {
                 "Ship behind a flag?",
                 "@maria-pm",
                 vec![
-                    ClarifyOption { label: "Flag".into(), description: "safer rollout".into() },
-                    ClarifyOption { label: "Direct".into(), description: "simpler".into() },
+                    ClarifyOption {
+                        label: "Flag".into(),
+                        description: "safer rollout".into(),
+                    },
+                    ClarifyOption {
+                        label: "Direct".into(),
+                        description: "simpler".into(),
+                    },
                 ],
                 false,
                 true,
@@ -629,7 +650,10 @@ mod tests {
         };
         assert_eq!(a.summary(), "A; B; note");
 
-        let only_sel = ClarifyAnswer { selected: vec!["A".into()], free_text: None };
+        let only_sel = ClarifyAnswer {
+            selected: vec!["A".into()],
+            free_text: None,
+        };
         assert_eq!(only_sel.summary(), "A");
 
         let only_ft = ClarifyAnswer {

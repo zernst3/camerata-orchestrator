@@ -250,7 +250,11 @@ pub fn find_wrong_table_reenable(
 /// see [`SupabaseFnSearchPathChecker`](super::search_path_checker::SupabaseFnSearchPathChecker))
 /// should call [`build_timeline_from_globs`] instead, with its own glob list.
 pub fn build_timeline(repo: &RepoView<'_>) -> Timeline {
-    build_timeline_from_globs(repo, &["supabase/migrations/*.sql"], &["supabase/schemas/*.sql"])
+    build_timeline_from_globs(
+        repo,
+        &["supabase/migrations/*.sql"],
+        &["supabase/schemas/*.sql"],
+    )
 }
 
 /// The general form of [`build_timeline`]: gather every file matching `migration_globs`

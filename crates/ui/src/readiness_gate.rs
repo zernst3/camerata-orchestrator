@@ -35,7 +35,9 @@ impl Readiness {
 
 /// Percent-encode a `owner/repo` for the `:repo` path segment of the link endpoint.
 fn enc_repo(repo: &str) -> String {
-    repo.replace('%', "%25").replace('/', "%2F").replace(' ', "%20")
+    repo.replace('%', "%25")
+        .replace('/', "%2F")
+        .replace(' ', "%20")
 }
 
 /// Parse the shared readiness JSON body (`{ ok, readiness, repos }`) into a `Readiness`. An
@@ -54,7 +56,10 @@ fn parse_readiness(v: &serde_json::Value) -> Readiness {
                         .and_then(|s| s.as_str())
                         .unwrap_or_default()
                         .to_string(),
-                    resolved: it.get("resolved").and_then(|b| b.as_bool()).unwrap_or(false),
+                    resolved: it
+                        .get("resolved")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false),
                     path: it
                         .get("path")
                         .and_then(|s| s.as_str())
@@ -493,6 +498,9 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(!html.contains("readiness-banner"), "ready state renders no banner");
+        assert!(
+            !html.contains("readiness-banner"),
+            "ready state renders no banner"
+        );
     }
 }

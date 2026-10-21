@@ -468,10 +468,7 @@ fn missing<'a>(needed: &'a [String], have: &[String]) -> Vec<&'a String> {
 }
 
 fn join_refs(v: &[&String]) -> String {
-    v.iter()
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
+    v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
 }
 
 fn endpoint_human(kind: &ArtifactKind) -> String {
@@ -573,7 +570,11 @@ mod tests {
         });
         let f = reconcile(&tree(vec![p], vec![c]), SeamRule::ApiContract);
         assert_eq!(f.len(), 1);
-        assert!(f[0].detail.contains("email"), "email is not emitted: {}", f[0].detail);
+        assert!(
+            f[0].detail.contains("email"),
+            "email is not emitted: {}",
+            f[0].detail
+        );
     }
 
     #[test]
@@ -597,7 +598,9 @@ mod tests {
         let t = tree(
             vec![Produced {
                 repo: "api".into(),
-                kind: ArtifactKind::Event { name: "member.created".into() },
+                kind: ArtifactKind::Event {
+                    name: "member.created".into(),
+                },
                 shape: None,
                 guarded: None,
                 location: "api/events.rs:5".into(),
@@ -615,7 +618,9 @@ mod tests {
             vec![],
             vec![Consumed {
                 repo: "worker".into(),
-                kind: ArtifactKind::Event { name: "member.created".into() },
+                kind: ArtifactKind::Event {
+                    name: "member.created".into(),
+                },
                 shape: None,
                 ui_gated: None,
                 location: "worker/sub.ts:3".into(),
@@ -691,12 +696,28 @@ mod tests {
     #[test]
     fn assembly_is_order_independent() {
         let a = AssembledTree::from_repos(&[
-            RepoArtifacts { repo: "a".into(), produced: vec![produced_ep("a", "GET", "/z")], consumed: vec![] },
-            RepoArtifacts { repo: "b".into(), produced: vec![produced_ep("b", "GET", "/a")], consumed: vec![] },
+            RepoArtifacts {
+                repo: "a".into(),
+                produced: vec![produced_ep("a", "GET", "/z")],
+                consumed: vec![],
+            },
+            RepoArtifacts {
+                repo: "b".into(),
+                produced: vec![produced_ep("b", "GET", "/a")],
+                consumed: vec![],
+            },
         ]);
         let b = AssembledTree::from_repos(&[
-            RepoArtifacts { repo: "b".into(), produced: vec![produced_ep("b", "GET", "/a")], consumed: vec![] },
-            RepoArtifacts { repo: "a".into(), produced: vec![produced_ep("a", "GET", "/z")], consumed: vec![] },
+            RepoArtifacts {
+                repo: "b".into(),
+                produced: vec![produced_ep("b", "GET", "/a")],
+                consumed: vec![],
+            },
+            RepoArtifacts {
+                repo: "a".into(),
+                produced: vec![produced_ep("a", "GET", "/z")],
+                consumed: vec![],
+            },
         ]);
         assert_eq!(a.produced, b.produced, "assembly order is stable");
     }

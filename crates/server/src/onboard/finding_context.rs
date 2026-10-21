@@ -165,7 +165,12 @@ pub async fn lookup(
 /// `"text"` for anything the extractor layer doesn't cover — purely cosmetic (the UI's
 /// "language" tag), never affects which block is resolved.
 fn language_label(rel_path: &str) -> String {
-    if rel_path.rsplit('.').next().map(|e| e.eq_ignore_ascii_case("sql")).unwrap_or(false) {
+    if rel_path
+        .rsplit('.')
+        .next()
+        .map(|e| e.eq_ignore_ascii_case("sql"))
+        .unwrap_or(false)
+    {
         return "sql".to_string();
     }
     camerata_checks::extract::lang_for_path(rel_path)
@@ -272,7 +277,10 @@ mod tests {
                 assert_eq!((start_line, end_line), (1, 4));
                 assert_eq!(kind, "function");
                 assert_eq!(language, "rust");
-                assert!(matches_snippet, "no `expect` supplied — must not flag stale");
+                assert!(
+                    matches_snippet,
+                    "no `expect` supplied — must not flag stale"
+                );
             }
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -284,8 +292,13 @@ mod tests {
         write(tmp.path(), "src/lib.rs", "fn f() {\n    let x = 1;\n}\n");
         let outcome = lookup(tmp.path(), "src/lib.rs", 2, Some("let x = 999;")).await;
         match outcome {
-            FindingContextOutcome::Ok { matches_snippet, .. } => {
-                assert!(!matches_snippet, "expect text doesn't match — must flag stale")
+            FindingContextOutcome::Ok {
+                matches_snippet, ..
+            } => {
+                assert!(
+                    !matches_snippet,
+                    "expect text doesn't match — must flag stale"
+                )
             }
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -297,7 +310,9 @@ mod tests {
         write(tmp.path(), "src/lib.rs", "fn f() {\n    let x = 1;\n}\n");
         let outcome = lookup(tmp.path(), "src/lib.rs", 2, Some("let x = 1;")).await;
         match outcome {
-            FindingContextOutcome::Ok { matches_snippet, .. } => assert!(matches_snippet),
+            FindingContextOutcome::Ok {
+                matches_snippet, ..
+            } => assert!(matches_snippet),
             other => panic!("expected Ok, got {other:?}"),
         }
     }

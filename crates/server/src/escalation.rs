@@ -23,10 +23,10 @@
 //! `raise_if_blocked`.
 
 pub use camerata_app_core::escalation::{
-    AnswerEscalationReq, Escalation, EscalationAction, EscalationMsg, EscalationStatus,
-    RaiseEscalationReq, ResumePayload, SubjectKind, TranslationDriver, blocked_run_escalation_req,
-    chat_system_prompt, chat_user_prompt, parse_resume_payload, scaffold_resume_payload,
-    translate_answer, translate_answer_ai, translate_system_prompt, translate_user_prompt,
+    blocked_run_escalation_req, chat_system_prompt, chat_user_prompt, parse_resume_payload,
+    scaffold_resume_payload, translate_answer, translate_answer_ai, translate_system_prompt,
+    translate_user_prompt, AnswerEscalationReq, Escalation, EscalationAction, EscalationMsg,
+    EscalationStatus, RaiseEscalationReq, ResumePayload, SubjectKind, TranslationDriver,
 };
 
 use std::path::PathBuf;
@@ -148,7 +148,9 @@ impl EscalationStore {
             .lock()
             .ok()?
             .iter()
-            .find(|e| e.subject_kind == kind && e.routine_id == id && e.status == EscalationStatus::Open)
+            .find(|e| {
+                e.subject_kind == kind && e.routine_id == id && e.status == EscalationStatus::Open
+            })
             .cloned()
     }
 
@@ -337,12 +339,21 @@ mod tests {
         // subject_kind disambiguates.
         let routine_esc = store.raise(req("x"), "Nightly");
         let uow_esc = store.raise_deduped(uow_req("x", "ckpt-1"), "Story x");
-        assert_ne!(routine_esc.id, uow_esc.id, "routine + uow with same id are distinct");
+        assert_ne!(
+            routine_esc.id, uow_esc.id,
+            "routine + uow with same id are distinct"
+        );
         assert_eq!(uow_esc.subject_kind, SubjectKind::Uow);
         assert_eq!(uow_esc.checkpoint_id.as_deref(), Some("ckpt-1"));
         // open_for_* is subject-scoped.
-        assert_eq!(store.open_for_routine("x").map(|e| e.id.clone()), Some(routine_esc.id));
-        assert_eq!(store.open_for_uow("x").map(|e| e.id.clone()), Some(uow_esc.id.clone()));
+        assert_eq!(
+            store.open_for_routine("x").map(|e| e.id.clone()),
+            Some(routine_esc.id)
+        );
+        assert_eq!(
+            store.open_for_uow("x").map(|e| e.id.clone()),
+            Some(uow_esc.id.clone())
+        );
         assert_eq!(store.list_open_for_uow("x").len(), 1);
         assert_eq!(store.list_open_uow().len(), 1);
         // Dedup per subject: raising the same UoW again returns the existing open one.
@@ -371,8 +382,14 @@ mod tests {
         assert!(esc.checkpoint_id.is_none());
         let linked = store.set_checkpoint(&esc.id, "ckpt-7").unwrap();
         assert_eq!(linked.checkpoint_id.as_deref(), Some("ckpt-7"));
-        assert_eq!(store.get(&esc.id).unwrap().checkpoint_id.as_deref(), Some("ckpt-7"));
-        assert!(store.set_checkpoint("nope", "ckpt-7").is_none(), "unknown id -> None");
+        assert_eq!(
+            store.get(&esc.id).unwrap().checkpoint_id.as_deref(),
+            Some("ckpt-7")
+        );
+        assert!(
+            store.set_checkpoint("nope", "ckpt-7").is_none(),
+            "unknown id -> None"
+        );
     }
 
     #[test]
@@ -444,8 +461,14 @@ mod tests {
         let store = EscalationStore::new();
         let e = store.raise(req("rt-1"), "Nightly");
         let json = r#"{"decision":"Use SQLite","directive":"Switch the store to SQLite and continue.","confident":true}"#;
-        let payload =
-            translate_answer_ai(&CannedDriver(json.to_string()), &e, "sqlite please", "m", None).await;
+        let payload = translate_answer_ai(
+            &CannedDriver(json.to_string()),
+            &e,
+            "sqlite please",
+            "m",
+            None,
+        )
+        .await;
 
         let resolved = store
             .resolve_with_payload(&e.id, "sqlite please", &payload)

@@ -12,8 +12,7 @@
 
 pub use camerata_fleet::tier::{
     classify_task, default_balanced_chain, default_balanced_model, default_fast_chain,
-    default_fast_model, default_strongest_model,
-    CapabilityBand, TierMap,
+    default_fast_model, default_strongest_model, CapabilityBand, TierMap,
 };
 
 // ─── tests ────────────────────────────────────────────────────────────────────

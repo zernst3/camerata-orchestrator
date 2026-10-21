@@ -135,7 +135,10 @@ mod tests {
         };
         match check_integration_gate(&input) {
             IntegrationGateResult::BounceToOrchestrator { reason } => {
-                assert!(reason.contains("empty"), "reason should mention empty: {reason}");
+                assert!(
+                    reason.contains("empty"),
+                    "reason should mention empty: {reason}"
+                );
             }
             other => panic!("expected BounceToOrchestrator, got {other:?}"),
         }

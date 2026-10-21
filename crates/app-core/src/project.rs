@@ -224,10 +224,17 @@ impl HierarchySchema {
 /// architect can edit via the drag-and-drop builder. `Initiative` and `Epic` are design roots.
 pub fn default_hierarchy_schema() -> HierarchySchema {
     fn ty(name: &str, is_design_root: bool) -> WorkType {
-        WorkType { name: name.to_string(), builtin: true, is_design_root }
+        WorkType {
+            name: name.to_string(),
+            builtin: true,
+            is_design_root,
+        }
     }
     fn rel(parent: &str, child: &str) -> TypeRelation {
-        TypeRelation { parent: parent.to_string(), child: child.to_string() }
+        TypeRelation {
+            parent: parent.to_string(),
+            child: child.to_string(),
+        }
     }
     HierarchySchema {
         types: vec![
@@ -958,7 +965,10 @@ mod tests {
         p.ruleset.cross_repo.push(sel("CROSS-RULE-1"));
         p.ruleset.process.push(sel("PROC-RULE-1"));
         assert!(p.set_rule_chosen_option("CROSS-RULE-1", "opt-x"));
-        assert_eq!(p.ruleset.cross_repo[0].chosen_option.as_deref(), Some("opt-x"));
+        assert_eq!(
+            p.ruleset.cross_repo[0].chosen_option.as_deref(),
+            Some("opt-x")
+        );
         assert!(p.set_rule_chosen_option("PROC-RULE-1", "opt-y"));
         assert_eq!(p.ruleset.process[0].chosen_option.as_deref(), Some("opt-y"));
     }
@@ -980,7 +990,10 @@ mod tests {
     fn set_rule_chosen_option_matches_case_insensitively() {
         let mut p = project_with_selections(vec![sel("RUST-DOMAIN-7")]);
         assert!(p.set_rule_chosen_option("rust-domain-7", "opt-x"));
-        assert_eq!(p.ruleset.selections[0].chosen_option.as_deref(), Some("opt-x"));
+        assert_eq!(
+            p.ruleset.selections[0].chosen_option.as_deref(),
+            Some("opt-x")
+        );
     }
 
     fn custom(name: &str, body: &str) -> CustomRule {
@@ -1068,7 +1081,10 @@ mod tests {
     #[test]
     fn manual_l3_override_flips_profile_to_custom() {
         let mut p = proj_on_balanced();
-        p.set_l3_review(L3ReviewConfig { enabled: true, model: "pinned-l3".into() });
+        p.set_l3_review(L3ReviewConfig {
+            enabled: true,
+            model: "pinned-l3".into(),
+        });
         assert_eq!(p.model_profile, ModelProfile::Custom);
     }
 
@@ -1207,7 +1223,11 @@ mod tests {
             "onboarded": []
         }"#;
         let p: Project = serde_json::from_str(json).unwrap();
-        assert_eq!(p.backend, ProjectBackend::Cli, "backend must default to Cli when absent");
+        assert_eq!(
+            p.backend,
+            ProjectBackend::Cli,
+            "backend must default to Cli when absent"
+        );
 
         // An explicit `"api"` in the JSON round-trips correctly.
         let json_api = r#"{
@@ -1355,7 +1375,10 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let back: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(back.step_models, original.step_models);
-        assert_eq!(back.model_for_step(StepKind::Decomposition), "claude-opus-5");
+        assert_eq!(
+            back.model_for_step(StepKind::Decomposition),
+            "claude-opus-5"
+        );
     }
 
     #[test]

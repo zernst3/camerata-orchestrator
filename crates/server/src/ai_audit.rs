@@ -22,7 +22,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::llm::{LlmPort, Llm, LlmRequest};
+use crate::llm::{Llm, LlmPort, LlmRequest};
 use crate::onboard::{Finding, MergedLocation, ProposedRule, RuleOptionView};
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -271,9 +271,7 @@ impl UsageMeter {
             // partial sum that would understate (some calls' usage may be unreported).
             cost_complete: calls > 0 && cost_calls == calls,
             cache_read_input_tokens: self.cache_read_input_tokens.load(Ordering::Relaxed),
-            cache_creation_input_tokens: self
-                .cache_creation_input_tokens
-                .load(Ordering::Relaxed),
+            cache_creation_input_tokens: self.cache_creation_input_tokens.load(Ordering::Relaxed),
         }
     }
 }
@@ -540,8 +538,16 @@ fn canonical_adopted_rule(
 /// order) and never need a model-supplied override. Restricting to this allowlist means a
 /// model that emits a garbage or hallucinated key just has that key silently dropped — it can
 /// never smuggle an arbitrary token into the report's `Finding` wire type via `captures`.
-const KNOWN_AI_CAPTURE_TOKENS: &[&str] =
-    &["table", "function-name", "function", "bucket", "view", "matview", "schema", "policy"];
+const KNOWN_AI_CAPTURE_TOKENS: &[&str] = &[
+    "table",
+    "function-name",
+    "function",
+    "bucket",
+    "view",
+    "matview",
+    "schema",
+    "policy",
+];
 
 /// A capture value's length cap: a token should be a bare object name (a table, bucket, or
 /// function name), never a paragraph. Generous enough that it never clips a real identifier;
@@ -1357,9 +1363,7 @@ fn mentions_authenticated_cross_tenant_read(text: &str) -> bool {
     CROSS_TENANT_PHRASES
         .iter()
         .any(|p| contains_phrase_as_word(text, p))
-        && READ_VERBS
-            .iter()
-            .any(|v| contains_phrase_as_word(text, v))
+        && READ_VERBS.iter().any(|v| contains_phrase_as_word(text, v))
 }
 
 fn mentions_escalating_data_class(text: &str) -> bool {
@@ -2461,7 +2465,10 @@ fn build_alternatives_block(alternatives: &[RuleAlternatives]) -> String {
 /// (or, absent that, the first-listed) option and flagged `hallucinated` so the caller can
 /// tell this was a fallback rather than a genuine model answer. Used when the model's raw
 /// output for the recommendation pass could not be parsed at all.
-fn fallback_recommendations(alternatives: &[RuleAlternatives], reason: &str) -> Vec<RuleRecommendation> {
+fn fallback_recommendations(
+    alternatives: &[RuleAlternatives],
+    reason: &str,
+) -> Vec<RuleRecommendation> {
     alternatives
         .iter()
         .filter_map(|a| {
@@ -2519,7 +2526,10 @@ fn parse_observed_options(
         out.push(camerata_api_types::audit::ObservedOptionUsage {
             option_id: opt.id.clone(),
             label: opt.label.clone(),
-            sites: entry["sites"].as_u64().filter(|n| *n > 0).map(|n| n as usize),
+            sites: entry["sites"]
+                .as_u64()
+                .filter(|n| *n > 0)
+                .map(|n| n as usize),
         });
     }
     out
@@ -2595,7 +2605,11 @@ pub fn parse_alternative_recommendations(
         };
         let rec = match entry {
             Some(r) => {
-                let raw_id = r["recommended_option_id"].as_str().unwrap_or("").trim().to_string();
+                let raw_id = r["recommended_option_id"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 let reasoning = r["recommendation_reasoning"]
                     .as_str()
                     .unwrap_or("")
@@ -2623,8 +2637,10 @@ pub fn parse_alternative_recommendations(
                 // Pass-1 W3: the model's structured site count (`"sites_total"`) — the
                 // deviation sentence's DENOMINATOR. Display honesty only; a missing or
                 // non-positive count is `None`, never a fabricated number.
-                let assessed_sites =
-                    r["sites_total"].as_u64().filter(|n| *n > 0).map(|n| n as usize);
+                let assessed_sites = r["sites_total"]
+                    .as_u64()
+                    .filter(|n| *n > 0)
+                    .map(|n| n as usize);
                 // W21/W22: does the codebase ACTUALLY follow the recommended option today, as
                 // opposed to the rule's concern merely applying? `applicable` cannot answer
                 // that — its own contract is "already follows it OR concretely needs it" —
@@ -2640,8 +2656,10 @@ pub fn parse_alternative_recommendations(
                 // (flagged `hallucinated`, judged against an option exactly as before), so a
                 // lazy model answer can never silently drop a rule's violation coverage.
                 let observed_options = parse_observed_options(r, &a.options);
-                let no_convention_claimed =
-                    r.get("no_convention").and_then(|v| v.as_bool()).unwrap_or(false);
+                let no_convention_claimed = r
+                    .get("no_convention")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 // W17: `offers_no_convention_escape()` in place of an inline `== Decision`, so
                 // the kind taxonomy answers this in one exhaustive match. Same reasoning and
                 // same behaviour as the prompt-side marker in `build_alternatives_block`, and
@@ -4869,7 +4887,13 @@ pub(crate) fn categorize_rule_id(rule_id: &str) -> Option<String> {
         "error-handling"
     } else if has("TEST") || has("SPEC") || has("FIXTURE") {
         "testing-style"
-    } else if has("PERF") || has("N-PLUS") || has("NPLUS") || has("HOT-READ") || has("CACHE") || has("PAGINATION") {
+    } else if has("PERF")
+        || has("N-PLUS")
+        || has("NPLUS")
+        || has("HOT-READ")
+        || has("CACHE")
+        || has("PAGINATION")
+    {
         "performance"
     } else if has("EXPOSE") || has("EXPOSED") || has("EXPOSURE") || has("CORS") || has("PUBLIC") {
         "resource-exposure"
@@ -4981,7 +5005,10 @@ fn structural_objects(f: &Finding) -> std::collections::HashSet<String> {
                 if !name.is_empty() && name.len() <= 64 && !name.contains(close) {
                     // seg up to the next delimiter is the quoted content only when the split
                     // gave us the inside; guard against runaway by length + single-token shape.
-                    if name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ' ' || c == '.') {
+                    if name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == ' ' || c == '.')
+                    {
                         out.insert(name.to_ascii_lowercase());
                     }
                 }
@@ -5045,11 +5072,10 @@ fn objects_conflict(a: &Finding, b: &Finding) -> bool {
     let is_container = |s: &str| {
         oa.iter().chain(ob.iter()).any(|o| {
             o.as_str() != s
-                && (o.starts_with(&format!("{s}."))
-                    || {
-                        let segs: Vec<&str> = o.split('.').collect();
-                        segs.len() > 1 && segs[..segs.len() - 1].contains(&s)
-                    })
+                && (o.starts_with(&format!("{s}.")) || {
+                    let segs: Vec<&str> = o.split('.').collect();
+                    segs.len() > 1 && segs[..segs.len() - 1].contains(&s)
+                })
         })
     };
     // A genuinely shared object (one that is NOT just a shared container) is identity
@@ -5058,10 +5084,8 @@ fn objects_conflict(a: &Finding, b: &Finding) -> bool {
         return false;
     }
     // Otherwise judge disjointness over each side's DISCRIMINATING objects only.
-    let da: std::collections::HashSet<&String> =
-        oa.iter().filter(|s| !is_container(s)).collect();
-    let db: std::collections::HashSet<&String> =
-        ob.iter().filter(|s| !is_container(s)).collect();
+    let da: std::collections::HashSet<&String> = oa.iter().filter(|s| !is_container(s)).collect();
+    let db: std::collections::HashSet<&String> = ob.iter().filter(|s| !is_container(s)).collect();
     !da.is_empty() && !db.is_empty() && da.is_disjoint(&db)
 }
 
@@ -6186,9 +6210,7 @@ async fn run_routed_passes(
             // Filter files to this group's scope.
             let group_files: Vec<&(String, String)> = files
                 .iter()
-                .filter(|(path, _)| {
-                    crate::scan_routing::file_in_scope(path, &g.scope)
-                })
+                .filter(|(path, _)| crate::scan_routing::file_in_scope(path, &g.scope))
                 .collect();
             // The group's rules split into batches.
             let n_batches = g.rules.chunks(batch_size.max(1)).count().max(1);
@@ -6264,16 +6286,13 @@ async fn run_routed_passes(
                 }
                 Scope::All => "no files matched this scan's file set".to_string(),
             };
-            skipped_rules
-                .extend(group.rules.iter().map(|(id, _)| (id.clone(), note.clone())));
+            skipped_rules.extend(group.rules.iter().map(|(id, _)| (id.clone(), note.clone())));
             continue;
         }
 
         let chunks = chunk_files(&group_files, CHUNK_DIGEST_CHARS);
         let group_rules: &[(String, String)] = &group.rules;
-        let batches: Vec<&[(String, String)]> = group_rules
-            .chunks(batch_size.max(1))
-            .collect();
+        let batches: Vec<&[(String, String)]> = group_rules.chunks(batch_size.max(1)).collect();
 
         let scope_label = match &group.scope {
             Scope::Language(lang) => format!("pass[{lang}]"),
@@ -6311,7 +6330,13 @@ async fn run_routed_passes(
         }
     }
 
-    (all_findings, all_proposed, all_requested, total_ok, last_err)
+    (
+        all_findings,
+        all_proposed,
+        all_requested,
+        total_ok,
+        last_err,
+    )
 }
 
 /// Run the AI architectural audit for one repo. Returns the findings + proposed rules.
@@ -6421,9 +6446,10 @@ fn strip_authoring_token(why: &str) -> String {
     /// from a client who read it.
     const TOKENS: &[&str] = &["rejected:", "avoided:"];
     let trimmed = why.trim_start();
-    let Some(token) = TOKENS.iter().find(|t| {
-        trimmed.len() >= t.len() && trimmed[..t.len()].eq_ignore_ascii_case(t)
-    }) else {
+    let Some(token) = TOKENS
+        .iter()
+        .find(|t| trimmed.len() >= t.len() && trimmed[..t.len()].eq_ignore_ascii_case(t))
+    else {
         return why.to_string();
     };
     let rest = trimmed[token.len()..].trim_start();
@@ -7046,72 +7072,71 @@ pub async fn audit_repo(
     }
 
     // ── Dispatch to the appropriate execution engine ─────────────────────────────────
-    let (mut all_findings, mut all_proposed, requested, ok_passes, last_err) = if mode
-        == ScanMode::Batch
-    {
-        // Batch path: submit all (chunk × rule-batch) pairs as one Message Batch, poll to
-        // completion, reassemble by custom_id. The job's add_total is called inside
-        // run_passes_batch (it knows the full item count before any network I/O).
-        // NOTE: the Batch path audits every rule against every file (no per-rule routing yet).
-        let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
-        let batches: Vec<&[(String, String)]> = if effective_selected.is_empty() {
-            vec![&effective_selected]
-        } else {
-            effective_selected.chunks(batch_size.max(1)).collect()
-        };
-        // The Message-Batches path is concrete-only (API-key-gated; `submit_batch` et al.
-        // are not part of the minimal `LlmPort` seam), so recover the concrete `&Llm` via
-        // the `as_any` downcast. In production this is always a real `Llm`, so the downcast
-        // always succeeds and the behavior is unchanged. A non-`Llm` completer (a test stub)
-        // can only drive the non-batch real-time path; batch mode is not reachable for it.
-        let llm_concrete = llm.as_any().downcast_ref::<Llm>().ok_or_else(|| {
-            anyhow::anyhow!(
-                "batch mode requires the concrete Llm client (the Message-Batches API is not \
+    let (mut all_findings, mut all_proposed, requested, ok_passes, last_err) =
+        if mode == ScanMode::Batch {
+            // Batch path: submit all (chunk × rule-batch) pairs as one Message Batch, poll to
+            // completion, reassemble by custom_id. The job's add_total is called inside
+            // run_passes_batch (it knows the full item count before any network I/O).
+            // NOTE: the Batch path audits every rule against every file (no per-rule routing yet).
+            let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
+            let batches: Vec<&[(String, String)]> = if effective_selected.is_empty() {
+                vec![&effective_selected]
+            } else {
+                effective_selected.chunks(batch_size.max(1)).collect()
+            };
+            // The Message-Batches path is concrete-only (API-key-gated; `submit_batch` et al.
+            // are not part of the minimal `LlmPort` seam), so recover the concrete `&Llm` via
+            // the `as_any` downcast. In production this is always a real `Llm`, so the downcast
+            // always succeeds and the behavior is unchanged. A non-`Llm` completer (a test stub)
+            // can only drive the non-batch real-time path; batch mode is not reachable for it.
+            let llm_concrete = llm.as_any().downcast_ref::<Llm>().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "batch mode requires the concrete Llm client (the Message-Batches API is not \
                  part of the LlmPort seam); use parallel/sequential mode with a custom completer"
+                )
+            })?;
+            run_passes_batch(
+                llm_concrete,
+                repo,
+                &repo_map,
+                &adopted,
+                audit_model.as_deref(),
+                job,
+                &chunks,
+                &batches,
+                "pass",
+                meter,
+                // Batch mode does not yet apply per-rule routing (all rules vs all files), so
+                // the Scope::All advisory semantics apply: advisory is enabled (not disabled).
+                // If batch mode ever gains routing, pass the group's advisory_disabled flag here.
+                false,
             )
-        })?;
-        run_passes_batch(
-            llm_concrete,
-            repo,
-            &repo_map,
-            &adopted,
-            audit_model.as_deref(),
-            job,
-            &chunks,
-            &batches,
-            "pass",
-            meter,
-            // Batch mode does not yet apply per-rule routing (all rules vs all files), so
-            // the Scope::All advisory semantics apply: advisory is enabled (not disabled).
-            // If batch mode ever gains routing, pass the group's advisory_disabled flag here.
-            false,
-        )
-        .await?
-    } else {
-        // ── Real-time path (parallel or sequential) with rule-routing ────────────────
-        //
-        // When routing produces only one group (all rules are cross-cutting, or no rules at
-        // all), the loop runs once with no difference from the old single-pass behavior.
-        // When routing produces multiple groups, each group runs its rules over its own
-        // (smaller) file subset. Advisory is enabled only in the All group.
-        run_routed_passes(
-            llm,
-            repo,
-            files,
-            &effective_selected,
-            &route_plan,
-            &repo_map,
-            &adopted,
-            audit_model.as_deref(),
-            feedback,
-            job,
-            concurrency,
-            batch_size,
-            meter,
-            &mut skipped_rules,
-        )
-        .await
-    };
+            .await?
+        } else {
+            // ── Real-time path (parallel or sequential) with rule-routing ────────────────
+            //
+            // When routing produces only one group (all rules are cross-cutting, or no rules at
+            // all), the loop runs once with no difference from the old single-pass behavior.
+            // When routing produces multiple groups, each group runs its rules over its own
+            // (smaller) file subset. Advisory is enabled only in the All group.
+            run_routed_passes(
+                llm,
+                repo,
+                files,
+                &effective_selected,
+                &route_plan,
+                &repo_map,
+                &adopted,
+                audit_model.as_deref(),
+                feedback,
+                job,
+                concurrency,
+                batch_size,
+                meter,
+                &mut skipped_rules,
+            )
+            .await
+        };
 
     // Every pass failed -> surface the error so the caller notes the AI audit was skipped
     // (the deterministic findings still return independently). Each pass already finalized
@@ -8233,7 +8258,8 @@ mod tests {
             |_| {},
         )
         .await;
-        let err = res.expect_err("5 (here: 3-cap) consecutive failures must give up, not hang forever");
+        let err =
+            res.expect_err("5 (here: 3-cap) consecutive failures must give up, not hang forever");
         assert!(err.to_string().contains("3 times consecutively"));
         assert_eq!(*call.borrow(), 3, "must stop AT the cap, not overshoot it");
     }
@@ -8264,7 +8290,11 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(*seen.borrow(), 1, "on_status fires exactly once, for the ended poll only");
+        assert_eq!(
+            *seen.borrow(),
+            1,
+            "on_status fires exactly once, for the ended poll only"
+        );
     }
 
     #[test]
@@ -8304,9 +8334,15 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let arr = v["verdicts"].as_array().unwrap();
         let v0 = arr.iter().find(|x| x["index"] == 0).unwrap();
-        assert_eq!(v0["effort"], "low", "unanimous effort votes pass straight through");
+        assert_eq!(
+            v0["effort"], "low",
+            "unanimous effort votes pass straight through"
+        );
         let v1 = arr.iter().find(|x| x["index"] == 1).unwrap();
-        assert_eq!(v1["effort"], "medium", "a low/high tie must break to medium");
+        assert_eq!(
+            v1["effort"], "medium",
+            "a low/high tie must break to medium"
+        );
     }
 
     #[test]
@@ -8537,8 +8573,14 @@ mod tests {
                 1,
                 "a {sev} finding must survive ungrouped: {out:?}"
             );
-            assert_eq!(out[0].severity, sev, "severity must not be downgraded to low");
-            assert_eq!(out[0].path, "secret.rs", "must remain its own individual row");
+            assert_eq!(
+                out[0].severity, sev,
+                "severity must not be downgraded to low"
+            );
+            assert_eq!(
+                out[0].path, "secret.rs",
+                "must remain its own individual row"
+            );
         }
     }
 
@@ -8567,7 +8609,11 @@ mod tests {
             wrong_confidence.clone(),
             already_suppressed.clone(),
         ]);
-        assert_eq!(out.len(), 3, "none of these three should be grouped: {out:?}");
+        assert_eq!(
+            out.len(),
+            3,
+            "none of these three should be grouped: {out:?}"
+        );
         assert!(out.contains(&wrong_category));
         assert!(out.contains(&wrong_confidence));
         assert!(out.contains(&already_suppressed));
@@ -8609,7 +8655,11 @@ mod tests {
         let b = structural_needs_review("b.rs", 20);
 
         let out = group_structural_needs_review(vec![a, b]);
-        assert_eq!(out.len(), 1, "both occurrences collapse into one row: {out:?}");
+        assert_eq!(
+            out.len(),
+            1,
+            "both occurrences collapse into one row: {out:?}"
+        );
         let grouped = &out[0];
 
         assert!(
@@ -8946,7 +8996,11 @@ mod tests {
         // rule-batch per chunk): the digest breakpoint is dropped — it would be written
         // once and never re-read, paying a pure cache-write premium for zero benefit.
         let bps_one = cache_breakpoints_for_pass(100, 250, 1);
-        assert_eq!(bps_one, vec![100], "digest breakpoint dropped when n_b == 1");
+        assert_eq!(
+            bps_one,
+            vec![100],
+            "digest breakpoint dropped when n_b == 1"
+        );
 
         // n_b == 0 is a degenerate/defensive case (should never happen — there's always at
         // least one rule-batch) but must not panic or add a spurious second breakpoint.
@@ -8958,8 +9012,9 @@ mod tests {
     fn build_pass_prompt_leads_with_the_shared_repo_map_not_the_chunk_label() {
         let repo = "acme/widgets";
         let repo_map = "REPO MAP:\nfoo.rs: fn foo()\n";
-        let (prompt, _bps) =
-            build_pass_prompt(repo, repo_map, "parallel", 0, 3, "DIGEST-0", 2, "TASK", "RULES");
+        let (prompt, _bps) = build_pass_prompt(
+            repo, repo_map, "parallel", 0, 3, "DIGEST-0", 2, "TASK", "RULES",
+        );
         // The prompt must START with the repo-map segment, not the chunk label — this is
         // the exact ordering bug being fixed (old: "Repository: {repo} ({label} n/n_c)...").
         assert!(
@@ -8969,20 +9024,44 @@ mod tests {
         // The chunk label + digest come AFTER the repo map now, not embedded in front of it.
         let repo_map_prefix = format!("Repository: {repo}\n\n{repo_map}");
         let rest = &prompt[repo_map_prefix.len()..];
-        assert!(rest.starts_with("(parallel 1/3)"), "chunk label trails the repo map: {rest:?}");
+        assert!(
+            rest.starts_with("(parallel 1/3)"),
+            "chunk label trails the repo map: {rest:?}"
+        );
     }
 
     #[test]
     fn build_pass_prompt_repo_map_segment_is_byte_identical_across_chunk_indices() {
         let repo = "acme/widgets";
         let repo_map = "REPO MAP:\nfoo.rs: fn foo()\nbar.rs: fn bar()\n";
-        let (prompt_c0, bps_c0) =
-            build_pass_prompt(repo, repo_map, "parallel", 0, 5, "digest for chunk 0", 2, "T", "R");
-        let (prompt_c1, bps_c1) =
-            build_pass_prompt(repo, repo_map, "parallel", 1, 5, "digest for chunk 1", 2, "T", "R");
+        let (prompt_c0, bps_c0) = build_pass_prompt(
+            repo,
+            repo_map,
+            "parallel",
+            0,
+            5,
+            "digest for chunk 0",
+            2,
+            "T",
+            "R",
+        );
+        let (prompt_c1, bps_c1) = build_pass_prompt(
+            repo,
+            repo_map,
+            "parallel",
+            1,
+            5,
+            "digest for chunk 1",
+            2,
+            "T",
+            "R",
+        );
 
         // Both prompts carry the SAME first breakpoint offset...
-        assert_eq!(bps_c0[0], bps_c1[0], "the repo-map breakpoint offset must match across chunks");
+        assert_eq!(
+            bps_c0[0], bps_c1[0],
+            "the repo-map breakpoint offset must match across chunks"
+        );
         // ...and the bytes up to that offset are IDENTICAL — this is what actually lets the
         // provider cache-hit the repo map on chunk 2, 3, ... instead of re-billing it.
         assert_eq!(
@@ -9000,8 +9079,9 @@ mod tests {
         let repo_map = "REPO MAP:\nfoo.rs: fn foo()\n";
 
         // n_b > 1 (parallel mode's normal case): two breakpoints, repo-map then digest.
-        let (prompt, bps) =
-            build_pass_prompt(repo, repo_map, "parallel", 2, 5, "DIGEST-2", 3, "TASK", "RULES");
+        let (prompt, bps) = build_pass_prompt(
+            repo, repo_map, "parallel", 2, 5, "DIGEST-2", 3, "TASK", "RULES",
+        );
         assert_eq!(bps.len(), 2, "n_b > 1 keeps both breakpoints");
         assert!(bps[0] < bps[1], "breakpoints are ascending");
         // The segment between the two breakpoints is the chunk label + digest.
@@ -9012,16 +9092,22 @@ mod tests {
         // rules must NEVER leak into a cached segment.
         let suffix = &prompt[bps[1]..];
         assert!(suffix.contains("TASK") && suffix.contains("RULES"));
-        assert!(!digest_segment.contains("RULES"), "rules must not leak into the cached prefix");
+        assert!(
+            !digest_segment.contains("RULES"),
+            "rules must not leak into the cached prefix"
+        );
 
         // n_b == 1 (batch mode's default rule-batch size): only the repo-map breakpoint
         // survives; the chunk label + digest fold into the uncached suffix instead.
-        let (prompt_one, bps_one) =
-            build_pass_prompt(repo, repo_map, "batch", 2, 5, "DIGEST-2", 1, "TASK", "RULES");
+        let (prompt_one, bps_one) = build_pass_prompt(
+            repo, repo_map, "batch", 2, 5, "DIGEST-2", 1, "TASK", "RULES",
+        );
         assert_eq!(bps_one.len(), 1, "n_b == 1 drops the digest breakpoint");
         let suffix_one = &prompt_one[bps_one[0]..];
         assert!(
-            suffix_one.contains("DIGEST-2") && suffix_one.contains("TASK") && suffix_one.contains("RULES"),
+            suffix_one.contains("DIGEST-2")
+                && suffix_one.contains("TASK")
+                && suffix_one.contains("RULES"),
             "digest + task + rules all fold into the single uncached suffix: {suffix_one:?}"
         );
     }
@@ -9111,7 +9197,11 @@ mod tests {
         );
         let none = std::collections::HashSet::new();
         let (findings, _) = parse_ai_findings("me/api", &raw, &none);
-        assert_eq!(findings.len(), 1, "the finding itself must survive a malformed captures blob");
+        assert_eq!(
+            findings.len(),
+            1,
+            "the finding itself must survive a malformed captures blob"
+        );
         assert_eq!(
             findings[0].captures.get("bucket").map(String::as_str),
             Some("avatars"),
@@ -9556,7 +9646,8 @@ mod tests {
         };
         let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
 
-        let (out, _) = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let (out, _) =
+            generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
 
         assert_eq!(
             completer
@@ -9704,7 +9795,8 @@ mod tests {
         ];
         let completer = SalvagingFixCompleter { calls: 0.into() };
 
-        let (out, _) = generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
+        let (out, _) =
+            generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
 
         assert_eq!(
             out[0].fix_specific.as_deref(),
@@ -9831,7 +9923,10 @@ mod tests {
             {"index":0,"severity":"critical","confidence":"high","reason":"unauthenticated charge with service_role"}
         ]}"#;
         let out = apply_verdicts(raw, findings);
-        assert_eq!(out[0].severity, "critical", "an explicit critical verdict must be applied");
+        assert_eq!(
+            out[0].severity, "critical",
+            "an explicit critical verdict must be applied"
+        );
     }
 
     /// ANTI-OVER-ROTATION GUARD: ordinary findings must NEVER be auto-escalated to critical.
@@ -9843,17 +9938,26 @@ mod tests {
     fn apply_verdicts_does_not_auto_escalate_ordinary_findings_to_critical() {
         let findings = vec![
             finding("AI-ORDINARY-HIGH", "medium"), // index 0: explicit "high" verdict
-            finding("AI-UNTOUCHED", "high"),        // index 1: verdict omits severity
+            finding("AI-UNTOUCHED", "high"),       // index 1: verdict omits severity
         ];
         let raw = r#"{"verdicts":[
             {"index":0,"severity":"high","confidence":"high","reason":"a real but contained bug"},
             {"index":1,"confidence":"high","reason":"no severity opinion given"}
         ]}"#;
         let out = apply_verdicts(raw, findings);
-        let ordinary = out.iter().find(|f| f.rule_id == "AI-ORDINARY-HIGH").unwrap();
-        assert_eq!(ordinary.severity, "high", "an explicit high verdict must stay high, never inflate to critical");
+        let ordinary = out
+            .iter()
+            .find(|f| f.rule_id == "AI-ORDINARY-HIGH")
+            .unwrap();
+        assert_eq!(
+            ordinary.severity, "high",
+            "an explicit high verdict must stay high, never inflate to critical"
+        );
         let untouched = out.iter().find(|f| f.rule_id == "AI-UNTOUCHED").unwrap();
-        assert_eq!(untouched.severity, "high", "no severity field in the verdict leaves the finding's prior severity as-is");
+        assert_eq!(
+            untouched.severity, "high",
+            "no severity field in the verdict leaves the finding's prior severity as-is"
+        );
     }
 
     // ── Upward-calibration precondition guardrail ─────────────────────────────
@@ -11143,14 +11247,20 @@ mod tests {
         let out = apply_verdicts(raw, findings);
         let timing = out.iter().find(|f| f.rule_id == "AI-TIMING").unwrap();
         assert_eq!(timing.confidence.as_deref(), Some("needs-review"));
-        assert!(timing.needs_review, "low confidence must set structured needs_review");
+        assert!(
+            timing.needs_review,
+            "low confidence must set structured needs_review"
+        );
         assert_eq!(timing.effort.as_deref(), Some("low"));
         // The detail tag is KEPT for one release (UI back-compat) alongside the new field.
         assert!(timing.detail.contains("[needs review"));
 
         let real = out.iter().find(|f| f.rule_id == "AI-REAL").unwrap();
         assert_eq!(real.confidence.as_deref(), Some("high"));
-        assert!(!real.needs_review, "high confidence must not set needs_review");
+        assert!(
+            !real.needs_review,
+            "high confidence must not set needs_review"
+        );
         assert_eq!(real.effort.as_deref(), Some("high"));
     }
 
@@ -11160,14 +11270,21 @@ mod tests {
     #[test]
     fn apply_verdicts_ignores_invalid_effort_value() {
         let findings = vec![finding("AI-X", "medium")];
-        let raw = r#"{"verdicts":[{"index":0,"confidence":"high","effort":"extreme","reason":""}]}"#;
+        let raw =
+            r#"{"verdicts":[{"index":0,"confidence":"high","effort":"extreme","reason":""}]}"#;
         let out = apply_verdicts(raw, findings);
-        assert_eq!(out[0].effort, None, "an unrecognized effort value must not be recorded");
+        assert_eq!(
+            out[0].effort, None,
+            "an unrecognized effort value must not be recorded"
+        );
 
         let findings2 = vec![finding("AI-Y", "medium")];
         let raw2 = r#"{"verdicts":[{"index":0,"confidence":"high","reason":""}]}"#;
         let out2 = apply_verdicts(raw2, findings2);
-        assert_eq!(out2[0].effort, None, "an absent effort field must leave effort as None");
+        assert_eq!(
+            out2[0].effort, None,
+            "an absent effort field must leave effort as None"
+        );
     }
 
     /// The calibration verdict JSON schema (Part 1 §3) parses `effort` alongside
@@ -11285,9 +11402,13 @@ mod tests {
 
     #[test]
     fn parse_threats_drops_empty_rows_and_tolerates_garbage() {
-        let raw = r#"{"summary":"x","threats":[{"component":"","threat":"","kind":"entry-point"}]}"#;
+        let raw =
+            r#"{"summary":"x","threats":[{"component":"","threat":"","kind":"entry-point"}]}"#;
         let (_s, threats) = parse_threats(raw);
-        assert!(threats.is_empty(), "row with no component and no threat dropped");
+        assert!(
+            threats.is_empty(),
+            "row with no component and no threat dropped"
+        );
         let (s2, t2) = parse_threats("{ not json ]");
         assert!(s2.is_empty());
         assert!(t2.is_empty());
@@ -11413,8 +11534,10 @@ mod tests {
         // and explicitly deny producing a SOC-2 report / certification.
         let p = soc2_gap_system_prompt();
         assert!(p.contains("GAP ANALYSIS"));
-        assert!(p.to_lowercase().contains("not a \"soc-2 report\"")
-            || p.contains("NOT a \"SOC-2 report\""));
+        assert!(
+            p.to_lowercase().contains("not a \"soc-2 report\"")
+                || p.contains("NOT a \"SOC-2 report\"")
+        );
     }
 
     #[test]
@@ -11469,30 +11592,61 @@ mod tests {
         // Polyglot repo: Rust backend, TypeScript frontend, some config.
         let files = vec![
             ("src/main.rs".to_string(), "fn main() {}".to_string()),
-            ("src/handler.rs".to_string(), "pub fn handler() {}".to_string()),
-            ("ui/app.tsx".to_string(), "export function App() {}".to_string()),
-            ("schema.sql".to_string(), "CREATE TABLE users (id INT);".to_string()),
+            (
+                "src/handler.rs".to_string(),
+                "pub fn handler() {}".to_string(),
+            ),
+            (
+                "ui/app.tsx".to_string(),
+                "export function App() {}".to_string(),
+            ),
+            (
+                "schema.sql".to_string(),
+                "CREATE TABLE users (id INT);".to_string(),
+            ),
         ];
         let rules = vec![
-            ("RUST-ENTITIES-1".to_string(), "Rust entities rule".to_string()),
+            (
+                "RUST-ENTITIES-1".to_string(),
+                "Rust entities rule".to_string(),
+            ),
             ("REACT-HOOKS-1".to_string(), "React hooks rule".to_string()),
-            ("ARCH-STRICT-LAYERING-1".to_string(), "Layering rule".to_string()),
-            ("SEC-NO-RAW-SQL-1".to_string(), "No raw SQL rule".to_string()),
+            (
+                "ARCH-STRICT-LAYERING-1".to_string(),
+                "Layering rule".to_string(),
+            ),
+            (
+                "SEC-NO-RAW-SQL-1".to_string(),
+                "No raw SQL rule".to_string(),
+            ),
         ];
 
         let plan = plan_routes(&rules, &files);
 
         // Should have 3 groups: rust, web, and All.
-        assert_eq!(plan.groups.len(), 3, "polyglot repo gets rust + web + All groups");
+        assert_eq!(
+            plan.groups.len(),
+            3,
+            "polyglot repo gets rust + web + All groups"
+        );
 
         // Verify group scopes.
-        let rust_group = plan.groups.iter().find(|g| g.scope == Scope::Language("rust"));
-        let web_group = plan.groups.iter().find(|g| g.scope == Scope::Language("web"));
+        let rust_group = plan
+            .groups
+            .iter()
+            .find(|g| g.scope == Scope::Language("rust"));
+        let web_group = plan
+            .groups
+            .iter()
+            .find(|g| g.scope == Scope::Language("web"));
         let all_group = plan.groups.iter().find(|g| g.scope == Scope::All);
 
         assert!(rust_group.is_some(), "rust group exists for RUST-* rule");
         assert!(web_group.is_some(), "web group exists for REACT-* rule");
-        assert!(all_group.is_some(), "All group exists for ARCH-* and SEC-* rules");
+        assert!(
+            all_group.is_some(),
+            "All group exists for ARCH-* and SEC-* rules"
+        );
 
         // Rust group: only .rs files should be in scope.
         let rust_g = rust_group.unwrap();
@@ -11513,17 +11667,20 @@ mod tests {
         let web_g = web_group.unwrap();
         for (path, _) in &files {
             let in_web = crate::scan_routing::file_in_scope(path, &web_g.scope);
-            let expected_in_web = path.ends_with(".tsx") || path.ends_with(".ts")
-                || path.ends_with(".js") || path.ends_with(".jsx");
-            assert_eq!(
-                in_web, expected_in_web,
-                "{path} web scope filter mismatch"
-            );
+            let expected_in_web = path.ends_with(".tsx")
+                || path.ends_with(".ts")
+                || path.ends_with(".js")
+                || path.ends_with(".jsx");
+            assert_eq!(in_web, expected_in_web, "{path} web scope filter mismatch");
         }
 
         // All group has both ARCH and SEC rules; sees every file including .sql.
         let all_g = all_group.unwrap();
-        assert_eq!(all_g.rules.len(), 2, "ARCH + SEC rules both land in All group");
+        assert_eq!(
+            all_g.rules.len(),
+            2,
+            "ARCH + SEC rules both land in All group"
+        );
         for (path, _) in &files {
             assert!(
                 crate::scan_routing::file_in_scope(path, &all_g.scope),
@@ -11532,7 +11689,10 @@ mod tests {
         }
 
         // Routing saves input on this polyglot fixture (language rules skip non-matching files).
-        assert!(plan.saved_fraction() > 0.0, "routing reduces input on a polyglot repo");
+        assert!(
+            plan.saved_fraction() > 0.0,
+            "routing reduces input on a polyglot repo"
+        );
     }
 
     /// Advisory must be enabled ONLY in the All group and disabled in language-specific groups.
@@ -11612,7 +11772,11 @@ mod tests {
 
         assert_eq!(plan.groups.len(), 1, "all cross-cutting → single All group");
         assert_eq!(plan.groups[0].scope, Scope::All);
-        assert_eq!(plan.saved_fraction(), 0.0, "no savings when all rules are cross-cutting");
+        assert_eq!(
+            plan.saved_fraction(),
+            0.0,
+            "no savings when all rules are cross-cutting"
+        );
     }
 
     /// A purely single-language repo with language-scoped rules also routes to a single
@@ -11634,7 +11798,11 @@ mod tests {
         // Only one group — the rust language group.
         assert_eq!(plan.groups.len(), 1);
         assert_eq!(plan.groups[0].scope, Scope::Language("rust"));
-        assert_eq!(plan.groups[0].rules.len(), 2, "both RUST rules land in the same group");
+        assert_eq!(
+            plan.groups[0].rules.len(),
+            2,
+            "both RUST rules land in the same group"
+        );
 
         // W2 (previously a documented-but-unfixed defect): no cross-cutting rule was selected,
         // so this plan has NO `Scope::All` group at all. Mirror `run_routed_passes`'s
@@ -11737,7 +11905,10 @@ mod tests {
             "BUG-5: three-way 1-1-1 tie must resolve to low (lowest), got: {v0}"
         );
         // Disagreement → confidence must be "low" (needs-review), regardless of tie direction.
-        assert_eq!(v0["confidence"], "low", "disagreement forces low confidence");
+        assert_eq!(
+            v0["confidence"], "low",
+            "disagreement forces low confidence"
+        );
     }
 
     /// Unanimous "high" must still resolve to "high" — the fix must not break the non-tie case.
@@ -11769,12 +11940,20 @@ mod tests {
         ];
         let out = consensus_verdicts(&votes, 1);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let v0 = v["verdicts"].as_array().unwrap().iter().find(|x| x["index"] == 0).unwrap();
+        let v0 = v["verdicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["index"] == 0)
+            .unwrap();
         assert_eq!(
             v0["severity"], "high",
             "a critical-vs-high tie must resolve to high (lower), not silently promote to critical: {v0}"
         );
-        assert_eq!(v0["confidence"], "low", "disagreement forces low confidence (needs review)");
+        assert_eq!(
+            v0["confidence"], "low",
+            "disagreement forces low confidence (needs review)"
+        );
     }
 
     /// Unanimous "critical" across every pass must resolve to "critical" with high confidence —
@@ -11788,9 +11967,20 @@ mod tests {
         ];
         let out = consensus_verdicts(&votes, 1);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let v0 = v["verdicts"].as_array().unwrap().iter().find(|x| x["index"] == 0).unwrap();
-        assert_eq!(v0["severity"], "critical", "unanimous critical must stay critical");
-        assert_eq!(v0["confidence"], "high", "unanimous critical → high confidence");
+        let v0 = v["verdicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["index"] == 0)
+            .unwrap();
+        assert_eq!(
+            v0["severity"], "critical",
+            "unanimous critical must stay critical"
+        );
+        assert_eq!(
+            v0["confidence"], "high",
+            "unanimous critical → high confidence"
+        );
     }
 
     // ── BUG-4: resolution round add_total guard in Batch mode ────────────────────────
@@ -11859,7 +12049,11 @@ mod tests {
     fn bug6_sequential_mode_tuning_unchanged() {
         let (concurrency, batch_size) = ScanMode::Sequential.tuning();
         assert_eq!(concurrency, 1, "sequential must be single-threaded");
-        assert_eq!(batch_size, usize::MAX, "sequential must include all rules in one pass");
+        assert_eq!(
+            batch_size,
+            usize::MAX,
+            "sequential must include all rules in one pass"
+        );
     }
 
     // ── BUG-7 regression: merge_location_group tiebreaker comment ────────────────
@@ -12020,7 +12214,7 @@ mod tests {
         let non_panic_rules = &[
             "PREVENT-PANICKING-AUTH-CHECK",
             "LOG-PANIC-RECOVERY-1",
-            "PANIC-GATE-GUARD",     // "PANIC" + "GUARD" — not in narrowing list
+            "PANIC-GATE-GUARD", // "PANIC" + "GUARD" — not in narrowing list
         ];
         for rule in non_panic_rules {
             let result = canonical_adopted_rule(rule, &adopted);
@@ -12142,7 +12336,10 @@ mod tests {
         };
         assert_eq!(report.lenses.len(), 2, "soc2 off: only 2 lenses");
         let has_soc2 = report.lenses.iter().any(|l| l.lens == "soc2-gap");
-        assert!(!has_soc2, "soc2_enabled=false: soc2-gap lens must be absent");
+        assert!(
+            !has_soc2,
+            "soc2_enabled=false: soc2-gap lens must be absent"
+        );
         // The report is still valid (advisory flag set, disclaimer present).
         assert!(report.advisory);
         assert_eq!(report.disclaimer, DEEP_ADVISORY_DISCLAIMER);
@@ -12254,7 +12451,9 @@ mod tests {
             "proposed_rules": [],
             "needs_files": []
         }"#;
-        let stub = StubCompleter { text: findings_json.to_string() };
+        let stub = StubCompleter {
+            text: findings_json.to_string(),
+        };
         let files = vec![(
             "src/handlers/account.rs".to_string(),
             "fn delete(req: Req) {\n    delete_account(req.account_id);\n}\n".to_string(),
@@ -12348,10 +12547,14 @@ mod tests {
     #[tokio::test]
     async fn run_passes_produces_byte_identical_repo_map_prefix_across_chunks() {
         let completer = CapturingCompleter::default();
-        let chunk0: Vec<(String, String)> =
-            vec![("chunk0.rs".to_string(), "// CHUNK0 marker\nfn chunk0() {}".to_string())];
-        let chunk1: Vec<(String, String)> =
-            vec![("chunk1.rs".to_string(), "// CHUNK1 marker\nfn chunk1() {}".to_string())];
+        let chunk0: Vec<(String, String)> = vec![(
+            "chunk0.rs".to_string(),
+            "// CHUNK0 marker\nfn chunk0() {}".to_string(),
+        )];
+        let chunk1: Vec<(String, String)> = vec![(
+            "chunk1.rs".to_string(),
+            "// CHUNK1 marker\nfn chunk1() {}".to_string(),
+        )];
         let chunks: Vec<&[(String, String)]> = vec![&chunk0, &chunk1];
 
         let batch0: Vec<(String, String)> = vec![("RULE-A".to_string(), "rule A desc".to_string())];
@@ -12387,8 +12590,10 @@ mod tests {
         // (a) Every request carries exactly two cache breakpoints (n_b == 2 > 1).
         for req in seen.iter() {
             assert_eq!(
-                req.cache_breakpoints.len(), 2,
-                "n_b==2 keeps both breakpoints: {:?}", req.cache_breakpoints
+                req.cache_breakpoints.len(),
+                2,
+                "n_b==2 keeps both breakpoints: {:?}",
+                req.cache_breakpoints
             );
         }
 
@@ -12400,7 +12605,8 @@ mod tests {
         let first_segment = repo_map_segment(&seen[0]).to_string();
         for req in seen.iter() {
             assert_eq!(
-                repo_map_segment(req), first_segment,
+                repo_map_segment(req),
+                first_segment,
                 "the repo-map segment must be byte-identical across every chunk/rule-batch"
             );
         }
@@ -12411,15 +12617,27 @@ mod tests {
         fn digest_segment(req: &LlmRequest) -> &str {
             &req.prompt[req.cache_breakpoints[0]..req.cache_breakpoints[1]]
         }
-        let chunk0_segs: Vec<&str> =
-            seen.iter().map(digest_segment).filter(|s| s.contains("CHUNK0")).collect();
-        let chunk1_segs: Vec<&str> =
-            seen.iter().map(digest_segment).filter(|s| s.contains("CHUNK1")).collect();
+        let chunk0_segs: Vec<&str> = seen
+            .iter()
+            .map(digest_segment)
+            .filter(|s| s.contains("CHUNK0"))
+            .collect();
+        let chunk1_segs: Vec<&str> = seen
+            .iter()
+            .map(digest_segment)
+            .filter(|s| s.contains("CHUNK1"))
+            .collect();
         assert_eq!(chunk0_segs.len(), 2, "both rule-batches for chunk 0");
         assert_eq!(chunk1_segs.len(), 2, "both rule-batches for chunk 1");
-        assert_eq!(chunk0_segs[0], chunk0_segs[1], "same chunk's digest segment is identical across rule-batches");
+        assert_eq!(
+            chunk0_segs[0], chunk0_segs[1],
+            "same chunk's digest segment is identical across rule-batches"
+        );
         assert_eq!(chunk1_segs[0], chunk1_segs[1]);
-        assert_ne!(chunk0_segs[0], chunk1_segs[0], "different chunks' digest segments differ");
+        assert_ne!(
+            chunk0_segs[0], chunk1_segs[0],
+            "different chunks' digest segments differ"
+        );
 
         // (d) Rule content never leaks into a cached segment — only the uncached suffix.
         for req in seen.iter() {
@@ -12440,8 +12658,10 @@ mod tests {
     #[tokio::test]
     async fn run_passes_drops_the_digest_breakpoint_when_only_one_rule_batch() {
         let completer = CapturingCompleter::default();
-        let chunk0: Vec<(String, String)> = vec![("chunk0.rs".to_string(), "fn chunk0() {}".to_string())];
-        let chunk1: Vec<(String, String)> = vec![("chunk1.rs".to_string(), "fn chunk1() {}".to_string())];
+        let chunk0: Vec<(String, String)> =
+            vec![("chunk0.rs".to_string(), "fn chunk0() {}".to_string())];
+        let chunk1: Vec<(String, String)> =
+            vec![("chunk1.rs".to_string(), "fn chunk1() {}".to_string())];
         let chunks: Vec<&[(String, String)]> = vec![&chunk0, &chunk1];
 
         let batch0: Vec<(String, String)> = vec![("RULE-A".to_string(), "rule A desc".to_string())];
@@ -12473,8 +12693,10 @@ mod tests {
         let seen = completer.seen.lock().unwrap();
         for req in seen.iter() {
             assert_eq!(
-                req.cache_breakpoints.len(), 1,
-                "n_b==1 drops the digest breakpoint: {:?}", req.cache_breakpoints
+                req.cache_breakpoints.len(),
+                1,
+                "n_b==1 drops the digest breakpoint: {:?}",
+                req.cache_breakpoints
             );
         }
     }
@@ -12502,16 +12724,16 @@ mod tests {
             "me/api",
             &files,
             &selected,
-            &[],                    // alternatives (none — no multi-option rules in this test)
+            &[], // alternatives (none — no multi-option rules in this test)
             &std::collections::HashMap::new(), // forced
-            None,                  // model
-            None,                  // calibration model
-            ScanMode::Parallel,    // real-time path (the "both" AI-review path)
-            false,                 // thorough
-            None,                  // feedback -> non-streaming complete()
-            None,                  // job
-            None,                  // meter
-            None,                  // map_files
+            None, // model
+            None, // calibration model
+            ScanMode::Parallel, // real-time path (the "both" AI-review path)
+            false, // thorough
+            None, // feedback -> non-streaming complete()
+            None, // job
+            None, // meter
+            None, // map_files
         )
         .await;
         // (1) The AI failure is SURFACED, not swallowed into a clean result.
@@ -12568,7 +12790,9 @@ mod tests {
     async fn audit_repo_with_stub_completer_returns_findings() {
         // Minimal audit-JSON the parser recognizes: one finding under the adopted rule.
         let canned = r#"{"findings":[{"rule":"ARCH-NO-DIRECT-DB-1","severity":"high","path":"src/lib.rs","code":"db.execute(query)","title":"direct DB call","detail":"controller calls the database directly"}]}"#;
-        let llm = StubCompleter { text: canned.to_string() };
+        let llm = StubCompleter {
+            text: canned.to_string(),
+        };
         let files = vec![(
             "src/lib.rs".to_string(),
             "fn handler() { db.execute(query); }\n".to_string(),
@@ -12649,16 +12873,37 @@ mod tests {
         let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
         let block = build_alternatives_block(&[alt]);
         assert!(block.contains("MULTI-RULE-1"));
-        assert!(block.contains("opt-a"), "every option id must be present: {block}");
-        assert!(block.contains("opt-b"), "every option id must be present: {block}");
-        assert!(block.contains("Do it the A way."), "every directive must be present: {block}");
-        assert!(block.contains("Do it the B way."), "every directive must be present: {block}");
-        assert!(block.contains("why: A is simple."), "every rationale must be present: {block}");
+        assert!(
+            block.contains("opt-a"),
+            "every option id must be present: {block}"
+        );
+        assert!(
+            block.contains("opt-b"),
+            "every option id must be present: {block}"
+        );
+        assert!(
+            block.contains("Do it the A way."),
+            "every directive must be present: {block}"
+        );
+        assert!(
+            block.contains("Do it the B way."),
+            "every directive must be present: {block}"
+        );
+        assert!(
+            block.contains("why: A is simple."),
+            "every rationale must be present: {block}"
+        );
         // The marker sits on the SELECTED option's line, not the other one.
         let a_line = block.lines().find(|l| l.contains("opt-a")).unwrap();
         let b_line = block.lines().find(|l| l.contains("opt-b")).unwrap();
-        assert!(a_line.contains("CURRENTLY SELECTED"), "selected option must be marked: {a_line}");
-        assert!(!b_line.contains("CURRENTLY SELECTED"), "unselected option must not be marked: {b_line}");
+        assert!(
+            a_line.contains("CURRENTLY SELECTED"),
+            "selected option must be marked: {a_line}"
+        );
+        assert!(
+            !b_line.contains("CURRENTLY SELECTED"),
+            "unselected option must not be marked: {b_line}"
+        );
     }
 
     #[test]
@@ -12716,18 +12961,29 @@ mod tests {
     fn req_d7_the_rejected_token_is_stripped_before_the_client_sees_it() {
         // The token, with the sentence after it capitalised as an author would write it.
         assert_eq!(
-            strip_authoring_token("Rejected: this conflates a performance optimisation with a security defect."),
+            strip_authoring_token(
+                "Rejected: this conflates a performance optimisation with a security defect."
+            ),
             "This conflates a performance optimisation with a security defect.",
             "the token goes, and the clause after it still opens like a sentence"
         );
         // Case and spacing as actually authored across the corpus.
-        assert_eq!(strip_authoring_token("Rejected:  already lower case here."), "Already lower case here.");
-        assert_eq!(strip_authoring_token("rejected: lowercase token"), "Lowercase token");
+        assert_eq!(
+            strip_authoring_token("Rejected:  already lower case here."),
+            "Already lower case here."
+        );
+        assert_eq!(
+            strip_authoring_token("rejected: lowercase token"),
+            "Lowercase token"
+        );
 
         // `Avoided:` is the same leak by another author's hand - found in
         // PYTHON-TESTING-UNIT-LAYOUT-1 / scattered during the 2026-10-20 rationale pass. A
         // token list rather than one token, because the next one will not be either of these.
-        assert_eq!(strip_authoring_token("Avoided: makes coverage reporting harder."), "Makes coverage reporting harder.");
+        assert_eq!(
+            strip_authoring_token("Avoided: makes coverage reporting harder."),
+            "Makes coverage reporting harder."
+        );
 
         // A `why` that never used the convention is untouched - 306 of 377 options.
         let plain = "Each record triggers its own query, so latency grows with the result set.";
@@ -12751,7 +13007,10 @@ mod tests {
         };
 
         let out = capped("JAVASCRIPT-TESTING-NO-DISABLED-TESTS-1", "critical");
-        assert_eq!(out.severity, "high", "a test rule must not ship at critical");
+        assert_eq!(
+            out.severity, "high",
+            "a test rule must not ship at critical"
+        );
         assert!(
             out.calibration_rationale
                 .as_deref()
@@ -12771,13 +13030,18 @@ mod tests {
         }
 
         // A real exposure still reaches critical — the anchor must not be a blanket demotion.
-        assert_eq!(capped("SUPABASE-RLS-ENABLED-1", "critical").severity, "critical");
+        assert_eq!(
+            capped("SUPABASE-RLS-ENABLED-1", "critical").severity,
+            "critical"
+        );
 
         // Segment-anchored, so a rule that merely CONTAINS the letters is unaffected. The D5
         // floor bug raised anything containing "urls" because it also contains "rls"; this
         // is the same trap one rule over.
         assert!(!crate::is_test_coverage_class("SEC-NO-ATTESTING-TOKEN-1"));
-        assert!(crate::is_test_coverage_class("GO-TESTING-BLACK-BOX-PKG-TEST-1"));
+        assert!(crate::is_test_coverage_class(
+            "GO-TESTING-BLACK-BOX-PKG-TEST-1"
+        ));
     }
 
     #[test]
@@ -12820,7 +13084,9 @@ mod tests {
             ..Finding::default()
         };
         assert_eq!(
-            apply_severity_ceiling_rules(vec![unflagged]).remove(0).severity,
+            apply_severity_ceiling_rules(vec![unflagged])
+                .remove(0)
+                .severity,
             "high",
             "an unflagged row must keep its authored severity"
         );
@@ -12829,7 +13095,10 @@ mod tests {
     #[test]
     fn req_w19_resolve_audit_model_prefers_the_caller_then_env_then_the_default() {
         // The caller's explicit pick always wins.
-        assert_eq!(resolve_audit_model(Some("claude-sonnet-5")), "claude-sonnet-5");
+        assert_eq!(
+            resolve_audit_model(Some("claude-sonnet-5")),
+            "claude-sonnet-5"
+        );
 
         // Blank is not a pick. Falling through on an empty string is what makes
         // `--model ""` behave like omitting the flag rather than selecting nothing.
@@ -12853,7 +13122,10 @@ mod tests {
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].rule_id, "MULTI-RULE-1");
         assert_eq!(recs[0].recommended_option_id, "opt-b");
-        assert_eq!(recs[0].recommendation_reasoning, "the codebase already does it the B way");
+        assert_eq!(
+            recs[0].recommendation_reasoning,
+            "the codebase already does it the B way"
+        );
         assert!(!recs[0].hallucinated);
         assert!(!recs[0].operator_chosen);
     }
@@ -12866,9 +13138,14 @@ mod tests {
         assert_eq!(recs.len(), 1);
         // Falls back to the currently-selected option, never the hallucinated id.
         assert_eq!(recs[0].recommended_option_id, "opt-a");
-        assert!(recs[0].hallucinated, "a non-real option id must be flagged hallucinated");
         assert!(
-            recs[0].recommendation_reasoning.contains("opt-does-not-exist"),
+            recs[0].hallucinated,
+            "a non-real option id must be flagged hallucinated"
+        );
+        assert!(
+            recs[0]
+                .recommendation_reasoning
+                .contains("opt-does-not-exist"),
             "the correction note should name the bogus id: {}",
             recs[0].recommendation_reasoning
         );
@@ -12879,7 +13156,10 @@ mod tests {
         let alt = two_option_alternatives("MULTI-RULE-1", None);
         let raw = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","recommended_option_id":"nonsense","recommendation_reasoning":""}]}"#;
         let recs = parse_alternative_recommendations(raw, &[alt]);
-        assert_eq!(recs[0].recommended_option_id, "opt-a", "first option is the last-resort fallback");
+        assert_eq!(
+            recs[0].recommended_option_id, "opt-a",
+            "first option is the last-resort fallback"
+        );
         assert!(recs[0].hallucinated);
     }
 
@@ -12893,9 +13173,16 @@ mod tests {
         // silently dropped (every listed rule gets exactly one output entry).
         let raw = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","recommended_option_id":"opt-a","recommendation_reasoning":"fine as-is"}]}"#;
         let recs = parse_alternative_recommendations(raw, &alts);
-        assert_eq!(recs.len(), 2, "every listed rule must get exactly one entry");
+        assert_eq!(
+            recs.len(),
+            2,
+            "every listed rule must get exactly one entry"
+        );
         let r2 = recs.iter().find(|r| r.rule_id == "MULTI-RULE-2").unwrap();
-        assert_eq!(r2.recommended_option_id, "opt-b", "falls back to its own selected option");
+        assert_eq!(
+            r2.recommended_option_id, "opt-b",
+            "falls back to its own selected option"
+        );
         assert!(r2.hallucinated);
     }
 
@@ -12927,7 +13214,10 @@ mod tests {
             Some("src/api/list_users.rs:42 — cursor param already threaded through")
         );
         assert_eq!(recs[0].recommended_option_id, "opt-b");
-        assert!(!recs[0].hallucinated, "an evidenced applicable pick is not a hallucination");
+        assert!(
+            !recs[0].hallucinated,
+            "an evidenced applicable pick is not a hallucination"
+        );
     }
 
     /// THE CORE P7 GUARANTEE: a model claiming `applicable: true` but citing NO evidence line
@@ -12980,7 +13270,10 @@ mod tests {
             !recs[0].hallucinated,
             "an honest, explicit not-applicable answer is not a hallucination"
         );
-        assert_eq!(recs[0].recommendation_reasoning, "no pagination anywhere in this codebase");
+        assert_eq!(
+            recs[0].recommendation_reasoning,
+            "no pagination anywhere in this codebase"
+        );
     }
 
     /// Back-compat: a response that omits the `applicable` key entirely (pre-P7 shape) is NOT
@@ -13012,7 +13305,10 @@ mod tests {
         let raw = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","recommended_option_id":"opt-a","recommendation_reasoning":"fine"}]}"#;
         let recs2 = parse_alternative_recommendations(raw, &alts2);
         let missing = recs2.iter().find(|r| r.rule_id == "MULTI-RULE-2").unwrap();
-        assert!(missing.applicable, "a rule the model never answered stays applicable");
+        assert!(
+            missing.applicable,
+            "a rule the model never answered stays applicable"
+        );
     }
 
     /// HAPPY PATH end-to-end: `audit_repo` fed one multi-option rule (via `alternatives`)
@@ -13034,7 +13330,9 @@ mod tests {
             ],
             "proposed_rules": []
         }"#;
-        let llm = StubCompleter { text: canned.to_string() };
+        let llm = StubCompleter {
+            text: canned.to_string(),
+        };
         let files = vec![(
             "src/lib.rs".to_string(),
             "fn handler() { old pattern here; }\n".to_string(),
@@ -13092,7 +13390,9 @@ mod tests {
             ],
             "proposed_rules": []
         }"#;
-        let llm = StubCompleter { text: canned.to_string() };
+        let llm = StubCompleter {
+            text: canned.to_string(),
+        };
         let files = vec![(
             "src/lib.rs".to_string(),
             "fn handler() { old pattern here; }\n".to_string(),
@@ -13142,7 +13442,9 @@ mod tests {
             ],
             "proposed_rules": []
         }"#;
-        let llm = StubCompleter { text: canned.to_string() };
+        let llm = StubCompleter {
+            text: canned.to_string(),
+        };
         let files = vec![(
             "src/lib.rs".to_string(),
             "fn handler() { old pattern here; }\n".to_string(),
@@ -13173,10 +13475,19 @@ mod tests {
 
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].recommended_option_id, "opt-b");
-        assert!(recs[0].operator_chosen, "a forced pick must be marked operator_chosen");
-        assert!(!recs[0].hallucinated, "a real forced option id is not a hallucination");
+        assert!(
+            recs[0].operator_chosen,
+            "a forced pick must be marked operator_chosen"
+        );
+        assert!(
+            !recs[0].hallucinated,
+            "a real forced option id is not a hallucination"
+        );
 
-        let f = findings.iter().find(|f| f.rule_id == "MULTI-RULE-1").unwrap();
+        let f = findings
+            .iter()
+            .find(|f| f.rule_id == "MULTI-RULE-1")
+            .unwrap();
         assert_eq!(f.evaluated_option_id.as_deref(), Some("opt-b"));
     }
 
@@ -13185,7 +13496,9 @@ mod tests {
     #[tokio::test]
     async fn audit_repo_forced_mode_rejects_an_invalid_forced_option_id() {
         let canned = r#"{"findings": [], "proposed_rules": []}"#;
-        let llm = StubCompleter { text: canned.to_string() };
+        let llm = StubCompleter {
+            text: canned.to_string(),
+        };
         let files = vec![("src/lib.rs".to_string(), "fn handler() {}\n".to_string())];
         let selected = vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
         let alternatives = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
@@ -13212,7 +13525,10 @@ mod tests {
         .expect("stub completer never errors");
 
         assert_eq!(recs.len(), 1);
-        assert_eq!(recs[0].recommended_option_id, "opt-a", "falls back to the selected option");
+        assert_eq!(
+            recs[0].recommended_option_id, "opt-a",
+            "falls back to the selected option"
+        );
         assert!(recs[0].hallucinated);
         assert!(recs[0].operator_chosen);
     }
@@ -13236,7 +13552,9 @@ mod tests {
             ],
             "proposed_rules": []
         }"#;
-        let llm = StubCompleter { text: canned.to_string() };
+        let llm = StubCompleter {
+            text: canned.to_string(),
+        };
         // The two findings sit on DIFFERENT lines so the cross-rule location-merge pass
         // (`merge_by_location`, which fuses same-(path,line) findings into one row) doesn't
         // collapse them into a single finding — this test wants two distinct rows to assert
@@ -13246,8 +13564,14 @@ mod tests {
             "fn handler() {\n    thing one;\n    thing two;\n}\n".to_string(),
         )];
         let selected = vec![
-            ("MULTI-WITH-DEFAULT-1".to_string(), "Do it the A way.".to_string()),
-            ("MULTI-NO-DEFAULT-1".to_string(), "Do it the A way.".to_string()),
+            (
+                "MULTI-WITH-DEFAULT-1".to_string(),
+                "Do it the A way.".to_string(),
+            ),
+            (
+                "MULTI-NO-DEFAULT-1".to_string(),
+                "Do it the A way.".to_string(),
+            ),
         ];
         let alternatives = vec![
             // Has a currently-selected option (the corpus default, in the real pipeline).
@@ -13276,8 +13600,14 @@ mod tests {
         .expect("no-default rule must not block or error the scan");
 
         assert_eq!(recs.len(), 2, "both rules must get a recommendation");
-        let with_default = recs.iter().find(|r| r.rule_id == "MULTI-WITH-DEFAULT-1").unwrap();
-        let no_default = recs.iter().find(|r| r.rule_id == "MULTI-NO-DEFAULT-1").unwrap();
+        let with_default = recs
+            .iter()
+            .find(|r| r.rule_id == "MULTI-WITH-DEFAULT-1")
+            .unwrap();
+        let no_default = recs
+            .iter()
+            .find(|r| r.rule_id == "MULTI-NO-DEFAULT-1")
+            .unwrap();
         assert_eq!(with_default.recommended_option_id, "opt-a");
         assert_eq!(
             no_default.recommended_option_id, "opt-b",
@@ -13286,9 +13616,10 @@ mod tests {
         assert!(!with_default.hallucinated);
         assert!(!no_default.hallucinated);
 
-        for (rule_id, expected_option) in
-            [("MULTI-WITH-DEFAULT-1", "opt-a"), ("MULTI-NO-DEFAULT-1", "opt-b")]
-        {
+        for (rule_id, expected_option) in [
+            ("MULTI-WITH-DEFAULT-1", "opt-a"),
+            ("MULTI-NO-DEFAULT-1", "opt-b"),
+        ] {
             let f = findings
                 .iter()
                 .find(|f| f.rule_id == rule_id)
@@ -13457,7 +13788,10 @@ mod tests {
         let f = finding.expect(
             "a codebase matching the `Rejected:` option must produce a finding, not silence",
         );
-        assert_eq!(f.rule_id, RULE_ID, "the finding carries the rule's citation");
+        assert_eq!(
+            f.rule_id, RULE_ID,
+            "the finding carries the rule's citation"
+        );
         assert_eq!(
             f.kind,
             Some(camerata_api_types::audit::FindingKind::Defect),
@@ -13627,7 +13961,6 @@ mod tests {
         );
     }
 
-
     // ---- Pass-1 W3: the five-kind taxonomy at emission (A5.2/A5.3/A5.5/A5.6) -------------
 
     /// Minimal deviation-shaped finding fixture: an AI-tier row under `rule`, as it looks
@@ -13647,7 +13980,11 @@ mod tests {
         }
     }
 
-    fn deviation_rec(rule: &str, option: &str, assessed_sites: Option<usize>) -> RuleRecommendation {
+    fn deviation_rec(
+        rule: &str,
+        option: &str,
+        assessed_sites: Option<usize>,
+    ) -> RuleRecommendation {
         RuleRecommendation {
             rule_id: rule.to_string(),
             recommended_option_id: option.to_string(),
@@ -13704,7 +14041,10 @@ mod tests {
                     assert_eq!(d.deviating_sites, 3, "2 rows + 1 absorbed site");
                     assert_eq!(d.assessed_sites, Some(47));
                     assert_eq!(d.convention_option_id.as_deref(), Some("opt-a"));
-                    assert_eq!(d.convention_label, "Option A", "AUTHORED label, never prose");
+                    assert_eq!(
+                        d.convention_label, "Option A",
+                        "AUTHORED label, never prose"
+                    );
                 }
                 other => panic!("expected Deviation, got {other:?}"),
             }
@@ -13833,7 +14173,10 @@ mod tests {
         let decision = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
         let recs = parse_alternative_recommendations(raw, &decision);
         assert_eq!(recs.len(), 1);
-        assert!(recs[0].no_convention, "decision-kind + breakdown must be honored");
+        assert!(
+            recs[0].no_convention,
+            "decision-kind + breakdown must be honored"
+        );
         assert!(!recs[0].hallucinated);
         assert_eq!(
             recs[0]
@@ -13844,7 +14187,10 @@ mod tests {
             vec!["opt-a", "opt-b"],
             "an observed option id must be one of the rule's REAL options"
         );
-        assert_eq!(recs[0].observed_options[0].label, "Option A", "authored label");
+        assert_eq!(
+            recs[0].observed_options[0].label, "Option A",
+            "authored label"
+        );
 
         // (b) The SAME answer for a default_with_exceptions rule -> refused, corrected.
         let mut dwe = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
@@ -13855,7 +14201,10 @@ mod tests {
             "a default_with_exceptions rule has an externally-correct default — the \
              no-convention escape must never be honored for it"
         );
-        assert!(recs[0].hallucinated, "the correction must be visible, never silent");
+        assert!(
+            recs[0].hallucinated,
+            "the correction must be visible, never silent"
+        );
 
         // (c) Decision-kind but NOTHING backing the claim (no breakdown, no evidence) ->
         // refused: a bare \"no convention\" can never silently drop a rule's coverage.
@@ -13936,8 +14285,7 @@ mod tests {
             "no existing pattern; recommending opt-a as the best-practice fit for this stack"
                 .to_string();
         assert!(
-            conventions_observed_findings("me/api", &[], &vec![aspirational], &alts)
-                .is_empty(),
+            conventions_observed_findings("me/api", &[], &vec![aspirational], &alts).is_empty(),
             "an aspirational target is not a convention the codebase follows"
         );
 
@@ -14175,7 +14523,11 @@ mod tests {
             .iter()
             .filter(|f| f.rule_id == "RUST-NO-UNWRAP-1")
             .collect();
-        assert_eq!(rows.len(), 1, "one honesty row per armed-but-unevaluated rule");
+        assert_eq!(
+            rows.len(),
+            1,
+            "one honesty row per armed-but-unevaluated rule"
+        );
         let f = rows[0];
         assert_eq!(f.severity, "info");
         match &f.kind {
@@ -14286,8 +14638,14 @@ mod tests {
         ai.category = Some("rls-policy".to_string());
         let out = merge_semantic_groups(vec![det, ai], &[]);
         assert_eq!(out.len(), 1, "same defect must collapse to one row");
-        assert_eq!(out[0].rule_id, "RLS-MISSING", "deterministic side is primary");
-        assert_eq!(out[0].line, 10, "primary keeps its own deterministic anchor line");
+        assert_eq!(
+            out[0].rule_id, "RLS-MISSING",
+            "deterministic side is primary"
+        );
+        assert_eq!(
+            out[0].line, 10,
+            "primary keeps its own deterministic anchor line"
+        );
         assert_eq!(out[0].severity, "high", "max severity is kept");
         assert!(
             out[0].also_matches.contains(&"AI-rls-thing".to_string()),
@@ -14602,8 +14960,13 @@ mod tests {
         det_a
             .captures
             .insert("secret".to_string(), "sk_live_abc123xyz".to_string());
-        let mut det_b =
-            site_finding("SEC-SECRET-SCANNER-B-1", "src/config.ts", 10, "critical", "");
+        let mut det_b = site_finding(
+            "SEC-SECRET-SCANNER-B-1",
+            "src/config.ts",
+            10,
+            "critical",
+            "",
+        );
         det_b
             .captures
             .insert("value".to_string(), "sk_live_abc123xyz".to_string());
@@ -14701,10 +15064,7 @@ mod tests {
             "Issues a refund via the same client built from STRIPE_SECRET_KEY.".to_string();
         call_site_b.effort = Some("high".to_string());
 
-        let out = merge_semantic_groups(
-            vec![holder, constructor, call_site_a, call_site_b],
-            &[],
-        );
+        let out = merge_semantic_groups(vec![holder, constructor, call_site_a, call_site_b], &[]);
         assert_eq!(
             out.len(),
             1,
@@ -14725,7 +15085,10 @@ mod tests {
             "AI-PAYMENT-CALL-USES-LEAKED-KEY-1",
             "AI-PAYMENT-CALL-USES-LEAKED-KEY-2",
         ] {
-            assert!(ids.contains(expected), "missing rule id {expected} in {ids:?}");
+            assert!(
+                ids.contains(expected),
+                "missing rule id {expected} in {ids:?}"
+            );
         }
         assert_eq!(
             row.also_locations.len(),
@@ -14863,13 +15226,23 @@ mod tests {
         // overlapping prose. The new description-overlap signal is deliberately same-path-only,
         // so this must NOT merge even though the text is near-identical — proving the signal
         // never crosses files.
-        let mut sink =
-            site_finding("SEC-SQL-INJECTION-SINK-1", "src/db/sink.ts", 50, "critical", "");
+        let mut sink = site_finding(
+            "SEC-SQL-INJECTION-SINK-1",
+            "src/db/sink.ts",
+            50,
+            "critical",
+            "",
+        );
         sink.detail = "User-controlled input flows into a raw SQL query without \
                        parameterization, enabling SQL injection."
             .to_string();
-        let mut call_site =
-            site_finding("AI-SQL-INJECTION-CALL-SITE", "src/api/handler.ts", 20, "high", "");
+        let mut call_site = site_finding(
+            "AI-SQL-INJECTION-CALL-SITE",
+            "src/api/handler.ts",
+            20,
+            "high",
+            "",
+        );
         call_site.detail = "User-controlled input flows into a raw SQL query without \
                              parameterization, enabling SQL injection at this call site."
             .to_string();
@@ -15058,12 +15431,22 @@ mod tests {
         // Collapsing them cross-file was an over-merge that broke the handler-no-db / strict-
         // layering e2e tests. Different paths, so no same-file signal (window/construct/overlap)
         // can fire — this isolates the same-rule-adjacent same-path guard specifically.
-        let mut rs =
-            site_finding("ARCH-HANDLER-NO-DB-REPEAT-1", "src/routes/orders.rs", 2, "high", "");
-        rs.detail = "The Rust route handler holds a database handle and queries it inline."
-            .to_string();
-        let mut ts =
-            site_finding("ARCH-HANDLER-NO-DB-REPEAT-1", "src/routes/orders.ts", 2, "high", "");
+        let mut rs = site_finding(
+            "ARCH-HANDLER-NO-DB-REPEAT-1",
+            "src/routes/orders.rs",
+            2,
+            "high",
+            "",
+        );
+        rs.detail =
+            "The Rust route handler holds a database handle and queries it inline.".to_string();
+        let mut ts = site_finding(
+            "ARCH-HANDLER-NO-DB-REPEAT-1",
+            "src/routes/orders.ts",
+            2,
+            "high",
+            "",
+        );
         ts.detail = "Separately, the TypeScript route reaches the data layer without delegating."
             .to_string();
         let out = merge_semantic_groups(vec![rs, ts], &[]);
@@ -15150,13 +15533,12 @@ mod tests {
         // would mis-score a planted defect as a miss on a blind hold-out. An injection finding
         // and an unrelated pagination-convention finding, co-located in the SAME handler, with
         // DIFFERENT categories and no shared captured object, must stay TWO rows.
-        let content = "fn handler() {\n let q = raw_sql(id);\n let page = rows.skip(n).take(k);\n}\n";
+        let content =
+            "fn handler() {\n let q = raw_sql(id);\n let page = rows.skip(n).take(k);\n}\n";
         let files = vec![("h.rs".to_string(), content.to_string())];
-        let mut injection =
-            site_finding("SEC-SQL-INJECTION-SINK-1", "h.rs", 2, "critical", "");
+        let mut injection = site_finding("SEC-SQL-INJECTION-SINK-1", "h.rs", 2, "critical", "");
         injection.detail = "User-controlled input flows into a raw SQL query.".to_string();
-        let mut pagination =
-            site_finding("PERF-PAGINATION-MISSING-1", "h.rs", 3, "medium", "");
+        let mut pagination = site_finding("PERF-PAGINATION-MISSING-1", "h.rs", 3, "medium", "");
         pagination.detail = "This handler returns every row with no pagination.".to_string();
         assert_eq!(
             finding_class(&injection),
@@ -15182,8 +15564,7 @@ mod tests {
              construct, with different categories and no shared object, must stay two rows, \
              each routed to its own category: {out:?}"
         );
-        let ids: std::collections::HashSet<&str> =
-            out.iter().map(|f| f.rule_id.as_str()).collect();
+        let ids: std::collections::HashSet<&str> = out.iter().map(|f| f.rule_id.as_str()).collect();
         assert!(
             ids.contains("SEC-SQL-INJECTION-SINK-1") && ids.contains("PERF-PAGINATION-MISSING-1"),
             "neither finding may be absorbed into the other's also_matches: {out:?}"
@@ -15410,8 +15791,8 @@ mod tests {
     #[test]
     fn req_b9_prose_abbreviations_are_not_structural_objects() {
         let mut f = site_finding("SEC-X-1", "a.rs", 1, "high", "");
-        f.detail = "Avoid string-built SQL, e.g. format! with user input, i.e. concatenation."
-            .to_string();
+        f.detail =
+            "Avoid string-built SQL, e.g. format! with user input, i.e. concatenation.".to_string();
         let objs = structural_objects(&f);
         assert!(
             !objs.contains("e.g") && !objs.contains("i.e"),
@@ -15485,7 +15866,8 @@ mod tests {
         let mut a = site_finding("RLS-MISSING-1", "s.sql", 10, "medium", "");
         a.captures.insert("table".to_string(), "orders".to_string());
         let mut b = site_finding("RLS-MISSING-1", "s.sql", 14, "medium", "");
-        b.captures.insert("table".to_string(), "profiles".to_string());
+        b.captures
+            .insert("table".to_string(), "profiles".to_string());
         // No prose objects at all — before W7 the veto could not see the captures and the
         // empty prose sets disabled it, so the same-rule-adjacent signal fused the pair.
         assert!(structural_objects(&a).is_empty() && structural_objects(&b).is_empty());
@@ -15653,7 +16035,11 @@ mod tests {
             1,
             "C pair-merges with member B and must join the group: {out:?}"
         );
-        assert_eq!(out[0].also_locations.len(), 2, "both absorbed sites preserved");
+        assert_eq!(
+            out[0].also_locations.len(),
+            2,
+            "both absorbed sites preserved"
+        );
     }
 
     /// req_c4 (non-regression): a genuinely SHARED full object is still identity evidence —
@@ -15670,7 +16056,11 @@ mod tests {
             "the identical table on both sides is shared identity, never a conflict"
         );
         let out = merge_semantic_groups(vec![a, b], &[]);
-        assert_eq!(out.len(), 1, "same rule, same table, 4 lines apart: one row: {out:?}");
+        assert_eq!(
+            out.len(),
+            1,
+            "same rule, same table, 4 lines apart: one row: {out:?}"
+        );
     }
 
     // ── REG-5: split_into_sentences / strip_cross_reference_sentences must never insert a
@@ -16335,7 +16725,8 @@ mod tests {
             "some-pkg@1.0.0",
         );
         let completer = FailingCompleter;
-        let (out, _) = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let (out, _) =
+            generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].fix_specific, None);
         // No model call was ever attempted — FailingCompleter would have surfaced it as a
@@ -16384,7 +16775,8 @@ mod tests {
         let completer = StubCompleter {
             text: "complete garbage, not json".to_string(),
         };
-        let (out, _) = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let (out, _) =
+            generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].fix_specific, None, "must never fabricate a fix");
         assert!(
@@ -16432,7 +16824,8 @@ mod tests {
             // Round 1 (after feedback): a grounded correction.
             r#"{"fixes":[{"index":0,"fix":"Check the caller owns `id` before calling delete_order(id)."}]}"#,
         ]);
-        let (out, _) = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let (out, _) =
+            generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
         assert_eq!(
             out[0].fix_specific.as_deref(),
             Some("Check the caller owns `id` before calling delete_order(id).")
@@ -16456,7 +16849,8 @@ mod tests {
             // Round 1: addresses the real gap instead.
             r#"{"fixes":[{"index":0,"fix":"Replace the `any` casts in foo.ts with explicit types."}]}"#,
         ]);
-        let (out, _) = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let (out, _) =
+            generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
         assert_eq!(
             out[0].fix_specific.as_deref(),
             Some("Replace the `any` casts in foo.ts with explicit types.")
@@ -16471,7 +16865,8 @@ mod tests {
             r#"{"fixes":[{"index":0,"fix":"Camerata detected this via a regex scan; fix the concatenation."}]}"#,
             r#"{"fixes":[{"index":0,"fix":"Use a parameterized query in a.rs instead of concatenation."}]}"#,
         ]);
-        let (out, _) = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let (out, _) =
+            generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
         let saved = out[0].fix_specific.as_deref().unwrap_or_default();
         assert!(!saved.to_ascii_lowercase().contains("camerata"));
         assert!(!saved.to_ascii_lowercase().contains("regex"));
@@ -16521,7 +16916,10 @@ mod tests {
     async fn generate_fix_specifics_instantiates_the_authored_remediation_on_give_up() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
         let mut f = fx(
             "SUPABASE-RLS-ENABLED-1",
             "supabase/migrations/1.sql",
@@ -16529,7 +16927,8 @@ mod tests {
             "no RLS evidence for `profiles`",
             "CREATE TABLE profiles (...)",
         );
-        f.captures.insert("table".to_string(), "profiles".to_string());
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
 
         let (out, failed_passes) = generate_fix_specifics(
             &FailingCompleter,
@@ -16542,11 +16941,10 @@ mod tests {
         )
         .await;
 
-        let fix = out[0]
-            .fix_specific
-            .as_deref()
-            .expect("a give-up with an authored remediation available must still populate \
-                     fix_specific — never leave the row with no codebase-specific fix line");
+        let fix = out[0].fix_specific.as_deref().expect(
+            "a give-up with an authored remediation available must still populate \
+                     fix_specific — never leave the row with no codebase-specific fix line",
+        );
         assert!(
             fix.contains("profiles"),
             "the instantiated fallback must name THIS finding's own identifier (the table \
@@ -16558,7 +16956,10 @@ mod tests {
             "every placeholder token must be substituted — no raw `<token>` left in the \
              client-facing fix: {fix}"
         );
-        assert!(!out[0].needs_review, "a fix-generation failure never hedges the finding");
+        assert!(
+            !out[0].needs_review,
+            "a fix-generation failure never hedges the finding"
+        );
 
         assert_eq!(
             failed_passes.len(),
@@ -16587,11 +16988,14 @@ mod tests {
     /// own tests) to re-route a row like this to "held" at export time rather than ship an
     /// action-bucket row with no fix text anywhere.
     #[tokio::test]
-    async fn generate_fix_specifics_leaves_fix_specific_none_when_the_rule_has_no_authored_remediation()
-     {
+    async fn generate_fix_specifics_leaves_fix_specific_none_when_the_rule_has_no_authored_remediation(
+    ) {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
         let f = fx(
             "AI-CUSTOM-ARCH-RULE-1",
             "a.rs",
@@ -16673,7 +17077,8 @@ mod tests {
             .map(|i| fx("ARCH-1", "a.rs", i, "some real defect", "let x = 1;"))
             .collect();
 
-        let (_, _) = generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
+        let (_, _) =
+            generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
 
         let seen = completer.seen.lock().unwrap();
         let expected = scaled_max_tokens(FIX_BATCH_SIZE, FIX_TOKENS_PER_FINDING);
@@ -16698,14 +17103,15 @@ mod tests {
     /// so every batched round AND the solo round all run; the LAST call this completer sees
     /// is therefore from the solo round.
     #[tokio::test]
-    async fn generate_fix_specifics_solo_retry_round_uses_a_smaller_max_tokens_than_the_batched_rounds()
-     {
+    async fn generate_fix_specifics_solo_retry_round_uses_a_smaller_max_tokens_than_the_batched_rounds(
+    ) {
         let completer = CapturingCompleter::default();
         let findings: Vec<Finding> = (0..FIX_BATCH_SIZE)
             .map(|i| fx("ARCH-1", "a.rs", i, "some real defect", "let x = 1;"))
             .collect();
 
-        let (_, _) = generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
+        let (_, _) =
+            generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
 
         let seen = completer.seen.lock().unwrap();
         let batched_rounds = MAX_FIX_REGENERATIONS + 1;
@@ -16737,7 +17143,8 @@ mod tests {
         let completer = CapturingCompleter::default();
         let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
 
-        let (_, _) = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let (_, _) =
+            generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
 
         let seen = completer.seen.lock().unwrap();
         assert_eq!(seen[0].max_tokens, 4096);
@@ -16765,7 +17172,8 @@ mod tests {
             canned,
         };
 
-        let (out, _) = generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
+        let (out, _) =
+            generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
 
         assert_eq!(out.len(), n, "no finding dropped across chunk boundaries");
         assert!(

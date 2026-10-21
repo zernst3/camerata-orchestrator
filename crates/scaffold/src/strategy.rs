@@ -30,15 +30,30 @@ pub enum ScaffoldStrategy {
 /// not a feature the skeleton merely doesn't have YET (persistence and auth are
 /// deliberately NOT here — see `choose_strategy`'s doc comment).
 const DISQUALIFYING_SIGNALS: &[(&str, &str)] = &[
-    ("desktop app", "a native desktop application shell, not a web PWA"),
-    ("desktop-only", "a native desktop application shell, not a web PWA"),
-    ("native desktop", "a native desktop application shell, not a web PWA"),
+    (
+        "desktop app",
+        "a native desktop application shell, not a web PWA",
+    ),
+    (
+        "desktop-only",
+        "a native desktop application shell, not a web PWA",
+    ),
+    (
+        "native desktop",
+        "a native desktop application shell, not a web PWA",
+    ),
     ("ios app", "a native iOS mobile application"),
     ("android app", "a native Android mobile application"),
     ("native mobile", "a native mobile application"),
     ("cli tool", "a command-line interface, not a web UI"),
-    ("command-line tool", "a command-line interface, not a web UI"),
-    ("command line interface", "a command-line interface, not a web UI"),
+    (
+        "command-line tool",
+        "a command-line interface, not a web UI",
+    ),
+    (
+        "command line interface",
+        "a command-line interface, not a web UI",
+    ),
     ("terminal application", "a terminal UI, not a web UI"),
     (
         "browser extension",
@@ -52,8 +67,14 @@ const DISQUALIFYING_SIGNALS: &[(&str, &str)] = &[
         "embedded system",
         "an embedded/firmware target, not a web runtime",
     ),
-    ("microcontroller", "an embedded/firmware target, not a web runtime"),
-    ("iot device", "an embedded/firmware target, not a web runtime"),
+    (
+        "microcontroller",
+        "an embedded/firmware target, not a web runtime",
+    ),
+    (
+        "iot device",
+        "an embedded/firmware target, not a web runtime",
+    ),
     (
         "system tray",
         "an OS-level background/tray process, not a web page",

@@ -52,7 +52,11 @@ fn branch_sort_key(name: &str) -> u8 {
 /// unit-testable with no VirtualDom.
 pub fn sort_branches(branches: &[String]) -> Vec<String> {
     let mut sorted = branches.to_vec();
-    sorted.sort_by(|a, b| branch_sort_key(a).cmp(&branch_sort_key(b)).then_with(|| a.cmp(b)));
+    sorted.sort_by(|a, b| {
+        branch_sort_key(a)
+            .cmp(&branch_sort_key(b))
+            .then_with(|| a.cmp(b))
+    });
     sorted
 }
 
@@ -93,17 +97,32 @@ mod tests {
 
     #[test]
     fn commit_matches_on_subject() {
-        assert!(commit_matches("abc1234", "Fix the login bug", "someone", "LOGIN"));
+        assert!(commit_matches(
+            "abc1234",
+            "Fix the login bug",
+            "someone",
+            "LOGIN"
+        ));
     }
 
     #[test]
     fn commit_matches_on_author() {
-        assert!(commit_matches("abc1234", "subject", "Zachary Ernst", "zachary"));
+        assert!(commit_matches(
+            "abc1234",
+            "subject",
+            "Zachary Ernst",
+            "zachary"
+        ));
     }
 
     #[test]
     fn commit_non_match_across_all_fields_returns_false() {
-        assert!(!commit_matches("abc1234", "subject line", "Zach", "nonexistent"));
+        assert!(!commit_matches(
+            "abc1234",
+            "subject line",
+            "Zach",
+            "nonexistent"
+        ));
     }
 
     // ── Branch-list sort: main/master pinned first, then alphabetical ─────────────
@@ -115,7 +134,10 @@ mod tests {
     #[test]
     fn sort_branches_pins_main_first() {
         let input = strs(&["zeta", "alpha", "main", "beta"]);
-        assert_eq!(sort_branches(&input), strs(&["main", "alpha", "beta", "zeta"]));
+        assert_eq!(
+            sort_branches(&input),
+            strs(&["main", "alpha", "beta", "zeta"])
+        );
     }
 
     #[test]

@@ -110,11 +110,17 @@ mod tests {
     use super::*;
 
     fn view<'a>(files: &'a [(String, String)]) -> RepoView<'a> {
-        RepoView { spec: "test/repo", files }
+        RepoView {
+            spec: "test/repo",
+            files,
+        }
     }
 
     fn files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
-        pairs.into_iter().map(|(p, c)| (p.to_string(), c.to_string())).collect()
+        pairs
+            .into_iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect()
     }
 
     #[test]
@@ -150,7 +156,10 @@ mod tests {
 
     #[test]
     fn conftest_and_init_are_exempt_even_though_conftest_ends_in_test_py() {
-        let f = files(vec![("tests/conftest.py", "import pytest\n"), ("tests/__init__.py", "")]);
+        let f = files(vec![
+            ("tests/conftest.py", "import pytest\n"),
+            ("tests/__init__.py", ""),
+        ]);
         assert!(PythonTestFileNamingChecker.check(&view(&f)).is_empty());
     }
 
@@ -192,7 +201,10 @@ mod tests {
     #[test]
     fn no_test_directory_files_never_applies() {
         let f = files(vec![("README.md", "hello"), ("app/main.py", "pass\n")]);
-        assert!(!crate::arch_checker::checker_applies(&PythonTestFileNamingChecker, &f));
+        assert!(!crate::arch_checker::checker_applies(
+            &PythonTestFileNamingChecker,
+            &f
+        ));
     }
 
     #[test]

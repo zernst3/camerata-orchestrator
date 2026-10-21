@@ -68,7 +68,10 @@ fn default_warn_after_days() -> u64 {
 /// The bundled watermark path, `crates/rules/CORPUS_FRESHNESS.toml`, resolved from the crate's
 /// manifest dir (the sibling of `principles/`). Mirrors [`crate::corpus_path`].
 pub fn corpus_freshness_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/CORPUS_FRESHNESS.toml"))
+    std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/CORPUS_FRESHNESS.toml"
+    ))
 }
 
 /// A domain whose last confirmation is older than its staleness window.
@@ -127,7 +130,11 @@ impl CorpusFreshness {
                 }
             })
             .collect();
-        out.sort_by(|a, b| b.days_since.cmp(&a.days_since).then(a.domain.cmp(&b.domain)));
+        out.sort_by(|a, b| {
+            b.days_since
+                .cmp(&a.days_since)
+                .then(a.domain.cmp(&b.domain))
+        });
         out
     }
 
@@ -193,8 +200,8 @@ pub fn confirm_in_text(text: &str, domain: &str, date: &str) -> Result<String, F
     let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
 
     // Existing entry (ignoring leading whitespace)?
-    if let Some(idx) = (header + 1..body_end)
-        .find(|&i| lines[i].trim_start().starts_with(&key_prefix))
+    if let Some(idx) =
+        (header + 1..body_end).find(|&i| lines[i].trim_start().starts_with(&key_prefix))
     {
         out[idx] = new_entry;
     } else {
@@ -228,7 +235,10 @@ pub fn confirm_domain(path: &Path, domain: &str, date: &str) -> Result<(), Fresh
 /// Format the human-facing staleness nag for a set of overdue and never-confirmed domains, or
 /// `None` when the corpus is fully fresh (nothing to say). Non-fatal text a caller prints in a
 /// load banner or the daily digest - it never blocks a scan or export.
-pub fn format_staleness_nag(overdue: &[OverdueDomain], never_confirmed: &[String]) -> Option<String> {
+pub fn format_staleness_nag(
+    overdue: &[OverdueDomain],
+    never_confirmed: &[String],
+) -> Option<String> {
     if overdue.is_empty() && never_confirmed.is_empty() {
         return None;
     }
@@ -267,8 +277,14 @@ mod tests {
         assert_eq!(days_from_civil(1969, 12, 31), -1);
         assert_eq!(days_from_civil(2000, 1, 1), 10957);
         // A one-year span is 365 days (2001 is not a leap year).
-        assert_eq!(days_from_civil(2001, 1, 1) - days_from_civil(2000, 1, 1), 366); // 2000 is leap
-        assert_eq!(days_from_civil(2002, 1, 1) - days_from_civil(2001, 1, 1), 365);
+        assert_eq!(
+            days_from_civil(2001, 1, 1) - days_from_civil(2000, 1, 1),
+            366
+        ); // 2000 is leap
+        assert_eq!(
+            days_from_civil(2002, 1, 1) - days_from_civil(2001, 1, 1),
+            365
+        );
     }
 
     fn fixture() -> CorpusFreshness {
@@ -306,7 +322,10 @@ mod tests {
         // 40 days after javascript's confirmation: past its 30-day override, still inside the
         // 90-day default every other pack uses.
         let overdue = f.overdue((2026, 11, 14));
-        let js = overdue.iter().find(|o| o.domain == "javascript").expect("js overdue");
+        let js = overdue
+            .iter()
+            .find(|o| o.domain == "javascript")
+            .expect("js overdue");
         assert_eq!(js.days_since, 40);
         assert_eq!(js.threshold_days, 30);
     }
@@ -337,7 +356,10 @@ mod tests {
             alsobad = "2026-13-40"
         "#;
         let f: CorpusFreshness = toml::from_str(toml).unwrap();
-        assert_eq!(f.unparseable(), vec!["alsobad".to_string(), "broken".to_string()]);
+        assert_eq!(
+            f.unparseable(),
+            vec!["alsobad".to_string(), "broken".to_string()]
+        );
         // The bad rows are skipped by overdue(), not crashed on.
         let _ = f.overdue((2030, 1, 1));
     }
@@ -363,8 +385,14 @@ mod tests {
     fn empty_confirmed_reports_every_domain_as_never_confirmed() {
         let f: CorpusFreshness = toml::from_str("warn_after_days = 90").unwrap();
         let domains = vec!["rust".to_string(), "go".to_string()];
-        assert_eq!(f.never_confirmed(&domains), vec!["go".to_string(), "rust".to_string()]);
-        assert!(f.overdue((2030, 1, 1)).is_empty(), "nothing confirmed -> nothing 'overdue'");
+        assert_eq!(
+            f.never_confirmed(&domains),
+            vec!["go".to_string(), "rust".to_string()]
+        );
+        assert!(
+            f.overdue((2030, 1, 1)).is_empty(),
+            "nothing confirmed -> nothing 'overdue'"
+        );
     }
 
     #[test]
@@ -385,9 +413,15 @@ mod tests {
     #[test]
     fn confirm_updates_an_existing_domain_in_place_preserving_comments() {
         let out = confirm_in_text(WATERMARK, "go", "2026-10-20").unwrap();
-        assert!(out.contains("# header comment, must survive"), "header comment lost");
+        assert!(
+            out.contains("# header comment, must survive"),
+            "header comment lost"
+        );
         assert!(out.contains("go = \"2026-10-20\""), "go not advanced");
-        assert!(!out.contains("go = \"2026-07-01\""), "old go date left behind");
+        assert!(
+            !out.contains("go = \"2026-07-01\""),
+            "old go date left behind"
+        );
         assert!(out.contains("rust = \"2026-08-01\""), "sibling clobbered");
         // Still parses, and go is now the confirmed value.
         let f: CorpusFreshness = toml::from_str(&out).unwrap();

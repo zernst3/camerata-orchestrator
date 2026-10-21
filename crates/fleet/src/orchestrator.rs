@@ -17,7 +17,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use camerata_agent::{render_rules_file, HeartbeatFn, GATE_EVENTS_FILE_ENV, MCP_SERVER_KEY, RULES_FILE_ENV, WORKTREE_ROOT_ENV};
+use camerata_agent::{
+    render_rules_file, HeartbeatFn, GATE_EVENTS_FILE_ENV, MCP_SERVER_KEY, RULES_FILE_ENV,
+    WORKTREE_ROOT_ENV,
+};
 use camerata_core::{AgentDriver, Role};
 
 use crate::tier::{CapabilityBand, TierMap};
@@ -156,7 +159,10 @@ pub fn render_orchestrator_mcp_config(
         DELEGATE_MODELS_ENV.to_string(),
         delegate_models_json(tier_map, vision_enabled)?,
     );
-    env.insert(GATEWAY_BIN_ENV.to_string(), gateway_bin.display().to_string());
+    env.insert(
+        GATEWAY_BIN_ENV.to_string(),
+        gateway_bin.display().to_string(),
+    );
     env.insert(DELEGATE_DEPTH_ENV.to_string(), "0".to_string());
 
     let server = serde_json::json!({
@@ -282,10 +288,10 @@ mod tests {
     #[test]
     fn lead_is_the_first_strongest_task() {
         let tasks = vec![
-            task(TaskKind::Test, "tests"),         // Fast
-            task(TaskKind::Database, "schema"),    // Balanced
-            task(TaskKind::Backend, "domain a"),   // Strongest  <- lead
-            task(TaskKind::Backend, "domain b"),   // Strongest
+            task(TaskKind::Test, "tests"),       // Fast
+            task(TaskKind::Database, "schema"),  // Balanced
+            task(TaskKind::Backend, "domain a"), // Strongest  <- lead
+            task(TaskKind::Backend, "domain b"), // Strongest
         ];
         assert_eq!(lead_stage_index(&tasks), Some(2));
     }
@@ -445,7 +451,10 @@ mod tests {
     #[test]
     fn prompt_suffix_omits_vision_block_when_disabled() {
         let s = orchestrator_prompt_suffix(false);
-        assert!(!s.contains("VISION/DESIGN WORK"), "no vision block when disabled");
+        assert!(
+            !s.contains("VISION/DESIGN WORK"),
+            "no vision block when disabled"
+        );
         assert!(!s.to_lowercase().contains("html/tailwind mockup"));
     }
 

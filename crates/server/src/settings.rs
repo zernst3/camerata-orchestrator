@@ -25,10 +25,12 @@ where
     D: serde::Deserializer<'de>,
 {
     let opt: Option<String> = Option::deserialize(deserializer)?;
-    Ok(match opt.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
-        Some(ref s) if s == "api" => ProjectBackend::Api,
-        _ => ProjectBackend::Cli,
-    })
+    Ok(
+        match opt.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+            Some(ref s) if s == "api" => ProjectBackend::Api,
+            _ => ProjectBackend::Cli,
+        },
+    )
 }
 
 /// The persisted settings document.
@@ -62,7 +64,11 @@ pub struct Settings {
     /// gone. `#[serde(alias = "llm_backend")]` + the tolerant [`deserialize_chat_backend`]
     /// means an old settings.json (key `llm_backend`, value `null`/`"cli"`/`"api"`/anything
     /// else) still loads cleanly, collapsing straight to this field.
-    #[serde(default, alias = "llm_backend", deserialize_with = "deserialize_chat_backend")]
+    #[serde(
+        default,
+        alias = "llm_backend",
+        deserialize_with = "deserialize_chat_backend"
+    )]
     pub chat_backend: ProjectBackend,
     /// OpenRouter provider-safety policy (safe-by-default no-train/no-retain provider
     /// enforcement) — see `docs/design/2026-07-28_openrouter-provider-safety.md`.
@@ -302,7 +308,10 @@ mod tests {
     fn provider_policy_defaults_to_safe_mode_on_with_no_pin_before_anything_is_set() {
         let store = SettingsStore::new();
         let policy = store.provider_policy();
-        assert!(policy.safe_mode, "a fresh store must read as safe_mode=true");
+        assert!(
+            policy.safe_mode,
+            "a fresh store must read as safe_mode=true"
+        );
         assert_eq!(policy.pinned_provider, None);
     }
 
@@ -342,16 +351,23 @@ mod tests {
     /// field. This is the fail-safe-on-upgrade guarantee.
     #[test]
     fn settings_file_without_provider_policy_key_loads_as_safe_default() {
-        let dir = std::env::temp_dir()
-            .join(format!("camerata-settings-legacy-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("camerata-settings-legacy-{}", std::process::id()));
         let path = dir.join("settings.json");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // A settings file with only the pre-existing fields, no `provider_policy` key.
-        std::fs::write(&path, r#"{"workspace_root": "/tmp/ws", "chat_model": null, "llm_backend": null}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"workspace_root": "/tmp/ws", "chat_model": null, "llm_backend": null}"#,
+        )
+        .unwrap();
         let store = SettingsStore::load_or_new(path);
         let policy = store.provider_policy();
-        assert!(policy.safe_mode, "missing provider_policy key must default to safe_mode=true");
+        assert!(
+            policy.safe_mode,
+            "missing provider_policy key must default to safe_mode=true"
+        );
         assert_eq!(policy.pinned_provider, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -365,11 +381,17 @@ mod tests {
             safe_mode: false,
             pinned_provider: Some("deepinfra".to_string()),
         });
-        assert!(!store.provider_policy().safe_mode, "precondition: testing mode was on");
+        assert!(
+            !store.provider_policy().safe_mode,
+            "precondition: testing mode was on"
+        );
 
         let reset = store.reset_provider_policy_to_safe_on_startup();
 
-        assert!(reset.safe_mode, "the reset must force safe_mode back to true");
+        assert!(
+            reset.safe_mode,
+            "the reset must force safe_mode back to true"
+        );
         assert_eq!(
             reset.pinned_provider.as_deref(),
             Some("deepinfra"),
@@ -409,8 +431,8 @@ mod tests {
     /// silently left on across sessions").
     #[test]
     fn startup_reset_survives_a_simulated_process_restart() {
-        let dir = std::env::temp_dir()
-            .join(format!("camerata-settings-reset-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("camerata-settings-reset-{}", std::process::id()));
         let path = dir.join("settings.json");
         let _ = std::fs::remove_dir_all(&dir);
         {
@@ -425,21 +447,34 @@ mod tests {
             // "Session 2": a fresh process boots, loads the same file, and runs the reset —
             // exactly the `AppState::from_env` sequence.
             let store = SettingsStore::load_or_new(path.clone());
-            assert!(!store.provider_policy().safe_mode, "loaded the OFF value from disk");
+            assert!(
+                !store.provider_policy().safe_mode,
+                "loaded the OFF value from disk"
+            );
             store.reset_provider_policy_to_safe_on_startup();
         }
         // "Session 3": reload again to prove the reset itself persisted (not just an
         // in-memory return value that a real process boot would also throw away).
         let reloaded = SettingsStore::load_or_new(path);
-        assert!(reloaded.provider_policy().safe_mode, "safe_mode must never survive a restart as OFF");
-        assert_eq!(reloaded.provider_policy().pinned_provider.as_deref(), Some("deepinfra"));
+        assert!(
+            reloaded.provider_policy().safe_mode,
+            "safe_mode must never survive a restart as OFF"
+        );
+        assert_eq!(
+            reloaded.provider_policy().pinned_provider.as_deref(),
+            Some("deepinfra")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn set_and_get_chat_backend() {
         let store = SettingsStore::new();
-        assert_eq!(store.chat_backend(), ProjectBackend::Cli, "a fresh store defaults to Cli");
+        assert_eq!(
+            store.chat_backend(),
+            ProjectBackend::Cli,
+            "a fresh store defaults to Cli"
+        );
         store.set_chat_backend(ProjectBackend::Api);
         assert_eq!(store.chat_backend(), ProjectBackend::Api);
         store.set_chat_backend(ProjectBackend::Cli);
@@ -448,8 +483,10 @@ mod tests {
 
     #[test]
     fn chat_backend_persists_across_reload() {
-        let dir =
-            std::env::temp_dir().join(format!("camerata-settings-chatbackend-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-settings-chatbackend-{}",
+            std::process::id()
+        ));
         let path = dir.join("settings.json");
         let _ = std::fs::remove_dir_all(&dir);
         {
@@ -467,8 +504,10 @@ mod tests {
     /// "llm_backend")]` — collapsing straight onto the new `chat_backend` field.
     #[test]
     fn legacy_llm_backend_key_migrates_to_chat_backend() {
-        let dir = std::env::temp_dir()
-            .join(format!("camerata-settings-legacy-backend-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-settings-legacy-backend-{}",
+            std::process::id()
+        ));
         let path = dir.join("settings.json");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

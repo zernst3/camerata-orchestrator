@@ -15,11 +15,14 @@ fn top_level(domain: &str) -> String {
 
 #[tokio::test]
 async fn bundled_freshness_file_loads_and_is_well_formed() {
-    let loaded = CorpusFreshness::load(&corpus_freshness_path())
-        .expect("CORPUS_FRESHNESS.toml must parse");
+    let loaded =
+        CorpusFreshness::load(&corpus_freshness_path()).expect("CORPUS_FRESHNESS.toml must parse");
     let freshness = loaded.expect("CORPUS_FRESHNESS.toml must exist in the crate");
 
-    assert!(freshness.warn_after_days > 0, "the default staleness window must be positive");
+    assert!(
+        freshness.warn_after_days > 0,
+        "the default staleness window must be positive"
+    );
     assert!(
         freshness.unparseable().is_empty(),
         "every date in CORPUS_FRESHNESS.toml must be YYYY-MM-DD; offenders: {:?}",
@@ -32,8 +35,7 @@ async fn every_watermarked_domain_is_a_real_corpus_domain() {
     let (corpus, errors) = load_corpus_lenient(&corpus_path()).await;
     assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
 
-    let corpus_domains: BTreeSet<String> =
-        corpus.iter().map(|r| top_level(&r.domain)).collect();
+    let corpus_domains: BTreeSet<String> = corpus.iter().map(|r| top_level(&r.domain)).collect();
 
     let freshness = CorpusFreshness::load(&corpus_freshness_path())
         .expect("parse")

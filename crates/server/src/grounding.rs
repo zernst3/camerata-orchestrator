@@ -350,8 +350,12 @@ mod tests {
 
     #[test]
     fn assemble_reports_unresolved_repos() {
-        let out = assemble(None, &[], &[("o/r".to_string(), "no local path set".to_string())])
-            .expect("some");
+        let out = assemble(
+            None,
+            &[],
+            &[("o/r".to_string(), "no local path set".to_string())],
+        )
+        .expect("some");
         assert!(out.contains("WITHOUT A LOCAL CLONE"));
         assert!(out.contains("o/r: no local path set"));
     }
@@ -373,7 +377,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
-        std::fs::write(dir.join("README.md"), "# Demo\nA Dioxus + Axum + SQLx app.\n").unwrap();
+        std::fs::write(
+            dir.join("README.md"),
+            "# Demo\nA Dioxus + Axum + SQLx app.\n",
+        )
+        .unwrap();
         // A secret file must NOT appear in the tree.
         std::fs::write(dir.join(".env"), "SECRET=abc123\n").unwrap();
 

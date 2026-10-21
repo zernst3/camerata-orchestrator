@@ -178,7 +178,11 @@ pub fn detect_secrets(text: &str) -> Vec<SecretMatch> {
         (SecretKind::OpenAiKey, openai_key_regex()),
     ] {
         for m in re.find_iter(text) {
-            matches.push(SecretMatch { start: m.start(), end: m.end(), kind });
+            matches.push(SecretMatch {
+                start: m.start(),
+                end: m.end(),
+                kind,
+            });
         }
     }
 
@@ -187,7 +191,11 @@ pub fn detect_secrets(text: &str) -> Vec<SecretMatch> {
             .iter()
             .any(|existing| m.start() < existing.end && existing.start < m.end());
         if !overlaps_more_specific {
-            matches.push(SecretMatch { start: m.start(), end: m.end(), kind: SecretKind::BearerToken });
+            matches.push(SecretMatch {
+                start: m.start(),
+                end: m.end(),
+                kind: SecretKind::BearerToken,
+            });
         }
     }
 
@@ -230,7 +238,10 @@ pub struct ScrubResult {
 pub fn scrub(text: &str) -> ScrubResult {
     let matches = detect_secrets(text);
     if matches.is_empty() {
-        return ScrubResult { scrubbed: text.to_string(), extracted: Vec::new() };
+        return ScrubResult {
+            scrubbed: text.to_string(),
+            extracted: Vec::new(),
+        };
     }
 
     let mut scrubbed = String::with_capacity(text.len());
@@ -254,7 +265,10 @@ pub fn scrub(text: &str) -> ScrubResult {
     }
     scrubbed.push_str(&text[cursor..]);
 
-    ScrubResult { scrubbed, extracted }
+    ScrubResult {
+        scrubbed,
+        extracted,
+    }
 }
 
 // ─── tests ──────────────────────────────────────────────────────────────────────
@@ -288,7 +302,8 @@ mod tests {
 
     #[test]
     fn detects_pem_private_key_header_only() {
-        let sample = "here is a key:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow...(truncated, no footer)";
+        let sample =
+            "here is a key:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow...(truncated, no footer)";
         let matches = detect_secrets(sample);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].kind, SecretKind::PemPrivateKey);
@@ -312,7 +327,10 @@ mod tests {
         let matches = detect_secrets(sample);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].kind, SecretKind::AwsAccessKey);
-        assert_eq!(&sample[matches[0].start..matches[0].end], "AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(
+            &sample[matches[0].start..matches[0].end],
+            "AKIAIOSFODNN7EXAMPLE"
+        );
     }
 
     #[test]
@@ -370,7 +388,10 @@ mod tests {
         let sample = "The API key rotation policy says to rotate secrets every 90 days. \
             Please update your token before the deadline. Bearer bonds are a kind of \
             debt instrument, unrelated to HTTP auth.";
-        assert!(detect_secrets(sample).is_empty(), "false positive on ordinary prose");
+        assert!(
+            detect_secrets(sample).is_empty(),
+            "false positive on ordinary prose"
+        );
     }
 
     #[test]
@@ -399,7 +420,10 @@ mod tests {
 
     #[test]
     fn azure_account_key_clause_alone_without_the_protocol_clause_is_not_flagged() {
-        assert!(detect_secrets("AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq==").is_empty());
+        assert!(detect_secrets(
+            "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq=="
+        )
+        .is_empty());
     }
 
     #[test]
@@ -417,7 +441,10 @@ mod tests {
 
         assert!(!result.scrubbed.contains(&secret));
         assert!(result.scrubbed.contains("{{SECRET:stripe_key_1}}"));
-        assert_eq!(result.scrubbed, "leaked: {{SECRET:stripe_key_1}} in the console dump");
+        assert_eq!(
+            result.scrubbed,
+            "leaked: {{SECRET:stripe_key_1}} in the console dump"
+        );
 
         assert_eq!(result.extracted.len(), 1);
         assert_eq!(result.extracted[0].kind, SecretKind::StripeKey);
@@ -432,7 +459,9 @@ mod tests {
 
         assert_eq!(result.extracted.len(), 2);
         assert!(!result.scrubbed.contains("AKIAIOSFODNN7EXAMPLE"));
-        assert!(!result.scrubbed.contains("ghp_16C7e42F292c6912E7710c838347Ae178B4a"));
+        assert!(!result
+            .scrubbed
+            .contains("ghp_16C7e42F292c6912E7710c838347Ae178B4a"));
         assert!(result.scrubbed.contains("{{SECRET:aws_access_key_1}}"));
         assert!(result.scrubbed.contains("{{SECRET:github_token_1}}"));
     }

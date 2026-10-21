@@ -127,7 +127,12 @@ pub struct EvidenceEntry {
 
 impl EvidenceEntry {
     /// Construct a new entry, automatically mapping `kind` to its SOC-2 controls.
-    pub fn new(ts: impl Into<String>, actor: impl Into<String>, kind: impl Into<String>, description: impl Into<String>) -> Self {
+    pub fn new(
+        ts: impl Into<String>,
+        actor: impl Into<String>,
+        kind: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
         let kind = kind.into();
         let controls = controls_for_event_kind(&kind);
         Self {
@@ -177,7 +182,11 @@ impl GateDecision {
     }
 
     /// Construct a deny decision.
-    pub fn deny(ts: impl Into<String>, target: impl Into<String>, rule_id: impl Into<String>) -> Self {
+    pub fn deny(
+        ts: impl Into<String>,
+        target: impl Into<String>,
+        rule_id: impl Into<String>,
+    ) -> Self {
         Self {
             ts: ts.into(),
             verdict: "deny".to_string(),
@@ -330,7 +339,11 @@ pub struct ScopedScanSummary {
 
 impl UowEvidenceRecord {
     /// Create a new, empty evidence record for the given story + run.
-    pub fn new(story_id: impl Into<String>, run_id: impl Into<String>, created_at: impl Into<String>) -> Self {
+    pub fn new(
+        story_id: impl Into<String>,
+        run_id: impl Into<String>,
+        created_at: impl Into<String>,
+    ) -> Self {
         Self {
             story_id: story_id.into(),
             run_id: run_id.into(),
@@ -346,8 +359,15 @@ impl UowEvidenceRecord {
     }
 
     /// Add an event to the history, automatically mapping it to SOC-2 controls.
-    pub fn add_event(&mut self, ts: impl Into<String>, actor: impl Into<String>, kind: impl Into<String>, description: impl Into<String>) {
-        self.history.push(EvidenceEntry::new(ts, actor, kind, description));
+    pub fn add_event(
+        &mut self,
+        ts: impl Into<String>,
+        actor: impl Into<String>,
+        kind: impl Into<String>,
+        description: impl Into<String>,
+    ) {
+        self.history
+            .push(EvidenceEntry::new(ts, actor, kind, description));
     }
 
     /// Record a gate decision (allow or deny).
@@ -356,7 +376,12 @@ impl UowEvidenceRecord {
     }
 
     /// Record a rule that was enforced during this run.
-    pub fn record_rule(&mut self, rule_id: impl Into<String>, directive: impl Into<String>, enforcement: impl Into<String>) {
+    pub fn record_rule(
+        &mut self,
+        rule_id: impl Into<String>,
+        directive: impl Into<String>,
+        enforcement: impl Into<String>,
+    ) {
         self.rules_enforced.push(EnforcedRule {
             rule_id: rule_id.into(),
             directive: directive.into(),
@@ -370,7 +395,12 @@ impl UowEvidenceRecord {
     }
 
     /// Add a PR or commit link.
-    pub fn add_change_link(&mut self, kind: impl Into<String>, ref_: impl Into<String>, label: impl Into<String>) {
+    pub fn add_change_link(
+        &mut self,
+        kind: impl Into<String>,
+        ref_: impl Into<String>,
+        label: impl Into<String>,
+    ) {
         self.change_links.push(ChangeLink {
             kind: kind.into(),
             ref_: ref_.into(),
@@ -464,9 +494,9 @@ fn canonical_json_for_hashing(r: &UowEvidenceRecord) -> Result<String, serde_jso
 fn fnv1a_hex(s: &str) -> String {
     const OFFSET: u32 = 2_166_136_261;
     const PRIME: u32 = 16_777_619;
-    let hash = s.bytes().fold(OFFSET, |acc, byte| {
-        (acc ^ byte as u32).wrapping_mul(PRIME)
-    });
+    let hash = s
+        .bytes()
+        .fold(OFFSET, |acc, byte| (acc ^ byte as u32).wrapping_mul(PRIME));
     format!("{hash:08x}")
 }
 
@@ -491,8 +521,12 @@ pub fn render_pr_markdown(record: &UowEvidenceRecord) -> String {
 
     // ── Header ──────────────────────────────────────────────────────────────
     out.push_str("## Camerata Governance Evidence\n\n");
-    out.push_str("> **SOC-2 GAP ANALYSIS (ADVISORY)** — This artifact is produced by Camerata's \n");
-    out.push_str("> governed development engine. It surfaces potential compliance gaps and provides \n");
+    out.push_str(
+        "> **SOC-2 GAP ANALYSIS (ADVISORY)** — This artifact is produced by Camerata's \n",
+    );
+    out.push_str(
+        "> governed development engine. It surfaces potential compliance gaps and provides \n",
+    );
     out.push_str("> audit trail evidence. It does **not** certify SOC-2 compliance.\n\n");
 
     out.push_str(&format!(
@@ -577,15 +611,19 @@ pub fn render_pr_markdown(record: &UowEvidenceRecord) -> String {
     }
 
     // ── Gate decisions ───────────────────────────────────────────────────────
-    let denies: Vec<&GateDecision> = record.gate_decisions.iter().filter(|d| d.verdict == "deny").collect();
-    let allows: usize = record.gate_decisions.iter().filter(|d| d.verdict == "allow").count();
+    let denies: Vec<&GateDecision> = record
+        .gate_decisions
+        .iter()
+        .filter(|d| d.verdict == "deny")
+        .collect();
+    let allows: usize = record
+        .gate_decisions
+        .iter()
+        .filter(|d| d.verdict == "allow")
+        .count();
     if !record.gate_decisions.is_empty() {
         out.push_str("### Gate Decisions\n\n");
-        out.push_str(&format!(
-            "{} allow, {} deny\n\n",
-            allows,
-            denies.len()
-        ));
+        out.push_str(&format!("{} allow, {} deny\n\n", allows, denies.len()));
         if !denies.is_empty() {
             out.push_str("<details><summary>Denied writes</summary>\n\n");
             out.push_str("| Timestamp | Rule | Target |\n");
@@ -637,20 +675,27 @@ pub fn render_pr_markdown(record: &UowEvidenceRecord) -> String {
     // ── SOC-2 control index ──────────────────────────────────────────────────
     // Build a deduplicated index of all controls referenced in this record, so an
     // auditor can quickly see which controls this UoW's evidence addresses.
-    let mut all_controls: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut all_controls: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     for e in &record.history {
         for c in &e.controls {
-            all_controls.entry(c.code.clone()).or_insert_with(|| c.description.clone());
+            all_controls
+                .entry(c.code.clone())
+                .or_insert_with(|| c.description.clone());
         }
     }
     for d in &record.gate_decisions {
         for c in &d.controls {
-            all_controls.entry(c.code.clone()).or_insert_with(|| c.description.clone());
+            all_controls
+                .entry(c.code.clone())
+                .or_insert_with(|| c.description.clone());
         }
     }
     if let Some(so) = &record.sign_off {
         for c in &so.controls {
-            all_controls.entry(c.code.clone()).or_insert_with(|| c.description.clone());
+            all_controls
+                .entry(c.code.clone())
+                .or_insert_with(|| c.description.clone());
         }
     }
     if !all_controls.is_empty() {
@@ -672,7 +717,9 @@ pub fn render_pr_markdown(record: &UowEvidenceRecord) -> String {
 /// Escape a string for use inside a markdown table cell. Replaces `|` with `&#124;`
 /// and strips newlines (a newline in a table cell breaks the table layout).
 fn escape_md_table(s: &str) -> String {
-    s.replace('|', "&#124;").replace('\n', " ").replace('\r', "")
+    s.replace('|', "&#124;")
+        .replace('\n', " ")
+        .replace('\r', "")
 }
 
 // ── Scoped security scan ──────────────────────────────────────────────────────
@@ -775,8 +822,14 @@ mod tests {
     fn run_event_maps_to_cc8_and_cc6() {
         let controls = controls_for_event_kind("run");
         let codes: Vec<&str> = controls.iter().map(|c| c.code.as_str()).collect();
-        assert!(codes.contains(&"CC8.1"), "run must map to CC8.1 (change management)");
-        assert!(codes.contains(&"CC6.8"), "run must map to CC6.8 (software change auth)");
+        assert!(
+            codes.contains(&"CC8.1"),
+            "run must map to CC8.1 (change management)"
+        );
+        assert!(
+            codes.contains(&"CC6.8"),
+            "run must map to CC6.8 (software change auth)"
+        );
     }
 
     #[test]
@@ -785,38 +838,64 @@ mod tests {
         let codes: Vec<&str> = controls.iter().map(|c| c.code.as_str()).collect();
         assert!(codes.contains(&"CC7.1"), "gate_deny must map to CC7.1");
         assert!(codes.contains(&"CC8.1"), "gate_deny must map to CC8.1");
-        assert!(codes.contains(&"CC6.1"), "gate_deny must map to CC6.1 (access control)");
+        assert!(
+            codes.contains(&"CC6.1"),
+            "gate_deny must map to CC6.1 (access control)"
+        );
     }
 
     #[test]
     fn sign_off_maps_to_communication_controls() {
         let controls = controls_for_event_kind("sign_off");
         let codes: Vec<&str> = controls.iter().map(|c| c.code.as_str()).collect();
-        assert!(codes.contains(&"CC2.2"), "sign_off must map to CC2.2 (communication)");
-        assert!(codes.contains(&"CC4.2"), "sign_off must map to CC4.2 (deficiency eval)");
+        assert!(
+            codes.contains(&"CC2.2"),
+            "sign_off must map to CC2.2 (communication)"
+        );
+        assert!(
+            codes.contains(&"CC4.2"),
+            "sign_off must map to CC4.2 (deficiency eval)"
+        );
     }
 
     #[test]
     fn critical_finding_maps_to_a1_1() {
         let controls = controls_for_event_kind("critical_finding");
         let codes: Vec<&str> = controls.iter().map(|c| c.code.as_str()).collect();
-        assert!(codes.contains(&"A1.1"), "critical_finding must map to A1.1 (availability)");
-        assert!(codes.contains(&"CC7.2"), "critical_finding must map to CC7.2 (anomaly detection)");
+        assert!(
+            codes.contains(&"A1.1"),
+            "critical_finding must map to A1.1 (availability)"
+        );
+        assert!(
+            codes.contains(&"CC7.2"),
+            "critical_finding must map to CC7.2 (anomaly detection)"
+        );
     }
 
     #[test]
     fn unknown_kind_falls_back_to_cc8_1() {
         let controls = controls_for_event_kind("something_exotic");
         let codes: Vec<&str> = controls.iter().map(|c| c.code.as_str()).collect();
-        assert!(codes.contains(&"CC8.1"), "unknown kind must fall back to CC8.1");
+        assert!(
+            codes.contains(&"CC8.1"),
+            "unknown kind must fall back to CC8.1"
+        );
     }
 
     // ── EvidenceEntry ────────────────────────────────────────────────────────
 
     #[test]
     fn evidence_entry_new_populates_controls() {
-        let entry = EvidenceEntry::new("2026-06-20T00:00:00Z", "fleet", "run", "Governed run completed");
-        assert!(!entry.controls.is_empty(), "controls must be populated from kind");
+        let entry = EvidenceEntry::new(
+            "2026-06-20T00:00:00Z",
+            "fleet",
+            "run",
+            "Governed run completed",
+        );
+        assert!(
+            !entry.controls.is_empty(),
+            "controls must be populated from kind"
+        );
         assert!(entry.controls.iter().any(|c| c.code == "CC8.1"));
         assert_eq!(entry.kind, "run");
         assert_eq!(entry.actor, "fleet");
@@ -834,7 +913,11 @@ mod tests {
 
     #[test]
     fn gate_decision_deny_records_rule_id() {
-        let d = GateDecision::deny("2026-06-20T00:00:00Z", "src/auth.rs", "SEC-NO-HARDCODED-SECRETS-1");
+        let d = GateDecision::deny(
+            "2026-06-20T00:00:00Z",
+            "src/auth.rs",
+            "SEC-NO-HARDCODED-SECRETS-1",
+        );
         assert_eq!(d.verdict, "deny");
         assert_eq!(d.rule_id.as_deref(), Some("SEC-NO-HARDCODED-SECRETS-1"));
         assert!(d.controls.iter().any(|c| c.code == "CC6.1"));
@@ -857,7 +940,12 @@ mod tests {
     fn add_event_appends_to_history() {
         let mut r = UowEvidenceRecord::new("S-1", "r-1", "2026-06-20T00:00:00Z");
         r.add_event("2026-06-20T00:01:00Z", "fleet", "run", "Run started");
-        r.add_event("2026-06-20T00:02:00Z", "fleet", "gate_allow", "File written");
+        r.add_event(
+            "2026-06-20T00:02:00Z",
+            "fleet",
+            "gate_allow",
+            "File written",
+        );
         assert_eq!(r.history.len(), 2);
         assert_eq!(r.history[0].kind, "run");
         assert_eq!(r.history[1].kind, "gate_allow");
@@ -867,9 +955,21 @@ mod tests {
     fn record_gate_decision_splits_allow_deny() {
         let mut r = UowEvidenceRecord::new("S-1", "r-1", "2026-06-20T00:00:00Z");
         r.record_gate_decision(GateDecision::allow("2026-06-20T00:01:00Z", "src/main.rs"));
-        r.record_gate_decision(GateDecision::deny("2026-06-20T00:02:00Z", "src/auth.rs", "SEC-NO-HARDCODED-SECRETS-1"));
-        let allows: usize = r.gate_decisions.iter().filter(|d| d.verdict == "allow").count();
-        let denies: usize = r.gate_decisions.iter().filter(|d| d.verdict == "deny").count();
+        r.record_gate_decision(GateDecision::deny(
+            "2026-06-20T00:02:00Z",
+            "src/auth.rs",
+            "SEC-NO-HARDCODED-SECRETS-1",
+        ));
+        let allows: usize = r
+            .gate_decisions
+            .iter()
+            .filter(|d| d.verdict == "allow")
+            .count();
+        let denies: usize = r
+            .gate_decisions
+            .iter()
+            .filter(|d| d.verdict == "deny")
+            .count();
         assert_eq!(allows, 1);
         assert_eq!(denies, 1);
     }
@@ -899,7 +999,10 @@ mod tests {
         r.add_event("2026-06-20T00:01:00Z", "fleet", "run", "Governed run");
         r.compute_hash();
         assert!(!r.content_hash.is_empty(), "hash must be set after compute");
-        assert!(r.verify_hash(), "verify must pass immediately after compute");
+        assert!(
+            r.verify_hash(),
+            "verify must pass immediately after compute"
+        );
     }
 
     #[test]
@@ -922,13 +1025,21 @@ mod tests {
     #[test]
     fn hash_is_stable_across_recompute() {
         let mut r = UowEvidenceRecord::new("S-stable", "run-stable", "2026-06-20T00:00:00Z");
-        r.add_event("2026-06-20T00:01:00Z", "fleet", "gate_deny", "Deny detected");
+        r.add_event(
+            "2026-06-20T00:01:00Z",
+            "fleet",
+            "gate_deny",
+            "Deny detected",
+        );
         r.compute_hash();
         let first = r.content_hash.clone();
         // Re-compute should produce the same hash (stable serialization).
         r.content_hash = String::new();
         r.compute_hash();
-        assert_eq!(r.content_hash, first, "hash must be stable across re-computes");
+        assert_eq!(
+            r.content_hash, first,
+            "hash must be stable across re-computes"
+        );
     }
 
     // ── is_sign_off_blocked ──────────────────────────────────────────────────
@@ -963,8 +1074,14 @@ mod tests {
     fn render_includes_advisory_notice() {
         let r = UowEvidenceRecord::new("S-pr-1", "run-pr-1", "2026-06-20T00:00:00Z");
         let md = render_pr_markdown(&r);
-        assert!(md.contains("SOC-2 GAP ANALYSIS (ADVISORY)"), "must include advisory notice");
-        assert!(md.contains("does **not** certify"), "must disclaim certification");
+        assert!(
+            md.contains("SOC-2 GAP ANALYSIS (ADVISORY)"),
+            "must include advisory notice"
+        );
+        assert!(
+            md.contains("does **not** certify"),
+            "must disclaim certification"
+        );
     }
 
     #[test]
@@ -979,7 +1096,10 @@ mod tests {
     fn render_pending_sign_off_when_no_sign_off() {
         let r = UowEvidenceRecord::new("S-1", "r-1", "2026-06-20T00:00:00Z");
         let md = render_pr_markdown(&r);
-        assert!(md.contains("Pending sign-off"), "must show pending when no sign-off");
+        assert!(
+            md.contains("Pending sign-off"),
+            "must show pending when no sign-off"
+        );
     }
 
     #[test]
@@ -992,7 +1112,10 @@ mod tests {
             findings: Vec::new(),
         });
         let md = render_pr_markdown(&r);
-        assert!(md.contains("Sign-off BLOCKED"), "must show blocked when critical finding");
+        assert!(
+            md.contains("Sign-off BLOCKED"),
+            "must show blocked when critical finding"
+        );
     }
 
     #[test]
@@ -1015,7 +1138,10 @@ mod tests {
         let mut r = UowEvidenceRecord::new("S-1", "r-1", "2026-06-20T00:00:00Z");
         r.add_event("2026-06-20T00:01:00Z", "fleet", "run", "Run started");
         let md = render_pr_markdown(&r);
-        assert!(md.contains("Governance Event History"), "must include event history section");
+        assert!(
+            md.contains("Governance Event History"),
+            "must include event history section"
+        );
         assert!(md.contains("Run started"), "must include event description");
     }
 
@@ -1028,7 +1154,10 @@ mod tests {
             "SEC-NO-HARDCODED-SECRETS-1",
         ));
         let md = render_pr_markdown(&r);
-        assert!(md.contains("Gate Decisions"), "must include gate decisions section");
+        assert!(
+            md.contains("Gate Decisions"),
+            "must include gate decisions section"
+        );
         assert!(md.contains("deny"), "must show deny count");
     }
 
@@ -1037,7 +1166,10 @@ mod tests {
         let mut r = UowEvidenceRecord::new("S-1", "r-1", "2026-06-20T00:00:00Z");
         r.add_event("2026-06-20T00:01:00Z", "fleet", "run", "Run completed");
         let md = render_pr_markdown(&r);
-        assert!(md.contains("SOC-2 Control Index"), "must include control index");
+        assert!(
+            md.contains("SOC-2 Control Index"),
+            "must include control index"
+        );
         assert!(md.contains("CC8.1"), "must cite CC8.1 for a run event");
     }
 
@@ -1045,17 +1177,21 @@ mod tests {
     fn render_includes_camerata_footer() {
         let r = UowEvidenceRecord::new("S-1", "r-1", "2026-06-20T00:00:00Z");
         let md = render_pr_markdown(&r);
-        assert!(md.contains("Generated by"), "must include generated-by footer");
-        assert!(md.contains("ADVISORY ONLY"), "footer must repeat advisory label");
+        assert!(
+            md.contains("Generated by"),
+            "must include generated-by footer"
+        );
+        assert!(
+            md.contains("ADVISORY ONLY"),
+            "footer must repeat advisory label"
+        );
     }
 
     // ── scoped_audit ─────────────────────────────────────────────────────────
 
     #[test]
     fn scoped_audit_empty_changed_paths_returns_empty() {
-        let all_files = vec![
-            ("src/main.rs".to_string(), "fn main() {}".to_string()),
-        ];
+        let all_files = vec![("src/main.rs".to_string(), "fn main() {}".to_string())];
         let result = scoped_audit("owner/repo", &all_files, &[]);
         assert_eq!(result.summary.files_scanned, 0);
         assert_eq!(result.summary.total_findings, 0);
@@ -1067,7 +1203,8 @@ mod tests {
         // Clean file: no findings.
         let clean = "fn main() { println!(\"hello\"); }".to_string();
         // Dirty file: hardcoded secret pattern.
-        let dirty = "const PASSWORD: &str = \"hunter2_secret_password_verylongsecrethere\";".to_string();
+        let dirty =
+            "const PASSWORD: &str = \"hunter2_secret_password_verylongsecrethere\";".to_string();
         let all_files = vec![
             ("src/clean.rs".to_string(), clean),
             ("src/dirty.rs".to_string(), dirty),
@@ -1077,7 +1214,12 @@ mod tests {
         assert_eq!(clean_result.summary.files_scanned, 1, "only 1 file scanned");
         // The clean file may or may not produce findings — the important assertion is that
         // the dirty file's findings are NOT included.
-        let dirty_paths: Vec<&str> = clean_result.summary.findings.iter().map(|f| f.path.as_str()).collect();
+        let dirty_paths: Vec<&str> = clean_result
+            .summary
+            .findings
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
         assert!(
             !dirty_paths.contains(&"src/dirty.rs"),
             "findings from non-changed files must not appear in scoped scan"
@@ -1089,18 +1231,20 @@ mod tests {
         // The deterministic floor labels secrets as "critical".
         // We construct a file that triggers SEC-NO-HARDCODED-SECRETS-1.
         // Use a pattern the gate recognizes: a common password assignment.
-        let files = vec![
-            (
-                "src/config.rs".to_string(),
-                // The gate checks for secret-looking assignments; use a recognizable pattern.
-                "let api_key = \"AKIA1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ\";".to_string(),
-            ),
-        ];
+        let files = vec![(
+            "src/config.rs".to_string(),
+            // The gate checks for secret-looking assignments; use a recognizable pattern.
+            "let api_key = \"AKIA1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ\";".to_string(),
+        )];
         let result = scoped_audit("owner/repo", &files, &["src/config.rs".to_string()]);
         // If the gate fires, has_critical must be set. If the pattern doesn't fire on this
         // gate, the test still passes (the test is "IF a finding is critical, the flag is set").
         // We verify the structural invariant: has_critical matches findings severity.
-        let any_critical = result.summary.findings.iter().any(|f| f.severity == "critical");
+        let any_critical = result
+            .summary
+            .findings
+            .iter()
+            .any(|f| f.severity == "critical");
         assert_eq!(
             result.has_critical, any_critical,
             "has_critical must match whether any finding has severity 'critical'"
@@ -1109,9 +1253,10 @@ mod tests {
 
     #[test]
     fn scoped_audit_result_has_critical_matches_summary() {
-        let files = vec![
-            ("src/lib.rs".to_string(), "pub fn add(a: i32, b: i32) -> i32 { a + b }".to_string()),
-        ];
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }".to_string(),
+        )];
         let result = scoped_audit("owner/repo", &files, &["src/lib.rs".to_string()]);
         // The ScopedAuditResult and the ScopedScanSummary must agree on has_critical.
         assert_eq!(result.has_critical, result.summary.has_critical);
@@ -1223,7 +1368,11 @@ mod tests {
     #[test]
     fn bug_ev2_render_pr_markdown_includes_change_link_label() {
         let mut r = UowEvidenceRecord::new("S-EV2", "r-ev2", "2026-06-20T00:00:00Z");
-        r.add_change_link("pr", "https://github.com/org/repo/pull/42", "fix: add auth check");
+        r.add_change_link(
+            "pr",
+            "https://github.com/org/repo/pull/42",
+            "fix: add auth check",
+        );
         let md = render_pr_markdown(&r);
         assert!(
             md.contains("fix: add auth check"),

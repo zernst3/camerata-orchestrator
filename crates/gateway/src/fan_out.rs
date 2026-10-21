@@ -203,14 +203,9 @@ pub async fn run_fan_out(
         let tier = "balanced".to_string();
 
         join_set.spawn(async move {
-            let output = run_delegated(
-                &worker_config,
-                rule_subset_clone,
-                &framed_subtask,
-                &tier,
-            )
-            .await
-            .unwrap_or_else(|e| e.to_string());
+            let output = run_delegated(&worker_config, rule_subset_clone, &framed_subtask, &tier)
+                .await
+                .unwrap_or_else(|e| e.to_string());
 
             let incomplete = output.contains("INCOMPLETE:");
             WorkerResult {
@@ -296,9 +291,7 @@ mod tests {
             entry("frontend", "ui", "add page"),
             entry("backend", "api2", "another backend task"), // collision!
         ];
-        let err = run_fan_out(&cfg(0, 1), vec![], entries)
-            .await
-            .unwrap_err();
+        let err = run_fan_out(&cfg(0, 1), vec![], entries).await.unwrap_err();
         assert_eq!(err, FanOutError::DuplicateRepo("backend".to_string()));
     }
 
@@ -316,9 +309,7 @@ mod tests {
             entry("backend", "api", "do something"),
             entry("frontend", "ui", "do something else"),
         ];
-        let err = run_fan_out(&cfg(1, 1), vec![], entries)
-            .await
-            .unwrap_err();
+        let err = run_fan_out(&cfg(1, 1), vec![], entries).await.unwrap_err();
         assert_eq!(
             err,
             FanOutError::DepthExceeded {
@@ -341,10 +332,7 @@ mod tests {
     fn absolute_repo_is_used_as_is() {
         let base = std::path::Path::new("/work/project");
         let jail = worker_jail(base, "/repos/other-service");
-        assert_eq!(
-            jail,
-            std::path::PathBuf::from("/repos/other-service")
-        );
+        assert_eq!(jail, std::path::PathBuf::from("/repos/other-service"));
     }
 
     // ── assembly tests ────────────────────────────────────────────────────────
@@ -422,7 +410,9 @@ mod tests {
         ) -> std::io::Result<Box<dyn AgentDriver>> {
             self.models.lock().unwrap().push(model.to_string());
             self.worktrees.lock().unwrap().push(worktree.to_path_buf());
-            Ok(Box::new(EchoChild { model: model.into() }))
+            Ok(Box::new(EchoChild {
+                model: model.into(),
+            }))
         }
     }
 
@@ -449,7 +439,9 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 2);
         // Both workers ran via the factory (echo marker for the balanced model).
-        assert!(results.iter().all(|r| r.output.contains("ECHO model=claude-sonnet-5")));
+        assert!(results
+            .iter()
+            .all(|r| r.output.contains("ECHO model=claude-sonnet-5")));
 
         // The factory was asked for the balanced model TWICE (one per worker).
         let asked = factory.models.lock().unwrap().clone();
@@ -472,7 +464,10 @@ mod tests {
 
     #[test]
     fn fan_out_error_display_messages_are_descriptive() {
-        let e = FanOutError::DepthExceeded { depth: 1, max_depth: 1 };
+        let e = FanOutError::DepthExceeded {
+            depth: 1,
+            max_depth: 1,
+        };
         assert!(e.to_string().contains("depth guard tripped"));
         assert!(e.to_string().contains("depth=1"));
 

@@ -873,7 +873,9 @@ impl Gateway {
         };
         eprintln!("[gateway] propose_memory recorded");
         append_memory_proposal(&record);
-        format!("MEMORY PROPOSED: \"{text}\". Recorded for the human to curate; continue your work.")
+        format!(
+            "MEMORY PROPOSED: \"{text}\". Recorded for the human to curate; continue your work."
+        )
     }
 
     /// Governed delegation. ENABLED only in orchestrator mode (the lead agent's
@@ -994,12 +996,7 @@ impl Gateway {
         });
 
         // Dispatch all workers concurrently.
-        let result = fan_out::run_fan_out(
-            config,
-            (*self.rule_subset).clone(),
-            entries,
-        )
-        .await;
+        let result = fan_out::run_fan_out(config, (*self.rule_subset).clone(), entries).await;
 
         // Observability: record the fan-out return.
         let (summary, incomplete_count) = match &result {
@@ -1126,7 +1123,10 @@ mod gate_sink_tests {
         assert!(r.content_hash.is_some());
         let hash = r.content_hash.as_deref().unwrap();
         assert_eq!(hash.len(), 64, "SHA-256 hex is 64 chars");
-        assert!(!hash.contains("secret"), "hash must not contain raw content");
+        assert!(
+            !hash.contains("secret"),
+            "hash must not contain raw content"
+        );
     }
 
     #[test]
@@ -1158,12 +1158,7 @@ mod gate_sink_tests {
     #[test]
     fn allow_record_has_no_content_hash_after_jsonl_roundtrip() {
         // #[serde(default)] means a missing field deserializes to None.
-        let r = build_gate_record(
-            "a/b.rs",
-            "ALLOWED: wrote 5 bytes to a/b.rs",
-            1,
-            "hello",
-        );
+        let r = build_gate_record("a/b.rs", "ALLOWED: wrote 5 bytes to a/b.rs", 1, "hello");
         let line = serde_json::to_string(&r).unwrap();
         let back: GateDecisionRecord = serde_json::from_str(&line).unwrap();
         assert!(back.content_hash.is_none());
@@ -1253,7 +1248,9 @@ mod clarify_tool_tests {
         std::env::set_var(RULES_FILE_ENV, "/tmp/session-9/rules.json");
         assert_eq!(
             clarify_requests_sink_path(),
-            Some(std::path::PathBuf::from("/tmp/session-9/clarify-requests.jsonl"))
+            Some(std::path::PathBuf::from(
+                "/tmp/session-9/clarify-requests.jsonl"
+            ))
         );
         std::env::remove_var(RULES_FILE_ENV);
     }
@@ -1314,7 +1311,11 @@ mod clarify_tool_tests {
             .filter_map(|e| e.ok())
             .map(|e| e.file_name())
             .collect();
-        assert_eq!(entries.len(), 1, "only the sink file should exist: {entries:?}");
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the sink file should exist: {entries:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1422,7 +1423,10 @@ mod jail_tests {
         );
 
         // A real in-jail write is still allowed.
-        assert!(within_jail(&worktree, worktree.join("src.rs").to_str().unwrap()));
+        assert!(within_jail(
+            &worktree,
+            worktree.join("src.rs").to_str().unwrap()
+        ));
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1456,7 +1460,7 @@ mod jail_tests {
 #[cfg(test)]
 mod fan_out_gate_invariant_tests {
     use camerata_agent::{
-        allowed_tools_for_role, allowed_tools_for_role_with_mode, FAN_OUT_TOOL, DELEGATE_TOOL,
+        allowed_tools_for_role, allowed_tools_for_role_with_mode, DELEGATE_TOOL, FAN_OUT_TOOL,
         GATED_WRITE_TOOL,
     };
     use camerata_core::{Role, RuleId};
@@ -1510,10 +1514,10 @@ mod fan_out_gate_invariant_tests {
 
 #[cfg(test)]
 mod integration_gate_module_tests {
+    use super::fan_out::WorkerResult;
     use camerata_gateway::integration_gate::{
         check_integration_gate, IntegrationGateInput, IntegrationGateResult,
     };
-    use super::fan_out::WorkerResult;
 
     fn no_workers() -> Vec<WorkerResult> {
         vec![]
@@ -1686,7 +1690,10 @@ mod mcp_gated_write_boundary_tests {
             out.starts_with("DENIED [JAIL"),
             "expected a JAIL denial, got: {out}"
         );
-        assert!(!target.exists(), "a jail-denied write must never touch disk");
+        assert!(
+            !target.exists(),
+            "a jail-denied write must never touch disk"
+        );
 
         let _ = std::fs::remove_dir_all(&jail);
         let _ = std::fs::remove_dir_all(&outside);
@@ -1709,7 +1716,10 @@ mod mcp_gated_write_boundary_tests {
             "expected a JAIL denial, got: {out}"
         );
         let escaped = jail.parent().unwrap().join("evil-sibling.txt");
-        assert!(!escaped.exists(), "a jail-denied write must never touch disk");
+        assert!(
+            !escaped.exists(),
+            "a jail-denied write must never touch disk"
+        );
 
         let _ = std::fs::remove_dir_all(&jail);
     }
@@ -1943,7 +1953,10 @@ mod mcp_gated_write_boundary_tests {
         let out = call_gated_write(&gw, "sub/loader.rs", "data = pickle.loads(untrusted)").await;
 
         assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
-        assert!(out.contains("SEC-NO-UNSAFE-DESERIALIZATION-1"), "got: {out}");
+        assert!(
+            out.contains("SEC-NO-UNSAFE-DESERIALIZATION-1"),
+            "got: {out}"
+        );
         assert!(!jail.join("sub/loader.rs").exists());
 
         let _ = std::fs::remove_dir_all(&jail);
@@ -1958,7 +1971,8 @@ mod mcp_gated_write_boundary_tests {
         env.set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
-        let out = call_gated_write(&gw, "sub/.camerata/checks.toml", "[gate]\ndisabled = true").await;
+        let out =
+            call_gated_write(&gw, "sub/.camerata/checks.toml", "[gate]\ndisabled = true").await;
 
         assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
         assert!(out.contains("SEC-NO-CAMERATA-CONFIG-1"), "got: {out}");
@@ -2005,7 +2019,10 @@ mod mcp_gated_write_boundary_tests {
         assert!(out.starts_with("ALLOWED"), "expected an allow, got: {out}");
         let written = std::fs::read_to_string(jail.join("sub/feature.rs"))
             .expect("the gate must have written the file");
-        assert_eq!(written, content, "the file must hold EXACTLY the written content");
+        assert_eq!(
+            written, content,
+            "the file must hold EXACTLY the written content"
+        );
 
         let _ = std::fs::remove_dir_all(&jail);
     }
@@ -2042,7 +2059,11 @@ mod mcp_gated_write_boundary_tests {
         assert_eq!(deny_rec.kind, "gate");
         assert_eq!(deny_rec.verdict, "deny");
         assert_eq!(deny_rec.target, "forbidden/leak.rs");
-        assert!(deny_rec.rule.as_deref().unwrap_or_default().contains("GOV-1"));
+        assert!(deny_rec
+            .rule
+            .as_deref()
+            .unwrap_or_default()
+            .contains("GOV-1"));
         assert!(
             deny_rec.content_hash.is_some(),
             "a deny record must carry the content hash (never raw content)"
@@ -2084,7 +2105,10 @@ mod mcp_gated_write_boundary_tests {
             out.starts_with("DENIED [JAIL"),
             "jail must win over the rule engine, got: {out}"
         );
-        assert!(!out.contains("GOV-1"), "the rule engine must not have run at all: {out}");
+        assert!(
+            !out.contains("GOV-1"),
+            "the rule engine must not have run at all: {out}"
+        );
         assert!(!target.exists());
 
         let _ = std::fs::remove_dir_all(&jail);

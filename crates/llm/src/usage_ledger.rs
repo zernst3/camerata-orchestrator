@@ -290,7 +290,10 @@ mod tests {
         a.cache_read_input_tokens = 30;
         a.cache_creation_input_tokens = 20;
         l.record("claude-opus-5", &a);
-        l.record("claude-opus-5", &anthropic_resp("claude-opus-5", 200, 100, 0.02));
+        l.record(
+            "claude-opus-5",
+            &anthropic_resp("claude-opus-5", 200, 100, 0.02),
+        );
         l.record(
             "claude-sonnet-5",
             &anthropic_resp("claude-sonnet-5", 10, 5, 0.001),
@@ -332,7 +335,11 @@ mod tests {
         );
         let s = l.snapshot();
         // 1M * 5 + 1M * 25 over 1M = 30.0.
-        assert!((s.total_cost_usd - 30.0).abs() < 1e-6, "got {}", s.total_cost_usd);
+        assert!(
+            (s.total_cost_usd - 30.0).abs() < 1e-6,
+            "got {}",
+            s.total_cost_usd
+        );
         assert_eq!(s.by_model.len(), 1);
         assert!((s.by_model[0].cost - 30.0).abs() < 1e-6);
         assert_eq!(s.by_model[0].tokens, 2_000_000);
@@ -342,10 +349,7 @@ mod tests {
     fn cost_fallback_unknown_model_is_zero_no_panic() {
         let l = UsageLedger::new();
         // No cost field, model id NOT in the registry -> tokens accumulate, cost stays 0, no panic.
-        l.record(
-            "gemini-3-pro",
-            &gemini_shape_resp("gemini-3-pro", 500, 200),
-        );
+        l.record("gemini-3-pro", &gemini_shape_resp("gemini-3-pro", 500, 200));
         let s = l.snapshot();
         assert_eq!(s.input_tokens, 500);
         assert_eq!(s.output_tokens, 200);
@@ -374,12 +378,18 @@ mod tests {
         assert_eq!(s.calls, 2);
         assert_eq!(s.input_tokens, 1_000_100);
         // 0.0018 (reported) + 18.0 (derived) = 18.0018.
-        assert!((s.total_cost_usd - 18.0018).abs() < 1e-6, "got {}", s.total_cost_usd);
+        assert!(
+            (s.total_cost_usd - 18.0018).abs() < 1e-6,
+            "got {}",
+            s.total_cost_usd
+        );
     }
 
     #[test]
     fn rate_limit_signal_detection() {
-        assert!(is_rate_limit_signal("Anthropic API HTTP 429: too many requests"));
+        assert!(is_rate_limit_signal(
+            "Anthropic API HTTP 429: too many requests"
+        ));
         assert!(is_rate_limit_signal("the service is Overloaded right now"));
         assert!(is_rate_limit_signal(
             r#"{"error":{"type":"rate_limit_error"}}"#
@@ -389,8 +399,12 @@ mod tests {
             "claude produced no model output for 120s — treating as a hang (likely rate-limited/queued; set CAMERATA_LLM_IDLE_SECS to tune)"
         ));
         // Normal text / unrelated errors must NOT trip it.
-        assert!(!is_rate_limit_signal("parse claude CLI JSON: unexpected token"));
-        assert!(!is_rate_limit_signal("here is a normal completion of some prose"));
+        assert!(!is_rate_limit_signal(
+            "parse claude CLI JSON: unexpected token"
+        ));
+        assert!(!is_rate_limit_signal(
+            "here is a normal completion of some prose"
+        ));
         assert!(!is_rate_limit_signal("findings: 4 high, 2 medium"));
     }
 

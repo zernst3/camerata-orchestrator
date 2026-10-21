@@ -696,7 +696,11 @@ impl LlmRequest {
     /// backend (no filesystem). An empty path is treated as `None`.
     pub fn with_repo_read(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         let d = dir.into();
-        self.repo_read_dir = if d.as_os_str().is_empty() { None } else { Some(d) };
+        self.repo_read_dir = if d.as_os_str().is_empty() {
+            None
+        } else {
+            Some(d)
+        };
         self
     }
 
@@ -911,7 +915,12 @@ impl CacheTtl {
     pub fn from_env() -> Self {
         let truthy = std::env::var("CAMERATA_ANTHROPIC_CACHE_TTL_1H")
             .ok()
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false);
         if truthy {
             CacheTtl::OneHour
@@ -1145,17 +1154,12 @@ impl Llm {
     }
 
     /// Same as [`Llm::from_env`] but with the process-global usage ledger attached.
-    pub fn from_env_with_ledger(
-        ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>,
-    ) -> Self {
+    pub fn from_env_with_ledger(ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>) -> Self {
         Self::from_env().with_ledger(ledger)
     }
 
     /// Attach (or replace) the process-global usage ledger on an existing instance.
-    pub fn with_ledger(
-        mut self,
-        ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>,
-    ) -> Self {
+    pub fn with_ledger(mut self, ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>) -> Self {
         self.ledger = Some(ledger);
         self
     }
@@ -1418,8 +1422,13 @@ impl Llm {
             .unwrap_or_default();
         let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&v["usage"]);
         // The API doesn't bill back a dollar figure, so compute it from usage × list price.
-        let cost_usd =
-            compute_cost_usd(model, input_tokens, output_tokens, cache_read, cache_creation);
+        let cost_usd = compute_cost_usd(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read,
+            cache_creation,
+        );
         Ok(LlmResponse {
             text: out,
             model: model.to_string(),
@@ -1646,14 +1655,17 @@ impl Llm {
         if !status.is_success() {
             anyhow::bail!("Message Batches API HTTP {status}: {text}");
         }
-        let v: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse batch response: {e}"))?;
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("parse batch response: {e}"))?;
         let batch_id = v["id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("batch response missing `id` field: {text}"))?
             .to_string();
         let counts = parse_request_counts(&v["request_counts"]);
-        Ok(BatchSubmitResult { batch_id, request_counts: counts })
+        Ok(BatchSubmitResult {
+            batch_id,
+            request_counts: counts,
+        })
     }
 
     /// Poll the status of a submitted batch. Returns the `processing_status` and current
@@ -1666,12 +1678,15 @@ impl Llm {
     /// hours-long batch must not die because of one bad polling window after the tokens
     /// are already spent — see that function's `poll_batch_until_ended` helper.
     pub async fn poll_batch_status(&self, batch_id: &str) -> anyhow::Result<BatchStatus> {
-        let key = self.api_key.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("batch polling requires ANTHROPIC_API_KEY")
-        })?;
+        let key = self
+            .api_key
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("batch polling requires ANTHROPIC_API_KEY"))?;
         let make_request = || {
             shared_http_client()
-                .get(format!("https://api.anthropic.com/v1/messages/batches/{batch_id}"))
+                .get(format!(
+                    "https://api.anthropic.com/v1/messages/batches/{batch_id}"
+                ))
                 .header("x-api-key", key)
                 .header("anthropic-version", "2023-06-01")
         };
@@ -1686,7 +1701,10 @@ impl Llm {
             .unwrap_or("unknown")
             .to_string();
         let counts = parse_request_counts(&v["request_counts"]);
-        Ok(BatchStatus { processing_status, request_counts: counts })
+        Ok(BatchStatus {
+            processing_status,
+            request_counts: counts,
+        })
     }
 
     /// Stream the results of a completed batch from the Anthropic results URL. Each line
@@ -1699,13 +1717,11 @@ impl Llm {
     /// RETRY: same policy as [`Self::complete_api`] — losing the results fetch after a
     /// batch has already run to completion (tokens spent) would be a pure waste, so this
     /// retries transient failures rather than surfacing immediately.
-    pub async fn fetch_batch_results(
-        &self,
-        batch_id: &str,
-    ) -> anyhow::Result<Vec<BatchResultRow>> {
-        let key = self.api_key.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("batch result fetch requires ANTHROPIC_API_KEY")
-        })?;
+    pub async fn fetch_batch_results(&self, batch_id: &str) -> anyhow::Result<Vec<BatchResultRow>> {
+        let key = self
+            .api_key
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("batch result fetch requires ANTHROPIC_API_KEY"))?;
         let make_request = || {
             shared_http_client()
                 .get(format!(
@@ -1753,8 +1769,8 @@ impl Llm {
         if !status.is_success() {
             anyhow::bail!("count_tokens HTTP {status}: {text}");
         }
-        let v: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse count_tokens JSON: {e}"))?;
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("parse count_tokens JSON: {e}"))?;
         v["input_tokens"]
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("count_tokens response missing `input_tokens`: {text}"))
@@ -2029,11 +2045,14 @@ impl OpenRouterCompleter {
             .registry
             .ensure_safe_providers_loaded(Some(&self.api_key), model)
             .await;
-        let provider_constraint =
-            crate::provider_policy::provider_constraint_for_request(&self.policy, &safe_providers, model)
-                .map_err(|reason| {
-                    anyhow::anyhow!("OpenRouter provider-safety check refused this request: {reason}")
-                })?;
+        let provider_constraint = crate::provider_policy::provider_constraint_for_request(
+            &self.policy,
+            &safe_providers,
+            model,
+        )
+        .map_err(|reason| {
+            anyhow::anyhow!("OpenRouter provider-safety check refused this request: {reason}")
+        })?;
 
         let body = build_openrouter_chat_body(model, req, &self.session_id, provider_constraint);
 
@@ -2295,8 +2314,10 @@ pub fn build_completer(
 pub fn is_retryable_for_chain(err_msg: &str) -> bool {
     let lower = err_msg.to_ascii_lowercase();
     // Never retry auth errors.
-    if lower.contains("401") || lower.contains("403")
-        || lower.contains("unauthorized") || lower.contains("forbidden")
+    if lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden")
     {
         return false;
     }
@@ -2308,22 +2329,33 @@ pub fn is_retryable_for_chain(err_msg: &str) -> bool {
         return true;
     }
     // 5xx → retryable (provider down).
-    if lower.contains("500") || lower.contains("502") || lower.contains("503")
-        || lower.contains("504") || lower.contains("internal server error")
-        || lower.contains("bad gateway") || lower.contains("service unavailable")
+    if lower.contains("500")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("504")
+        || lower.contains("internal server error")
+        || lower.contains("bad gateway")
+        || lower.contains("service unavailable")
     {
         return true;
     }
     // Network / timeout → retryable.
-    if lower.contains("timeout") || lower.contains("timed out") || lower.contains("connection")
-        || lower.contains("network") || lower.contains("io error") || lower.contains("dns")
+    if lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("connection")
+        || lower.contains("network")
+        || lower.contains("io error")
+        || lower.contains("dns")
     {
         return true;
     }
     // Capability 400s → retryable (a longer-context or tool-capable model may work).
-    if lower.contains("context_length_exceeded") || lower.contains("context length exceeded")
-        || lower.contains("too long") || lower.contains("maximum context")
-        || lower.contains("tool use not supported") || lower.contains("tools not supported")
+    if lower.contains("context_length_exceeded")
+        || lower.contains("context length exceeded")
+        || lower.contains("too long")
+        || lower.contains("maximum context")
+        || lower.contains("tool use not supported")
+        || lower.contains("tools not supported")
         || lower.contains("tool_use_not_supported")
     {
         return true;
@@ -2356,8 +2388,14 @@ pub async fn call_with_fallback(
     }
     let mut last_err = anyhow::anyhow!("call_with_fallback: no models tried");
     for model_id in chain {
-        let completer =
-            build_completer(model_id, registry, creds, llm.clone(), limiter.clone(), policy)?;
+        let completer = build_completer(
+            model_id,
+            registry,
+            creds,
+            llm.clone(),
+            limiter.clone(),
+            policy,
+        )?;
         let req = base_req.clone().with_model(model_id);
         match completer.complete(req).await {
             Ok(resp) => return Ok(resp),
@@ -2401,9 +2439,15 @@ mod tests {
     #[test]
     fn with_repo_read_binds_dir_and_default_is_none() {
         let req = LlmRequest::new("hi").with_repo_read("/tmp/repo");
-        assert_eq!(req.repo_read_dir.as_deref(), Some(std::path::Path::new("/tmp/repo")));
+        assert_eq!(
+            req.repo_read_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/repo"))
+        );
         // Empty path is treated as None (no read window).
-        assert!(LlmRequest::new("hi").with_repo_read("").repo_read_dir.is_none());
+        assert!(LlmRequest::new("hi")
+            .with_repo_read("")
+            .repo_read_dir
+            .is_none());
         // Default request leaves the lockdown in place (repo_read_dir None).
         assert!(LlmRequest::new("hi").repo_read_dir.is_none());
     }
@@ -2421,13 +2465,22 @@ mod tests {
     #[test]
     fn resolve_backend_cli_is_always_quiet_regardless_of_key() {
         // `Cli` never depends on key presence — it's the zero-setup subscription path.
-        assert_eq!(resolve_backend(ProjectBackend::Cli, true), BackendResolution::Cli);
-        assert_eq!(resolve_backend(ProjectBackend::Cli, false), BackendResolution::Cli);
+        assert_eq!(
+            resolve_backend(ProjectBackend::Cli, true),
+            BackendResolution::Cli
+        );
+        assert_eq!(
+            resolve_backend(ProjectBackend::Cli, false),
+            BackendResolution::Cli
+        );
     }
 
     #[test]
     fn resolve_backend_api_with_key_resolves_api() {
-        assert_eq!(resolve_backend(ProjectBackend::Api, true), BackendResolution::Api);
+        assert_eq!(
+            resolve_backend(ProjectBackend::Api, true),
+            BackendResolution::Api
+        );
     }
 
     #[test]
@@ -2449,7 +2502,11 @@ mod tests {
         let prior = std::env::var("CAMERATA_LLM_BACKEND").ok();
         std::env::set_var("CAMERATA_LLM_BACKEND", "api");
         let llm = Llm::from_env_with_backend(Backend::Cli);
-        assert_eq!(llm.backend, Backend::Cli, "explicit Cli must win over any env var");
+        assert_eq!(
+            llm.backend,
+            Backend::Cli,
+            "explicit Cli must win over any env var"
+        );
         match prior {
             Some(v) => std::env::set_var("CAMERATA_LLM_BACKEND", v),
             None => std::env::remove_var("CAMERATA_LLM_BACKEND"),
@@ -2497,7 +2554,10 @@ mod tests {
         // of the prompt would leave the trailing block empty, which the API rejects, so
         // this must degenerate to "no caching" rather than silently rewriting the offset.
         let r2 = LlmRequest::new("hi").with_cache_prefix_len(999);
-        assert!(r2.cache_breakpoints.is_empty(), "out-of-range breakpoint is dropped, not clamped");
+        assert!(
+            r2.cache_breakpoints.is_empty(),
+            "out-of-range breakpoint is dropped, not clamped"
+        );
 
         // Zero is a no-op: caching stays disabled.
         let r3 = LlmRequest::new("hi").with_cache_prefix_len(0);
@@ -2506,7 +2566,10 @@ mod tests {
         // Prefix == prompt length: also dropped (whole prompt as prefix leaves an empty
         // suffix block) — same "no caching" degeneration as the oversized case.
         let r4 = LlmRequest::new("exact").with_cache_prefix_len(5);
-        assert!(r4.cache_breakpoints.is_empty(), "prefix == prompt length is dropped, not stored");
+        assert!(
+            r4.cache_breakpoints.is_empty(),
+            "prefix == prompt length is dropped, not stored"
+        );
     }
 
     #[test]
@@ -2514,14 +2577,22 @@ mod tests {
         // Unsorted, duplicate, and out-of-range (0 and >= len) inputs all get cleaned up.
         let prompt = "0123456789"; // len 10
         let r = LlmRequest::new(prompt).with_cache_breakpoints(vec![7, 3, 3, 0, 10, 999, 7]);
-        assert_eq!(r.cache_breakpoints, vec![3, 7], "sorted, deduped, degenerate offsets dropped");
+        assert_eq!(
+            r.cache_breakpoints,
+            vec![3, 7],
+            "sorted, deduped, degenerate offsets dropped"
+        );
 
         // Multi-byte UTF-8: a breakpoint landing mid-character snaps down to the previous
         // char boundary rather than panicking on a non-boundary slice.
         let multibyte = "café123"; // 'é' is 2 bytes, starting at byte 3
-        // Byte 4 is inside 'é' (bytes 3-4); snapping down lands on byte 3.
+                                   // Byte 4 is inside 'é' (bytes 3-4); snapping down lands on byte 3.
         let r2 = LlmRequest::new(multibyte).with_cache_breakpoints(vec![4]);
-        assert_eq!(r2.cache_breakpoints, vec![3], "mid-character offset snaps to the char boundary");
+        assert_eq!(
+            r2.cache_breakpoints,
+            vec![3],
+            "mid-character offset snaps to the char boundary"
+        );
     }
 
     // `LlmResponse::cache_hit_ratio` tests moved to
@@ -2562,15 +2633,21 @@ mod tests {
         // opus: price_in 5, price_out 25 ($/Mtok) — the registry's live Anthropic list price
         // (see crate::model_registry::CLAUDE_REGISTRY_MODELS). input folds cache fields
         // (base 100, read 200, creation 30 -> 330); fresh input is 100.
-        let cost = compute_cost_usd("claude-opus-5", Some(330), Some(50), 200, 30)
-            .expect("priced model");
+        let cost =
+            compute_cost_usd("claude-opus-5", Some(330), Some(50), 200, 30).expect("priced model");
         // 100*5 (fresh) + 200*5*0.1 (read) + 30*5*1.25 (creation) + 50*25 (out) = 1837.5
-        let expected = (100.0 * 5.0 + 200.0 * 5.0 * 0.1 + 30.0 * 5.0 * 1.25 + 50.0 * 25.0)
-            / 1_000_000.0;
-        assert!((cost - expected).abs() < 1e-12, "cost={cost} expected={expected}");
+        let expected =
+            (100.0 * 5.0 + 200.0 * 5.0 * 0.1 + 30.0 * 5.0 * 1.25 + 50.0 * 25.0) / 1_000_000.0;
+        assert!(
+            (cost - expected).abs() < 1e-12,
+            "cost={cost} expected={expected}"
+        );
         // The naive fold-everything-at-full-input rate would over-bill.
         let naive = (330.0 * 5.0 + 50.0 * 25.0) / 1_000_000.0;
-        assert!(cost < naive, "cached reads must not be billed at full input rate");
+        assert!(
+            cost < naive,
+            "cached reads must not be billed at full input rate"
+        );
 
         // No cache tokens -> matches the plain input*price formula.
         let plain = compute_cost_usd("claude-opus-5", Some(100), Some(50), 0, 0).unwrap();
@@ -2589,13 +2666,28 @@ mod tests {
     fn price_for_matches_the_live_model_registry_exactly() {
         for reg in crate::model_registry::CLAUDE_REGISTRY_MODELS {
             let (pin, pout) = price_for(reg.id).unwrap_or_else(|| {
-                panic!("price_for must resolve every registry model id, missing {}", reg.id)
+                panic!(
+                    "price_for must resolve every registry model id, missing {}",
+                    reg.id
+                )
             });
-            assert_eq!(pin, reg.price_in, "{} price_in must match the registry", reg.id);
-            assert_eq!(pout, reg.price_out, "{} price_out must match the registry", reg.id);
+            assert_eq!(
+                pin, reg.price_in,
+                "{} price_in must match the registry",
+                reg.id
+            );
+            assert_eq!(
+                pout, reg.price_out,
+                "{} price_out must match the registry",
+                reg.id
+            );
         }
         let (opus_in, opus_out) = price_for("claude-opus-5").unwrap();
-        assert_eq!((opus_in, opus_out), (5.0, 25.0), "Opus must price at the current $5/$25, not the stale $15/$75");
+        assert_eq!(
+            (opus_in, opus_out),
+            (5.0, 25.0),
+            "Opus must price at the current $5/$25, not the stale $15/$75"
+        );
     }
 
     #[test]
@@ -2605,10 +2697,16 @@ mod tests {
         assert_eq!(cli_result_text(&ok).unwrap(), "hello");
         // is_error:true -> Err even though a result string is present.
         let errored = serde_json::json!({"is_error": true, "subtype": "error_max_turns", "result": "partial"});
-        assert!(cli_result_text(&errored).is_err(), "is_error=true must fail");
+        assert!(
+            cli_result_text(&errored).is_err(),
+            "is_error=true must fail"
+        );
         // Absent result -> Err.
         let no_result = serde_json::json!({"is_error": false, "subtype": "success"});
-        assert!(cli_result_text(&no_result).is_err(), "missing result must fail");
+        assert!(
+            cli_result_text(&no_result).is_err(),
+            "missing result must fail"
+        );
     }
 
     #[test]
@@ -2771,14 +2869,21 @@ malformed line, not json
 "#;
         let rows = parse_batch_results_jsonl(jsonl).expect("parse should not fail");
         // 2 succeeded + 1 errored; the malformed line is skipped.
-        assert_eq!(rows.len(), 3, "3 valid rows (2 ok + 1 error), malformed skipped");
+        assert_eq!(
+            rows.len(),
+            3,
+            "3 valid rows (2 ok + 1 error), malformed skipped"
+        );
         let ok: Vec<_> = rows.iter().filter(|r| r.response.is_some()).collect();
         let err: Vec<_> = rows.iter().filter(|r| r.error.is_some()).collect();
         assert_eq!(ok.len(), 2, "two succeeded rows");
         assert_eq!(err.len(), 1, "one error row");
 
         // Spot-check a succeeded row.
-        let c0b0 = ok.iter().find(|r| r.custom_id == "c0-b0").expect("c0-b0 present");
+        let c0b0 = ok
+            .iter()
+            .find(|r| r.custom_id == "c0-b0")
+            .expect("c0-b0 present");
         let resp = c0b0.response.as_ref().unwrap();
         assert_eq!(resp.text, "finding A");
         assert_eq!(resp.backend, "api/batch");
@@ -2853,7 +2958,9 @@ malformed line, not json
     /// `build_batch_item` serialises correctly (no private fields, correct JSON shape).
     #[test]
     fn batch_item_serialises_to_expected_shape() {
-        let req = LlmRequest::new("hello").with_model("claude-sonnet-5").with_max_tokens(512);
+        let req = LlmRequest::new("hello")
+            .with_model("claude-sonnet-5")
+            .with_max_tokens(512);
         let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v["custom_id"], "c0-b0");
@@ -2951,8 +3058,14 @@ malformed line, not json
         let creds = crate::credentials::MemoryCredentialStore::new();
         let llm = make_llm();
 
-        let completer =
-            build_completer("unknown-model-xyz", &registry, &creds, llm, make_limiter(), &default_policy());
+        let completer = build_completer(
+            "unknown-model-xyz",
+            &registry,
+            &creds,
+            llm,
+            make_limiter(),
+            &default_policy(),
+        );
         // Should succeed (no error for an unknown model — safe fallback to Anthropic).
         assert!(
             completer.is_ok(),
@@ -2969,8 +3082,14 @@ malformed line, not json
         // Note: no OPENROUTER_API_KEY set, yet this must not error.
         let llm = make_llm();
 
-        let completer =
-            build_completer("claude-sonnet-5", &registry, &creds, llm, make_limiter(), &default_policy());
+        let completer = build_completer(
+            "claude-sonnet-5",
+            &registry,
+            &creds,
+            llm,
+            make_limiter(),
+            &default_policy(),
+        );
         assert!(
             completer.is_ok(),
             "claude-provider model must succeed even without an OpenRouter key"
@@ -3000,8 +3119,14 @@ malformed line, not json
         let creds = crate::credentials::MemoryCredentialStore::new();
         // No key set → error.
         let llm = make_llm();
-        let result =
-            build_completer("qwen/qwen3-235b:free", &registry, &creds, llm, make_limiter(), &default_policy());
+        let result = build_completer(
+            "qwen/qwen3-235b:free",
+            &registry,
+            &creds,
+            llm,
+            make_limiter(),
+            &default_policy(),
+        );
         assert!(result.is_err(), "factory must error when key is absent");
         // Extract the error without relying on `T: Debug` (Arc<dyn LlmPort> is not Debug).
         let msg = match result {
@@ -3083,7 +3208,10 @@ malformed line, not json
         assert_eq!(body["model"], "deepseek/deepseek-v4-pro");
         assert_eq!(body["session_id"], "sess-123");
         assert_eq!(body["provider"]["data_collection"], "deny");
-        assert_eq!(body["provider"]["only"], serde_json::json!(["deepinfra", "novita"]));
+        assert_eq!(
+            body["provider"]["only"],
+            serde_json::json!(["deepinfra", "novita"])
+        );
         // The messages array is present and unaffected by the constraint injection.
         assert!(body["messages"].as_array().unwrap().len() == 2);
     }
@@ -3145,10 +3273,13 @@ malformed line, not json
             !only.iter().any(|v| v == "deepseek"),
             "unsafe pinned provider must never be emitted in the request body: {only:?}"
         );
-        assert_eq!(only, &vec![
-            serde_json::Value::String("deepinfra".to_string()),
-            serde_json::Value::String("novita".to_string()),
-        ]);
+        assert_eq!(
+            only,
+            &vec![
+                serde_json::Value::String("deepinfra".to_string()),
+                serde_json::Value::String("novita".to_string()),
+            ]
+        );
     }
 
     /// FAIL-CLOSED at the body-builder call site: when the safe set is `Unknown`, the
@@ -3236,12 +3367,18 @@ malformed line, not json
     #[test]
     fn retryable_classification_selective_400() {
         // Capability 400s → retryable.
-        assert!(is_retryable_for_chain("context_length_exceeded: prompt too long"));
-        assert!(is_retryable_for_chain("tool use not supported on this model"));
+        assert!(is_retryable_for_chain(
+            "context_length_exceeded: prompt too long"
+        ));
+        assert!(is_retryable_for_chain(
+            "tool use not supported on this model"
+        ));
         assert!(is_retryable_for_chain("maximum context length exceeded"));
         // Generic 400 → fatal.
         assert!(!is_retryable_for_chain("HTTP 400: bad request"));
-        assert!(!is_retryable_for_chain("invalid parameter: model not found"));
+        assert!(!is_retryable_for_chain(
+            "invalid parameter: model not found"
+        ));
         assert!(!is_retryable_for_chain("400: malformed JSON"));
     }
 
@@ -3254,7 +3391,9 @@ malformed line, not json
     #[tokio::test]
     async fn fallback_advances_on_retryable_uses_first_success() {
         // Verify that 429 is retryable and the chain advances:
-        assert!(is_retryable_for_chain("HTTP 429: rate_limit exceeded for primary-model"));
+        assert!(is_retryable_for_chain(
+            "HTTP 429: rate_limit exceeded for primary-model"
+        ));
         // And the second model would be tried.
         let chain = vec!["primary-model".to_string(), "fallback-model".to_string()];
         assert_eq!(chain[0], "primary-model");
@@ -3265,7 +3404,10 @@ malformed line, not json
     fn call_with_fallback_empty_chain_errors() {
         // An empty chain is an immediate error — no model to try.
         let chain: Vec<String> = vec![];
-        assert!(chain.is_empty(), "empty chain should produce an error from call_with_fallback");
+        assert!(
+            chain.is_empty(),
+            "empty chain should produce an error from call_with_fallback"
+        );
     }
 
     // ── Silent-death-class fixes: CLI timeout, kill, and the not-found message ─────
@@ -3288,7 +3430,10 @@ malformed line, not json
         ] {
             let e = std::io::Error::from(kind);
             let msg = map_spawn_error(e).to_string();
-            assert!(msg.starts_with("failed to spawn `claude` CLI"), "message: {msg}");
+            assert!(
+                msg.starts_with("failed to spawn `claude` CLI"),
+                "message: {msg}"
+            );
             assert!(!msg.contains("was not found on PATH"), "message: {msg}");
         }
     }
@@ -3397,7 +3542,10 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"FINAL","usage":{"inpu
         .expect_err("a silent child must time out");
 
         let msg = err.to_string();
-        assert!(msg.contains("timed out after 0s (no output)"), "message: {msg}");
+        assert!(
+            msg.contains("timed out after 0s (no output)"),
+            "message: {msg}"
+        );
         assert!(
             msg.contains("stuck waiting for authentication or input"),
             "message: {msg}"
@@ -3417,7 +3565,10 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"FINAL","usage":{"inpu
                 break;
             }
         }
-        assert!(!still_alive, "child pid {pid} was not killed after the timeout");
+        assert!(
+            !still_alive,
+            "child pid {pid} was not killed after the timeout"
+        );
     }
 
     /// A child that emits only NON-progress keepalive lines keeps the silence backstop
@@ -3655,8 +3806,10 @@ exit 1
         fn new(tag: &str, script: &str) -> Self {
             use std::io::Write;
             use std::os::unix::fs::PermissionsExt;
-            let dir = std::env::temp_dir()
-                .join(format!("camerata-llm-fake-claude-{}-{tag}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!(
+                "camerata-llm-fake-claude-{}-{tag}",
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("create fake-claude dir");
             let bin = dir.join("claude");
@@ -3697,7 +3850,10 @@ exit 1
             };
             std::env::set_var("PATH", joined);
             std::env::set_var("CAMERATA_CLI_TIMEOUT_SECS", overall_secs.to_string());
-            Self { prior_path, prior_timeout }
+            Self {
+                prior_path,
+                prior_timeout,
+            }
         }
     }
 
@@ -3783,10 +3939,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
     #[tokio::test]
     async fn complete_cli_backend_still_kills_a_genuinely_wedged_process() {
         let _g = FAKE_CLI_ENV_LOCK.lock().await;
-        let fake = FakeClaude::new(
-            "wedged",
-            "#!/bin/sh\nexec sleep 30\n",
-        );
+        let fake = FakeClaude::new("wedged", "#!/bin/sh\nexec sleep 30\n");
         let _env = FakeCliEnv::new(&fake.dir, 1);
 
         let started = std::time::Instant::now();
@@ -3797,7 +3950,10 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
         let elapsed = started.elapsed();
 
         let msg = err.to_string();
-        assert!(msg.contains("timed out after 1s (no output)"), "message: {msg}");
+        assert!(
+            msg.contains("timed out after 1s (no output)"),
+            "message: {msg}"
+        );
         assert!(
             msg.contains("stuck waiting for authentication or input"),
             "message: {msg}"

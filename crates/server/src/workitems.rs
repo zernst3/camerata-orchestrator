@@ -204,14 +204,21 @@ mod tests {
         let wi = WorkItem::from_github_issue("o/r", &detail(20, "open"));
         assert_eq!(wi.id, "github:o/r#20");
         assert_eq!(wi.provider, "github");
-        assert_eq!(wi.repo, "o/r", "the repo must be set on the item (#contract)");
+        assert_eq!(
+            wi.repo, "o/r",
+            "the repo must be set on the item (#contract)"
+        );
         assert_eq!(wi.number, 20);
         assert_eq!(wi.title, "Issue 20");
         assert_eq!(wi.body, "Body text.");
         assert_eq!(wi.state, "open");
         assert_eq!(wi.url, "https://github.com/o/r/issues/20");
         assert_eq!(wi.labels, vec!["bug", "camerata:status:intake"]);
-        assert_eq!(wi.assignees, vec!["octocat"], "assignees thread onto the item");
+        assert_eq!(
+            wi.assignees,
+            vec!["octocat"],
+            "assignees thread onto the item"
+        );
         assert_eq!(
             wi.updated_at, "2026-07-05T12:00:00Z",
             "updated_at threads onto the item"
@@ -232,12 +239,8 @@ mod tests {
         let story = CanonicalStory {
             id: "o/r#20".to_string(),
             external_ref: Some(
-                ExternalRef::new(
-                    Provider::GitHub,
-                    "20",
-                    "https://github.com/o/r/issues/20",
-                )
-                .with_container("o/r"),
+                ExternalRef::new(Provider::GitHub, "20", "https://github.com/o/r/issues/20")
+                    .with_container("o/r"),
             ),
             title: "T".to_string(),
             description: "D".to_string(),

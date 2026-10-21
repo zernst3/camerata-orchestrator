@@ -253,10 +253,10 @@ fn scope3_apply_writes_the_expected_arm_files_set() {
 
     // The full expected arm-files set for this mix:
     for expected in [
-        "AGENTS.md",                          // prose + custom rules
-        "CONVENTIONS.md",                     // structured + mechanical rules
-        ".camerata/rules.json",               // the gate config (always, when rules exist)
-        ".camerata/checks.toml",              // CI-tier (mechanical) -> checks manifest
+        "AGENTS.md",                            // prose + custom rules
+        "CONVENTIONS.md",                       // structured + mechanical rules
+        ".camerata/rules.json",                 // the gate config (always, when rules exist)
+        ".camerata/checks.toml",                // CI-tier (mechanical) -> checks manifest
         ".github/workflows/camerata-gates.yml", // CI-tier -> generated workflow
     ] {
         assert!(
@@ -267,7 +267,10 @@ fn scope3_apply_writes_the_expected_arm_files_set() {
 
     // AGENTS.md carries the prose rule AND the custom rule.
     let agents = &files.iter().find(|(p, _)| p == "AGENTS.md").unwrap().1;
-    assert!(agents.contains("### PROSE-1"), "prose rule emitted into AGENTS.md");
+    assert!(
+        agents.contains("### PROSE-1"),
+        "prose rule emitted into AGENTS.md"
+    );
     assert!(
         agents.contains("CUSTOM-house-style"),
         "custom rule emitted into AGENTS.md"
@@ -277,10 +280,17 @@ fn scope3_apply_writes_the_expected_arm_files_set() {
     let conv = &files.iter().find(|(p, _)| p == "CONVENTIONS.md").unwrap().1;
     assert!(conv.contains("### STRUCT-1"));
     assert!(conv.contains("### MECH-1"));
-    assert!(!conv.contains("### PROSE-1"), "prose rules do NOT go in CONVENTIONS.md");
+    assert!(
+        !conv.contains("### PROSE-1"),
+        "prose rules do NOT go in CONVENTIONS.md"
+    );
 
     // .camerata/rules.json (the SELECTION PERSISTENCE: every applied rule id incl. custom).
-    let gate_json = &files.iter().find(|(p, _)| p == ".camerata/rules.json").unwrap().1;
+    let gate_json = &files
+        .iter()
+        .find(|(p, _)| p == ".camerata/rules.json")
+        .unwrap()
+        .1;
     let gate: Vec<GateRule> = serde_json::from_str(gate_json).unwrap();
     let gate_ids: Vec<&str> = gate.iter().map(|g| g.id.as_str()).collect();
     assert!(gate_ids.contains(&"PROSE-1"));
@@ -330,7 +340,10 @@ fn scope3_existing_governance_files_warns_before_clobbering() {
     ];
     let existing = existing_governance_files(dir.path(), &will_write);
 
-    assert!(existing.contains(&"AGENTS.md".to_string()), "AGENTS.md already exists");
+    assert!(
+        existing.contains(&"AGENTS.md".to_string()),
+        "AGENTS.md already exists"
+    );
     assert!(
         existing.contains(&".camerata/rules.json".to_string()),
         ".camerata/rules.json already exists"
@@ -387,7 +400,10 @@ fn scope3_active_findings_snapshot_into_baseline_and_suppress_on_reclassify() {
         Status::SuppressedBaseline,
         "a baselined finding is suppressed"
     );
-    assert_eq!(classify_one(&f2, &[], &baseline), Status::SuppressedBaseline);
+    assert_eq!(
+        classify_one(&f2, &[], &baseline),
+        Status::SuppressedBaseline
+    );
 
     // A NEW finding (not in the baseline) is ACTIVE -> the gate enforces on new code.
     let new_finding = FindingRef {

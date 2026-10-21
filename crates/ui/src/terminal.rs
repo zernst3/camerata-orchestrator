@@ -550,7 +550,10 @@ mod tests {
         // The reveal must force a full repaint (fit() alone no-ops if dims are unchanged,
         // leaving the canvas blank after a hide/show) and re-focus.
         assert!(script.contains("fit()"), "re-fits the addon");
-        assert!(script.contains("refresh(0"), "forces a full viewport repaint");
+        assert!(
+            script.contains("refresh(0"),
+            "forces a full viewport repaint"
+        );
         assert!(script.contains("focus()"), "re-focuses for keystrokes");
     }
 

@@ -210,7 +210,10 @@ mod tests {
         let result = newest_mtime(tmp.path()).expect("Some");
 
         // The result must be >= the root file's mtime (it found at least one).
-        assert!(result >= mt_root, "result should be at least as new as root file");
+        assert!(
+            result >= mt_root,
+            "result should be at least as new as root file"
+        );
         // On filesystems with sub-ms precision, result == mt_sub; on coarse ones it
         // may equal mt_root. Just assert it found SOMETHING.
         let _ = mt_sub; // used for documentation above
@@ -230,11 +233,7 @@ mod tests {
         });
 
         // Use a very short interval for the test.
-        let probe = spawn_mtime_probe(
-            tmp.path().to_path_buf(),
-            cb,
-            Duration::from_millis(50),
-        );
+        let probe = spawn_mtime_probe(tmp.path().to_path_buf(), cb, Duration::from_millis(50));
 
         // Wait one interval for the probe to take its baseline reading.
         tokio::time::sleep(Duration::from_millis(80)).await;

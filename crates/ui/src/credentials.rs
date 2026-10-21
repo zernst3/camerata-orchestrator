@@ -92,7 +92,8 @@ async fn set_chat_backend(backend: ProjectBackend) -> Option<(ProjectBackend, bo
         return None;
     }
     let v: serde_json::Value = resp.json().await.ok()?;
-    let backend = ProjectBackend::parse_lenient(v.get("backend").and_then(|b| b.as_str()).unwrap_or("cli"));
+    let backend =
+        ProjectBackend::parse_lenient(v.get("backend").and_then(|b| b.as_str()).unwrap_or("cli"));
     let api_key_present = v
         .get("api_key_present")
         .and_then(|b| b.as_bool())
@@ -111,10 +112,7 @@ async fn post_credential(name: &str, value: &str) -> Result<String, String> {
     let status = resp.status();
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     if status.is_success() {
-        let masked = json["masked"]
-            .as_str()
-            .unwrap_or("(saved)")
-            .to_string();
+        let masked = json["masked"].as_str().unwrap_or("(saved)").to_string();
         Ok(masked)
     } else {
         // The server reports failures under `message`; fall back to `error` for resilience.
@@ -189,19 +187,24 @@ fn OpenRouterModelsRefresh() -> Element {
     let (status_text, status_is_warn): (Option<String>, bool) = match status() {
         RefreshStatus::Idle => (None, false),
         RefreshStatus::Loading => (Some("Refreshing…".to_string()), false),
-        RefreshStatus::Done { count: 0, attempted: false } => (
+        RefreshStatus::Done {
+            count: 0,
+            attempted: false,
+        } => (
             Some("Add an OpenRouter API key to load its models.".to_string()),
             true,
         ),
-        RefreshStatus::Done { count: 0, attempted: true } => {
-            (Some("OpenRouter returned 0 models.".to_string()), true)
-        }
+        RefreshStatus::Done {
+            count: 0,
+            attempted: true,
+        } => (Some("OpenRouter returned 0 models.".to_string()), true),
         RefreshStatus::Done { count, .. } => {
             (Some(format!("{count} OpenRouter models loaded.")), false)
         }
-        RefreshStatus::Failed => {
-            (Some("Refresh failed — check the server connection.".to_string()), true)
-        }
+        RefreshStatus::Failed => (
+            Some("Refresh failed — check the server connection.".to_string()),
+            true,
+        ),
     };
 
     rsx! {
@@ -276,7 +279,10 @@ struct AnthropicRefreshRegistryResp {
 /// normal `Some(AnthropicRefreshRegistryResp { attempted: false, anthropic_count: 0 })`.
 async fn refresh_anthropic_registry() -> Option<AnthropicRefreshRegistryResp> {
     reqwest::Client::new()
-        .post(format!("{}/api/models/registry/refresh/anthropic", crate::bff_base()))
+        .post(format!(
+            "{}/api/models/registry/refresh/anthropic",
+            crate::bff_base()
+        ))
         .send()
         .await
         .ok()?
@@ -307,20 +313,28 @@ fn AnthropicModelsRefresh() -> Element {
     let (status_text, status_is_warn): (Option<String>, bool) = match status() {
         AnthropicRefreshStatus::Idle => (None, false),
         AnthropicRefreshStatus::Loading => (Some("Refreshing…".to_string()), false),
-        AnthropicRefreshStatus::Done { count: 0, attempted: false } => (
+        AnthropicRefreshStatus::Done {
+            count: 0,
+            attempted: false,
+        } => (
             Some("Add an Anthropic API key above to load the live model list.".to_string()),
             true,
         ),
-        AnthropicRefreshStatus::Done { count: 0, attempted: true } => (
+        AnthropicRefreshStatus::Done {
+            count: 0,
+            attempted: true,
+        } => (
             Some("Anthropic returned 0 models — double-check the key.".to_string()),
             true,
         ),
-        AnthropicRefreshStatus::Done { count, .. } => {
-            (Some(format!("{count} live Anthropic models loaded.")), false)
-        }
-        AnthropicRefreshStatus::Failed => {
-            (Some("Refresh failed — check the server connection.".to_string()), true)
-        }
+        AnthropicRefreshStatus::Done { count, .. } => (
+            Some(format!("{count} live Anthropic models loaded.")),
+            false,
+        ),
+        AnthropicRefreshStatus::Failed => (
+            Some("Refresh failed — check the server connection.".to_string()),
+            true,
+        ),
     };
 
     rsx! {
@@ -484,7 +498,8 @@ fn ChatBackendSettings() -> Element {
             }
         },
         Some(Some(view)) => {
-            let selected = ProjectBackend::parse_lenient(view.chat_backend.as_deref().unwrap_or("cli"));
+            let selected =
+                ProjectBackend::parse_lenient(view.chat_backend.as_deref().unwrap_or("cli"));
             let api_key_present = view.api_key_present;
             let warn = show_api_key_warning(selected, api_key_present);
 
@@ -531,10 +546,7 @@ fn ChatBackendSettings() -> Element {
             // When API is selected, look up the Anthropic key credential's state from the
             // credentials list so the revealed row shows the correct set/masked badge.
             let anthropic_item = match &*creds_res.read() {
-                Some(Some(items)) => items
-                    .iter()
-                    .find(|i| i.name == ANTHROPIC_API_KEY)
-                    .cloned(),
+                Some(Some(items)) => items.iter().find(|i| i.name == ANTHROPIC_API_KEY).cloned(),
                 _ => None,
             };
             let anthropic_is_set = anthropic_item.as_ref().map(|i| i.is_set).unwrap_or(false);
@@ -641,7 +653,11 @@ fn BombeSettings() -> Element {
     });
 
     let preview_val = preview();
-    let preview_label = if preview_val { "Pause Preview" } else { "Play Preview" };
+    let preview_label = if preview_val {
+        "Pause Preview"
+    } else {
+        "Play Preview"
+    };
     let enabled_label = if enabled_val { "ON" } else { "OFF" };
 
     rsx! {
@@ -715,10 +731,7 @@ fn CredentialRow(
     let mut saving = use_signal(|| false);
 
     let badge = if is_set {
-        let masked_display = current_masked
-            .as_deref()
-            .unwrap_or("(set)")
-            .to_string();
+        let masked_display = current_masked.as_deref().unwrap_or("(set)").to_string();
         rsx! {
             span { class: "credentials-badge-set", "Saved: {masked_display}" }
         }
@@ -728,7 +741,11 @@ fn CredentialRow(
         }
     };
 
-    let placeholder = if is_set { "Enter new value to update" } else { "Paste value here…" };
+    let placeholder = if is_set {
+        "Enter new value to update"
+    } else {
+        "Paste value here…"
+    };
 
     rsx! {
         div { class: "credentials-field-section",
@@ -846,7 +863,8 @@ mod tests {
             .and(path("/api/credentials/openrouter_api_key"))
             .and(body_json(serde_json::json!({ "value": "sk-secret-123" })))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "masked": "sk-s••••" })),
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "masked": "sk-s••••" })),
             )
             .expect(1)
             .mount(&server)
@@ -896,9 +914,11 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/settings/chat-backend"))
             .and(body_json(serde_json::json!({ "backend": "api" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({ "backend": "api", "api_key_present": true }),
-            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({ "backend": "api", "api_key_present": true }),
+                ),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -923,8 +943,9 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/settings/chat-backend"))
             .respond_with(
-                ResponseTemplate::new(400)
-                    .set_body_json(serde_json::json!({ "ok": false, "message": "invalid backend" })),
+                ResponseTemplate::new(400).set_body_json(
+                    serde_json::json!({ "ok": false, "message": "invalid backend" }),
+                ),
             )
             .mount(&server)
             .await;
@@ -1132,10 +1153,19 @@ mod tests {
             html.contains("Background Animation"),
             "section label renders; html=\n{html}"
         );
-        assert!(html.contains("Animate"), "the Animate control renders; html=\n{html}");
-        assert!(html.contains("Preview"), "the Preview control renders; html=\n{html}");
+        assert!(
+            html.contains("Animate"),
+            "the Animate control renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("Preview"),
+            "the Preview control renders; html=\n{html}"
+        );
         // enabled defaults to true → the toggle shows "ON" and the preview button is enabled.
-        assert!(html.contains("ON"), "enabled toggle shows ON state; html=\n{html}");
+        assert!(
+            html.contains("ON"),
+            "enabled toggle shows ON state; html=\n{html}"
+        );
         assert!(
             html.contains("Play Preview"),
             "preview button shows Play (not Pause) when inactive; html=\n{html}"
@@ -1175,7 +1205,10 @@ mod tests {
             html.contains("Saved:"),
             "the set-state badge renders; html=\n{html}"
         );
-        assert!(html.contains("Save"), "the Save button renders; html=\n{html}");
+        assert!(
+            html.contains("Save"),
+            "the Save button renders; html=\n{html}"
+        );
         assert!(
             html.contains("Enter new value to update"),
             "the is_set placeholder renders; html=\n{html}"
@@ -1238,7 +1271,10 @@ mod tests {
         let mut vdom = VirtualDom::new(credentials_settings_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("Settings"), "the panel title renders; html=\n{html}");
+        assert!(
+            html.contains("Settings"),
+            "the panel title renders; html=\n{html}"
+        );
         assert!(
             html.contains("OS keychain"),
             "the intro copy renders; html=\n{html}"
@@ -1269,7 +1305,10 @@ mod tests {
             html.contains("Data safety"),
             "the Data safety section renders; html=\n{html}"
         );
-        assert!(html.contains("SAFE MODE"), "the SAFE segment renders; html=\n{html}");
+        assert!(
+            html.contains("SAFE MODE"),
+            "the SAFE segment renders; html=\n{html}"
+        );
     }
 
     // OpenRouterModelsRefresh only consumes the toasts context (no resource), so SSR
@@ -1412,7 +1451,10 @@ mod tests {
             "the Anthropic key input is revealed for the API backend; html=\n{html}"
         );
         // The revealed row is an actual credential input (password field + Save button).
-        assert!(html.contains("Save"), "the key input has a Save button; html=\n{html}");
+        assert!(
+            html.contains("Save"),
+            "the key input has a Save button; html=\n{html}"
+        );
     }
 
     #[test]

@@ -167,10 +167,7 @@ async fn req_w16_emit_only_rule_never_reaches_the_scan_or_the_healthy_list() {
     // The thing that made this defect CLIENT-FACING rather than merely untidy: an external
     // source URL resolves a grounded citation, which sorts first into the capped healthy list.
     assert!(
-        emit_only
-            .sources
-            .iter()
-            .any(|s| s.url.starts_with("http")),
+        emit_only.sources.iter().any(|s| s.url.starts_with("http")),
         "precondition: {EMIT_ONLY_RULE} carries an external source URL, which is why it sorted \
          to the TOP of the capped 'What's healthy' list"
     );
@@ -264,12 +261,18 @@ async fn req_w16_emit_only_rule_never_reaches_the_scan_or_the_healthy_list() {
         "the emit-only rule must have NO ledger entry — not a clean one, not an excluded one"
     );
     assert!(
-        !ledger.healthy_rule_ids().iter().any(|r| r == EMIT_ONLY_RULE),
+        !ledger
+            .healthy_rule_ids()
+            .iter()
+            .any(|r| r == EMIT_ONLY_RULE),
         "the emit-only rule must never be 'verified clean': {:?}",
         ledger.healthy_rule_ids()
     );
     assert!(
-        !ledger.excluded_rules().iter().any(|(id, _)| *id == EMIT_ONLY_RULE),
+        !ledger
+            .excluded_rules()
+            .iter()
+            .any(|(id, _)| *id == EMIT_ONLY_RULE),
         "nor may it appear in 'rules not run this scan' — it was never a scan rule"
     );
     assert!(

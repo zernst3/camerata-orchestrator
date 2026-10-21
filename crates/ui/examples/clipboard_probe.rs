@@ -45,7 +45,9 @@ fn main() {
     fn ProbeApp() -> Element {
         // A/B switch: CAMERATA_PROBE_FIX=0 runs WITHOUT the paste bridge — the
         // pre-fix baseline that reproduces the bug. Default is fix ON.
-        let fix_enabled = std::env::var("CAMERATA_PROBE_FIX").map(|v| v != "0").unwrap_or(true);
+        let fix_enabled = std::env::var("CAMERATA_PROBE_FIX")
+            .map(|v| v != "0")
+            .unwrap_or(true);
         println!("[probe] paste-bridge fix enabled: {fix_enabled}");
         if fix_enabled {
             camerata_ui::desktop_chrome::use_clipboard_bridge();

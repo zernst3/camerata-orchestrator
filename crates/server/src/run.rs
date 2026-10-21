@@ -21,8 +21,8 @@ use camerata_liveness::LivenessTracker;
 // existing `crate::run::X` call site (handlers, routine store, scheduler) is unchanged.
 pub use camerata_app_core::run::{
     idle_ms, is_stalled, live_mode_enabled, provenance_markdown, run_provenance,
-    run_stall_threshold_ms, stall_decision, DEFAULT_RUN_STALL_THRESHOLD_MS, GateEvent, Run,
-    RunKind, RunProvenance, RunStatus, StallDecision, StallPolicy,
+    run_stall_threshold_ms, stall_decision, GateEvent, Run, RunKind, RunProvenance, RunStatus,
+    StallDecision, StallPolicy, DEFAULT_RUN_STALL_THRESHOLD_MS,
 };
 
 use crate::transcript::{generated_prompt, AgentTranscript, TranscriptStore};
@@ -31,7 +31,9 @@ use crate::transcript::{generated_prompt, AgentTranscript, TranscriptStore};
 /// Returns `0` for an id that doesn't match the pattern (defensive; should not happen for
 /// ids this store minted) so ordering degrades gracefully instead of panicking.
 fn run_id_seq(id: &str) -> usize {
-    id.strip_prefix("run-").and_then(|n| n.parse().ok()).unwrap_or(0)
+    id.strip_prefix("run-")
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
 }
 
 /// In-memory store of runs, shared into the background executor and the handlers.
@@ -249,7 +251,9 @@ impl RunStore {
                 if run.done || Self::is_terminal_status(&run.status) {
                     return;
                 }
-                run.status = RunStatus::Failed { reason: reason.clone() };
+                run.status = RunStatus::Failed {
+                    reason: reason.clone(),
+                };
                 run.failure_reason = Some(reason);
                 run.done = true;
                 became_done = true;
@@ -686,16 +690,22 @@ mod tests {
         // Tiny sleep to ensure time advances.
         std::thread::sleep(std::time::Duration::from_millis(5));
 
-        store.push_event(&id, GateEvent {
-            seq: 1,
-            layer: "layer-1".to_string(),
-            verdict: "allow".to_string(),
-            rule: None,
-            detail: "test".to_string(),
-            content_hash: None,
-        });
+        store.push_event(
+            &id,
+            GateEvent {
+                seq: 1,
+                layer: "layer-1".to_string(),
+                verdict: "allow".to_string(),
+                rule: None,
+                detail: "test".to_string(),
+                content_hash: None,
+            },
+        );
         let after = store.get(&id).unwrap().tracker.last_activity_ms();
-        assert!(after >= before, "last_activity_ms must advance after push_event");
+        assert!(
+            after >= before,
+            "last_activity_ms must advance after push_event"
+        );
     }
 
     #[test]
@@ -703,7 +713,10 @@ mod tests {
         let store = RunStore::new();
         let id = store.create("CAM-Y", "scripted", RunKind::Watched);
         let run = store.get(&id).unwrap();
-        assert!(run.tracker.last_activity_ms() > 0, "last_activity_ms must be initialized");
+        assert!(
+            run.tracker.last_activity_ms() > 0,
+            "last_activity_ms must be initialized"
+        );
         assert_eq!(run.last_progress_label, "created");
     }
 
@@ -711,14 +724,17 @@ mod tests {
     fn push_event_updates_last_progress_label() {
         let store = RunStore::new();
         let id = store.create("CAM-Z", "scripted", RunKind::Watched);
-        store.push_event(&id, GateEvent {
-            seq: 1,
-            layer: "delegate".to_string(),
-            verdict: "dispatch".to_string(),
-            rule: None,
-            detail: "dispatching".to_string(),
-            content_hash: None,
-        });
+        store.push_event(
+            &id,
+            GateEvent {
+                seq: 1,
+                layer: "delegate".to_string(),
+                verdict: "dispatch".to_string(),
+                rule: None,
+                detail: "dispatching".to_string(),
+                content_hash: None,
+            },
+        );
         let run = store.get(&id).unwrap();
         assert!(run.last_progress_label.contains("delegate"));
         assert!(run.last_progress_label.contains("dispatch"));
@@ -821,7 +837,12 @@ mod tests {
         store.fail_with_reason(&id, "boom".to_string());
         store.cancel(&id);
         let run = store.get(&id).unwrap();
-        assert_eq!(run.status, RunStatus::Failed { reason: "boom".to_string() });
+        assert_eq!(
+            run.status,
+            RunStatus::Failed {
+                reason: "boom".to_string()
+            }
+        );
         assert!(run.done);
         // The cancel signal is still set (between-step checks would see it), which is fine.
         assert!(store.is_cancelled(&id));
@@ -851,7 +872,9 @@ mod tests {
         let run = store.get(&id).unwrap();
         assert_eq!(
             run.status,
-            RunStatus::Failed { reason: "gateway binary missing".to_string() }
+            RunStatus::Failed {
+                reason: "gateway binary missing".to_string()
+            }
         );
         assert!(run.done);
     }
@@ -908,7 +931,12 @@ mod tests {
         let id = store.create("S-4", "live", RunKind::Watched);
         store.fail_with_reason(&id, "timeout".to_string());
         let run = store.get(&id).unwrap();
-        assert_eq!(run.status, RunStatus::Failed { reason: "timeout".to_string() });
+        assert_eq!(
+            run.status,
+            RunStatus::Failed {
+                reason: "timeout".to_string()
+            }
+        );
         assert_eq!(run.failure_reason.as_deref(), Some("timeout"));
         assert!(run.done);
     }

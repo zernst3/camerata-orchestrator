@@ -41,7 +41,7 @@
 //! per option rather than per rule: does the option's own `why` name a context in which it is
 //! CORRECT? If yes it is an exception; if it only names costs, it is the fault.**
 
-use camerata_rules::{load_corpus_lenient, corpus_path, RuleKind};
+use camerata_rules::{corpus_path, load_corpus_lenient, RuleKind};
 
 /// `(rule id, the one option that is the degenerate form)`.
 ///
@@ -50,9 +50,18 @@ use camerata_rules::{load_corpus_lenient, corpus_path, RuleKind};
 /// ("creates the same testability and reuse problem as fat views").
 const LAYERING_FAMILY: &[(&str, &[&str])] = &[
     ("GO-HANDLER-SERVICE-REPOSITORY-1", &["logic-in-handlers"]),
-    ("JAVA-SPRING-THIN-CONTROLLERS-1", &["fat-controllers-inline-logic"]),
-    ("JAVA-SPRING-TRANSACTIONAL-SERVICE-LAYER-1", &["transactional-on-controller"]),
-    ("PYTHON-DJANGO-FAT-MODEL-SERVICE-1", &["fat-views", "fat-serializers"]),
+    (
+        "JAVA-SPRING-THIN-CONTROLLERS-1",
+        &["fat-controllers-inline-logic"],
+    ),
+    (
+        "JAVA-SPRING-TRANSACTIONAL-SERVICE-LAYER-1",
+        &["transactional-on-controller"],
+    ),
+    (
+        "PYTHON-DJANGO-FAT-MODEL-SERVICE-1",
+        &["fat-views", "fat-serializers"],
+    ),
     ("PYTHON-FLASK-SERVICE-LAYER-1", &["logic-in-route-handler"]),
     ("PYTHON-SERVICE-LAYER-1", &["logic-in-views"]),
     ("RUBY-RAILS-SKINNY-CONTROLLERS-1", &["fat-controller"]),
@@ -60,14 +69,23 @@ const LAYERING_FAMILY: &[(&str, &[&str])] = &[
     // here so the family is checked as a family — if one of these is ever loosened back to
     // `decision`, this test says so rather than leaving the next auditor to find nine rules
     // in two shapes and guess which is intended.
-    ("CSHARP-ASPNETCORE-THIN-CONTROLLERS-1", &["fat-controllers-inline-logic"]),
+    (
+        "CSHARP-ASPNETCORE-THIN-CONTROLLERS-1",
+        &["fat-controllers-inline-logic"],
+    ),
     // TWO faults, not one, and the test caught the author of this list assuming otherwise.
     // Skipping the service layer and having no layers at all are distinct states, and
     // neither `why` names a context where it is correct — `controller-accesses-repository-
     // directly` opens "Reduces boilerplate for simple CRUD" and then lists only costs, which
     // is an upside-first `why` (a separate wording defect, tracked in the Phase 3 batch) and
     // not evidence of a legitimate exception.
-    ("JAVA-SPRING-LAYERED-ARCHITECTURE-1", &["no-formal-layering", "controller-accesses-repository-directly"]),
+    (
+        "JAVA-SPRING-LAYERED-ARCHITECTURE-1",
+        &[
+            "no-formal-layering",
+            "controller-accesses-repository-directly",
+        ],
+    ),
 ];
 
 #[tokio::test]

@@ -38,7 +38,9 @@ use std::path::Path;
 use async_trait::async_trait;
 use camerata_core::{CheckOutcome, CheckRunner, Role, RuleId};
 
-use crate::arch_checker::{all_checkers, checker_applies, matches_any_glob, ArchViolation, RepoView};
+use crate::arch_checker::{
+    all_checkers, checker_applies, matches_any_glob, ArchViolation, RepoView,
+};
 
 /// Layer-2 runner for the native architectural-checker registry
 /// ([`crate::arch_checker::all_checkers`]).
@@ -124,7 +126,10 @@ impl CheckRunner for NativeArchCheckRunner {
 fn format_violation(v: &ArchViolation) -> String {
     match (&v.object, v.line) {
         (Some(obj), line) if line > 0 => {
-            format!("{}:{} [{}] {} — {}", v.file, line, v.rule_id, obj, v.message)
+            format!(
+                "{}:{} [{}] {} — {}",
+                v.file, line, v.rule_id, obj, v.message
+            )
         }
         (Some(obj), _) => format!("{} [{}] {} — {}", v.file, v.rule_id, obj, v.message),
         (None, line) if line > 0 => format!("{}:{} [{}] {}", v.file, line, v.rule_id, v.message),
@@ -355,13 +360,21 @@ mod tests {
              /* unterminated comment\n\
              \u{0}\u{1}\u{2} garbage bytes",
         );
-        let role = role_armed_with(&[RLS_ENABLED, RLS_NO_POLICY, RLS_POLICY_DISABLED, FUNC_SEARCH_PATH]);
+        let role = role_armed_with(&[
+            RLS_ENABLED,
+            RLS_NO_POLICY,
+            RLS_POLICY_DISABLED,
+            FUNC_SEARCH_PATH,
+        ]);
         let runner = NativeArchCheckRunner::new();
 
         // The only contract under test: this must not panic and must return Ok. Whatever it
         // decides about violations is secondary (best-effort over unparseable input).
         let result = runner.check(&role, dir.path()).await;
-        assert!(result.is_ok(), "malformed SQL must never propagate as Err: {result:?}");
+        assert!(
+            result.is_ok(),
+            "malformed SQL must never propagate as Err: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -370,12 +383,19 @@ mod tests {
         let migrations = dir.path().join("supabase").join("migrations");
         fs::create_dir_all(&migrations).unwrap();
         // Invalid UTF-8 bytes — must be lossily decoded, never crash the walk.
-        fs::write(migrations.join("20240101000000_binary.sql"), [0xff, 0xfe, 0x00, 0x80, 0x81]).unwrap();
+        fs::write(
+            migrations.join("20240101000000_binary.sql"),
+            [0xff, 0xfe, 0x00, 0x80, 0x81],
+        )
+        .unwrap();
         let role = role_armed_with(&[RLS_ENABLED]);
         let runner = NativeArchCheckRunner::new();
 
         let result = runner.check(&role, dir.path()).await;
-        assert!(result.is_ok(), "non-UTF8 file must never propagate as Err: {result:?}");
+        assert!(
+            result.is_ok(),
+            "non-UTF8 file must never propagate as Err: {result:?}"
+        );
     }
 
     // ── glob-scoping: reading is limited to armed checkers' interest globs ────
@@ -385,7 +405,11 @@ mod tests {
         let dir = tmpdir();
         // A file that would trip up any naive "read everything" walk if it were parsed as
         // SQL, but sits outside every checker's interest_globs.
-        fs::write(dir.path().join("notes.sql"), "DROP TABLE everything; -- not a migration").unwrap();
+        fs::write(
+            dir.path().join("notes.sql"),
+            "DROP TABLE everything; -- not a migration",
+        )
+        .unwrap();
         write_migration(
             dir.path(),
             "20240101000000_init.sql",

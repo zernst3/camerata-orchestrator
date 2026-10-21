@@ -203,10 +203,11 @@ pub fn classify_statement(text: &str) -> Option<ParsedStmt> {
         let header_upper = upper
             .get(after_name.min(header_end)..header_end.max(after_name))
             .unwrap_or(&[]);
-        let trailer_upper: &[char] = match body_start.and_then(|start| dollar_quote_end(&raw, start)) {
-            Some(end) => upper.get(end.min(upper.len())..).unwrap_or(&[]),
-            None => &[],
-        };
+        let trailer_upper: &[char] =
+            match body_start.and_then(|start| dollar_quote_end(&raw, start)) {
+                Some(end) => upper.get(end.min(upper.len())..).unwrap_or(&[]),
+                None => &[],
+            };
         let security_definer = contains_kw_seq(header_upper, &["SECURITY", "DEFINER"])
             || contains_kw_seq(trailer_upper, &["SECURITY", "DEFINER"]);
         let has_search_path = contains_kw_seq(header_upper, &["SET", "SEARCH_PATH"])

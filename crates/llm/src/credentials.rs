@@ -161,11 +161,7 @@ pub fn validate_name(name: &str) -> Result<(), CredentialError> {
 ///
 /// Used by `AppState::github_token()` (and any future similar helpers) to give
 /// the keychain priority while keeping the env var working for back-compat.
-pub fn resolve(
-    store: &dyn CredentialStore,
-    cred_name: &str,
-    env_var: &str,
-) -> Option<String> {
+pub fn resolve(store: &dyn CredentialStore, cred_name: &str, env_var: &str) -> Option<String> {
     // Keychain wins.
     match store.get(cred_name) {
         Ok(Some(v)) => return Some(v),
@@ -184,8 +180,8 @@ pub fn resolve(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use super::*;
+    use std::sync::Arc;
 
     fn store() -> Arc<MemoryCredentialStore> {
         Arc::new(MemoryCredentialStore::new())
@@ -219,13 +215,19 @@ mod tests {
     impl EnvVarGuard {
         /// `Some(v)` sets the variable, `None` removes it. Either way the prior value returns.
         fn set(key: &'static str, value: Option<&str>) -> Self {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let previous = std::env::var(key).ok();
             match value {
                 Some(v) => std::env::set_var(key, v),
                 None => std::env::remove_var(key),
             }
-            Self { key, previous, _lock: lock }
+            Self {
+                key,
+                previous,
+                _lock: lock,
+            }
         }
     }
 
@@ -269,7 +271,10 @@ mod tests {
     fn set_and_get_round_trip() {
         let s = store();
         s.set(OPENROUTER_API_KEY, "sk-test-value").unwrap();
-        assert_eq!(s.get(OPENROUTER_API_KEY).unwrap(), Some("sk-test-value".to_string()));
+        assert_eq!(
+            s.get(OPENROUTER_API_KEY).unwrap(),
+            Some("sk-test-value".to_string())
+        );
     }
 
     #[test]
@@ -315,7 +320,10 @@ mod tests {
         let s = store();
         s.set(GITHUB_TOKEN, "first-value").unwrap();
         s.set(GITHUB_TOKEN, "second-value").unwrap();
-        assert_eq!(s.get(GITHUB_TOKEN).unwrap(), Some("second-value".to_string()));
+        assert_eq!(
+            s.get(GITHUB_TOKEN).unwrap(),
+            Some("second-value".to_string())
+        );
     }
 
     // ── list_credentials ─────────────────────────────────────────────────────

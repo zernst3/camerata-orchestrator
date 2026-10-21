@@ -355,7 +355,10 @@ const LANGUAGE_DOMAINS: &[(&str, &[&str])] = &[
     // those baseline rules are suggested; the child → parent expansion in `domains_for_stack`
     // adds plain `javascript` whenever a `javascript:*` framework domain is present.
     ("JavaScript", &["javascript", "fullstack", "api-layer"]),
-    ("TypeScript", &["javascript:typescript", "fullstack", "api-layer"]),
+    (
+        "TypeScript",
+        &["javascript:typescript", "fullstack", "api-layer"],
+    ),
     ("Rust", &["rust", "api-layer"]),
     // Python is overwhelmingly a backend/data-layer language: its own `python` baseline domain
     // (typing/idiom/web-API rules), the cross-language `api-layer` architecture rules, and the
@@ -651,9 +654,7 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
 /// (future); the selection is real now.
 ///
 /// `repo_domains` is each repo paired with the corpus domains its stack maps to.
-pub async fn propose_corpus_rules(
-    repo_domains: &[(String, Vec<String>)],
-) -> Vec<ProposedRule> {
+pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec<ProposedRule> {
     let path = camerata_rules::corpus_path();
     if !path.exists() {
         return Vec::new();
@@ -803,7 +804,10 @@ mod tests {
 
     /// A synthetic repo: `(path, content)` pairs, built the shape `detect_stack` consumes.
     fn files(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect()
     }
 
     /// Every distinct `domain` present in the REAL shipped corpus, derived the same way
@@ -1095,7 +1099,10 @@ mod tests {
             .map(|(d, _)| *d)
             .filter(|d| !corpus.contains(*d))
             .collect();
-        assert!(stale.is_empty(), "witnesses for domains not in the corpus: {stale:?}");
+        assert!(
+            stale.is_empty(),
+            "witnesses for domains not in the corpus: {stale:?}"
+        );
     }
 
     /// One manifest file per framework label [`FRAMEWORK_DOMAINS`] maps: `(label, path,
@@ -1108,44 +1115,120 @@ mod tests {
         ("Axum", "Cargo.toml", "[dependencies]\naxum = \"0.7\"\n"),
         ("Actix", "Cargo.toml", "[dependencies]\nactix-web = \"4\"\n"),
         ("Tokio", "Cargo.toml", "[dependencies]\ntokio = \"1\"\n"),
-        ("SeaORM", "Cargo.toml", "[dependencies]\nsea-orm = \"1.0\"\n"),
+        (
+            "SeaORM",
+            "Cargo.toml",
+            "[dependencies]\nsea-orm = \"1.0\"\n",
+        ),
         ("sqlx", "Cargo.toml", "[dependencies]\nsqlx = \"0.8\"\n"),
         ("Diesel", "Cargo.toml", "[dependencies]\ndiesel = \"2\"\n"),
-        ("Next.js", "package.json", r#"{"dependencies":{"next":"14.0.0"}}"#),
-        ("React", "package.json", r#"{"dependencies":{"react":"18.2.0"}}"#),
-        ("Redux", "package.json", r#"{"dependencies":{"redux":"5.0.0"}}"#),
+        (
+            "Next.js",
+            "package.json",
+            r#"{"dependencies":{"next":"14.0.0"}}"#,
+        ),
+        (
+            "React",
+            "package.json",
+            r#"{"dependencies":{"react":"18.2.0"}}"#,
+        ),
+        (
+            "Redux",
+            "package.json",
+            r#"{"dependencies":{"redux":"5.0.0"}}"#,
+        ),
         ("Vue", "package.json", r#"{"dependencies":{"vue":"3.4.0"}}"#),
-        ("Angular", "package.json", r#"{"dependencies":{"@angular/core":"17.0.0"}}"#),
-        ("Svelte", "package.json", r#"{"dependencies":{"svelte":"4.2.0"}}"#),
-        ("Express", "package.json", r#"{"dependencies":{"express":"4.19.0"}}"#),
-        ("NestJS", "package.json", r#"{"dependencies":{"@nestjs/core":"10.0.0"}}"#),
+        (
+            "Angular",
+            "package.json",
+            r#"{"dependencies":{"@angular/core":"17.0.0"}}"#,
+        ),
+        (
+            "Svelte",
+            "package.json",
+            r#"{"dependencies":{"svelte":"4.2.0"}}"#,
+        ),
+        (
+            "Express",
+            "package.json",
+            r#"{"dependencies":{"express":"4.19.0"}}"#,
+        ),
+        (
+            "NestJS",
+            "package.json",
+            r#"{"dependencies":{"@nestjs/core":"10.0.0"}}"#,
+        ),
         ("FastAPI", "requirements.txt", "fastapi==0.110.0\n"),
         ("Django", "requirements.txt", "django==5.0\n"),
         ("Flask", "requirements.txt", "flask==3.0\n"),
         ("SQLAlchemy", "requirements.txt", "sqlalchemy==2.0.29\n"),
         ("Pydantic", "requirements.txt", "pydantic==2.6.0\n"),
-        ("Gin", "go.mod", "module example\n\nrequire github.com/gin-gonic/gin v1.9.1\n"),
-        ("Echo", "go.mod", "module example\n\nrequire github.com/labstack/echo/v4 v4.11.0\n"),
-        ("Chi", "go.mod", "module example\n\nrequire github.com/go-chi/chi/v5 v5.0.12\n"),
-        ("Fiber", "go.mod", "module example\n\nrequire github.com/gofiber/fiber/v2 v2.52.0\n"),
-        ("Gorilla Mux", "go.mod", "module example\n\nrequire github.com/gorilla/mux v1.8.1\n"),
-        ("GORM", "go.mod", "module example\n\nrequire gorm.io/gorm v1.25.0\n"),
-        ("gRPC-Go", "go.mod", "module example\n\nrequire google.golang.org/grpc v1.62.0\n"),
+        (
+            "Gin",
+            "go.mod",
+            "module example\n\nrequire github.com/gin-gonic/gin v1.9.1\n",
+        ),
+        (
+            "Echo",
+            "go.mod",
+            "module example\n\nrequire github.com/labstack/echo/v4 v4.11.0\n",
+        ),
+        (
+            "Chi",
+            "go.mod",
+            "module example\n\nrequire github.com/go-chi/chi/v5 v5.0.12\n",
+        ),
+        (
+            "Fiber",
+            "go.mod",
+            "module example\n\nrequire github.com/gofiber/fiber/v2 v2.52.0\n",
+        ),
+        (
+            "Gorilla Mux",
+            "go.mod",
+            "module example\n\nrequire github.com/gorilla/mux v1.8.1\n",
+        ),
+        (
+            "GORM",
+            "go.mod",
+            "module example\n\nrequire gorm.io/gorm v1.25.0\n",
+        ),
+        (
+            "gRPC-Go",
+            "go.mod",
+            "module example\n\nrequire google.golang.org/grpc v1.62.0\n",
+        ),
         (
             "Spring",
             "pom.xml",
             "<dependency><groupId>org.springframework.boot</groupId></dependency>",
         ),
-        ("ASP.NET", "App.csproj", "<PackageReference Include=\"Microsoft.AspNetCore.App\" />"),
+        (
+            "ASP.NET",
+            "App.csproj",
+            "<PackageReference Include=\"Microsoft.AspNetCore.App\" />",
+        ),
         (
             "Entity Framework Core",
             "App.csproj",
             "<PackageReference Include=\"Microsoft.EntityFrameworkCore\" Version=\"8.0.0\" />",
         ),
         ("Rails", "Gemfile", "gem \"rails\", \"~> 7.1\"\n"),
-        ("Supabase", "supabase/config.toml", "project_id = \"example\"\n"),
-        ("Terraform", "main.tf", "resource \"null_resource\" \"a\" {}\n"),
-        ("Terragrunt", "terragrunt.hcl", "terraform { source = \".\" }\n"),
+        (
+            "Supabase",
+            "supabase/config.toml",
+            "project_id = \"example\"\n",
+        ),
+        (
+            "Terraform",
+            "main.tf",
+            "resource \"null_resource\" \"a\" {}\n",
+        ),
+        (
+            "Terragrunt",
+            "terragrunt.hcl",
+            "terraform { source = \".\" }\n",
+        ),
         ("Bicep", "main.bicep", "param location string\n"),
         ("Pulumi", "Pulumi.yaml", "name: example\nruntime: nodejs\n"),
         (
@@ -1156,9 +1239,17 @@ mod tests {
         ("GitHub Actions", ".github/workflows/ci.yml", "on: push\n"),
         ("GitLab CI", ".gitlab-ci.yml", "stages: [build]\n"),
         ("CircleCI", ".circleci/config.yml", "version: 2.1\n"),
-        ("Azure Pipelines", "azure-pipelines.yml", "trigger: [main]\n"),
+        (
+            "Azure Pipelines",
+            "azure-pipelines.yml",
+            "trigger: [main]\n",
+        ),
         ("Travis CI", ".travis.yml", "language: node_js\n"),
-        ("Bitbucket Pipelines", "bitbucket-pipelines.yml", "pipelines: {}\n"),
+        (
+            "Bitbucket Pipelines",
+            "bitbucket-pipelines.yml",
+            "pipelines: {}\n",
+        ),
         ("Drone CI", ".drone.yml", "kind: pipeline\n"),
         ("Jenkins", "Jenkinsfile", "pipeline { agent any }\n"),
     ];
@@ -1245,28 +1336,48 @@ mod tests {
     async fn req_a6_a_nest_repo_arms_the_nest_rules() {
         let repo_files = files(&[
             ("src/main.ts", "import { NestFactory } from '@nestjs/core';"),
-            ("package.json", r#"{"dependencies":{"@nestjs/core":"10.0.0"}}"#),
+            (
+                "package.json",
+                r#"{"dependencies":{"@nestjs/core":"10.0.0"}}"#,
+            ),
         ]);
         let stack = detect_stack("acme/api", &repo_files);
-        assert!(stack.frameworks.contains(&"NestJS".to_string()), "{stack:?}");
+        assert!(
+            stack.frameworks.contains(&"NestJS".to_string()),
+            "{stack:?}"
+        );
         let domains = domains_for_stack(&stack);
-        assert!(domains.contains(&"javascript:nest".to_string()), "{domains:?}");
+        assert!(
+            domains.contains(&"javascript:nest".to_string()),
+            "{domains:?}"
+        );
         // The `javascript` baseline must come along via the child → parent expansion.
         assert!(domains.contains(&"javascript".to_string()), "{domains:?}");
 
         let repo_domains = vec![("acme/api".to_string(), domains)];
         let proposed = propose_corpus_rules(&repo_domains).await;
-        let nest: Vec<&ProposedRule> =
-            proposed.iter().filter(|r| r.domain == "javascript:nest").collect();
-        assert!(!nest.is_empty(), "the corpus has javascript:nest rules to propose");
+        let nest: Vec<&ProposedRule> = proposed
+            .iter()
+            .filter(|r| r.domain == "javascript:nest")
+            .collect();
+        assert!(
+            !nest.is_empty(),
+            "the corpus has javascript:nest rules to propose"
+        );
         let unbound: Vec<&String> = nest
             .iter()
             .filter(|r| !r.repos.contains(&"acme/api".to_string()))
             .map(|r| &r.id)
             .collect();
-        assert!(unbound.is_empty(), "every nest rule must bind to this repo: {unbound:?}");
-        let unarmed: Vec<&String> =
-            nest.iter().filter(|r| !r.is_auto_recommended).map(|r| &r.id).collect();
+        assert!(
+            unbound.is_empty(),
+            "every nest rule must bind to this repo: {unbound:?}"
+        );
+        let unarmed: Vec<&String> = nest
+            .iter()
+            .filter(|r| !r.is_auto_recommended)
+            .map(|r| &r.id)
+            .collect();
         assert!(
             unarmed.is_empty(),
             "every stack-matched, grounded nest rule must be pre-checked: {unarmed:?}"
@@ -1286,7 +1397,14 @@ mod tests {
         ]);
         let stack = detect_stack("acme/svc", &repo_files);
         let domains = domains_for_stack(&stack);
-        for expected in ["rust", "rust:axum", "rust:tokio", "rust:sqlx", "sql", "api-layer"] {
+        for expected in [
+            "rust",
+            "rust:axum",
+            "rust:tokio",
+            "rust:sqlx",
+            "sql",
+            "api-layer",
+        ] {
             assert!(
                 domains.iter().any(|d| d == expected),
                 "{expected} missing from {domains:?} (stack {stack:?})"
@@ -1343,7 +1461,10 @@ mod tests {
     fn req_a6_widened_detection_does_not_misfire_on_an_unrelated_stack() {
         let repo_files = files(&[
             ("src/app.tsx", "export const App = () => null;"),
-            ("package.json", r#"{"dependencies":{"react":"18.2.0","react-dom":"18.2.0"}}"#),
+            (
+                "package.json",
+                r#"{"dependencies":{"react":"18.2.0","react-dom":"18.2.0"}}"#,
+            ),
         ]);
         let stack = detect_stack("acme/web", &repo_files);
         let domains = domains_for_stack(&stack);

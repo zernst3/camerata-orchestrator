@@ -217,14 +217,14 @@ impl<'a> FleetCoordinator<'a> {
                 })?;
 
         // 2. Layer-2 check against the shared worktree.
-        let initial_check =
-            self.checks
-                .check(role, &self.worktree)
-                .await
-                .map_err(|source| CoordinatorError::Check {
-                    pass: "initial",
-                    source,
-                })?;
+        let initial_check = self
+            .checks
+            .check(role, &self.worktree)
+            .await
+            .map_err(|source| CoordinatorError::Check {
+                pass: "initial",
+                source,
+            })?;
         let initial_violations = initial_check.violated;
         // The captured toolchain diagnostics feed the NEXT revise prompt tail.
         let mut current_diagnostics = initial_check.diagnostics;
@@ -255,14 +255,14 @@ impl<'a> FleetCoordinator<'a> {
             })?;
             revised_outcome = Some(outcome);
 
-            let recheck =
-                self.checks
-                    .check(role, &self.worktree)
-                    .await
-                    .map_err(|source| CoordinatorError::Check {
-                        pass: "revise",
-                        source,
-                    })?;
+            let recheck = self
+                .checks
+                .check(role, &self.worktree)
+                .await
+                .map_err(|source| CoordinatorError::Check {
+                    pass: "revise",
+                    source,
+                })?;
             current_violations = recheck.violated;
             current_diagnostics = recheck.diagnostics;
 

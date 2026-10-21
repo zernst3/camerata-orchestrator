@@ -24,7 +24,10 @@ fn top_level(domain: &str) -> String {
 async fn corpus_domains() -> Vec<String> {
     let (corpus, errors) = load_corpus_lenient(&corpus_path()).await;
     if !errors.is_empty() {
-        eprintln!("warning: {} corpus file(s) failed to load: {errors:?}", errors.len());
+        eprintln!(
+            "warning: {} corpus file(s) failed to load: {errors:?}",
+            errors.len()
+        );
     }
     let mut domains: Vec<String> = corpus.iter().map(|r| top_level(&r.domain)).collect();
     domains.sort();
@@ -36,8 +39,8 @@ async fn corpus_domains() -> Vec<String> {
 pub async fn run_corpus_check() -> Result<()> {
     let domains = corpus_domains().await;
 
-    let Some(freshness) = CorpusFreshness::load(&corpus_freshness_path())
-        .context("parsing CORPUS_FRESHNESS.toml")?
+    let Some(freshness) =
+        CorpusFreshness::load(&corpus_freshness_path()).context("parsing CORPUS_FRESHNESS.toml")?
     else {
         println!(
             "No CORPUS_FRESHNESS.toml found. Every domain is unconfirmed:\n  {}",

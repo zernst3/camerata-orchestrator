@@ -601,10 +601,7 @@ impl ClaudeLeadEngineer {
     /// FIRST becomes the cwd + primary `--add-dir` (like [`Self::with_repo_dir`]); every other
     /// is added as its own read-only `--add-dir`, so planning can scan ACROSS every repo.
     /// Builder-style. READ-ONLY — no write tools, no gateway. Empty input clears the binding.
-    pub fn with_repo_dirs(
-        mut self,
-        dirs: impl IntoIterator<Item = std::path::PathBuf>,
-    ) -> Self {
+    pub fn with_repo_dirs(mut self, dirs: impl IntoIterator<Item = std::path::PathBuf>) -> Self {
         let mut iter = dirs.into_iter();
         match iter.next() {
             Some(primary) => {
@@ -913,7 +910,10 @@ mod tests {
         // The planning calls offer ONLY read-class built-ins so they can scan the repo;
         // no write/exec/spawn tool may be present (these calls have no gateway either).
         for t in READ_ONLY_TOOLS {
-            assert!(["Read", "Glob", "Grep", "LS"].contains(t), "unexpected tool {t}");
+            assert!(
+                ["Read", "Glob", "Grep", "LS"].contains(t),
+                "unexpected tool {t}"
+            );
         }
         for forbidden in ["Write", "Edit", "Bash", "Task", "MultiEdit", "NotebookEdit"] {
             assert!(
@@ -926,7 +926,10 @@ mod tests {
     #[test]
     fn with_repo_dir_binds_the_repo_for_on_demand_read() {
         let le = ClaudeLeadEngineer::new().with_repo_dir("/tmp/repo");
-        assert_eq!(le.repo_dir.as_deref(), Some(std::path::Path::new("/tmp/repo")));
+        assert_eq!(
+            le.repo_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/repo"))
+        );
         // Default (no repo) leaves it unbound (digest-only fallback).
         assert!(ClaudeLeadEngineer::new().repo_dir.is_none());
     }

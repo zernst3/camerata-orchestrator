@@ -291,7 +291,8 @@ mod tests {
 
     #[test]
     fn strips_line_comments() {
-        let sql = "create table a (id int); -- trailing note\nalter table a enable row level security;";
+        let sql =
+            "create table a (id int); -- trailing note\nalter table a enable row level security;";
         let stmts = split_statements(sql);
         assert_eq!(stmts.len(), 2);
         assert!(!stmts[1].text.to_lowercase().contains("trailing"));
@@ -321,7 +322,11 @@ mod tests {
             $$ language plpgsql;
         "#;
         let stmts = split_statements(sql);
-        assert_eq!(stmts.len(), 1, "the whole CREATE FUNCTION is one statement: {stmts:#?}");
+        assert_eq!(
+            stmts.len(),
+            1,
+            "the whole CREATE FUNCTION is one statement: {stmts:#?}"
+        );
         assert!(stmts[0].text.contains("security definer"));
         assert!(stmts[0].text.contains("set search_path"));
     }
@@ -342,8 +347,15 @@ mod tests {
             create table after_it (id int);
         "#;
         let stmts = split_statements(sql);
-        assert_eq!(stmts.len(), 2, "tagged dollar-quote must not close on an inner $$: {stmts:#?}");
-        assert!(stmts[1].text.to_lowercase().contains("create table after_it"));
+        assert_eq!(
+            stmts.len(),
+            2,
+            "tagged dollar-quote must not close on an inner $$: {stmts:#?}"
+        );
+        assert!(stmts[1]
+            .text
+            .to_lowercase()
+            .contains("create table after_it"));
     }
 
     #[test]
@@ -412,7 +424,11 @@ mod tests {
     fn unterminated_block_comment_does_not_panic() {
         let sql = "create table a (id int); /* never closes";
         let stmts = split_statements(sql);
-        assert_eq!(stmts.len(), 1, "only the pre-comment statement is real: {stmts:#?}");
+        assert_eq!(
+            stmts.len(),
+            1,
+            "only the pre-comment statement is real: {stmts:#?}"
+        );
     }
 
     #[test]

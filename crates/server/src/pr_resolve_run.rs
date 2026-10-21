@@ -142,7 +142,11 @@ pub async fn execute_pr_resolve_run(
                 content_hash: None,
             },
         );
-        uow.append_history(&story_id, "pr_resolve", &format!("Resolve PR feedback failed: {detail}"));
+        uow.append_history(
+            &story_id,
+            "pr_resolve",
+            &format!("Resolve PR feedback failed: {detail}"),
+        );
         // LIFECYCLE-2: a failure is a genuine FAILED terminal, not a silent AwaitingQa.
         runs.fail_with_reason(&run_id, detail);
     };
@@ -193,7 +197,11 @@ pub async fn execute_pr_resolve_run(
 
     // Ensure the UoW branch is checked out in this worktree before the agent edits.
     if let Err(e) = crate::workspace::switch_branch(&dir, &target_branch).await {
-        fail(&runs, &uow, format!("could not check out the UoW branch `{target_branch}`: {e}"));
+        fail(
+            &runs,
+            &uow,
+            format!("could not check out the UoW branch `{target_branch}`: {e}"),
+        );
         return;
     }
 
@@ -209,7 +217,11 @@ pub async fn execute_pr_resolve_run(
     let role = match governed_role("PrFeedbackResolver").await {
         Ok(r) => r,
         Err(e) => {
-            fail(&runs, &uow, format!("could not build the governed resolver role: {e}"));
+            fail(
+                &runs,
+                &uow,
+                format!("could not build the governed resolver role: {e}"),
+            );
             return;
         }
     };
@@ -223,11 +235,20 @@ pub async fn execute_pr_resolve_run(
         .filter(|d| d.as_path() != dir.as_path())
         .cloned()
         .collect();
-    let spawn = match prepare_session(&gateway_bin, &role, Some(dir.as_path()), &sibling_read_dirs, None)
-    {
+    let spawn = match prepare_session(
+        &gateway_bin,
+        &role,
+        Some(dir.as_path()),
+        &sibling_read_dirs,
+        None,
+    ) {
         Ok(s) => s,
         Err(e) => {
-            fail(&runs, &uow, format!("could not prepare the resolver session: {e}"));
+            fail(
+                &runs,
+                &uow,
+                format!("could not prepare the resolver session: {e}"),
+            );
             return;
         }
     };
@@ -237,18 +258,32 @@ pub async fn execute_pr_resolve_run(
     let store_hb = runs.clone();
     let rid_hb = run_id.clone();
     let on_activity: HeartbeatFn = Arc::new(move || store_hb.touch_activity(&rid_hb, None));
-    let driver = spawn.driver.with_model(&model).with_on_activity(on_activity);
+    let driver = spawn
+        .driver
+        .with_model(&model)
+        .with_on_activity(on_activity);
 
     event(
         &runs,
         "info",
         format!(
             "Spawning single gated PR-feedback resolution agent on model `{}`.",
-            if model.trim().is_empty() { "<cli default>" } else { &model }
+            if model.trim().is_empty() {
+                "<cli default>"
+            } else {
+                &model
+            }
         ),
     );
 
-    let task = resolve_prompt(&story_id, pr_number, &target_branch, &review_comments, &failing_checks, grounding.as_deref());
+    let task = resolve_prompt(
+        &story_id,
+        pr_number,
+        &target_branch,
+        &review_comments,
+        &failing_checks,
+        grounding.as_deref(),
+    );
     if let Err(e) = driver.run(&role, &task).await {
         fail(&runs, &uow, format!("resolution agent failed: {e}"));
         return;
@@ -274,7 +309,11 @@ pub async fn execute_pr_resolve_run(
         &numeric_id,
     );
     if let Err(e) = crate::vcs_choke::gated_commit(&vcs_config, &commit_msg) {
-        fail(&runs, &uow, format!("VCS-action gate blocked the machine commit: {e}"));
+        fail(
+            &runs,
+            &uow,
+            format!("VCS-action gate blocked the machine commit: {e}"),
+        );
         return;
     }
 
@@ -300,7 +339,11 @@ pub async fn execute_pr_resolve_run(
     match token.as_deref() {
         Some(t) => match crate::workspace::push_branch(&dir, &repo, &target_branch, t).await {
             Ok(()) => {
-                event(&runs, "info", format!("Pushed `{target_branch}` — the PR will re-run its checks."));
+                event(
+                    &runs,
+                    "info",
+                    format!("Pushed `{target_branch}` — the PR will re-run its checks."),
+                );
                 uow.append_history(
                     &story_id,
                     "pr_resolve",
@@ -326,12 +369,16 @@ pub async fn execute_pr_resolve_run(
             event(
                 &runs,
                 "info",
-                format!("No GitHub token: committed locally — push `{target_branch}` to update the PR."),
+                format!(
+                    "No GitHub token: committed locally — push `{target_branch}` to update the PR."
+                ),
             );
             uow.append_history(
                 &story_id,
                 "pr_resolve",
-                &format!("Resolved PR #{pr_number} feedback (committed locally; no token to push)."),
+                &format!(
+                    "Resolved PR #{pr_number} feedback (committed locally; no token to push)."
+                ),
             );
         }
     }
@@ -410,7 +457,10 @@ mod tests {
         assert!(matches!(run.status, RunStatus::Failed { .. }));
         assert!(run.done);
         assert!(run.events.iter().any(|e| e.verdict == "error"));
-        assert!(run.events.iter().any(|e| e.detail.contains("live mode is off")));
+        assert!(run
+            .events
+            .iter()
+            .any(|e| e.detail.contains("live mode is off")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
