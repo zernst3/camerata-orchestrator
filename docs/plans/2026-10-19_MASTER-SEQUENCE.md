@@ -147,7 +147,7 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
     flagging. The schema field stays (harmless, zero rules use it); we revisit only if a
     specific rule is ever found to teach something the ecosystem abandoned.
 
-16b. **Machine-readable exports (CSV + JSON per dataset) in the product ZIP** (Zach, 2026-10-20).
+16b. ✅ DONE **Machine-readable exports (CSV + JSON per dataset) in the product ZIP** (Zach, 2026-10-20).
     Every xlsx DATA worksheet (All Findings, Deviations, Conventions, Dependencies, False
     Positives, Coverage; NOT Index or the per-category duplicates) emitted as BOTH a CSV and a
     JSON, in nested `csv/` and `json/` folders inside the export ZIP, PLUS a root `manifest.json` (file index + per-file sha256 + schema versions + provenance: commit, engine version, corpus-content digest, and the client-visible rules-last-reviewed staleness date), as additional serializers

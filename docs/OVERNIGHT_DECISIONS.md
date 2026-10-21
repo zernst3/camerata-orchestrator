@@ -76,3 +76,16 @@ nothing is on origin yet - review `git log` and push in the morning.
 ### Recommended next session order
 Exports+manifest build (turnkey plan ready) -> W24 vertical slice -> W29 -> 19f grader -> 20 sweep.
 Plus the gated pre-first-client full staleness sweep before client #1.
+
+## UPDATE (2026-10-21, resumed on "keep going"): Track 2 exports BUILT
+- Machine-readable exports + manifest.json: DONE and wired end-to-end into the product ZIP
+  (both HTTP export_product + CLI inspect). 8 json/*.json + 8 csv/*.csv + manifest.json
+  (file index + sha256 + schema_version + provenance). Each a serializer over the SAME
+  partition_rows pass (parity gate: all-findings.json == findings.json). Sample ZIP regenerated
+  with the new files. Gates: json/csv file-set + parity + RFC4180 round-trip + manifest integrity.
+- Fixed two PRE-EXISTING masked failures surfaced along the way: W32 Rule test-fixture literals
+  (server test compile) and integrity_gate_cmd fixtures (empty_input/model_unrecorded). Both
+  were from earlier this-session commits; now green.
+- Known remaining red: ONE test, scan_tools::live_eslint_detects_a_real_exhaustive_deps_violation
+  — the eslint-provisioning residual (W30), environmental (leaky skip-guard on a half-provisioned
+  machine), NOT a regression. Needs the W30 eslint tool-manifest version-pinning.
