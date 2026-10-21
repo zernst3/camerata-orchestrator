@@ -60,10 +60,10 @@
 // TEMPORARY while the checker is built up over several commits; removed when `check` uses these.
 #![allow(dead_code)]
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView};
-use crate::extract::{self, LiteralKind};
+use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_MEDIUM};
+use crate::extract::{self, LiteralCtx, LiteralKind, SourceLang};
 
 pub const RULE_SHARED_CONSTANT: &str = "ARCH-SHARED-CONSTANT-1";
 
@@ -115,8 +115,242 @@ impl ArchChecker for SharedConstantChecker {
         INTEREST_GLOBS
     }
 
-    fn check(&self, _repo: &RepoView<'_>) -> Vec<ArchViolation> {
-        Vec::new()
+    fn check(&self, repo: &RepoView<'_>) -> Vec<ArchViolation> {
+        let emitted = extract::paths::emitted_js_paths(repo.files);
+        let mut index: BTreeMap<Key, Group<'_>> = BTreeMap::new();
+        for (path, content) in repo.files {
+            let Some(lang) = extract::lang_for_path(path) else {
+                continue;
+            };
+            if is_excluded_file(path, content, &emitted) {
+                continue;
+            }
+            let family = family_of(lang);
+            for literal in extract::literals(lang, content) {
+                let Some(shape) = shape_of(literal.kind, &literal.value) else {
+                    continue;
+                };
+                // A protocol or style token is protocol or style text wherever it appears, so
+                // dropping each occurrence on sight removes the value everywhere.
+                if literal.kind == LiteralKind::Str && is_protocol_or_style_value(&literal.value) {
+                    continue;
+                }
+                index
+                    .entry((family, literal.kind, literal.value))
+                    .or_insert_with(|| Group {
+                        shape,
+                        occurrences: Vec::new(),
+                    })
+                    .occurrences
+                    .push(Occurrence {
+                        file: path,
+                        line: literal.line,
+                        ctx: literal.ctx,
+                    });
+            }
+        }
+        let locale_keys = collect_locale_keys(repo.files);
+        let mut out: Vec<ArchViolation> = index
+            .into_iter()
+            .filter_map(|((_, kind, value), group)| judge(&value, kind, &group, &locale_keys))
+            .collect();
+        out.sort_by(|a, b| {
+            (a.file.as_str(), a.line, a.message.as_str()).cmp(&(
+                b.file.as_str(),
+                b.line,
+                b.message.as_str(),
+            ))
+        });
+        out
+    }
+}
+
+// ─── the index ──────────────────────────────────────────────────────────────────────────
+
+/// A value is only ever compared within one language family: a TypeScript client and a Python
+/// server writing the same route share a contract, not a constant, and "export one constant" is
+/// not a fix across languages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Family {
+    Ecma,
+    Python,
+    Rust,
+}
+
+fn family_of(lang: SourceLang) -> Family {
+    match lang {
+        SourceLang::TypeScript | SourceLang::Tsx | SourceLang::JavaScript => Family::Ecma,
+        SourceLang::Python => Family::Python,
+        SourceLang::Rust => Family::Rust,
+    }
+}
+
+type Key = (Family, LiteralKind, String);
+
+/// One place a value is written.
+struct Occurrence<'a> {
+    file: &'a str,
+    line: usize,
+    ctx: LiteralCtx,
+}
+
+struct Group<'a> {
+    shape: Shape,
+    occurrences: Vec<Occurrence<'a>>,
+}
+
+// ─── the guards that read an occurrence's context (stubs until the safe twins drive them) ─
+
+/// Value-level disqualifiers V1 to V11: one occurrence anywhere in the family that shows the
+/// value is something other than a domain constant removes the value entirely.
+fn context_disqualifies(shape: Shape, value: &str, ctx: &LiteralCtx) -> bool {
+    let _ = (shape, value, ctx);
+    false
+}
+
+/// Occurrence-level exclusions O1 to O4: this occurrence is not counted; the value survives.
+fn occurrence_excluded(shape: Shape, value: &str, ctx: &LiteralCtx) -> bool {
+    let _ = (shape, value, ctx);
+    false
+}
+
+/// Every key found in a translation catalogue (V1's second half).
+fn collect_locale_keys(files: &[(String, String)]) -> HashSet<String> {
+    let _ = files;
+    HashSet::new()
+}
+
+// ─── the verdict ────────────────────────────────────────────────────────────────────────
+
+/// A module-level constant that holds the value.
+struct Home<'a> {
+    file: &'a str,
+    line: usize,
+    name: &'a str,
+}
+
+fn judge(
+    value: &str,
+    kind: LiteralKind,
+    group: &Group<'_>,
+    locale_keys: &HashSet<String>,
+) -> Option<ArchViolation> {
+    if group
+        .occurrences
+        .iter()
+        .any(|o| context_disqualifies(group.shape, value, &o.ctx))
+    {
+        return None;
+    }
+    if kind == LiteralKind::Str && locale_keys.contains(value) {
+        return None;
+    }
+    let counted: Vec<&Occurrence<'_>> = group
+        .occurrences
+        .iter()
+        .filter(|o| !occurrence_excluded(group.shape, value, &o.ctx))
+        .collect();
+
+    // Homes: the initializer of a module-level constant, deduplicated by (file, name) so a
+    // constant that lists the value twice is still one home.
+    let mut homes: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for o in &counted {
+        if let Some(home) = &o.ctx.module_const {
+            let line = homes.entry((o.file, home.name.as_str())).or_insert(o.line);
+            *line = (*line).min(o.line);
+        }
+    }
+    let mut homes: Vec<Home<'_>> = homes
+        .into_iter()
+        .map(|((file, name), line)| Home { file, line, name })
+        .collect();
+    homes.sort_by_key(|h| (h.file, h.line, h.name));
+    let home_files: BTreeSet<&str> = homes.iter().map(|h| h.file).collect();
+
+    // Bare copies: everything else, minus the files that hold a home (a module using its own
+    // constant's value next to it is not a cross-module copy).
+    let bare: Vec<&Occurrence<'_>> = counted
+        .iter()
+        .copied()
+        .filter(|o| o.ctx.module_const.is_none() && !home_files.contains(o.file))
+        .collect();
+    // A decimal rate is only a rate where it is arithmetic: one bare copy that is not an
+    // operand means the number is something else here, and so everywhere.
+    if kind == LiteralKind::Number && bare.iter().any(|o| !o.ctx.arithmetic) {
+        return None;
+    }
+    let mut bare_files: BTreeMap<&str, usize> = BTreeMap::new();
+    for o in &bare {
+        let line = bare_files.entry(o.file).or_insert(o.line);
+        *line = (*line).min(o.line);
+    }
+    let needed = if homes.is_empty() { 2 } else { 1 };
+    if bare_files.len() < needed {
+        return None;
+    }
+    let (first_file, first_line) = bare_files
+        .iter()
+        .map(|(f, l)| (*f, *l))
+        .min_by_key(|(f, l)| (*f, *l))?;
+    Some(ArchViolation {
+        rule_id: RULE_SHARED_CONSTANT.to_string(),
+        file: first_file.to_string(),
+        line: first_line,
+        object: Some(value.to_string()),
+        message: message_for(value, &homes, &bare_files),
+        // The corpus rule's `max_severity = "low"` is expected to clamp this at report time;
+        // the checker contract forbids emitting `low` directly.
+        severity: SEVERITY_MEDIUM,
+    })
+}
+
+/// The finding text, in the client's voice: what is true, then what to do about it.
+fn message_for(value: &str, homes: &[Home<'_>], bare_files: &BTreeMap<&str, usize>) -> String {
+    let locations: Vec<String> = bare_files
+        .iter()
+        .map(|(file, line)| format!("`{file}:{line}`"))
+        .collect();
+    let list = join_with_and(&locations);
+    let count = bare_files.len();
+    match homes {
+        [] => format!(
+            "`{value}` is written as a bare literal in {count} files: {list}. Give it one home: \
+             define it once as a named, exported constant and import that constant at every use, \
+             so that changing the value is one edit and a search for the constant's name finds \
+             every user."
+        ),
+        [home] => format!(
+            "`{value}` is defined once as the constant `{}` in `{}:{}`, but is written as a bare \
+             literal in {count} other file{}: {list}. Import the constant there instead of \
+             repeating the value.",
+            home.name,
+            home.file,
+            home.line,
+            if count == 1 { "" } else { "s" },
+        ),
+        many => {
+            let defs: Vec<String> = many
+                .iter()
+                .map(|h| format!("`{}` in `{}:{}`", h.name, h.file, h.line))
+                .collect();
+            format!(
+                "`{value}` is defined as the constants {}, but is also written as a bare literal \
+                 in {count} other file{}: {list}. Keep one of those constants as the home and \
+                 import it at every use, including where the other definition sits, instead of \
+                 repeating the value.",
+                join_with_and(&defs),
+                if count == 1 { "" } else { "s" },
+            )
+        }
+    }
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn join_with_and(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
     }
 }
 
@@ -999,6 +1233,207 @@ fn is_declaration_file(base: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
+        pairs
+            .into_iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect()
+    }
+
+    fn run(f: &[(String, String)]) -> Vec<ArchViolation> {
+        SharedConstantChecker.check(&RepoView {
+            spec: "test/repo",
+            files: f,
+        })
+    }
+
+    fn run_pairs(pairs: Vec<(&str, &str)>) -> Vec<ArchViolation> {
+        run(&files(pairs))
+    }
+
+    // ── positives ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn kebab_queue_name_bare_in_two_files_is_flagged() {
+        let v = run_pairs(vec![
+            ("src/api/orders.ts", "publish('orders-high', msg);\n"),
+            ("src/worker/consume.ts", "subscribe('orders-high', h);\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert_eq!(v[0].rule_id, RULE_SHARED_CONSTANT);
+        assert_eq!(v[0].object.as_deref(), Some("orders-high"));
+        assert_eq!(v[0].file, "src/api/orders.ts");
+        assert_eq!(v[0].line, 1);
+        assert_eq!(v[0].severity, SEVERITY_MEDIUM);
+        let m = &v[0].message;
+        for needle in [
+            "src/api/orders.ts:1",
+            "src/worker/consume.ts:1",
+            "bare literal in 2 files",
+            "one home",
+        ] {
+            assert!(m.contains(needle), "{needle} missing: {m}");
+        }
+    }
+
+    #[test]
+    fn colon_channel_name_across_three_files_lists_all_locations() {
+        let v = run_pairs(vec![
+            ("src/a.ts", "emit('user:signup');\non('user:signup', h);\n"),
+            ("src/b.ts", "\nemit('user:signup');\n"),
+            ("src/c.ts", "\n\non('user:signup', h);\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        let m = &v[0].message;
+        for needle in [
+            "bare literal in 3 files",
+            "src/a.ts:1",
+            "src/b.ts:2",
+            "src/c.ts:3",
+        ] {
+            assert!(m.contains(needle), "{needle} missing: {m}");
+        }
+    }
+
+    #[test]
+    fn route_template_bare_in_client_and_server_is_flagged() {
+        let v = run_pairs(vec![
+            ("src/client/api.ts", "fetch('/api/v1/orders');\n"),
+            ("src/server/routes.ts", "router.get('/api/v1/orders', h);\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert_eq!(v[0].object.as_deref(), Some("/api/v1/orders"));
+    }
+
+    #[test]
+    fn route_in_python_decorator_is_counted() {
+        let v = run_pairs(vec![
+            (
+                "app/orders.py",
+                "@app.route('/api/v1/orders')\ndef orders():\n    pass\n",
+            ),
+            ("app/client.py", "client.get('/api/v1/orders')\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert_eq!(v[0].object.as_deref(), Some("/api/v1/orders"));
+    }
+
+    #[test]
+    fn route_in_rust_attribute_is_counted() {
+        let v = run_pairs(vec![
+            ("src/a.rs", "#[get(\"/api/v1/orders\")]\nasync fn a() {}\n"),
+            ("src/b.rs", "fn b() { client.get(\"/api/v1/orders\"); }\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert_eq!(v[0].object.as_deref(), Some("/api/v1/orders"));
+    }
+
+    #[test]
+    fn screaming_snake_action_type_without_a_union_is_flagged() {
+        let v = run_pairs(vec![
+            (
+                "src/actions.ts",
+                "export function add() { return { type: 'ADD_TODO' }; }\n",
+            ),
+            (
+                "src/reducer.ts",
+                "switch (a.type) { case 'ADD_TODO': break; }\n",
+            ),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert_eq!(v[0].object.as_deref(), Some("ADD_TODO"));
+    }
+
+    #[test]
+    fn decimal_rate_in_arithmetic_in_two_files_is_flagged() {
+        let v = run_pairs(vec![
+            ("src/cart.ts", "const t = total * 0.12;\n"),
+            ("src/invoice.ts", "const t = subtotal * 0.12;\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert_eq!(v[0].object.as_deref(), Some("0.12"));
+    }
+
+    #[test]
+    fn number_spellings_normalize_to_one_value() {
+        let v = run_pairs(vec![
+            ("src/cart.ts", "const t = total * .12;\n"),
+            ("src/invoice.ts", "const t = subtotal * 0.120;\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert_eq!(v[0].object.as_deref(), Some("0.12"));
+    }
+
+    #[test]
+    fn existing_home_with_one_bare_copy_elsewhere_is_flagged() {
+        let v = run_pairs(vec![
+            (
+                "src/queues.ts",
+                "export const ORDERS_QUEUE = 'orders-high';\n",
+            ),
+            ("src/worker.ts", "subscribe('orders-high');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert_eq!(v[0].file, "src/worker.ts");
+        let m = &v[0].message;
+        for needle in ["ORDERS_QUEUE", "src/queues.ts:1", "1 other file"] {
+            assert!(m.contains(needle), "{needle} missing: {m}");
+        }
+    }
+
+    #[test]
+    fn as_const_object_member_is_a_home() {
+        let v = run_pairs(vec![
+            (
+                "src/routes.ts",
+                "export const Routes = { orders: '/api/orders' } as const;\n",
+            ),
+            ("src/a.ts", "fetch('/api/orders');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert!(v[0].message.contains("`Routes`"), "{}", v[0].message);
+    }
+
+    #[test]
+    fn python_module_level_constant_is_a_home() {
+        let v = run_pairs(vec![
+            ("app/const.py", "ORDERS_QUEUE: Final = 'orders-high'\n"),
+            ("app/worker.py", "q.subscribe('orders-high')\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert!(v[0].message.contains("`ORDERS_QUEUE`"), "{}", v[0].message);
+    }
+
+    #[test]
+    fn rust_const_item_is_a_home() {
+        let v = run_pairs(vec![
+            ("src/cfg.rs", "pub const BUCKET: &str = \"user-uploads\";\n"),
+            (
+                "src/upload.rs",
+                "fn up() { client.bucket(\"user-uploads\"); }\n",
+            ),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert!(v[0].message.contains("`BUCKET`"), "{}", v[0].message);
+    }
+
+    #[test]
+    fn findings_are_sorted_and_stable() {
+        let input = vec![
+            ("src/z.ts", "publish('orders-high');\nsend('a-queue');\n"),
+            ("src/y.ts", "subscribe('orders-high');\n"),
+            ("src/x.ts", "pull('a-queue');\n"),
+        ];
+        let first = run_pairs(input.clone());
+        let mut reversed = input;
+        reversed.reverse();
+        let second = run_pairs(reversed);
+        assert_eq!(first, second, "input order must not matter");
+        assert_eq!(first.len(), 2, "{first:#?}");
+        let keys: Vec<(&str, usize)> = first.iter().map(|v| (v.file.as_str(), v.line)).collect();
+        assert_eq!(keys, [("src/x.ts", 1), ("src/y.ts", 1)]);
+    }
 
     // ── shape classifier ───────────────────────────────────────────────────────
 
