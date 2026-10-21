@@ -105,7 +105,20 @@ pub fn format_verdict(verdict: &IntegrityVerdict) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camerata_server::scan_ledger::RuleTier;
+    use camerata_server::scan_ledger::{RuleTier, ScanInputFacts};
+
+    /// A healthy input-facts record: real files scanned, a recorded audit model, no engine
+    /// self-ingestion. The input-invariant gates (empty_input, model_unrecorded,
+    /// engine_self_ingestion) require this; a ledger that records rules/stages but no input is
+    /// the "ran over nothing" shape they exist to catch, so every fixture that should PASS must
+    /// carry it.
+    fn healthy_input() -> ScanInputFacts {
+        ScanInputFacts {
+            files_scanned: 20,
+            audit_model: Some("claude-sonnet-5".to_string()),
+            ..Default::default()
+        }
+    }
 
     fn write_ledger(dir: &std::path::Path, ledger: &ScanLedger) -> PathBuf {
         let p = dir.join("ledger.json");
@@ -122,6 +135,7 @@ mod tests {
         l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 5, 0);
         l.record_rule("TAINT-1", RuleTier::ExternalTool, true, None, 5, 0);
         l.record_rule("AI-1", RuleTier::Semantic, true, None, 5, 0);
+        l.record_input(healthy_input());
         let path = write_ledger(tmp.path(), &l);
 
         let verdict = run_integrity_gate(&IntegrityGateArgs {
@@ -201,6 +215,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut l = ScanLedger::new();
         l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 5, 0);
+        l.record_input(healthy_input());
         let path = write_ledger(tmp.path(), &l);
 
         let smoke = run_integrity_gate(&IntegrityGateArgs {
