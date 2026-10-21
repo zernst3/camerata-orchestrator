@@ -2,9 +2,20 @@
 
 ## Status
 
-Design, not yet built. Camerata is in the build phase: no clients, no shipped
-deliverables, so the package layout has no backward-compatibility constraint. (Supersedes
-the narrower `2026-10-20_csv-export.md`, which covered CSV only.)
+Built (2026-10-21), with all seven Testing gates in place (see the table under
+[Testing](#testing-mirrors-the-existing-cross-artifact-discipline)). Camerata is in the build
+phase: no clients, no shipped deliverables, so the package layout has no backward-compatibility
+constraint. (Supersedes the narrower `2026-10-20_csv-export.md`, which covered CSV only.)
+
+The text below is the original design; where the build differs from it, the section
+[Where the build differs from this design](#where-the-build-differs-from-this-design) says so
+and is the authority.
+
+**The dataset set must be re-checked when the W27 PDF/xlsx rebuild reshapes the worksheets.**
+The set is "one per data worksheet", and the Pass-3 per-kind restructure has already moved it
+once (six datasets became eight). `gate2_csv_json_and_xlsx_agree_for_every_dataset_*` pins the
+current eight by name and maps each to its worksheet, so a W27 change to the sheet set fails
+that gate on purpose; update the dataset list, the sheet mapping and this document together.
 
 ## The gap this closes
 
@@ -17,12 +28,13 @@ The product-export ZIP today carries (`crates/server/src/lib.rs`, `build_product
 | `findings.json` | JSON | ONLY the "All Findings" rows, wrapped with provenance + summary |
 | `README.txt` | text | manifest |
 
-The xlsx holds seven data worksheets - **All Findings, Deviations, Conventions,
-Dependencies, False Positives, Coverage**, plus per-category views - but it is the ONLY
-artifact that carries six of them. `findings.json` mirrors just one (All Findings). So
-five datasets a client's tooling might want (the convention inventory, the dependency
-list, the reviewer's false-positive exclusions, the full coverage roster, the
-deviations) exist ONLY inside a binary Excel file. That is the asymmetry to fix.
+The xlsx holds data worksheets - **All Findings, Deviations, Conventions, Dependencies,
+False Positives, Coverage** (which also carries the not-assessed and rules-applied tables) -
+plus per-category views, but it is the ONLY artifact that carries most of them.
+`findings.json` mirrors just one (All Findings). So the other datasets a client's tooling
+might want (the convention inventory, the dependency list, the reviewer's false-positive
+exclusions, the full coverage roster, the deviations, the not-assessed list, the rules-applied
+audit trail) exist ONLY inside a binary Excel file. That is the asymmetry to fix.
 
 The fix: emit **every data worksheet in both plain-text machine formats** - CSV (flat,
 universal, diffable, awk/pandas/csvkit friendly) and JSON (structured, nested-field
@@ -30,9 +42,25 @@ friendly, the shape a web/CI consumer expects) - so no dataset is trapped in the
 
 ## What ships, and the folder layout
 
-One CSV and one JSON per DATA worksheet. Index (pure navigation) and the per-category
-sheets (filtered duplicates of All Findings - the `Category` column already filters) get
-neither.
+One CSV and one JSON per DATASET: **eight** of them. Index (pure navigation) and the
+per-category sheets (filtered duplicates of All Findings - the `Category` column already
+filters) get neither.
+
+| Dataset | Rows are | Worksheet it mirrors |
+|---------|----------|----------------------|
+| `all-findings` | every non-false-positive finding, all kinds | "All Findings" (defect, deviation and kind-less rows only; see below) |
+| `deviations` | one per rule with consistency deviations | "Deviations" |
+| `conventions` | one per derived or absent convention | "Conventions" |
+| `not-assessed` | one per rule armed but not evaluable | "Coverage", section "Checks we could not complete this scan" |
+| `dependencies` | one per dependency advisory | "Dependencies" |
+| `false-positives` | findings the reviewer excluded, with the reason | "False Positives" |
+| `coverage` | one per audited rule, found or clean | "Coverage", the main per-rule table |
+| `rules-applied` | one per multi-option rule an alternative was chosen for | "Coverage", section "Rules applied (alternative selection)" |
+
+The original design named six (`all-findings`, `deviations`, `conventions`, `dependencies`,
+`false-positives`, `coverage`). The Pass-3 per-kind worksheet restructure added `not-assessed`
+(its rows are a coverage disclosure, not a finding) and `rules-applied` (the Coverage sheet's
+alternative-selection appendix), and each got the same CSV and JSON pair.
 
 ```
 manifest.json            # the package index + provenance + integrity (see below)
@@ -45,16 +73,20 @@ csv/
   all-findings.csv
   deviations.csv
   conventions.csv
+  not-assessed.csv
   dependencies.csv
   false-positives.csv
   coverage.csv
+  rules-applied.csv
 json/
   all-findings.json
   deviations.json
   conventions.json
+  not-assessed.json
   dependencies.json
   false-positives.json
   coverage.json
+  rules-applied.json
 ```
 
 ## `manifest.json` - the package index, provenance, and integrity (Zach, 2026-10-20)
@@ -135,7 +167,7 @@ same provenance struct so they cannot drift.
 
 Grouping choice: **by format** (`csv/` and `json/`), not by dataset
 (`all-findings/`, `deviations/`, ...). A consumer who wants "all the JSON" or "all the
-CSV" opens one folder; per-dataset folders would be six folders of two files each and
+CSV" opens one folder; per-dataset folders would be eight folders of two files each and
 scatter a format across them. (This is the one place I went against the literal "a
 folder for each set" - see open question 1; say the word and I flip it to per-dataset.)
 
@@ -148,7 +180,7 @@ rows, without the wrapper - so:
 
 - `json/all-findings.json` is the flat sibling of the rows inside `findings.json`.
 - the provenance/summary wrapper lives ONCE (in `findings.json`), not duplicated into
-  six per-set files.
+  eight per-set files.
 
 That means All Findings appears in three shapes (wrapped `findings.json`, flat
 `json/all-findings.json`, `csv/all-findings.csv`). That is intentional and friendly:
@@ -180,7 +212,7 @@ asserted identical.
 | quoting | quote any field with comma / `"` / CR / LF; escape `"` by doubling |
 | encoding | UTF-8, no BOM (tool-friendly, matches `findings.json`; Excel users open the xlsx) |
 | line endings | LF (matches every other text artifact here; documented) |
-| header row | yes, column names identical to the xlsx sheet's header row |
+| header row | yes; column names are the JSON keys (stable snake_case), NOT the xlsx sheet's human header text. The CSV is derived from the JSON, so the two agree by construction. |
 
 **JSON** (`serde_json`, pretty-printed for diffability, same as `findings.json`):
 
@@ -202,32 +234,25 @@ produced by a new `machine_export` module that takes the same
 
 ## Testing (mirrors the existing cross-artifact discipline)
 
-1. **Parity gate.** `csv/all-findings.csv` and `json/all-findings.json`, parsed back,
-   each equal the xlsx "All Findings" rows and the `findings.json` row set - one pass,
-   now four serializations, asserted identical on every shared column.
-2. **Per-set parity.** Each `csv/X.csv` equals `json/X.json` equals the xlsx `X` sheet,
-   for all six datasets.
-3. **CSV dialect / round-trip.** A finding whose `detail` has a comma, a `"`, and a
-   newline survives write-then-parse as one row, text intact (the escaping test a
-   hand-rolled writer fails).
-4. **Set gate.** The ZIP contains exactly the six `csv/*.csv` and six `json/*.json`
-   entries - no Index, no per-category duplicates.
-5. **e2e.** `generate_sample_report` also writes `sample-report/csv/` and
-   `sample-report/json/`, reviewable fixtures beside the PDF and xlsx.
-6. **Manifest integrity gate.** Every `files[]` entry's `sha256` equals the actual
-   hash of that entry in the ZIP; `files[]` covers every ZIP member except
-   `manifest.json`; `manifest.json` is absent from its own `files[]`. A deliberately
-   corrupted byte makes the recomputed hash mismatch - the test asserts that is caught.
-7. **Provenance-parity gate.** The README's printed commit / engine version / corpus
-   version / rules-last-reviewed equal the manifest's, since both render the same
-   provenance struct (they cannot drift).
+All seven gates exist. The design's numbering is kept; where the built gate is not literally
+what was written, the right-hand column says so.
+
+| # | Gate | Where | Notes |
+|---|------|-------|-------|
+| 1 | Parity: `csv/all-findings.csv` and `json/all-findings.json`, parsed back, equal the `findings.json` rows | `json_all_findings_matches_findings_json_rows` and the CSV-from-JSON derivation (`xlsx_export` tests) | `all-findings` is a SUPERSET of the xlsx "All Findings" sheet (it is unpartitioned), so it is not equal to that sheet's rows; gate 2 accounts for the partition. |
+| 2 | Per-set parity: each `csv/X.csv` equals `json/X.json` equals the xlsx worksheet, for ALL EIGHT datasets | `tests/machine_export_dataset_parity_e2e.rs` | Reads the workbook back cell by cell from the real `.xlsx` bytes. CSV vs JSON is row count, header set and every cell; JSON vs xlsx projects each column from a JSON key under an explicit rule, and every JSON key must be rendered or named JSON-only. Runs with no corpus and with the real corpus. |
+| 3 | CSV dialect / round-trip: a `detail` with a comma, a `"` and a newline survives as one row | `csv_exports_cover_every_table_and_survive_nasty_cells` (`xlsx_export`); also exercised by gate 2's fixture | |
+| 4 | Set gate: exactly the eight `csv/*.csv` and eight `json/*.json`, no Index, no per-category duplicates | `json_exports_cover_every_table_and_parse`, `csv_exports_cover_every_table_and_survive_nasty_cells`; gate 2 asserts the dataset names in both formats | |
+| 5 | e2e: `generate_sample_report` also writes the sample package | `tests/generate_sample_report.rs` | The sample ZIP (with `csv/`, `json/`, `manifest.json`) is built through the shipping `product_export_readme` and `build_product_zip`. The generator does NOT write `sample-report/csv/` and `sample-report/json/` as loose folders beside the PDF, as the design asked; the files exist only inside `camerata-sample-audit.zip`. |
+| 6 | Manifest integrity: every `files[]` sha256 equals the actual hash; `files[]` covers every member except `manifest.json`; a corrupted byte is caught | coverage clause: `manifest_lists_and_hashes_every_file_except_itself` (`lib.rs`); corruption clause: `tests/product_export_manifest_gates.rs` | Corruption flips one bit of each exported file in turn, re-zips with valid CRCs under the original manifest, and requires the check to flag exactly that file (plus a clean control and a swapped-file case). |
+| 7 | Provenance parity: the README's commit / engine version / corpus version / rules-last-reviewed equal the manifest's | `tests/product_export_manifest_gates.rs` | Both render from one `ManifestProvenance` (`readme_lines`, `inspection_json`). Covers the populated case, a generic "every manifest `inspection` value appears in the README" check, and the absent case (null in the manifest, line omitted from the README). |
 
 ## Resolved decisions (Zach, 2026-10-20)
 
 1. **Folder grouping: by FORMAT** - nested `csv/` and `json/` subfolders inside the ZIP.
 2. **Comprehensive and symmetric** - every data worksheet gets BOTH a CSV and a JSON, as
-   many of each as it takes to cover the full dataset (the six named here today, and any
-   new data sheet W27 adds). The flat `json/all-findings.json` stays alongside the
+   many of each as it takes to cover the full dataset (the eight listed above today, and
+   any new data sheet W27 adds). The flat `json/all-findings.json` stays alongside the
    wrapped `findings.json`; symmetry wins over avoiding the small overlap.
 3. **Inside the product ZIP, not a separate download.** No standalone CSV/JSON route;
    the files ride in the package next to the PDF and xlsx.
@@ -275,6 +300,52 @@ Green, committable increments. Facts confirmed by reading the code:
 Note: W27 reworks the xlsx sheet set (per-kind sheets, R-id column). If W27 lands first, the
 CSV/JSON set tracks its final sheets for free (one-per-data-sheet); if exports land first, the
 set follows when W27 moves. Either order is fine; do NOT block one on the other.
+
+## Where the build differs from this design
+
+Found while building gates 2, 6 and 7. None of these is a regression; each is a place the text
+above was wrong or the build stopped short of it.
+
+1. **Eight datasets, not six** (see above).
+2. **`all-findings` is not the xlsx "All Findings" sheet.** The JSON/CSV carry every
+   non-false-positive row of every kind; the workbook routes defects, deviations and kind-less
+   rows to "All Findings", convention rows to "Conventions" and not-assessed rows to Coverage.
+   Equality with the sheet was never true after Pass 3; the right invariant (every row lands on
+   exactly one sheet) is `req_pass3_every_exported_row_lands_on_exactly_one_sheet`, and gate 2
+   checks the same partition across all three formats.
+3. **CSV headers are JSON keys, not the sheet's header text** (corrected in the Formats table).
+4. **A worksheet is not a dump of the JSON.** It title-cases severities, joins location lists
+   with newlines, writes "not counted" for an unknown denominator, and derives "Result" and "How
+   we checked it" from counts and citation kinds. Gate 2 therefore compares a projection, not
+   raw equality, and fails on a JSON key that is neither projected nor listed as JSON-only.
+5. **`all-findings` rows do not share one key set.** The finding kind's payload is flattened
+   into the row, so only deviation, convention, no-convention and not-assessed rows carry their
+   payload keys. The CSV header is the union of keys (first-seen order); a JSON consumer should
+   not assume every row has every key.
+6. **An empty dataset has no CSV header.** The header is derived from the rows, so a dataset
+   with no rows is an empty CSV with no column names (and `[]` in JSON). Consistent, but a
+   consumer cannot learn the columns from an empty export.
+7. **Column order is `serde_json`'s `preserve_order`, now requested explicitly.** It had been
+   enabled only through feature unification with an unrelated crate.
+8. **Manifest provenance is thinner than specified.** The design shows
+   `inspection.repos[] = { name, commit }` (a commit per repo). The build has
+   `inspection.repos` as a list of names and ONE optional top-level `commit`. And although
+   `commit`, `corpus_version` and `rules_last_reviewed` exist in the struct, the manifest and
+   the README, no call site populates them yet (`export_product`, `camerata inspect --export`
+   and the sample generator all seed from the report cover only), so today the manifest carries
+   `null` for all three and the README omits those lines. The per-repo shape and the corpus
+   digest function are still to be built; gates 6 and 7 hold the rendering and parity ready for
+   when they are.
+9. **README and manifest provenance now come from one struct.** The design asked for this; the
+   build had two hand-written renderings (and the sample generator carried a third, stale copy
+   of the README text). `ManifestProvenance` is now the single source, and
+   `product_export_readme(stem, &provenance)` no longer reads the report cover itself.
+10. **No `machine_export` module.** The serializers (`build_json_exports`, `build_csv_exports`)
+    live in `xlsx_export.rs` beside the row structs they serialize, and CSV is derived from the
+    JSON (`json_array_to_csv`) rather than serialized separately from the row structs. Both
+    still consume the one `partition_rows` pass, which is the design's actual constraint.
+11. **Built before W27 settled**, which the Sequencing section permitted ("build against
+    today's sheets and let the set follow"). The set did follow once already (item 1).
 
 ## Non-goals
 
