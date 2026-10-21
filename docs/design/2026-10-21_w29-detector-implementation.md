@@ -91,6 +91,50 @@ Wave B: UI-REACT-HOOKS-LINT (cheapest; detector exists).
 Wave C: build the clone detector, then SINGLE-SOURCE-LOGIC, then NAMING + SHARED-PRIMITIVE.
 Wave D: STATE-SHAPE, NEEDLESS-COMPLEXITY.
 
+## False-positive traps — discovered while starting the build (2026-10-21)
+
+Reading the actual code before writing it surfaced real correctness traps. Each deterministic
+rule has a way to be WRONG that a naive implementation walks straight into; the guard is part of
+the rule, not an afterthought. The standing law (from `extract/resolver.rs`'s own module doc):
+**false-negative, never false-positive** — a consistency finding a client cannot immediately
+verify as real is worse than a missed one.
+
+- **ARCH-DEAD-CODE-1 — the reachability INVERSION trap (the big one).** `resolver::reachable_from`
+  follows only RESOLVED import edges, and `build_import_graph` deliberately DROPS every edge it
+  cannot resolve unambiguously (bare/external specifiers, dynamic `import()`, reflection, un-aliased
+  TS paths, Rust 2015 unprefixed paths). Every OTHER checker benefits from that drop (it never
+  flags on a dropped edge). Dead-code INVERTS the logic — it flags on UN-reachability — so a file
+  reached ONLY via a dropped edge looks unreachable and would be falsely called dead. **Guard:**
+  never flag a file dead on graph-unreachability alone. Require corroboration: (a) unreachable from
+  every entry point (bin/lib/index roots + test files), AND (b) its module name/basename appears in
+  NO other file's text at all (catches dynamic/unresolvable references), AND (c) it is not itself an
+  entry point, a public-API/re-export surface, or a test. Err to false-negative. The safe twin — a
+  public package's exported API — must stay silent because the lib/index root reaches it.
+
+- **ARCH-ONE-IMPORT-PATH-1 — the relative-position trap.** `foo` imported as `./utils` from dir A
+  and `../a/utils` from dir B are the SAME file via two spellings that are each FORCED by relative
+  position — flagging that is a false positive. And two different symbols that happen to share a
+  name imported from different modules are NOT the same symbol. **Guard:** key the group on the
+  RESOLVED `to_file` (so same-name/different-file never collides), and only flag when the distinct
+  specifiers are not merely relative-position variants — i.e. a barrel/alias path coexisting with a
+  deep path, or distinct non-relative specifiers for the same target. Pure relative-position
+  variance is expected and ignored.
+
+- **ARCH-SHARED-CONSTANT-1 — the trivial/infrastructure-literal trap.** `0`, `1`, `""`, HTTP status
+  codes, protocol strings, and i18n keys repeat everywhere legitimately. **Guard:** an allowlist of
+  trivial/protocol/i18n shapes; only flag a DOMAIN value repeated across ≥2 modules.
+
+- **The H rules (single-source / naming / shared-primitive) — the candidate-vs-finding line.** The
+  clone detector's output is a CANDIDATE list, not findings. Presenting candidates directly would
+  flag coincidental structural similarity as a defect. **Guard:** the advisory tier judges "same
+  business decision / same concept / same mechanism"; only confirmed candidates become findings.
+  The candidate list is never dropped (it is re-ranked), but it is never shipped unjudged.
+
+**Build consequence:** each rule's positive test must be paired with a safe-twin test that exercises
+its specific trap above (a dynamically-referenced file for dead-code; a relative-position variant
+for one-import-path; an i18n/protocol literal for shared-constant; a coincidental clone for the H
+rules). That is what "correct to the QA boundary" means for this phase.
+
 ## Scope note
 Dead-code, one-import-path, shared-constant, state-shape, needless-complexity are **deterministic**
 (no model, no token cost). Single-source/naming/shared-primitive add ONE shared clone pass and an
