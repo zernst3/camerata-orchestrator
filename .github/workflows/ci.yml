@@ -6,7 +6,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # Feature and fix branches are gated on every push, not only once a PR is
+    # opened: long-lived branches that were never gated drifted months out of
+    # compliance before anyone saw a red build.
+    branches: [main, "feat/**", "fix/**"]
   pull_request:
 
 env:
