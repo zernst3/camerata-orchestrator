@@ -142,10 +142,17 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
     `superseded_since`/`current_recommendation` on RuleToml+Rule, both load sites, unknown-field
     allowlist, RULE_AUTHORING), `cwe` authored on all 14 SEC- rules from their own source CWE
     citations, two gates (`w32_rule_metadata`: every SEC- rule has a code + well-formedness).
-    **Part (b) DEFERRED, schema-ready:** `superseded_since` + `current_recommendation` on
-    pattern-level architecture rules needs per-rule judgment about which patterns genuinely aged
-    out and the year/guidance — a credibility call to make deliberately with Zach, not bulk-guess.
-    W27 renders what exists; a row simply omits the supersession line until (b) is authored.
+    **Part (b) DROPPED (Zach, 2026-10-20):** `superseded_since` was a nice-to-have enrichment,
+    not load-bearing; no clients, build phase, no rule is a confirmed-stale pattern worth
+    flagging. The schema field stays (harmless, zero rules use it); we revisit only if a
+    specific rule is ever found to teach something the ecosystem abandoned.
+
+16b. **CSV export in the product package** (Zach, 2026-10-20). Add plain-text CSVs (one per xlsx
+    DATA worksheet - All Findings, Deviations, Conventions, Dependencies, False Positives,
+    Coverage; NOT Index or the per-category duplicates) under `csv/` in the export ZIP, as a
+    second serializer over the SAME row structs the xlsx builds from (never a fourth data
+    source). Design: `docs/design/2026-10-20_csv-export.md`. **Sequence after W27's xlsx
+    worksheet changes** so the CSV set tracks the final sheet layout.
 
 ### PHASE 4 — W29, coverage expansion
 
