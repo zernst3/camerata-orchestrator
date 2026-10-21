@@ -531,24 +531,31 @@ async fn regenerate_sample_report() {
         json.cover.generated_at,
         report_export::AUDIT_REPORT_DISCLAIMER,
     );
-    let zip_bytes = {
-        use std::io::Write;
-        let buf = std::io::Cursor::new(Vec::new());
-        let mut writer = zip::ZipWriter::new(buf);
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
-        writer.start_file("camerata-sample-audit.pdf", options).expect("zip entry: pdf");
-        writer.write_all(&pdf).expect("zip write: pdf");
-        writer
-            .start_file("camerata-sample-audit-findings.xlsx", options)
-            .expect("zip entry: xlsx");
-        writer.write_all(&xlsx).expect("zip write: xlsx");
-        writer.start_file("findings.json", options).expect("zip entry: findings.json");
-        writer.write_all(&findings_json_bytes).expect("zip write: findings.json");
-        writer.start_file("README.txt", options).expect("zip entry: readme");
-        writer.write_all(readme.as_bytes()).expect("zip write: readme");
-        writer.finish().expect("finish zip").into_inner()
+    // Assemble the sample ZIP through the SAME build_product_zip the real product export uses,
+    // so the fixture mirrors the deliverable exactly — now including csv/*, json/*, manifest.json.
+    let sealed_for_zip = report.clone().seal();
+    let mut extra_files: Vec<(String, Vec<u8>)> =
+        xlsx_export::build_csv_exports(&sealed_for_zip, &dispositions, Some(&corpus), &opts)
+            .expect("sample csv exports");
+    extra_files.extend(
+        xlsx_export::build_json_exports(&sealed_for_zip, &dispositions, Some(&corpus), &opts)
+            .expect("sample json exports"),
+    );
+    let provenance = camerata_server::ManifestProvenance {
+        repos: json.cover.repos.clone(),
+        generated_at: json.cover.generated_at.clone(),
+        ..Default::default()
     };
+    let zip_bytes = camerata_server::build_product_zip(
+        "camerata-sample-audit",
+        &pdf,
+        &xlsx,
+        &findings_json_bytes,
+        &readme,
+        &extra_files,
+        &provenance,
+    )
+    .expect("build the sample product zip");
     assert_eq!(&zip_bytes[0..2], b"PK", "the product-export zip itself must be a valid zip");
     std::fs::write(repo_root.join("camerata-sample-audit.zip"), &zip_bytes)
         .expect("write sample-report/camerata-sample-audit.zip");
