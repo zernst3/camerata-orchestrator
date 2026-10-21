@@ -117,3 +117,20 @@ FIX (W30, focused next session):
   c. NOTE: I left the local workspace at eslint 9.39.5 / react-hooks 5.2.0 (npm --no-save), which
      is better than the drifted 10/7, but it is not pinned anywhere yet.
 Do NOT bandaid the test to skip-on-empty: that would hide the real finding-zeroing in client scans.
+
+## W30 eslint residual — FIXED (2026-10-21), both factors
+Investigated + fixed per Zach ("as long as it is investigated and fixed"):
+1. VERSION DRIFT (first factor): ESLINT_NPM_PACKAGES was unpinned -> npm pulled eslint 10 +
+   react-hooks 7 -> bundled flat config can't register the plugin -> zero findings. FIX: pinned
+   to eslint@^9 / @typescript-eslint/*@^8 / react-hooks@^5 / jest@^28, and made the provisioning
+   probe VERSION-AWARE so a drifted workspace re-provisions (presence-only check left 10/7 in
+   place forever). Helpers + scoped-package parsing unit-tested.
+2. REPO-SCOPE SYMLINK BUG (second factor, the real surprise): is_in_repo_scope compared a tool's
+   reported finding path against repo_root with a raw textual starts_with. Tools canonicalize
+   their paths, so on macOS eslint emits /private/var/folders/... while repo_root is the
+   symlinked /var/folders/... -> every finding judged "outside the repo" and DROPPED, zeroing
+   the whole tier. A real latent product bug for ANY repo under a symlinked path on macOS, not
+   just the test. FIX: canonicalize both sides before the containment check, fall back to raw on
+   failure (synthetic test paths unchanged).
+Result: live_eslint_detects_a_real_exhaustive_deps_violation passes; all scan_tools (73) +
+tool_provisioning (31) tests green. Did NOT bandaid the test. Full-suite confirmation pending.
