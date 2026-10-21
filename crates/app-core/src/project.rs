@@ -136,6 +136,12 @@ pub struct RuleSelection {
     /// `None` when never baselined. Serde default for back-compat.
     #[serde(default)]
     pub applied_directive: Option<String>,
+    /// The corpus rule's `version` as it stood when this selection was last baselined. Stored
+    /// beside `applied_hash` so the drift notice can say "you adopted v2, the corpus is now
+    /// v4" instead of only "something changed". `None` when never baselined, or baselined
+    /// before rules carried a version. Serde default for back-compat.
+    #[serde(default)]
+    pub applied_version: Option<u32>,
 }
 
 /// The project's full ruleset — the single source of truth that emit upserts.

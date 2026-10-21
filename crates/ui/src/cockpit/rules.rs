@@ -4922,6 +4922,59 @@ pub(super) struct RuleDriftEntry {
     /// Repos in the project that currently have the stale directive.
     #[serde(default)]
     pub repos: Vec<String>,
+    /// `true` when the stored baseline came from an older build and cannot be compared with the
+    /// current corpus (the server sends `changed: null` for these). Nothing is known to have
+    /// changed; the entry is there so the architect can re-baseline it.
+    #[serde(default)]
+    pub legacy_baseline: bool,
+    /// The rule's `version` when it was accepted; `None` when unknown (accepted before rules
+    /// carried a version).
+    #[serde(default)]
+    pub applied_version: Option<u32>,
+    /// The rule's `version` in the corpus now; `None` when the rule was removed.
+    #[serde(default)]
+    pub current_version: Option<u32>,
+}
+
+/// `(real changes, legacy baselines)` in a drift list. The two are told apart because they mean
+/// different things to the reader: a change is a fact, a legacy baseline is an unknown.
+pub(super) fn drift_counts(entries: &[RuleDriftEntry]) -> (usize, usize) {
+    let legacy = entries.iter().filter(|e| e.legacy_baseline).count();
+    (entries.len() - legacy, legacy)
+}
+
+/// The notice's headline for `changed` real changes and `legacy` unknown baselines. A legacy
+/// baseline is never described as an update: the old fingerprint says nothing either way.
+pub(super) fn drift_notice_title(changed: usize, legacy: usize) -> String {
+    match (changed, legacy) {
+        (c, 0) => format!("{c} applied rule(s) have corpus updates"),
+        (0, l) => format!("{l} applied rule(s) have an older baseline"),
+        (c, l) => format!("{c} applied rule(s) have corpus updates, {l} have an older baseline"),
+    }
+}
+
+/// The notice's explanatory line, covering only what is actually present in the list.
+pub(super) fn drift_notice_hint(changed: usize, legacy: usize) -> String {
+    const CHANGED: &str = "Some rules were adopted before their corpus entry was updated. \
+        Review the diff and accept the update to keep your governance in sync.";
+    const LEGACY: &str = "Some rules were last accepted by an older version of Camerata, \
+        whose fingerprint cannot be compared with the current corpus; nothing is known to have \
+        changed. Review the current text and accept it to re-baseline.";
+    match (changed > 0, legacy > 0) {
+        (true, false) => CHANGED.to_string(),
+        (false, true) => LEGACY.to_string(),
+        _ => format!("{CHANGED} {LEGACY}"),
+    }
+}
+
+/// `"v2 to v4"` when the rule's version moved between acceptance and now and both ends are
+/// known; `None` otherwise (an unknown end is never guessed, and an equal version is no
+/// transition).
+pub(super) fn drift_version_note(entry: &RuleDriftEntry) -> Option<String> {
+    match (entry.applied_version, entry.current_version) {
+        (Some(a), Some(c)) if a != c => Some(format!("v{a} to v{c}")),
+        _ => None,
+    }
 }
 
 pub(super) async fn fetch_rule_drift(project_id: &str) -> Option<Vec<RuleDriftEntry>> {
@@ -4978,17 +5031,16 @@ pub(super) fn RuleDriftNotice(project_id: String) -> Element {
     // Which entry's diff is currently expanded.
     let expanded: Signal<Option<String>> = use_signal(|| None);
 
+    let (changed_n, legacy_n) = drift_counts(&drift);
+    let title = drift_notice_title(changed_n, legacy_n);
+    let hint = drift_notice_hint(changed_n, legacy_n);
+
     rsx! {
         div { class: "drift-notice",
             div { class: "drift-notice-header",
                 span { class: "drift-notice-icon", "\u{26A0}" }
-                span { class: "drift-notice-title",
-                    "{drift.len()} applied rule(s) have corpus updates"
-                }
-                p { class: "drift-notice-hint",
-                    "These rules were adopted before their corpus entry was updated. \
-                     Review the diff and accept the update to keep your governance in sync."
-                }
+                span { class: "drift-notice-title", "{title}" }
+                p { class: "drift-notice-hint", "{hint}" }
             }
             for entry in drift.iter() {
                 {
@@ -5007,6 +5059,12 @@ pub(super) fn RuleDriftNotice(project_id: String) -> Element {
                                 }
                                 if !entry.repos.is_empty() {
                                     span { class: "drift-entry-repos", "repos: {entry.repos.join(\", \")}" }
+                                }
+                                if let Some(note) = drift_version_note(&entry) {
+                                    span { class: "drift-entry-version", "{note}" }
+                                }
+                                if entry.legacy_baseline {
+                                    span { class: "drift-entry-version", "older baseline" }
                                 }
                                 button {
                                     class: "btn-edit-sm",
@@ -7009,6 +7067,110 @@ mod render_tests {
         assert!(
             !html.contains("sups-table"),
             "no table before Refresh; html=\n{html}"
+        );
+    }
+
+    fn drift_entry(legacy: bool, applied: Option<u32>, current: Option<u32>) -> RuleDriftEntry {
+        RuleDriftEntry {
+            rule_id: "R-1".to_string(),
+            title: String::new(),
+            applied_directive: String::new(),
+            corpus_directive: String::new(),
+            repos: Vec::new(),
+            legacy_baseline: legacy,
+            applied_version: applied,
+            current_version: current,
+        }
+    }
+
+    // The server reports a baseline written by an older build as `changed: null` +
+    // `legacy_baseline: true`. The entry must deserialize both that and the pre-version shape
+    // (no version / legacy keys at all) without error.
+    #[test]
+    fn rule_drift_entry_deserializes_legacy_flag_and_versions() {
+        let entry: RuleDriftEntry = serde_json::from_value(serde_json::json!({
+            "rule_id": "R-1",
+            "changed": null,
+            "legacy_baseline": true,
+            "applied_version": null,
+            "current_version": 3,
+        }))
+        .expect("the new shape deserializes");
+        assert!(entry.legacy_baseline);
+        assert_eq!(entry.applied_version, None);
+        assert_eq!(entry.current_version, Some(3));
+
+        let old: RuleDriftEntry =
+            serde_json::from_value(serde_json::json!({ "rule_id": "R-2", "changed": true }))
+                .expect("a pre-version server response still deserializes");
+        assert!(!old.legacy_baseline);
+        assert_eq!(old.applied_version, None);
+    }
+
+    #[test]
+    fn drift_counts_split_real_changes_from_unknown_legacy_baselines() {
+        let entries = vec![
+            drift_entry(false, Some(1), Some(2)),
+            drift_entry(true, None, Some(2)),
+            drift_entry(true, None, None),
+        ];
+        assert_eq!(drift_counts(&entries), (1, 2));
+        assert_eq!(drift_counts(&[]), (0, 0));
+    }
+
+    // A legacy baseline must never be described as "has a corpus update": nothing is known
+    // to have changed, only that the old fingerprint cannot be compared.
+    #[test]
+    fn drift_notice_title_does_not_call_a_legacy_baseline_a_corpus_update() {
+        assert_eq!(
+            drift_notice_title(2, 0),
+            "2 applied rule(s) have corpus updates"
+        );
+        let legacy_only = drift_notice_title(0, 3);
+        assert!(
+            !legacy_only.contains("corpus updates"),
+            "legacy-only title must not claim an update: {legacy_only}"
+        );
+        assert!(legacy_only.contains('3'));
+        let both = drift_notice_title(1, 2);
+        assert!(both.contains("1 applied rule(s) have corpus updates"));
+        assert!(both.contains('2'));
+    }
+
+    #[test]
+    fn drift_notice_hint_matches_what_is_actually_known() {
+        let changed = drift_notice_hint(1, 0);
+        assert!(changed.contains("adopted before their corpus entry was updated"));
+        assert!(!changed.contains("older version"));
+
+        let legacy = drift_notice_hint(0, 1);
+        assert!(legacy.contains("older version"));
+        assert!(
+            legacy.contains("nothing is known to have changed"),
+            "{legacy}"
+        );
+
+        let both = drift_notice_hint(1, 1);
+        assert!(both.contains("adopted before their corpus entry was updated"));
+        assert!(both.contains("older version"));
+    }
+
+    #[test]
+    fn drift_version_note_only_when_both_versions_are_known_and_differ() {
+        assert_eq!(
+            drift_version_note(&drift_entry(false, Some(2), Some(4))).as_deref(),
+            Some("v2 to v4")
+        );
+        assert_eq!(
+            drift_version_note(&drift_entry(false, None, Some(4))),
+            None,
+            "an unknown applied version must not be guessed"
+        );
+        assert_eq!(drift_version_note(&drift_entry(false, Some(2), None)), None);
+        assert_eq!(
+            drift_version_note(&drift_entry(false, Some(3), Some(3))),
+            None,
+            "an unchanged version is not a transition"
         );
     }
 

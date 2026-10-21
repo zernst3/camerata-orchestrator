@@ -4100,6 +4100,10 @@ html, body {
   color: var(--ink-faint);
   font-style: italic;
 }
+.drift-entry-version {
+  font-size: 11px;
+  color: var(--ink-faint);
+}
 .drift-update-btn {
   margin-left: auto;
 }

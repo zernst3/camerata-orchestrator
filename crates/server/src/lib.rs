@@ -15496,23 +15496,32 @@ async fn development_context(State(state): State<AppState>) -> Json<serde_json::
 ///     {
 ///       "rule_id": "RUST-DOMAIN-1",
 ///       "project_id": "proj-abc",
-///       "content_hash_applied": "abc123",
-///       "content_hash_current": "def456",
-///       "changed": true
+///       "title": "Newtype IDs",
+///       "applied_directive": "…",
+///       "corpus_directive": "…",
+///       "repos": ["me/api"],
+///       "changed": true,
+///       "legacy_baseline": false,
+///       "applied_version": 2,
+///       "current_version": 4
 ///     }
 ///   ]
 /// }
 /// ```
 ///
 /// `app` is `null` when the GitHub release check fails (no token or network
-/// error). `rule_drift` lists only rules whose applied hash diverged from the
-/// current corpus hash.
+/// error). `rule_drift` lists the rules whose baseline no longer matches the
+/// corpus: `changed: true` when the rule's content hash diverged (or the rule was
+/// removed), and `changed: null` + `legacy_baseline: true` when the stored
+/// baseline predates the current hash format and so cannot be compared (see
+/// [`drift_verdict`]). `applied_version` / `current_version` are the rule's
+/// `version` when the selection was baselined and now, `null` when unknown.
 ///
 /// # Applied-rule hash
 ///
-/// A per-rule content hash is computed as `sha256(rule_id || "\n" || title ||
-/// "\n" || summary || "\n" || enforcement)`. An applied rule stores the hash at
-/// apply time; the drift check compares it to the current corpus.
+/// The baseline is [`camerata_rules::Rule::content_hash`]: `sha256:<hex>` over the
+/// canonical serialization of the whole rule. [`accept_rule_drift`] stores it (and the
+/// rule's `version`) on the selection; the drift check compares it to the corpus.
 async fn updates_check(State(state): State<AppState>) -> Json<serde_json::Value> {
     // ── App-version check ─────────────────────────────────────────────────────
     let app_update = check_github_release().await;
@@ -15525,26 +15534,6 @@ async fn updates_check(State(state): State<AppState>) -> Json<serde_json::Value>
         "app": app_update,
         "rule_drift": drift,
     }))
-}
-
-/// Compute a content hash for a corpus rule — the fingerprint stored at apply
-/// time and compared against the current corpus to detect upstream drift.
-///
-/// Hash input: `rule_id + "\n" + title + "\n" + summary + "\n" + enforcement`.
-/// Uses SHA-256 truncated to the first 16 hex chars for a compact wire value.
-fn rule_content_hash(rule: &camerata_rules::Rule) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    // Use a stable, fast hash (not cryptographic, but deterministic across runs
-    // within the same binary). A proper SHA-256 would require a dep add; this is
-    // sufficient for drift detection.
-    let mut h = DefaultHasher::new();
-    rule.id.0.hash(&mut h);
-    rule.title.hash(&mut h);
-    rule.summary.hash(&mut h);
-    rule.enforcement.as_str().hash(&mut h);
-    format!("{:016x}", h.finish())
 }
 
 /// Check the latest Camerata release on GitHub and return a JSON object with
@@ -15595,19 +15584,116 @@ fn resolved_directive(rule: &camerata_rules::Rule, chosen_option: Option<&str>) 
         .unwrap_or_else(|| rule.summary.clone())
 }
 
-/// Compute applied-rule drift: for each selected rule that has been BASELINED
-/// (`applied_hash` is `Some`), compare the baselined corpus hash against the
-/// current corpus hash and report the rule when they differ (or the rule was
-/// removed from the corpus). Selections that were never baselined (`applied_hash`
-/// is `None`) are treated as in-sync and are not reported — a freshly selected
-/// rule does not drift until it is accepted.
+/// How one baselined selection compares to the current corpus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriftVerdict {
+    /// The stored baseline equals the rule's current content hash: nothing to report.
+    InSync,
+    /// The stored baseline is a current-format hash that differs from the rule's: the rule
+    /// changed since it was accepted.
+    Changed,
+    /// The stored baseline is not a `sha256:` hash. It was written by an older build (the
+    /// `DefaultHasher` fingerprint over id/title/summary/enforcement only), is not comparable
+    /// to a current hash, and says NOTHING about whether the rule changed. Reporting it as
+    /// "changed" would raise a false alarm on every rule baselined before the upgrade;
+    /// reporting it as in sync would hide real drift. It is surfaced as unknown, and the next
+    /// accept re-baselines it.
+    Legacy,
+    /// The rule is no longer in the corpus.
+    Removed,
+}
+
+/// Classify a selection's stored `applied_hash` against the current corpus `rule` (`None` when
+/// the rule was removed). Pure. A removed rule is [`DriftVerdict::Removed`] whatever the hash
+/// looks like; otherwise a hash without [`camerata_rules::RULE_HASH_PREFIX`] is
+/// [`DriftVerdict::Legacy`] before any comparison is attempted.
+fn drift_verdict(applied_hash: &str, rule: Option<&camerata_rules::Rule>) -> DriftVerdict {
+    let Some(rule) = rule else {
+        return DriftVerdict::Removed;
+    };
+    if !applied_hash.starts_with(camerata_rules::RULE_HASH_PREFIX) {
+        return DriftVerdict::Legacy;
+    }
+    if rule.content_hash() == applied_hash {
+        DriftVerdict::InSync
+    } else {
+        DriftVerdict::Changed
+    }
+}
+
+/// Build one `rule_drift` entry. Matches the UI's `RuleDriftEntry` contract; see
+/// [`updates_check`] for the shape. `changed` is `true`, or `null` for a legacy baseline (never
+/// `false`: an in-sync rule is not reported at all).
+fn drift_entry(
+    project_id: &str,
+    selection: &crate::project::RuleSelection,
+    rule: Option<&camerata_rules::Rule>,
+    verdict: DriftVerdict,
+) -> serde_json::Value {
+    let changed = match verdict {
+        DriftVerdict::Legacy => serde_json::Value::Null,
+        _ => serde_json::Value::Bool(true),
+    };
+    let mut entry = serde_json::json!({
+        "rule_id": selection.rule_id,
+        "project_id": project_id,
+        "title": rule.map(|r| r.title.as_str()).unwrap_or(""),
+        "applied_directive": selection.applied_directive.clone().unwrap_or_default(),
+        "corpus_directive": match rule {
+            Some(r) => resolved_directive(r, selection.chosen_option.as_deref()),
+            None => "(removed from corpus)".to_string(),
+        },
+        "repos": selection.repos,
+        "changed": changed,
+        "legacy_baseline": verdict == DriftVerdict::Legacy,
+        "applied_version": selection.applied_version,
+        "current_version": rule.and_then(|r| r.version),
+    });
+    if let Some(r) = rule {
+        entry["verification"] = serde_json::json!(r.verification().as_str());
+    }
+    entry
+}
+
+/// Applied-rule drift across `projects` against `corpus`: for each selected rule that has been
+/// BASELINED (`applied_hash` is `Some`), report it unless it is in sync (see [`DriftVerdict`]).
+/// Selections that were never baselined (`applied_hash` is `None`) are treated as in-sync and
+/// are not reported. Pure; [`compute_rule_drift`] is the I/O wrapper.
 ///
-/// When `project_filter` is `Some(id)`, only that project's selections are scanned
-/// (the project-scoped `GET /api/projects/:id/rule-drift` route); when `None`, all
-/// projects are scanned (the global `GET /api/updates/check` route).
-///
-/// Each returned entry matches the UI's `RuleDriftEntry` contract:
-/// `{ rule_id, project_id, title, applied_directive, corpus_directive, repos, changed }`.
+/// When `project_filter` is `Some(id)`, only that project's selections are scanned.
+fn drift_for_projects(
+    projects: &[crate::project::Project],
+    project_filter: Option<&str>,
+    corpus: &camerata_rules::RuleSet,
+) -> Vec<serde_json::Value> {
+    let mut drift = Vec::new();
+    for project in projects {
+        if let Some(pid) = project_filter {
+            if project.id != pid {
+                continue;
+            }
+        }
+        for selection in &project.ruleset.selections {
+            // Only baselined selections can drift. A `None` baseline means the rule
+            // has never been accepted, so there is nothing to compare against.
+            let Some(applied_hash) = selection.applied_hash.as_deref() else {
+                continue;
+            };
+            let rule = corpus.get_by_id(&selection.rule_id);
+            let verdict = drift_verdict(applied_hash, rule);
+            if verdict == DriftVerdict::InSync {
+                continue;
+            }
+            drift.push(drift_entry(&project.id, selection, rule, verdict));
+        }
+    }
+    drift
+}
+
+/// Compute applied-rule drift for the live projects against the on-disk corpus. When
+/// `project_filter` is `Some(id)`, only that project's selections are scanned (the
+/// project-scoped `GET /api/projects/:id/rule-drift` route); when `None`, all projects are
+/// scanned (the global `GET /api/updates/check` route). See [`drift_for_projects`].
 async fn compute_rule_drift(
     state: &AppState,
     project_filter: Option<&str>,
@@ -15617,52 +15703,7 @@ async fn compute_rule_drift(
         return Vec::new();
     }
     let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-
-    let mut drift = Vec::new();
-    for project in state.projects.list() {
-        if let Some(pid) = project_filter {
-            if project.id != pid {
-                continue;
-            }
-        }
-        for selection in &project.ruleset.selections {
-            let rule_id = &selection.rule_id;
-            // Only baselined selections can drift. A `None` baseline means the rule
-            // has never been accepted, so there is nothing to compare against.
-            let Some(applied_hash) = selection.applied_hash.as_deref() else {
-                continue;
-            };
-            let Some(rule) = corpus.get_by_id(rule_id) else {
-                // Rule removed from corpus — report as drifted.
-                drift.push(serde_json::json!({
-                    "rule_id": rule_id,
-                    "project_id": project.id,
-                    "title": "",
-                    "applied_directive": selection.applied_directive.clone().unwrap_or_default(),
-                    "corpus_directive": "(removed from corpus)",
-                    "repos": selection.repos,
-                    "changed": true,
-                }));
-                continue;
-            };
-            let current_hash = rule_content_hash(rule);
-            if current_hash == applied_hash {
-                // In sync — the baselined hash matches the current corpus.
-                continue;
-            }
-            drift.push(serde_json::json!({
-                "rule_id": rule_id,
-                "project_id": project.id,
-                "title": rule.title,
-                "applied_directive": selection.applied_directive.clone().unwrap_or_default(),
-                "corpus_directive": resolved_directive(rule, selection.chosen_option.as_deref()),
-                "repos": selection.repos,
-                "verification": rule.verification().as_str(),
-                "changed": true,
-            }));
-        }
-    }
-    drift
+    drift_for_projects(&state.projects.list(), project_filter, &corpus)
 }
 
 /// `GET /api/projects/:id/rule-drift` — project-scoped applied-rule drift.
@@ -15682,14 +15723,26 @@ async fn project_rule_drift(
     }))
 }
 
+/// Record `rule` as the baseline `sel` was accepted against: the rule's content hash (the
+/// drift comparison), its `version` (so the drift notice can say "v2 to v4"), and the resolved
+/// directive text (the before side of the diff). This is the ONLY place a baseline is written,
+/// so a legacy (`DefaultHasher`) hash is re-baselined to the current format here and nowhere
+/// else. `applied_version` is cleared, not left stale, when the rule carries no version.
+fn baseline_selection(sel: &mut crate::project::RuleSelection, rule: &camerata_rules::Rule) {
+    sel.applied_directive = Some(resolved_directive(rule, sel.chosen_option.as_deref()));
+    sel.applied_hash = Some(rule.content_hash());
+    sel.applied_version = rule.version;
+}
+
 /// `POST /api/projects/:id/rule-drift/:rule_id/accept` — accept the corpus update
 /// for a drifted rule.
 ///
-/// Baselines the project's selection(s) for `rule_id`: sets `applied_hash` to the
-/// current corpus content hash and `applied_directive` to the current resolved
-/// directive text, so a subsequent [`compute_rule_drift`] no longer reports the
-/// rule as drifted. Persists via [`ProjectStore::update`]. Returns `{ ok: true }`
-/// on success (the client reads HTTP status for its bool check).
+/// Baselines the project's selection(s) for `rule_id` via [`baseline_selection`]: sets
+/// `applied_hash` to the current corpus content hash, `applied_version` to the rule's
+/// version and `applied_directive` to the current resolved directive text, so a subsequent
+/// [`compute_rule_drift`] no longer reports the rule as drifted. Persists via
+/// [`ProjectStore::update`]. Returns `{ ok: true }` on success (the client reads HTTP status
+/// for its bool check).
 async fn accept_rule_drift(
     State(state): State<AppState>,
     Path((id, rule_id)): Path<(String, String)>,
@@ -15704,7 +15757,6 @@ async fn accept_rule_drift(
     let Some(rule) = corpus.get_by_id(&rule_id) else {
         return Json(serde_json::json!({ "ok": false, "message": "rule not in corpus" }));
     };
-    let current_hash = rule_content_hash(rule);
 
     let updated = state.projects.update(&id, |p| {
         // Baseline every selection for this rule (project-level and any repo-scoped),
@@ -15715,8 +15767,7 @@ async fn accept_rule_drift(
             .iter_mut()
             .filter(|s| s.rule_id == rule_id)
         {
-            sel.applied_directive = Some(resolved_directive(rule, sel.chosen_option.as_deref()));
-            sel.applied_hash = Some(current_hash.clone());
+            baseline_selection(sel, rule);
         }
     });
     match updated {
@@ -28205,7 +28256,7 @@ mod tests {
         }
         let (corpus, _errs) = camerata_rules::load_corpus_lenient(&path).await;
         let rule = corpus.iter().next()?;
-        Some((rule.id.0.clone(), rule_content_hash(rule)))
+        Some((rule.id.0.clone(), rule.content_hash()))
     }
 
     /// BUG A: `GET /api/projects/:id/rule-drift` returns `{ ok:true, drift:[...] }`
@@ -28224,14 +28275,15 @@ mod tests {
             .projects
             .create("Drift", vec!["me/api".to_string()])
             .unwrap();
-        // Seed a selection baselined to a STALE hash (guaranteed != current).
+        // Seed a selection baselined to a STALE current-format hash (guaranteed != current).
         state.projects.update(&p.id, |proj| {
             proj.ruleset.selections.push(crate::project::RuleSelection {
                 rule_id: rule_id.clone(),
                 chosen_option: None,
                 repos: vec!["me/api".to_string()],
-                applied_hash: Some("stale-baseline-hash".to_string()),
+                applied_hash: Some(format!("sha256:{}", "0".repeat(64))),
                 applied_directive: Some("old directive text".to_string()),
+                applied_version: Some(1),
             });
         });
         let app = router(state.clone());
@@ -28264,10 +28316,20 @@ mod tests {
             "corpus_directive present"
         );
         assert_eq!(entry["repos"][0], "me/api");
+        // A current-format hash that differs is a real change, not an unknown.
+        assert_eq!(entry["changed"], true);
+        assert_eq!(entry["legacy_baseline"], false);
+        assert_eq!(entry["applied_version"], 1);
+        assert!(
+            entry["current_version"].is_number(),
+            "the corpus rule carries a version: {entry}"
+        );
     }
 
     /// BUG B: `POST /api/projects/:id/rule-drift/:rule_id/accept` baselines the rule
     /// to the current corpus hash so a subsequent drift check no longer reports it.
+    /// The seeded baseline is a LEGACY (unprefixed) hash, so this also proves accept
+    /// re-baselines it to the current format.
     #[tokio::test]
     async fn accept_rule_drift_clears_the_drift() {
         let Some((rule_id, current_hash)) = any_corpus_rule().await else {
@@ -28286,13 +28348,15 @@ mod tests {
                 repos: vec!["me/api".to_string()],
                 applied_hash: Some("stale-baseline-hash".to_string()),
                 applied_directive: Some("old".to_string()),
+                applied_version: None,
             });
         });
         let app = router(state.clone());
 
-        // Pre-condition: the rule is drifted.
+        // Pre-condition: the legacy baseline is reported (as unknown), not as in sync.
         let pre = compute_rule_drift(&state, Some(&p.id)).await;
-        assert_eq!(pre.len(), 1, "drifted before accept");
+        assert_eq!(pre.len(), 1, "reported before accept");
+        assert!(pre[0]["changed"].is_null(), "legacy is unknown: {pre:?}");
 
         // Accept the update.
         let resp = app
@@ -28321,10 +28385,255 @@ mod tests {
             .find(|s| s.rule_id == rule_id)
             .expect("selection persisted");
         assert_eq!(sel.applied_hash.as_deref(), Some(current_hash.as_str()));
+        assert!(
+            current_hash.starts_with(camerata_rules::RULE_HASH_PREFIX),
+            "re-baselined to the current format: {current_hash}"
+        );
+        assert!(
+            sel.applied_version.is_some(),
+            "accept stores the rule's version beside the hash"
+        );
 
         // Post-condition: a fresh drift computation no longer reports the rule.
         let post = compute_rule_drift(&state, Some(&p.id)).await;
         assert!(post.is_empty(), "accept cleared the drift; got {post:?}");
+    }
+
+    // ── Drift detection: content hash, legacy baselines, versions ────────────────
+
+    /// A one-rule synthetic corpus whose single option carries `directive`, so a test can
+    /// change ONLY an option and keep id/title/summary/enforcement identical: exactly the
+    /// change the old id/title/summary/enforcement fingerprint could not see.
+    fn drift_corpus(directive: &str, version: Option<u32>) -> camerata_rules::RuleSet {
+        let mut rule = camerata_rules::bare_rule("DRIFT-FIX-1", "universal");
+        rule.title = "Drift fixture".to_string();
+        rule.version = version;
+        rule.default_option = Some("only".to_string());
+        rule.options = vec![camerata_rules::RuleOption {
+            id: "only".to_string(),
+            label: "The only option".to_string(),
+            directive: directive.to_string(),
+            why: "Fixture.".to_string(),
+            remediation: None,
+            finding_headline: None,
+            finding_detail: None,
+            escalation: None,
+            effort: None,
+            violates: false,
+        }];
+        let mut set = camerata_rules::RuleSet::default();
+        set.push(rule);
+        set
+    }
+
+    fn corpus_rule(set: &camerata_rules::RuleSet) -> &camerata_rules::Rule {
+        set.get_by_id("DRIFT-FIX-1").expect("fixture rule")
+    }
+
+    /// A project holding one selection of `DRIFT-FIX-1` with the given baseline.
+    fn project_with_baseline(
+        hash: Option<&str>,
+        applied_version: Option<u32>,
+    ) -> crate::project::Project {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Drift", vec!["me/api".to_string()])
+            .unwrap();
+        state
+            .projects
+            .update(&p.id, |proj| {
+                proj.ruleset.selections.push(crate::project::RuleSelection {
+                    rule_id: "DRIFT-FIX-1".to_string(),
+                    chosen_option: None,
+                    repos: vec!["me/api".to_string()],
+                    applied_hash: hash.map(str::to_string),
+                    applied_directive: Some("the directive as baselined".to_string()),
+                    applied_version,
+                });
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn drift_verdict_classifies_in_sync_changed_legacy_and_removed() {
+        let set = drift_corpus("Do the thing.", Some(1));
+        let rule = corpus_rule(&set);
+        let current = rule.content_hash();
+
+        assert_eq!(
+            drift_verdict(&current, Some(rule)),
+            DriftVerdict::InSync,
+            "a baseline equal to the current hash is in sync"
+        );
+        assert_eq!(
+            drift_verdict(&format!("sha256:{}", "0".repeat(64)), Some(rule)),
+            DriftVerdict::Changed
+        );
+        // The old fingerprint: 16 hex chars, no prefix. NOT comparable, so NOT "changed".
+        assert_eq!(
+            drift_verdict("00ff00ff00ff00ff", Some(rule)),
+            DriftVerdict::Legacy
+        );
+        assert_eq!(
+            drift_verdict("stale-baseline-hash", Some(rule)),
+            DriftVerdict::Legacy
+        );
+        assert_eq!(drift_verdict("", Some(rule)), DriftVerdict::Legacy);
+        // A removed rule is removed whatever its stored hash looks like.
+        assert_eq!(drift_verdict(&current, None), DriftVerdict::Removed);
+        assert_eq!(
+            drift_verdict("00ff00ff00ff00ff", None),
+            DriftVerdict::Removed
+        );
+    }
+
+    /// The first defect: the old hash covered id/title/summary/enforcement only, so a changed
+    /// option or directive never showed as drift.
+    #[test]
+    fn a_changed_option_directive_is_reported_as_drift() {
+        let before = drift_corpus("Do the thing the old way.", Some(1));
+        let baseline = corpus_rule(&before).content_hash();
+        let project = project_with_baseline(Some(&baseline), Some(1));
+
+        // Same rule, same title/summary/enforcement; ONLY the option's directive moved.
+        let after = drift_corpus("Do the thing the new way.", Some(2));
+        let drift = drift_for_projects(&[project.clone()], None, &after);
+
+        assert_eq!(drift.len(), 1, "the changed directive must be reported");
+        assert_eq!(drift[0]["changed"], true);
+        assert_eq!(drift[0]["legacy_baseline"], false);
+        assert_eq!(drift[0]["corpus_directive"], "Do the thing the new way.");
+        assert_eq!(drift[0]["applied_directive"], "the directive as baselined");
+
+        // And a baseline that matches the corpus reports nothing.
+        let in_sync = drift_for_projects(&[project], None, &before);
+        assert!(in_sync.is_empty(), "{in_sync:?}");
+    }
+
+    /// The second defect: an upgrade must not report every applied rule as changed.
+    #[test]
+    fn a_legacy_baseline_is_reported_as_unknown_never_as_changed() {
+        let set = drift_corpus("Do the thing.", Some(3));
+        let project = project_with_baseline(Some("00ff00ff00ff00ff"), None);
+        let drift = drift_for_projects(&[project], None, &set);
+
+        assert_eq!(drift.len(), 1, "the legacy baseline is surfaced: {drift:?}");
+        let entry = &drift[0];
+        assert!(
+            entry["changed"].is_null(),
+            "legacy must be `changed: null`, never true or false: {entry}"
+        );
+        assert_eq!(entry["legacy_baseline"], true);
+        assert!(entry["applied_version"].is_null());
+        assert_eq!(entry["current_version"], 3);
+        assert_eq!(entry["corpus_directive"], "Do the thing.");
+    }
+
+    #[test]
+    fn drift_entries_carry_applied_and_current_version() {
+        let before = drift_corpus("Old.", Some(2));
+        let baseline = corpus_rule(&before).content_hash();
+        let project = project_with_baseline(Some(&baseline), Some(2));
+        let after = drift_corpus("New.", Some(4));
+
+        let drift = drift_for_projects(&[project], None, &after);
+        assert_eq!(drift[0]["applied_version"], 2);
+        assert_eq!(drift[0]["current_version"], 4);
+    }
+
+    #[test]
+    fn drift_versions_are_null_when_unknown() {
+        let before = drift_corpus("Old.", None);
+        let baseline = corpus_rule(&before).content_hash();
+        // Baselined before versions existed (`None`), against a rule that is still unversioned.
+        let project = project_with_baseline(Some(&baseline), None);
+        let after = drift_corpus("New.", None);
+
+        let drift = drift_for_projects(&[project], None, &after);
+        assert!(drift[0]["applied_version"].is_null());
+        assert!(drift[0]["current_version"].is_null());
+    }
+
+    #[test]
+    fn a_removed_rule_is_reported_changed_even_with_a_legacy_hash() {
+        let empty = camerata_rules::RuleSet::default();
+        let project = project_with_baseline(Some("00ff00ff00ff00ff"), Some(1));
+        let drift = drift_for_projects(&[project], None, &empty);
+
+        assert_eq!(drift.len(), 1);
+        assert_eq!(drift[0]["changed"], true, "removal is a definite change");
+        assert_eq!(drift[0]["legacy_baseline"], false);
+        assert_eq!(drift[0]["corpus_directive"], "(removed from corpus)");
+        assert!(drift[0]["current_version"].is_null());
+        assert_eq!(drift[0]["applied_version"], 1);
+    }
+
+    #[test]
+    fn a_selection_that_was_never_baselined_is_not_reported() {
+        let set = drift_corpus("Do the thing.", Some(1));
+        let project = project_with_baseline(None, None);
+        assert!(drift_for_projects(&[project], None, &set).is_empty());
+    }
+
+    #[test]
+    fn the_project_filter_scopes_drift_to_one_project() {
+        let set = drift_corpus("Do the thing.", Some(1));
+        let a = project_with_baseline(Some("00ff00ff00ff00ff"), None);
+        // Each helper call builds its own store, so both projects get the same first id.
+        let mut b = project_with_baseline(Some("00ff00ff00ff00ff"), None);
+        b.id = "proj-other".to_string();
+        assert_ne!(a.id, b.id);
+        let only_a = drift_for_projects(&[a.clone(), b.clone()], Some(&a.id), &set);
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0]["project_id"], a.id.as_str());
+        assert_eq!(
+            drift_for_projects(&[a, b], None, &set).len(),
+            2,
+            "no filter scans every project"
+        );
+    }
+
+    #[test]
+    fn baselining_stores_hash_version_and_directive_and_clears_a_legacy_baseline() {
+        let set = drift_corpus("Do the thing.", Some(5));
+        let rule = corpus_rule(&set);
+        let mut sel = crate::project::RuleSelection {
+            rule_id: "DRIFT-FIX-1".to_string(),
+            applied_hash: Some("00ff00ff00ff00ff".to_string()), // legacy
+            applied_directive: Some("stale".to_string()),
+            applied_version: Some(1),
+            ..Default::default()
+        };
+
+        baseline_selection(&mut sel, rule);
+
+        assert_eq!(
+            sel.applied_hash.as_deref(),
+            Some(rule.content_hash().as_str())
+        );
+        assert_eq!(sel.applied_version, Some(5));
+        assert_eq!(sel.applied_directive.as_deref(), Some("Do the thing."));
+        assert_eq!(
+            drift_verdict(sel.applied_hash.as_deref().unwrap(), Some(rule)),
+            DriftVerdict::InSync,
+            "a freshly baselined selection is in sync"
+        );
+    }
+
+    #[test]
+    fn baselining_an_unversioned_rule_clears_a_stale_applied_version() {
+        let set = drift_corpus("Do the thing.", None);
+        let mut sel = crate::project::RuleSelection {
+            rule_id: "DRIFT-FIX-1".to_string(),
+            applied_version: Some(9),
+            ..Default::default()
+        };
+        baseline_selection(&mut sel, corpus_rule(&set));
+        assert_eq!(
+            sel.applied_version, None,
+            "a version recorded for a rule that no longer has one would be a lie"
+        );
     }
 
     /// BUG C: `set_repo_rule_override` (the repo-level route the fixed client now

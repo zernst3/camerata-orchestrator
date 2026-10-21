@@ -1047,6 +1047,16 @@ duplicate id (writing nothing), and otherwise records new rules, bumps and remov
 refuses to regenerate over a lock it cannot parse. Workflow for editing a rule: edit it, bump
 `version`, run `camerata corpus lock`, commit the rule and the lock together.
 
+**The same hash is the applied-rule drift baseline.** `RuleSelection.applied_hash` (a project's
+record of the rule as it was last accepted) is `Rule::content_hash()`, stored with the rule's
+`version` in `applied_version` by the drift "Update this rule" action (`accept_rule_drift`,
+the only writer). `GET /api/updates/check` and `GET /api/projects/:id/rule-drift` compare it to
+the corpus: a different `sha256:` hash is `changed: true`; a stored hash WITHOUT the `sha256:`
+prefix was written by an older build (a non-cryptographic fingerprint over id, title, summary and
+enforcement only, which could not see an option change and was not stable across builds), is not
+comparable, and is reported as `changed: null` + `legacy_baseline: true` until the next accept
+re-baselines it. Each entry also carries `applied_version` and `current_version` when known.
+
 ---
 
 ## 4. The `[decision]` block
