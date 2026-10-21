@@ -16170,7 +16170,7 @@ pub fn build_manifest(
         let digest = Sha256::digest(bytes);
         digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
     };
-    let mut entry = |path: String, bytes: &[u8]| {
+    let entry = |path: String, bytes: &[u8]| {
         let (purpose, schema_version) = manifest_file_facts(&path);
         serde_json::json!({
             "path": path,

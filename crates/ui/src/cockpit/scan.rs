@@ -13908,7 +13908,6 @@ mod rule_hub_tests {
 mod convention_commit_tests {
     use super::*;
     use camerata_ui_core::adopt::CommitGate;
-    use dioxus::prelude::*;
 
     /// A finding carrying an arbitrary flattened `kind` payload.
     fn row(repo: &str, rule_id: &str, kind: serde_json::Value) -> FindingView {
