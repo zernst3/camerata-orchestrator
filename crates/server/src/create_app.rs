@@ -302,6 +302,7 @@ async fn scaffold_and_register(
 // ── Tests ────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[derive(Default)]
 pub struct NoopRepoPusher {
     pub calls: std::sync::Mutex<Vec<(std::path::PathBuf, String, String)>>,
 }
@@ -309,9 +310,7 @@ pub struct NoopRepoPusher {
 #[cfg(test)]
 impl NoopRepoPusher {
     pub fn new() -> Self {
-        Self {
-            calls: std::sync::Mutex::new(Vec::new()),
-        }
+        Self::default()
     }
 }
 
@@ -324,11 +323,16 @@ impl RepoPusher for NoopRepoPusher {
         repo_full_name: &str,
         token: &str,
     ) -> anyhow::Result<()> {
-        self.calls.lock().unwrap().push((
-            local_dir.to_path_buf(),
-            repo_full_name.to_string(),
-            token.to_string(),
-        ));
+        // Test double: a poisoned lock means another test thread panicked mid-push; the Vec
+        // is still valid, so recover the guard and keep recording.
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((
+                local_dir.to_path_buf(),
+                repo_full_name.to_string(),
+                token.to_string(),
+            ));
         Ok(())
     }
 }
@@ -541,7 +545,8 @@ mod tests {
         assert!(expected_dir.join("CONVENTIONS.md").is_file());
 
         // No real git process ran (the NoopRepoPusher recorded the call instead).
-        let pusher_calls = pusher.calls.lock().unwrap();
+        // Snapshot the calls so the std MutexGuard is dropped before the later `.await`s.
+        let pusher_calls = pusher.calls.lock().unwrap().clone();
         assert_eq!(pusher_calls.len(), 1);
         assert_eq!(pusher_calls[0].1, "zernst3/trip-planner");
         assert_eq!(pusher_calls[0].2, "ghp_test_token");

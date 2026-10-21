@@ -1423,14 +1423,8 @@ mod tests {
     // `CAMERATA_BFF_URL` is a process-global env var. Every Tier-2 test below sets it (to a
     // mock-server URI) then removes it. `cargo test` runs tests on parallel threads, so two such
     // tests overlapping would clobber each other's override and point a helper at the wrong server.
-    // This mutex serializes the env-mutating tests against each other (the doc's "serial_test-style
-    // mutex"; we can't add the serial_test crate without touching Cargo.toml). Lock for the whole
-    // body; recover from poisoning so one failing test doesn't cascade-fail the rest.
-    static BFF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn bff_env_guard() -> std::sync::MutexGuard<'static, ()> {
-        BFF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
+    // Every such test carries `#[serial_test::serial(bff_env)]`, which serializes them crate-wide
+    // (and, unlike a std mutex guard, is safe to hold across the test's `.await`s).
 
     // ── Tier-2 UI test: a network helper against a MOCK BFF (wiremock) ──────────
     // Verifies add_chat_learning's request CONTRACT: it GETs the active project, then POSTs the
@@ -1443,7 +1437,6 @@ mod tests {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/active"))
@@ -1483,7 +1476,6 @@ mod tests {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/chat"))
@@ -1537,7 +1529,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/chat"))
@@ -1569,7 +1560,6 @@ mod tests {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/settings/chat-model"))
@@ -1594,7 +1584,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/settings/chat-model"))
@@ -1619,7 +1608,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/settings"))
@@ -1643,7 +1631,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/settings"))
@@ -1674,7 +1661,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/models/registry"))
@@ -1769,7 +1755,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/corpus-rules"))
@@ -1828,7 +1813,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/corpus-rules"))
@@ -1855,7 +1839,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/development/context"))
@@ -1886,7 +1869,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/development/context"))
@@ -1918,7 +1900,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/active/context"))
@@ -1949,7 +1930,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/active/context"))
@@ -1977,7 +1957,6 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/active/context"))

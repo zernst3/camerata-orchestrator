@@ -16,8 +16,6 @@
 //! deterministic and isolated from the real bundled corpus. The arm-files + baseline pieces
 //! are pure functions driven with hand-built fixtures.
 
-use std::sync::Mutex;
-
 use camerata_server::arm::{arm_files_for_repo, existing_governance_files, ArmRule, GateRule};
 use camerata_server::effective_scan_modes;
 use camerata_server::project::{CustomRule, ProjectStore};
@@ -27,7 +25,8 @@ use camerata_server::suppression::{
 
 // `propose_corpus_rules` reads a process-global env var (`CAMERATA_CORPUS_PATH`) and the
 // corpus on disk. Serialize the env-mutating test so it never races a parallel test.
-static CORPUS_ENV_LOCK: Mutex<()> = Mutex::new(());
+// The env-mutating test carries `#[serial_test::serial(corpus_env)]`, so it never races a
+// parallel test and (unlike a std mutex guard) is safe to hold across its `.await`s.
 
 // ════════════════════════════════════════════════════════════════════════════════════
 // SCOPE 1 — Already-onboarded guard (#50)
@@ -137,9 +136,8 @@ fn scope2_each_flag_independently_gates_its_lane() {
 // ════════════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+#[serial_test::serial(corpus_env)]
 async fn scope3_propose_corpus_rules_returns_the_corpus_library() {
-    let _guard = CORPUS_ENV_LOCK.lock().unwrap();
-
     // Write a tiny, self-contained corpus so the proposal is deterministic + isolated from
     // the real bundled corpus. (Hermetic: local temp dir, no network.)
     let dir = tempfile::tempdir().unwrap();
