@@ -312,6 +312,31 @@ fn resolve_ecma(
     None // external package (or an unaliased bare specifier) — correctly dropped
 }
 
+/// A TS/TSX/JS specifier resolver built ONCE from the repo's file set, for a checker that
+/// needs to resolve specifiers the import graph does not carry (an `export { a as b } from`,
+/// whose exported name [`build_import_graph`] drops). It holds the same path set and
+/// `tsconfig.json` the graph builder uses and delegates to the same `resolve_ecma`, so the two
+/// can never disagree about where a specifier points. Same policy as the graph: an
+/// unresolvable or external specifier is `None`, never a guess.
+pub struct EcmaResolver<'a> {
+    path_set: HashSet<&'a str>,
+    tsconfig: Option<TsConfigFile>,
+}
+
+impl<'a> EcmaResolver<'a> {
+    pub fn new(files: &'a [(String, String)]) -> Self {
+        Self {
+            path_set: files.iter().map(|(p, _)| p.as_str()).collect(),
+            tsconfig: load_tsconfig(files),
+        }
+    }
+
+    /// The repo-relative file `specifier` (written in `importer`) points at, if any.
+    pub fn resolve(&self, importer: &str, specifier: &str) -> Option<String> {
+        resolve_ecma(importer, specifier, &self.path_set, self.tsconfig.as_ref())
+    }
+}
+
 // ─── Python: leading-dot relative + absolute-dotted suffix match ───────────────────────
 
 fn try_python_extensions(base: &str, path_set: &HashSet<&str>) -> Option<String> {
@@ -402,6 +427,56 @@ mod tests {
             .into_iter()
             .map(|(p, c)| (p.to_string(), c.to_string()))
             .collect()
+    }
+
+    // ── EcmaResolver: the public single-specifier entry point ──────────────────
+
+    #[test]
+    fn ecma_resolver_resolves_relative_index_and_alias_specifiers() {
+        let f = files(vec![
+            (
+                "tsconfig.json",
+                r#"{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}}}"#,
+            ),
+            ("src/a/consumer.ts", ""),
+            ("src/a/utils.ts", ""),
+            ("src/b/widgets/index.ts", ""),
+        ]);
+        let r = EcmaResolver::new(&f);
+        assert_eq!(
+            r.resolve("src/a/consumer.ts", "./utils").as_deref(),
+            Some("src/a/utils.ts")
+        );
+        assert_eq!(
+            r.resolve("src/a/consumer.ts", "../b/widgets").as_deref(),
+            Some("src/b/widgets/index.ts")
+        );
+        assert_eq!(
+            r.resolve("src/a/consumer.ts", "@/a/utils").as_deref(),
+            Some("src/a/utils.ts")
+        );
+    }
+
+    #[test]
+    fn ecma_resolver_drops_external_and_missing_specifiers() {
+        let f = files(vec![("src/a.ts", "")]);
+        let r = EcmaResolver::new(&f);
+        assert_eq!(r.resolve("src/a.ts", "react"), None);
+        assert_eq!(r.resolve("src/a.ts", "./missing"), None);
+    }
+
+    #[test]
+    fn ecma_resolver_agrees_with_the_import_graph() {
+        let f = files(vec![
+            ("src/routes/orders.ts", "import { db } from '../lib/db';\n"),
+            ("src/lib/db.ts", "export const db = {};\n"),
+        ]);
+        let graph = build_import_graph(&f);
+        let r = EcmaResolver::new(&f);
+        assert_eq!(
+            r.resolve("src/routes/orders.ts", "../lib/db"),
+            Some(graph[0].to_file.clone())
+        );
     }
 
     // ── TS / JS: relative resolution ───────────────────────────────────────────
