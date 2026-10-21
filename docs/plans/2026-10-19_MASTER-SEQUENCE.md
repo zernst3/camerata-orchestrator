@@ -128,9 +128,14 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
       middle finding, re-export, assert.
     - The withdrawal line, data-driven, with the retired set on the wire.
     - `sample-report/data.json` predates the `kind` field and needs regenerating.
-16. **W32 rule metadata** (D6) — `cwe`/`asvs` on security rules, `superseded_since` +
-    `current_recommendation` on pattern-level architecture rules. Sequenced with W27 so the
-    PDF can render both.
+16. **W32 rule metadata** (D6). Part (a) DONE (`05d94df`): schema added (`cwe`/`asvs`/
+    `superseded_since`/`current_recommendation` on RuleToml+Rule, both load sites, unknown-field
+    allowlist, RULE_AUTHORING), `cwe` authored on all 14 SEC- rules from their own source CWE
+    citations, two gates (`w32_rule_metadata`: every SEC- rule has a code + well-formedness).
+    **Part (b) DEFERRED, schema-ready:** `superseded_since` + `current_recommendation` on
+    pattern-level architecture rules needs per-rule judgment about which patterns genuinely aged
+    out and the year/guidance — a credibility call to make deliberately with Zach, not bulk-guess.
+    W27 renders what exists; a row simply omits the supersession line until (b) is authored.
 
 ### PHASE 4 — W29, coverage expansion
 
