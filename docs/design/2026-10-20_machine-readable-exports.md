@@ -35,6 +35,7 @@ sheets (filtered duplicates of All Findings - the `Category` column already filt
 neither.
 
 ```
+manifest.json            # the package index + provenance + integrity (see below)
 {stem}.pdf
 {stem}-findings.xlsx
 findings.json            # KEPT as-is: the headline All-Findings view, wrapped with
@@ -55,6 +56,82 @@ json/
   false-positives.json
   coverage.json
 ```
+
+## `manifest.json` - the package index, provenance, and integrity (Zach, 2026-10-20)
+
+One `manifest.json` at the ZIP root. It answers three questions a recipient asks: what
+is each file, can I trust it is intact, and what exactly was inspected to produce it.
+
+```json
+{
+  "manifest_schema_version": "1.0",
+  "generated_at": "2026-10-20T14:32:00Z",
+  "inspection": {
+    "repos": [
+      { "name": "harbor-member-portal", "commit": "a1b2c3d4e5f6..." }
+    ],
+    "engine_version": "camerata 0.3.1",
+    "corpus_version": "sha256:9f86d0...",
+    "rules_last_reviewed": "2026-10-18"
+  },
+  "files": [
+    {
+      "path": "camerata-sample-audit.pdf",
+      "purpose": "Curated narrative report for a decision-maker.",
+      "sha256": "e3b0c4...",
+      "schema_version": null
+    },
+    {
+      "path": "findings.json",
+      "purpose": "All-Findings rows wrapped with provenance + summary counts.",
+      "sha256": "a948904...",
+      "schema_version": "findings/1.0"
+    },
+    { "path": "csv/deviations.csv", "purpose": "...", "sha256": "...", "schema_version": "deviations/1.0" }
+    // ... one entry per file in the ZIP, except manifest.json itself
+  ]
+}
+```
+
+Field notes:
+
+- **`files[]`** lists every file in the ZIP EXCEPT `manifest.json` (a file cannot hash
+  itself). `purpose` is one plain sentence; `sha256` lets a recipient verify the file
+  arrived intact; `schema_version` is per data-contract (`findings/1.0`,
+  `deviations/1.0`, ...) and `null` for formats that have no schema (PDF, xlsx, README).
+- **`inspection.repos[].commit`** is the exact SHA scanned, per repo (a scan can span
+  several). This is the "what state of the code did these findings come from" anchor.
+- **`engine_version`** is Camerata's own version (`env!("CARGO_PKG_VERSION")`), so a
+  finding can always be traced to the engine that produced it.
+- **`corpus_version`** is a deterministic content digest of the rule corpus (a sha256
+  over the sorted rule files), so two packages built from the same rules carry the same
+  corpus id even across machines. Not a hand-maintained version string.
+- **`rules_last_reviewed`** is the staleness watermark made CLIENT-VISIBLE - this is the
+  field surfacing where the client can see it ("rules last reviewed on 2026-10-18").
+  Sourced from `CORPUS_FRESHNESS.toml` (see the staleness-check design). Because that
+  watermark is per-domain, the client-facing value is the OLDEST confirmed date among
+  the domains that actually fired in THIS scan - the honest weakest-link date, never a
+  flattering newest. Until the staleness feature ships, this field is `null` and the
+  README omits the line rather than print a fabricated date.
+
+### Build order and the self-reference problem
+
+The manifest hashes every other file, so it is built LAST: compute the PDF, xlsx,
+`findings.json`, every CSV and JSON as bytes; then build the manifest over those bytes;
+then add `manifest.json`; then finalize the ZIP. `manifest.json` never appears in its
+own `files[]`. This lives in `build_product_zip` (`crates/server/src/lib.rs`), the
+single assembly point, so both the HTTP export and `camerata inspect --export` get an
+identical manifest.
+
+### The README mirrors the new provenance for the human reader
+
+`product_export_readme` today carries file purposes, "Repos inspected", "Generated",
+and the disclaimer - but NOT the commit SHA, engine version, corpus version, or
+rules-last-reviewed date. Extend the README prose to print those same provenance lines
+(commit per repo, engine version, corpus version, "Rules last reviewed on YYYY-MM-DD")
+so a human reading the text file sees what the manifest encodes for a machine. The
+manifest is the source of truth; the README is its human rendering - built from the
+same provenance struct so they cannot drift.
 
 Grouping choice: **by format** (`csv/` and `json/`), not by dataset
 (`all-findings/`, `deviations/`, ...). A consumer who wants "all the JSON" or "all the
@@ -137,6 +214,13 @@ produced by a new `machine_export` module that takes the same
    entries - no Index, no per-category duplicates.
 5. **e2e.** `generate_sample_report` also writes `sample-report/csv/` and
    `sample-report/json/`, reviewable fixtures beside the PDF and xlsx.
+6. **Manifest integrity gate.** Every `files[]` entry's `sha256` equals the actual
+   hash of that entry in the ZIP; `files[]` covers every ZIP member except
+   `manifest.json`; `manifest.json` is absent from its own `files[]`. A deliberately
+   corrupted byte makes the recomputed hash mismatch - the test asserts that is caught.
+7. **Provenance-parity gate.** The README's printed commit / engine version / corpus
+   version / rules-last-reviewed equal the manifest's, since both render the same
+   provenance struct (they cannot drift).
 
 ## Resolved decisions (Zach, 2026-10-20)
 
