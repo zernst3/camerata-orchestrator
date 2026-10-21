@@ -57,7 +57,9 @@
 //! Always [`SEVERITY_MEDIUM`]: the checker contract forbids emitting `low`. The corpus rule
 //! declares `max_severity = "low"`, which the report export clamps down to.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::OnceLock;
 
 use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_MEDIUM};
 use crate::extract::{self, LiteralCtx, LiteralKind, SourceLang};
@@ -114,7 +116,7 @@ impl ArchChecker for SharedConstantChecker {
 
     fn check(&self, repo: &RepoView<'_>) -> Vec<ArchViolation> {
         let emitted = extract::paths::emitted_js_paths(repo.files);
-        let mut index: BTreeMap<Key, Group<'_>> = BTreeMap::new();
+        let mut index: HashMap<Key, Group<'_>> = HashMap::new();
         for (path, content) in repo.files {
             let Some(lang) = extract::lang_for_path(path) else {
                 continue;
@@ -127,28 +129,35 @@ impl ArchChecker for SharedConstantChecker {
                 let Some(shape) = shape_of(literal.kind, &literal.value) else {
                     continue;
                 };
-                // A protocol or style token is protocol or style text wherever it appears, so
-                // dropping each occurrence on sight removes the value everywhere.
-                if literal.kind == LiteralKind::Str && is_protocol_or_style_value(&literal.value) {
-                    continue;
-                }
-                index
-                    .entry((family, literal.kind, literal.value))
-                    .or_insert_with(|| Group {
-                        shape,
-                        occurrences: Vec::new(),
-                    })
-                    .occurrences
-                    .push(Occurrence {
+                let kind = literal.kind;
+                let group = match index.entry((family, kind, literal.value)) {
+                    Entry::Occupied(e) => e.into_mut(),
+                    Entry::Vacant(e) => {
+                        // A protocol or style token is protocol or style text wherever it
+                        // appears, so it is decided once per distinct value and the value
+                        // collects nothing.
+                        let protocol =
+                            kind == LiteralKind::Str && is_protocol_or_style_value(&e.key().2);
+                        e.insert(Group {
+                            shape,
+                            protocol,
+                            occurrences: Vec::new(),
+                        })
+                    }
+                };
+                if !group.protocol {
+                    group.occurrences.push(Occurrence {
                         file: path,
                         line: literal.line,
                         ctx: literal.ctx,
                     });
+                }
             }
         }
         let locale_keys = collect_locale_keys(repo.files);
         let mut out: Vec<ArchViolation> = index
             .into_iter()
+            .filter(|(_, group)| !group.protocol)
             .filter_map(|((_, kind, value), group)| judge(&value, kind, &group, &locale_keys))
             .collect();
         out.sort_by(|a, b| {
@@ -167,7 +176,7 @@ impl ArchChecker for SharedConstantChecker {
 /// A value is only ever compared within one language family: a TypeScript client and a Python
 /// server writing the same route share a contract, not a constant, and "export one constant" is
 /// not a fix across languages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Family {
     Ecma,
     Python,
@@ -193,6 +202,8 @@ struct Occurrence<'a> {
 
 struct Group<'a> {
     shape: Shape,
+    /// The value is protocol, style, platform or path text (decided once, from the value alone).
+    protocol: bool,
     occurrences: Vec<Occurrence<'a>>,
 }
 
@@ -1249,6 +1260,25 @@ fn is_protocol_or_style_value(v: &str) -> bool {
     is_style_value(v) || is_http_protocol_value(v) || is_platform_value(v) || is_path_like_value(v)
 }
 
+/// A lazily built hash set over one of the static name lists above, so a membership test is a
+/// hash lookup rather than a scan (the lists are consulted once per distinct value).
+fn name_set(
+    cell: &'static OnceLock<HashSet<&'static str>>,
+    list: &'static [&'static str],
+) -> &'static HashSet<&'static str> {
+    cell.get_or_init(|| list.iter().copied().collect())
+}
+
+fn css_property_set() -> &'static HashSet<&'static str> {
+    static SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    name_set(&SET, CSS_PROPERTIES)
+}
+
+fn header_name_set() -> &'static HashSet<&'static str> {
+    static SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    name_set(&SET, HEADER_NAMES)
+}
+
 fn is_style_value(v: &str) -> bool {
     TAILWIND_PREFIXES.iter().any(|p| v.starts_with(p))
         || CSS_KEYWORDS.contains(&v)
@@ -1267,7 +1297,7 @@ fn is_css_property(name: &str) -> bool {
             kebab.push(c);
         }
     }
-    CSS_PROPERTIES.contains(&kebab.as_str())
+    css_property_set().contains(kebab.as_str())
 }
 
 fn is_http_protocol_value(v: &str) -> bool {
@@ -1277,7 +1307,7 @@ fn is_http_protocol_value(v: &str) -> bool {
         || is_semver(v)
         || is_uuid(v)
         || HEADER_PREFIXES.iter().any(|p| v.starts_with(p))
-        || HEADER_NAMES.contains(&v)
+        || header_name_set().contains(v)
 }
 
 /// `^[a-z]{2}(-[a-z]{2,4})?$`.

@@ -21,6 +21,8 @@ use std::collections::{HashMap, HashSet};
 
 use tree_sitter::{Node, Tree};
 
+use super::ancestry::{walk_with_ancestors, Pos};
+
 use super::{
     canonical_number, ExportSurface, FunctionSpan, Import, ImportKind, Literal, LiteralCtx,
     LiteralKind, MethodCall, ModuleConst, NamedReExport, StarReExport,
@@ -797,22 +799,18 @@ pub fn literals(dialect: EcmaDialect, source: &str) -> Vec<Literal> {
     let root = tree.root_node();
     let type_sources = typeof_sources(root, source);
     let mut out = Vec::new();
-    // Explicit stack: a pathologically nested file must not overflow the call stack.
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        if let Some(literal) = literal_at(node, source, &type_sources) {
+    walk_with_ancestors(root, |pos| {
+        if let Some(literal) = literal_at(pos, source, &type_sources) {
             out.push(literal);
         }
-        let mut cursor = node.walk();
-        let children: Vec<Node> = node.children(&mut cursor).collect();
-        stack.extend(children.into_iter().rev());
-    }
+    });
     out
 }
 
 /// The literal `node` is, when it is one (a string, a substitution-free template, or a plain
 /// decimal number); `None` for every other node.
-fn literal_at(node: Node, source: &str, type_sources: &HashSet<String>) -> Option<Literal> {
+fn literal_at(pos: Pos, source: &str, type_sources: &HashSet<String>) -> Option<Literal> {
+    let node = pos.node;
     let (value, kind) = match node.kind() {
         "string" => (unescape_js(inner_text(node, source)?), LiteralKind::Str),
         "template_string" => {
@@ -828,7 +826,7 @@ fn literal_at(node: Node, source: &str, type_sources: &HashSet<String>) -> Optio
         "number" => (canonical_number(text(node, source))?, LiteralKind::Number),
         _ => return None,
     };
-    let mut ctx = literal_ctx(node, source);
+    let mut ctx = literal_ctx(pos, source);
     if !ctx.type_position {
         ctx.type_position = ctx
             .module_const
@@ -948,32 +946,38 @@ fn leftmost_identifier(node: Node, source: &str) -> Option<String> {
     }
 }
 
-fn literal_ctx(node: Node, source: &str) -> LiteralCtx {
+fn literal_ctx(pos: Pos, source: &str) -> LiteralCtx {
     let mut ctx = LiteralCtx {
-        import_specifier: is_import_specifier(node, source),
+        import_specifier: is_import_specifier(pos, source),
         ..LiteralCtx::default()
     };
-    apply_call_and_jsx(node, source, &mut ctx);
-    apply_key_context(node, source, &mut ctx);
-    ctx.type_position = in_type_position(node);
-    ctx.arithmetic = in_arithmetic_position(node, source);
-    ctx.module_const = module_const_of(node, source);
+    apply_call_and_jsx(pos, source, &mut ctx);
+    apply_key_context(pos, source, &mut ctx);
+    ctx.type_position = in_type_position(pos);
+    ctx.arithmetic = in_arithmetic_position(pos, source);
+    ctx.module_const = module_const_of(pos, source);
     ctx
 }
 
 /// Whether `node` is the source of an import/re-export, a `require`/`import()` argument, or the
 /// first argument of `jest.mock` / `vi.mock` / `require.resolve`.
-fn is_import_specifier(node: Node, source: &str) -> bool {
-    let Some(parent) = node.parent() else {
+fn is_import_specifier(pos: Pos, source: &str) -> bool {
+    let node = pos.node;
+    let Some(up) = pos.parent() else {
         return false;
     };
+    let parent = up.node;
     match parent.kind() {
         "import_statement" | "export_statement" | "import_require_clause" => parent
             .child_by_field_name("source")
             .is_some_and(|s| s.id() == node.id()),
         "arguments" => {
             let is_first = parent.named_child(0).is_some_and(|c| c.id() == node.id());
-            let Some(call) = parent.parent().filter(|c| c.kind() == "call_expression") else {
+            let Some(call) = up
+                .parent()
+                .map(|c| c.node)
+                .filter(|c| c.kind() == "call_expression")
+            else {
                 return false;
             };
             let Some(func) = call.child_by_field_name("function") else {
@@ -991,13 +995,15 @@ fn is_import_specifier(node: Node, source: &str) -> bool {
 
 /// Fill `callee`, `callee_chain` (the nearest enclosing call) and `jsx_attr` by walking up
 /// through [`CALLEE_PASS_THROUGH`] nodes until a call, a JSX attribute or anything else.
-fn apply_call_and_jsx(node: Node, source: &str, ctx: &mut LiteralCtx) {
-    let mut cur = node;
-    while let Some(parent) = cur.parent() {
+fn apply_call_and_jsx(pos: Pos, source: &str, ctx: &mut LiteralCtx) {
+    let mut cur = pos;
+    while let Some(up) = cur.parent() {
+        let parent = up.node;
         match parent.kind() {
             "arguments" => {
-                if let Some(call) = parent
+                if let Some(call) = up
                     .parent()
+                    .map(|c| c.node)
                     .filter(|c| matches!(c.kind(), "call_expression" | "new_expression"))
                 {
                     set_callee(call, source, ctx);
@@ -1008,7 +1014,7 @@ fn apply_call_and_jsx(node: Node, source: &str, ctx: &mut LiteralCtx) {
             "call_expression"
                 if parent
                     .child_by_field_name("arguments")
-                    .is_some_and(|a| a.id() == cur.id()) =>
+                    .is_some_and(|a| a.id() == cur.node.id()) =>
             {
                 set_callee(parent, source, ctx);
                 return;
@@ -1020,7 +1026,7 @@ fn apply_call_and_jsx(node: Node, source: &str, ctx: &mut LiteralCtx) {
                     .filter(|n| !n.is_empty());
                 return;
             }
-            kind if CALLEE_PASS_THROUGH.contains(&kind) => cur = parent,
+            kind if CALLEE_PASS_THROUGH.contains(&kind) => cur = up,
             _ => return,
         }
     }
@@ -1053,8 +1059,9 @@ fn set_callee(call: Node, source: &str, ctx: &mut LiteralCtx) {
 }
 
 /// Fill `object_key`, `value_of_key`, `subscript` and `subscript_receiver`.
-fn apply_key_context(node: Node, source: &str, ctx: &mut LiteralCtx) {
-    let Some(parent) = node.parent() else {
+fn apply_key_context(pos: Pos, source: &str, ctx: &mut LiteralCtx) {
+    let node = pos.node;
+    let Some(parent) = pos.parent().map(|p| p.node) else {
         return;
     };
     let is = |field: &str| is_field_of(parent, field, node);
@@ -1077,10 +1084,11 @@ fn apply_key_context(node: Node, source: &str, ctx: &mut LiteralCtx) {
     if ctx.object_key {
         return;
     }
-    let mut cur = node;
-    while let Some(p) = cur.parent() {
+    let mut cur = pos;
+    while let Some(up) = cur.parent() {
+        let p = up.node;
         if p.kind() == "pair" {
-            if is_field_of(p, "value", cur) {
+            if is_field_of(p, "value", cur.node) {
                 ctx.value_of_key = p
                     .child_by_field_name("key")
                     .and_then(|k| key_text(k, source));
@@ -1088,7 +1096,7 @@ fn apply_key_context(node: Node, source: &str, ctx: &mut LiteralCtx) {
             return;
         }
         if VALUE_WRAPPERS.contains(&p.kind()) {
-            cur = p;
+            cur = up;
         } else {
             return;
         }
@@ -1107,10 +1115,10 @@ fn key_text(key: Node, source: &str) -> Option<String> {
     }
 }
 
-fn in_type_position(node: Node) -> bool {
-    let mut cur = node.parent();
+fn in_type_position(pos: Pos) -> bool {
+    let mut cur = pos.parent();
     while let Some(p) = cur {
-        if TYPE_POSITION_KINDS.contains(&p.kind()) {
+        if TYPE_POSITION_KINDS.contains(&p.node.kind()) {
             return true;
         }
         cur = p.parent();
@@ -1118,17 +1126,18 @@ fn in_type_position(node: Node) -> bool {
     false
 }
 
-fn in_arithmetic_position(node: Node, source: &str) -> bool {
-    let mut cur = node;
+fn in_arithmetic_position(pos: Pos, source: &str) -> bool {
+    let mut cur = pos;
     while let Some(p) = cur
         .parent()
-        .filter(|p| p.kind() == "parenthesized_expression")
+        .filter(|p| p.node.kind() == "parenthesized_expression")
     {
         cur = p;
     }
-    let Some(parent) = cur.parent() else {
+    let Some(parent) = cur.parent().map(|p| p.node) else {
         return false;
     };
+    let cur = cur.node;
     let operator = |p: Node| {
         p.child_by_field_name("operator")
             .map(|o| text(o, source))
@@ -1155,35 +1164,37 @@ fn is_field_of(parent: Node, field: &str, child: Node) -> bool {
 
 /// The top-level `const`/`let`/`var` whose initializer is, or contains (through
 /// [`INITIALIZER_WRAPPERS`] only), this literal.
-fn module_const_of(node: Node, source: &str) -> Option<ModuleConst> {
-    let mut cur = node;
-    let declarator = loop {
-        let parent = cur.parent()?;
+fn module_const_of(pos: Pos, source: &str) -> Option<ModuleConst> {
+    let mut cur = pos;
+    let declarator_pos = loop {
+        let up = cur.parent()?;
+        let parent = up.node;
         match parent.kind() {
-            "variable_declarator" if is_field_of(parent, "value", cur) => break parent,
+            "variable_declarator" if is_field_of(parent, "value", cur.node) => break up,
             "variable_declarator" => return None,
-            "pair" if is_field_of(parent, "value", cur) => cur = parent,
+            "pair" if is_field_of(parent, "value", cur.node) => cur = up,
             "pair" => return None,
-            kind if INITIALIZER_WRAPPERS.contains(&kind) => cur = parent,
+            kind if INITIALIZER_WRAPPERS.contains(&kind) => cur = up,
             _ => return None,
         }
     };
+    let declarator = declarator_pos.node;
     let name = declarator.child_by_field_name("name")?;
     // A declarator the grammar had to recover around is not a reliable home.
     if name.kind() != "identifier" || declarator.has_error() {
         return None;
     }
-    let declaration = declarator.parent()?;
+    let declaration_pos = declarator_pos.parent()?;
     if !matches!(
-        declaration.kind(),
+        declaration_pos.node.kind(),
         "lexical_declaration" | "variable_declaration"
     ) {
         return None;
     }
-    let container = declaration.parent()?;
-    let exported = match container.kind() {
+    let container_pos = declaration_pos.parent()?;
+    let exported = match container_pos.node.kind() {
         "program" => false,
-        "export_statement" if container.parent()?.kind() == "program" => true,
+        "export_statement" if container_pos.parent()?.node.kind() == "program" => true,
         _ => return None,
     };
     Some(ModuleConst {

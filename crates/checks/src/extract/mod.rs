@@ -24,6 +24,7 @@
 //! already carries and the SQL splitter's existing discipline (see
 //! `docs/design/2026-07-27_ast-extractor-layer.md` §1).
 
+mod ancestry;
 pub mod ecma;
 pub mod enclosing;
 pub mod paths;

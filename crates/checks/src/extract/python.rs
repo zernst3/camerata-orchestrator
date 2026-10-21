@@ -18,6 +18,8 @@
 
 use tree_sitter::{Node, Tree};
 
+use super::ancestry::{walk_with_ancestors, Pos};
+
 use super::{
     canonical_number, FunctionSpan, Import, ImportKind, Literal, LiteralCtx, LiteralKind,
     MethodCall, ModuleConst,
@@ -366,27 +368,24 @@ pub fn literals(source: &str) -> Vec<Literal> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    // Explicit stack: a pathologically nested file must not overflow the call stack.
-    let mut stack = vec![tree.root_node()];
-    while let Some(node) = stack.pop() {
-        match node.kind() {
-            // Adjacent literals (`'a' 'b'`) concatenate at compile time; neither half is the
-            // constant, and the joined text is not worth guessing.
-            "concatenated_string" => continue,
-            _ => {
-                if let Some(literal) = literal_at(node, source) {
-                    out.push(literal);
-                }
-            }
+    walk_with_ancestors(tree.root_node(), |pos| {
+        // Adjacent literals (`'a' 'b'`) concatenate at compile time; neither half is the
+        // constant, and the joined text is not worth guessing.
+        let inside_concatenation = pos
+            .parent()
+            .is_some_and(|p| p.node.kind() == "concatenated_string");
+        if inside_concatenation {
+            return;
         }
-        let mut cursor = node.walk();
-        let children: Vec<Node> = node.children(&mut cursor).collect();
-        stack.extend(children.into_iter().rev());
-    }
+        if let Some(literal) = literal_at(pos, source) {
+            out.push(literal);
+        }
+    });
     out
 }
 
-fn literal_at(node: Node, source: &str) -> Option<Literal> {
+fn literal_at(pos: Pos, source: &str) -> Option<Literal> {
+    let node = pos.node;
     let (value, kind) = match node.kind() {
         "string" => (string_value(node, source)?, LiteralKind::Str),
         "integer" | "float" => (canonical_number(text(node, source))?, LiteralKind::Number),
@@ -396,7 +395,7 @@ fn literal_at(node: Node, source: &str) -> Option<Literal> {
         value,
         kind,
         line: start_line(node),
-        ctx: literal_ctx(node, source),
+        ctx: literal_ctx(pos, source),
     })
 }
 
@@ -485,21 +484,21 @@ fn unescape_python(raw: &str) -> String {
     out
 }
 
-fn literal_ctx(node: Node, source: &str) -> LiteralCtx {
+fn literal_ctx(pos: Pos, source: &str) -> LiteralCtx {
     let mut ctx = LiteralCtx::default();
-    apply_call_context(node, source, &mut ctx);
-    apply_key_context(node, source, &mut ctx);
-    ctx.type_position = in_type_position(node, source);
-    ctx.attribute = has_ancestor(node, "decorator");
-    ctx.arithmetic = in_arithmetic_position(node, source);
-    ctx.module_const = module_const_of(node, source);
+    apply_call_context(pos, source, &mut ctx);
+    apply_key_context(pos, source, &mut ctx);
+    ctx.type_position = in_type_position(pos, source);
+    ctx.attribute = has_ancestor(pos, "decorator");
+    ctx.arithmetic = in_arithmetic_position(pos, source);
+    ctx.module_const = module_const_of(pos, source);
     ctx
 }
 
-fn has_ancestor(node: Node, kind: &str) -> bool {
-    let mut cur = node.parent();
+fn has_ancestor(pos: Pos, kind: &str) -> bool {
+    let mut cur = pos.parent();
     while let Some(p) = cur {
-        if p.kind() == kind {
+        if p.node.kind() == kind {
             return true;
         }
         cur = p.parent();
@@ -516,12 +515,13 @@ fn is_field_of(parent: Node, field: &str, child: Node) -> bool {
 
 /// Fill `import_specifier`, `callee` and `callee_chain` from the nearest enclosing call, found
 /// by walking up through [`CALLEE_PASS_THROUGH`] nodes.
-fn apply_call_context(node: Node, source: &str, ctx: &mut LiteralCtx) {
-    let mut cur = node;
-    while let Some(parent) = cur.parent() {
+fn apply_call_context(pos: Pos, source: &str, ctx: &mut LiteralCtx) {
+    let mut cur = pos;
+    while let Some(up) = cur.parent() {
+        let parent = up.node;
         match parent.kind() {
             "argument_list" => {
-                let Some(call) = parent.parent().filter(|c| c.kind() == "call") else {
+                let Some(call) = up.parent().map(|c| c.node).filter(|c| c.kind() == "call") else {
                     return;
                 };
                 let Some(func) = call.child_by_field_name("function") else {
@@ -535,9 +535,11 @@ fn apply_call_context(node: Node, source: &str, ctx: &mut LiteralCtx) {
                     _ => None,
                 };
                 if let Some(name) = name.filter(|n| !n.is_empty()) {
-                    let first = parent.named_child(0).is_some_and(|c| c.id() == cur.id());
+                    let first = parent
+                        .named_child(0)
+                        .is_some_and(|c| c.id() == cur.node.id());
                     ctx.import_specifier = first
-                        && cur.id() == node.id()
+                        && cur.node.id() == pos.node.id()
                         && matches!(name.as_str(), "import_module" | "__import__");
                     ctx.callee_chain = Some(
                         text(func, source)
@@ -549,15 +551,16 @@ fn apply_call_context(node: Node, source: &str, ctx: &mut LiteralCtx) {
                 }
                 return;
             }
-            kind if CALLEE_PASS_THROUGH.contains(&kind) => cur = parent,
+            kind if CALLEE_PASS_THROUGH.contains(&kind) => cur = up,
             _ => return,
         }
     }
 }
 
 /// Fill `object_key`, `value_of_key`, `subscript` and `subscript_receiver`.
-fn apply_key_context(node: Node, source: &str, ctx: &mut LiteralCtx) {
-    let Some(parent) = node.parent() else {
+fn apply_key_context(pos: Pos, source: &str, ctx: &mut LiteralCtx) {
+    let node = pos.node;
+    let Some(parent) = pos.parent().map(|p| p.node) else {
         return;
     };
     match parent.kind() {
@@ -575,10 +578,11 @@ fn apply_key_context(node: Node, source: &str, ctx: &mut LiteralCtx) {
     if ctx.object_key {
         return;
     }
-    let mut cur = node;
-    while let Some(p) = cur.parent() {
+    let mut cur = pos;
+    while let Some(up) = cur.parent() {
+        let p = up.node;
         if p.kind() == "pair" {
-            if is_field_of(p, "value", cur) {
+            if is_field_of(p, "value", cur.node) {
                 ctx.value_of_key = p
                     .child_by_field_name("key")
                     .and_then(|k| key_text(k, source));
@@ -586,7 +590,7 @@ fn apply_key_context(node: Node, source: &str, ctx: &mut LiteralCtx) {
             return;
         }
         if VALUE_WRAPPERS.contains(&p.kind()) {
-            cur = p;
+            cur = up;
         } else {
             return;
         }
@@ -602,9 +606,10 @@ fn key_text(key: Node, source: &str) -> Option<String> {
 }
 
 /// Inside `Literal[...]` or on the right of an assignment in an `Enum` class body.
-fn in_type_position(node: Node, source: &str) -> bool {
-    let mut cur = node.parent();
-    while let Some(p) = cur {
+fn in_type_position(pos: Pos, source: &str) -> bool {
+    let mut cur = pos.parent();
+    while let Some(up) = cur {
+        let p = up.node;
         // `Literal[..]` is a `subscript` in an expression and a `generic_type` in an annotation.
         let subject = match p.kind() {
             "subscript" => p.child_by_field_name("value"),
@@ -614,37 +619,38 @@ fn in_type_position(node: Node, source: &str) -> bool {
         if subject.is_some_and(|v| last_segment(text(v, source)) == "Literal") {
             return true;
         }
-        cur = p.parent();
+        cur = up.parent();
     }
-    in_enum_body(node, source)
+    in_enum_body(pos, source)
 }
 
 fn last_segment(path: &str) -> &str {
     path.rsplit('.').next().unwrap_or(path).trim()
 }
 
-fn in_enum_body(node: Node, source: &str) -> bool {
-    let mut cur = node;
+fn in_enum_body(pos: Pos, source: &str) -> bool {
+    let mut cur = pos;
     // The initializer: the literal itself or inside a tuple/parenthesized value.
-    while let Some(p) = cur.parent() {
-        if INITIALIZER_WRAPPERS.contains(&p.kind()) {
-            cur = p;
+    while let Some(up) = cur.parent() {
+        if INITIALIZER_WRAPPERS.contains(&up.node.kind()) {
+            cur = up;
         } else {
             break;
         }
     }
     let Some(assignment) = cur
         .parent()
-        .filter(|a| a.kind() == "assignment" && is_field_of(*a, "right", cur))
+        .filter(|a| a.node.kind() == "assignment" && is_field_of(a.node, "right", cur.node))
     else {
         return false;
     };
     let class = assignment
         .parent()
-        .filter(|s| s.kind() == "expression_statement")
+        .filter(|s| s.node.kind() == "expression_statement")
         .and_then(|s| s.parent())
-        .filter(|b| b.kind() == "block")
+        .filter(|b| b.node.kind() == "block")
         .and_then(|b| b.parent())
+        .map(|c| c.node)
         .filter(|c| c.kind() == "class_definition");
     let Some(bases) = class.and_then(|c| c.child_by_field_name("superclasses")) else {
         return false;
@@ -656,17 +662,18 @@ fn in_enum_body(node: Node, source: &str) -> bool {
     found
 }
 
-fn in_arithmetic_position(node: Node, source: &str) -> bool {
-    let mut cur = node;
+fn in_arithmetic_position(pos: Pos, source: &str) -> bool {
+    let mut cur = pos;
     while let Some(p) = cur
         .parent()
-        .filter(|p| p.kind() == "parenthesized_expression")
+        .filter(|p| p.node.kind() == "parenthesized_expression")
     {
         cur = p;
     }
-    let Some(parent) = cur.parent() else {
+    let Some(parent) = cur.parent().map(|p| p.node) else {
         return false;
     };
+    let cur = cur.node;
     let operator = parent
         .child_by_field_name("operator")
         .map(|o| text(o, source))
@@ -683,25 +690,29 @@ fn in_arithmetic_position(node: Node, source: &str) -> bool {
 
 /// The module-level `NAME = ...` / `NAME: T = ...` whose value is, or contains (through
 /// [`INITIALIZER_WRAPPERS`] only), this literal.
-fn module_const_of(node: Node, source: &str) -> Option<ModuleConst> {
-    let mut cur = node;
-    let assignment = loop {
-        let parent = cur.parent()?;
+fn module_const_of(pos: Pos, source: &str) -> Option<ModuleConst> {
+    let mut cur = pos;
+    let assignment_pos = loop {
+        let up = cur.parent()?;
+        let parent = up.node;
         match parent.kind() {
-            "assignment" if is_field_of(parent, "right", cur) => break parent,
+            "assignment" if is_field_of(parent, "right", cur.node) => break up,
             "assignment" => return None,
-            "pair" if is_field_of(parent, "value", cur) => cur = parent,
+            "pair" if is_field_of(parent, "value", cur.node) => cur = up,
             "pair" => return None,
-            kind if INITIALIZER_WRAPPERS.contains(&kind) => cur = parent,
+            kind if INITIALIZER_WRAPPERS.contains(&kind) => cur = up,
             _ => return None,
         }
     };
+    let assignment = assignment_pos.node;
     let name = assignment.child_by_field_name("left")?;
     if name.kind() != "identifier" || assignment.has_error() {
         return None;
     }
-    let statement = assignment.parent()?;
-    if statement.kind() != "expression_statement" || statement.parent()?.kind() != "module" {
+    let statement = assignment_pos.parent()?;
+    if statement.node.kind() != "expression_statement"
+        || statement.parent()?.node.kind() != "module"
+    {
         return None;
     }
     let name = text(name, source).to_string();
