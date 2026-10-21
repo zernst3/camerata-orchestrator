@@ -57,7 +57,9 @@ use crate::extract::{self, SourceLang};
 mod analysis;
 mod emit;
 mod exclusions;
+mod manifests;
 mod mentions;
+mod roots;
 
 #[cfg(test)]
 mod tests;

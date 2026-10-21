@@ -10,6 +10,7 @@ use super::emit::{self, DeadFile};
 use super::exclusions::{
     has_generated_marker, has_keep_marker, is_config_shaped, is_declaration_file, is_test_file,
 };
+use super::manifests::{manifest_roots, Packages};
 use super::mentions::{is_always_mentioned, key_of, MentionIndex};
 use super::{family_of, Family};
 
@@ -75,6 +76,8 @@ pub(super) fn analyze(files: &[(String, String)]) -> Vec<crate::arch_checker::Ar
             roots.insert(path.clone());
         }
     }
+    let packages = Packages::load(files);
+    let manifest = manifest_roots(files, &packages);
     let key_of_candidate: HashMap<usize, String> = candidates
         .iter()
         .map(|&i| (i, key_of(&files[i].0)))
@@ -82,7 +85,15 @@ pub(super) fn analyze(files: &[(String, String)]) -> Vec<crate::arch_checker::Ar
     for &i in &candidates {
         let (path, content) = &files[i];
         let family = family_of(path).unwrap_or(Family::Ecma);
-        if is_always_mentioned(&key_of_candidate[&i]) || is_executable(content, family) {
+        let in_manifest_package = family == Family::Ecma
+            && packages
+                .nearest(path)
+                .is_some_and(|p| manifest.contains_package(&p.dir));
+        if is_always_mentioned(&key_of_candidate[&i])
+            || is_executable(content, family)
+            || manifest.contains(path)
+            || in_manifest_package
+        {
             roots.insert(path.clone());
         }
     }

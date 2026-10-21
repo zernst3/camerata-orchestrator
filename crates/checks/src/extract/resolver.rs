@@ -490,10 +490,14 @@ fn resolve_python(importer: &str, imp: &Import, path_set: &HashSet<&str>) -> Opt
         };
         return try_python_extensions(&joined, path_set);
     }
-    // Absolute dotted specifier — the repo's actual source root (`src/`, `app/`, repo root,
-    // ...) isn't known to this extractor, so match by SUFFIX against every `.py`/`.pyi`
-    // file's own derived module path. Zero or multiple matches both drop the edge (the
-    // ambiguity case this module's docs call out) rather than guess.
+    resolve_python_absolute(spec, path_set)
+}
+
+/// The absolute-dotted-specifier branch of [`resolve_python`]: the repo's actual source root
+/// (`src/`, `app/`, repo root, ...) isn't known to this extractor, so match by SUFFIX against
+/// every `.py`/`.pyi` file's own derived module path. Zero or multiple matches both drop the
+/// edge (the ambiguity case this module's docs call out) rather than guess.
+fn resolve_python_absolute(spec: &str, path_set: &HashSet<&str>) -> Option<String> {
     let want: Vec<&str> = spec.split('.').collect();
     let mut matches: Vec<&str> = Vec::new();
     for candidate_path in path_set.iter() {
@@ -509,6 +513,14 @@ fn resolve_python(importer: &str, imp: &Import, path_set: &HashSet<&str>) -> Opt
         [only] => Some((*only).to_string()),
         _ => None,
     }
+}
+
+/// The repo file an ABSOLUTE dotted Python module name (`pkg.cli`) names, by the same suffix
+/// match the import graph uses for `import pkg.cli`: a package's `__init__.py` is the package.
+/// Zero or several matches give `None` (never a guess). For a caller that holds a module name
+/// rather than an `import` statement, such as a `pyproject.toml` script entry.
+pub(crate) fn resolve_python_module(module: &str, path_set: &HashSet<&str>) -> Option<String> {
+    resolve_python_absolute(module, path_set)
 }
 
 #[cfg(test)]
@@ -977,6 +989,38 @@ mod tests {
         ]));
         let reached = reachable_from_all(&graph, ["src/a.ts", "src/b.ts"]);
         assert_eq!(reached.len(), 2);
+    }
+
+    // ── resolve_python_module ───────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_python_module_matches_files_and_packages_by_suffix() {
+        let f = files(vec![
+            ("src/pkg/__init__.py", ""),
+            ("src/pkg/cli.py", ""),
+            ("src/pkg/sub/__init__.py", ""),
+        ]);
+        let set: HashSet<&str> = f.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            resolve_python_module("pkg.cli", &set).as_deref(),
+            Some("src/pkg/cli.py")
+        );
+        assert_eq!(
+            resolve_python_module("pkg.sub", &set).as_deref(),
+            Some("src/pkg/sub/__init__.py")
+        );
+        assert_eq!(
+            resolve_python_module("pkg", &set).as_deref(),
+            Some("src/pkg/__init__.py")
+        );
+        assert_eq!(resolve_python_module("pkg.missing", &set), None);
+    }
+
+    #[test]
+    fn resolve_python_module_drops_an_ambiguous_name() {
+        let f = files(vec![("a/svc/cli.py", ""), ("b/svc/cli.py", "")]);
+        let set: HashSet<&str> = f.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(resolve_python_module("svc.cli", &set), None);
     }
 
     // ── adversarial: empty file set, self-import, does not panic ───────────────
