@@ -175,6 +175,28 @@ enum Command {
         #[arg(long, default_value = "graded", value_parser = integrity_gate_cmd::parse_profile)]
         profile: GateProfile,
     },
+
+    /// Corpus staleness watermark (see docs/design/2026-10-20_corpus-staleness-check.md).
+    Corpus {
+        #[command(subcommand)]
+        action: CorpusAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CorpusAction {
+    /// Report which rule domains are overdue for a staleness sweep or never confirmed.
+    /// Read-only; never blocks anything.
+    Check,
+    /// Advance ONE domain's watermark after you have reviewed that domain's sweep. This is the
+    /// only thing that advances a watermark; running a sweep never does. Writes
+    /// crates/rules/CORPUS_FRESHNESS.toml (commit it afterward).
+    Confirm {
+        /// The corpus domain just reviewed, e.g. `supabase`, `rust`, `javascript`.
+        domain: String,
+        /// The date it was confirmed current, YYYY-MM-DD.
+        date: String,
+    },
 }
 
 /// `--backend`'s `value_parser`: `ProjectBackend` lives in `camerata-api-types`, a foreign
@@ -278,6 +300,12 @@ async fn main() -> anyhow::Result<()> {
         Command::IntegrityGate { ledger, profile } => {
             run_integrity_gate_cmd(IntegrityGateArgs { ledger, profile })
         }
+        Command::Corpus { action } => match action {
+            CorpusAction::Check => camerata::corpus_cmd::run_corpus_check().await,
+            CorpusAction::Confirm { domain, date } => {
+                camerata::corpus_cmd::run_corpus_confirm(domain, date).await
+            }
+        },
     }
 }
 
