@@ -164,3 +164,76 @@ work and can follow.
 - The nag never blocks a scan or export.
 - Not a per-RULE timestamp. Freshness is tracked per domain; a single rule's currency
   is established by the sweep's finding, not a date field on every rule.
+
+---
+
+## Amendment 2026-10-21: schema readiness, rule versions, and the "due soon" warning
+
+**Zach's direction (2026-10-21).** The rules were all authored spring 2026 or later, so no
+freshness sweep runs now. One runs before the first client and then roughly quarterly. The
+SCHEMA must be ready for that today: per-rule fields to manage freshness, and a rule version.
+The in-app warning must fire as a domain APPROACHES its threshold, not only after it passes.
+
+**Status check of what was asked for before this amendment:**
+- In-app warning: designed above ("non-fatal banner when the engine loads the corpus" + a
+  morning-digest line) but NOT built. Only `camerata corpus check` (CLI) exists. The "morning
+  digest" is Zach's external routine, not Camerata code, so Camerata's in-app surface is the
+  cockpit banner below; the routine can call `camerata corpus check`.
+- An "approaching" warning was never designed. Only `overdue` (past the threshold) exists.
+- `superseded_since` + `current_recommendation` are ALREADY in the schema (W32 part (a) added
+  them, with a well-formedness gate), unused by any rule. So W32 part (b) is resolved as:
+  **schema ready, populated only by a confirmed sweep finding.** Not dropped.
+
+### 1. Per-rule fields (all on `RuleToml`/`Rule`, both load sites, unknown-field allowlist,
+`RULE_AUTHORING.md`, `RULES_REFERENCE.md`)
+
+| field | type | required | meaning |
+|---|---|---|---|
+| `version` | integer ≥ 1 | yes (backfill every rule to `1`) | bumped whenever anything about the rule changes |
+| `last_reviewed` | `"YYYY-MM-DD"` | no | this rule individually confirmed current on that date (a single-rule review between full sweeps) |
+| `superseded_since` | `"YYYY"` | no (exists) | the ecosystem moved off this pattern that year |
+| `current_recommendation` | string | no (exists) | what replaced it, with a source |
+
+A rule's **effective review date** = the later of its own `last_reviewed` and its domain's
+`[confirmed]` watermark. Gates: `last_reviewed` parses and is not in the future;
+`superseded_since` set ⇒ `current_recommendation` set (and vice versa); `version ≥ 1`.
+
+### 2. Making `version` mechanical, not a convention
+
+A version field nobody is forced to bump rots. So:
+- `Rule::content_hash()` in `camerata-rules`: SHA-256 over a canonical serialization of the
+  WHOLE rule (every field, options included, `version`/`last_reviewed` excluded so a bump does
+  not change the hash), rendered `"sha256:<hex>"`.
+- `crates/rules/CORPUS_LOCK.toml`: `[rules] "<ID>" = { version = N, hash = "sha256:..." }`.
+- Gate (rules-crate test): for each rule, if the hash differs from the lock while the version is
+  unchanged → FAIL "rule X changed; bump `version`, then run `camerata corpus lock`". If the
+  version differs from the lock, or a rule is missing from the lock, or the lock names a rule
+  that no longer exists → FAIL "run `camerata corpus lock`". The lock never moves on its own.
+- `camerata corpus lock`: regenerates the lock from the current corpus (refuses if any rule's
+  hash changed without a version bump, so the CLI cannot launder a missed bump).
+
+### 3. Fix the applied-rule drift detector (two defects found 2026-10-21)
+
+`crates/server/src/lib.rs::rule_content_hash` (a) hashes only id/title/summary/enforcement, so a
+changed option or directive never shows as drift, and (b) uses `DefaultHasher`, which Rust does
+not guarantee stable across builds, so an upgrade can report every applied rule as changed (its
+doc comment also wrongly claims SHA-256). Replace with `Rule::content_hash()`. A stored applied
+hash without the `sha256:` prefix is LEGACY: report it as `changed: null` + `legacy_baseline:
+true` (re-baselined on next apply), never as a false "changed". Add `applied_version` /
+`current_version` to the `rule_drift` response when known.
+
+### 4. The "due soon" warning
+
+- `CORPUS_FRESHNESS.toml` gains `warn_lead_days = 14` (per-domain overrides allowed, like
+  `warn_after_days`). New `CorpusFreshness::due_soon(today)`: confirmed domains whose age is
+  within `warn_lead_days` of the threshold but not past it.
+- `camerata corpus check` prints three groups: OVERDUE, DUE SOON (with days remaining), NEVER
+  CONFIRMED.
+- Server: one non-fatal log line at corpus load summarizing the same; `/api/updates/check`
+  gains `corpus_freshness: { overdue: [...], due_soon: [...], never_confirmed_count }`.
+- Cockpit: the existing update banner shows a corpus-freshness line when anything is overdue or
+  due soon (never-confirmed alone shows a quieter one-line note, since that is the honest
+  pre-first-sweep state and should not shout).
+- Operator-only. A gate asserts no freshness text reaches any client artifact (PDF, xlsx,
+  CSV/JSON, README). The client-visible "rules last reviewed" date in the manifest is separate
+  and unchanged.
