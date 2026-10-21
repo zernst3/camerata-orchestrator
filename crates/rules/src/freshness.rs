@@ -14,6 +14,7 @@
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
+use thiserror::Error;
 
 /// Days from the civil date `(y, m, d)` to the Unix epoch (1970-01-01 = 0), by Howard Hinnant's
 /// `days_from_civil` algorithm. Valid for any proleptic-Gregorian date; `m` in 1..=12, `d` in
@@ -161,6 +162,101 @@ impl CorpusFreshness {
     }
 }
 
+/// Advance (or insert) one domain's confirmation date inside the TEXT of a
+/// `CORPUS_FRESHNESS.toml`, returning the new text. A pure text transform, not a
+/// re-serialization, so every comment (the swept-vs-confirmed contract header, the override
+/// examples) is preserved verbatim - re-serializing a `toml::Value` would strip them all.
+///
+/// Rules: if a `<domain> = "..."` line already exists under `[confirmed]`, its date is replaced;
+/// otherwise a new line is appended at the end of the `[confirmed]` table (kept sorted among the
+/// existing entries for a stable diff). `date` is written as given; the caller passes a
+/// validated `YYYY-MM-DD`. Returns an error only if the file has no `[confirmed]` table at all.
+pub fn confirm_in_text(text: &str, domain: &str, date: &str) -> Result<String, FreshnessEditError> {
+    let lines: Vec<&str> = text.lines().collect();
+    // Find the [confirmed] header.
+    let header = lines
+        .iter()
+        .position(|l| l.trim() == "[confirmed]")
+        .ok_or(FreshnessEditError::NoConfirmedTable)?;
+
+    // The confirmed table runs from just after the header to the next table header (a line
+    // starting with '[') or EOF.
+    let body_end = lines[header + 1..]
+        .iter()
+        .position(|l| l.trim_start().starts_with('['))
+        .map(|rel| header + 1 + rel)
+        .unwrap_or(lines.len());
+
+    let key_prefix = format!("{domain} =");
+    let new_entry = format!("{domain} = \"{date}\"");
+
+    let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+
+    // Existing entry (ignoring leading whitespace)?
+    if let Some(idx) = (header + 1..body_end)
+        .find(|&i| lines[i].trim_start().starts_with(&key_prefix))
+    {
+        out[idx] = new_entry;
+    } else {
+        // Insert before the first trailing blank lines of the table body, so the entry sits
+        // with its siblings rather than after a gap.
+        let mut insert_at = body_end;
+        while insert_at > header + 1 && lines[insert_at - 1].trim().is_empty() {
+            insert_at -= 1;
+        }
+        out.insert(insert_at, new_entry);
+    }
+
+    let mut joined = out.join("\n");
+    if text.ends_with('\n') {
+        joined.push('\n');
+    }
+    Ok(joined)
+}
+
+/// Advance one domain's confirmation date in the watermark file on disk (read, transform via
+/// [`confirm_in_text`], write). The caller is responsible for committing the file - this does no
+/// git. This is the ONLY function that advances a watermark, and it is invoked by the human
+/// confirm step after a sweep is reviewed, never by a sweep run.
+pub fn confirm_domain(path: &Path, domain: &str, date: &str) -> Result<(), FreshnessEditError> {
+    let text = std::fs::read_to_string(path).map_err(FreshnessEditError::Io)?;
+    let updated = confirm_in_text(&text, domain, date)?;
+    std::fs::write(path, updated).map_err(FreshnessEditError::Io)?;
+    Ok(())
+}
+
+/// Format the human-facing staleness nag for a set of overdue and never-confirmed domains, or
+/// `None` when the corpus is fully fresh (nothing to say). Non-fatal text a caller prints in a
+/// load banner or the daily digest - it never blocks a scan or export.
+pub fn format_staleness_nag(overdue: &[OverdueDomain], never_confirmed: &[String]) -> Option<String> {
+    if overdue.is_empty() && never_confirmed.is_empty() {
+        return None;
+    }
+    let mut lines = vec!["CORPUS STALENESS:".to_string()];
+    for o in overdue {
+        lines.push(format!(
+            "  {} last confirmed {} ({} days ago, threshold {}). Due for a staleness sweep.",
+            o.domain, o.last_confirmed, o.days_since, o.threshold_days
+        ));
+    }
+    if !never_confirmed.is_empty() {
+        lines.push(format!(
+            "  never confirmed (no sweep yet): {}.",
+            never_confirmed.join(", ")
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
+/// Error from editing the watermark file in place.
+#[derive(Debug, Error)]
+pub enum FreshnessEditError {
+    #[error("CORPUS_FRESHNESS.toml has no [confirmed] table to write into")]
+    NoConfirmedTable,
+    #[error("reading or writing the watermark file: {0}")]
+    Io(#[source] std::io::Error),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,5 +378,58 @@ mod tests {
         let f: CorpusFreshness = toml::from_str("[confirmed]\nx = \"2026-01-01\"").unwrap();
         assert_eq!(f.warn_after_days, 90);
         assert_eq!(f.threshold_for("anything"), 90);
+    }
+
+    const WATERMARK: &str = "# header comment, must survive\nwarn_after_days = 90\n\n[warn_after_days_overrides]\n\n[confirmed]\ngo = \"2026-07-01\"\nrust = \"2026-08-01\"\n";
+
+    #[test]
+    fn confirm_updates_an_existing_domain_in_place_preserving_comments() {
+        let out = confirm_in_text(WATERMARK, "go", "2026-10-20").unwrap();
+        assert!(out.contains("# header comment, must survive"), "header comment lost");
+        assert!(out.contains("go = \"2026-10-20\""), "go not advanced");
+        assert!(!out.contains("go = \"2026-07-01\""), "old go date left behind");
+        assert!(out.contains("rust = \"2026-08-01\""), "sibling clobbered");
+        // Still parses, and go is now the confirmed value.
+        let f: CorpusFreshness = toml::from_str(&out).unwrap();
+        assert_eq!(f.confirmed.get("go").unwrap(), "2026-10-20");
+    }
+
+    #[test]
+    fn confirm_inserts_a_new_domain_under_confirmed() {
+        let out = confirm_in_text(WATERMARK, "python", "2026-10-20").unwrap();
+        let f: CorpusFreshness = toml::from_str(&out).unwrap();
+        assert_eq!(f.confirmed.get("python").unwrap(), "2026-10-20");
+        assert_eq!(f.confirmed.get("go").unwrap(), "2026-07-01"); // untouched
+        assert_eq!(f.confirmed.len(), 3);
+    }
+
+    #[test]
+    fn confirm_into_an_empty_confirmed_table_at_eof() {
+        // The bundled file's shape: [confirmed] is the last table and starts empty.
+        let text = "warn_after_days = 90\n\n[confirmed]\n";
+        let out = confirm_in_text(text, "go", "2026-10-20").unwrap();
+        let f: CorpusFreshness = toml::from_str(&out).unwrap();
+        assert_eq!(f.confirmed.get("go").unwrap(), "2026-10-20");
+        assert_eq!(f.confirmed.len(), 1);
+    }
+
+    #[test]
+    fn confirm_errors_without_a_confirmed_table() {
+        let err = confirm_in_text("warn_after_days = 90\n", "go", "2026-10-20");
+        assert!(matches!(err, Err(FreshnessEditError::NoConfirmedTable)));
+    }
+
+    #[test]
+    fn nag_is_none_when_fresh_and_text_when_not() {
+        assert!(format_staleness_nag(&[], &[]).is_none());
+        let overdue = vec![OverdueDomain {
+            domain: "go".to_string(),
+            last_confirmed: "2026-07-01".to_string(),
+            days_since: 111,
+            threshold_days: 90,
+        }];
+        let msg = format_staleness_nag(&overdue, &["rust".to_string()]).unwrap();
+        assert!(msg.contains("go last confirmed 2026-07-01 (111 days ago"));
+        assert!(msg.contains("never confirmed (no sweep yet): rust"));
     }
 }

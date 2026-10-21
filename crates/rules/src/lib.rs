@@ -21,7 +21,10 @@ use serde::Deserialize;
 use thiserror::Error;
 
 mod freshness;
-pub use freshness::{corpus_freshness_path, days_from_civil, CorpusFreshness, OverdueDomain};
+pub use freshness::{
+    confirm_domain, confirm_in_text, corpus_freshness_path, days_from_civil, format_staleness_nag,
+    CorpusFreshness, FreshnessEditError, OverdueDomain,
+};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Error type (RUST-DOMAIN-4 / RUST-DOMAIN-6)
