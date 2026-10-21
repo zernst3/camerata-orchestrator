@@ -89,3 +89,31 @@ Plus the gated pre-first-client full staleness sweep before client #1.
 - Known remaining red: ONE test, scan_tools::live_eslint_detects_a_real_exhaustive_deps_violation
   — the eslint-provisioning residual (W30), environmental (leaky skip-guard on a half-provisioned
   machine), NOT a regression. Needs the W30 eslint tool-manifest version-pinning.
+
+## W30 eslint residual — DIAGNOSED (2026-10-21), not my change, real product bug
+The failing test `live_eslint_detects_a_real_exhaustive_deps_violation` was NOT modified this
+session (verified git log -L) and is NOT a regression from this session's code. Root cause chain,
+reproduced:
+1. ESLINT_NPM_PACKAGES (tool_provisioning.rs:336) pins NO versions -> npm install pulls LATEST ->
+   this machine had eslint 10.12.0 + eslint-plugin-react-hooks 7.1.1 (major-version drift).
+2. Under eslint 10 / react-hooks 7 the bundled flat config cannot register the plugin -> raw
+   eslint errors "could not find plugin react-hooks" -> ZERO findings. (Reproduced directly.)
+   => This is a PRODUCT bug: a fresh-provisioned machine silently zeroes react-hooks (likely all
+      plugin) preview findings in real client scans, not just the test.
+3. Pinning the WORKSPACE to eslint 9.39.5 + react-hooks 5.2.0 makes RAW eslint (Camerata's exact
+   --config/--format json/--rule/. invocation) produce the finding correctly. So eslint 9 / rh 5
+   is the right pin.
+4. BUT: even with 9/5 installed + config intact + raw eslint working, the Rust `run_scan_tools`
+   path STILL returns findings=[] (eslint IS attempted; no error note). So there is a SECOND
+   factor inside run_scan_tools' provision/invoke/parse path, beyond the version drift, still to
+   find. NOT chased (context limit).
+FIX (W30, focused next session):
+  a. Pin ESLINT_NPM_PACKAGES to versioned specs (eslint@^9, eslint-plugin-react-hooks@^5,
+     @typescript-eslint/*@^8, eslint-plugin-jest@^28) AND make eslint_is_provisioned version-aware
+     (presence-only probe won't force a drifted workspace to re-pin).
+  b. Debug why run_scan_tools gets [] while raw eslint at 9/5 gets the finding (candidates:
+     eslint_bin resolution, a transient re-provision, file-selection/extension filtering, or the
+     JSON parse path). eslint_args + ESLINT_FORMATTER="json" match the working manual run.
+  c. NOTE: I left the local workspace at eslint 9.39.5 / react-hooks 5.2.0 (npm --no-save), which
+     is better than the drifted 10/7, but it is not pinned anywhere yet.
+Do NOT bandaid the test to skip-on-empty: that would hide the real finding-zeroing in client scans.
