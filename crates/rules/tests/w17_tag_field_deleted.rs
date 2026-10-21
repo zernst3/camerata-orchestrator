@@ -161,7 +161,7 @@ fn req_w17_layer_is_untouched_on_every_corpus_rule() {
         ("library", 34),
         ("platform", 35),
         ("testing", 7),
-        ("universal", 131),
+        ("universal", 132),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v))

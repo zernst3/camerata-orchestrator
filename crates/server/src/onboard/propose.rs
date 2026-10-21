@@ -1427,6 +1427,37 @@ mod tests {
         );
     }
 
+    /// `ARCH-SHARED-CONSTANT-1` lives in the `universal` domain, which `propose_corpus_rules`
+    /// binds to every repo by id with no stack match. The literal extractor covers TypeScript,
+    /// JavaScript, Python and Rust, so each of those stacks must be handed the rule, pre-checked
+    /// (a policy rule is auto-recommended).
+    #[tokio::test]
+    async fn arch_shared_constant_is_proposed_for_typescript_python_and_rust_stacks() {
+        const ID: &str = "ARCH-SHARED-CONSTANT-1";
+        for (repo, path) in [
+            ("acme/ts-app", "src/app.ts"),
+            ("acme/js-app", "src/app.js"),
+            ("acme/py-app", "app/main.py"),
+            ("acme/rs-app", "src/main.rs"),
+        ] {
+            let repo_files = files(&[(path, "x")]);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            let rule = proposed
+                .iter()
+                .find(|r| r.id == ID)
+                .unwrap_or_else(|| panic!("{ID} must be proposed for {repo}"));
+            assert_eq!(rule.domain, "universal");
+            assert!(rule.recommended, "{repo}: suggested, not merely available");
+            assert!(
+                rule.is_auto_recommended,
+                "{repo}: a policy rule is still auto-recommended (pre-checked)"
+            );
+            assert_eq!(rule.repos, vec![repo.to_string()]);
+        }
+    }
+
     /// req_a6: a plain Rust + Axum + Tokio + sqlx service must arm `rust:axum`, `rust:tokio`
     /// and `rust:sqlx` — the three Rust families the audit named, 15 rules between them.
     #[test]
