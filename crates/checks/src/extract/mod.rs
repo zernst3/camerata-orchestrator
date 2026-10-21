@@ -114,6 +114,10 @@ pub struct Import {
     pub names: Vec<String>,
     pub kind: ImportKind,
     pub line: usize,
+    /// TS `import type { A }` / inline `import { type A }` (and the `export type` /
+    /// `export { type A }` re-export equivalents): the binding exists only at the type level
+    /// and is erased at runtime. Always `false` for Rust and Python.
+    pub type_only: bool,
 }
 
 /// One function/method/handler definition with its body span (1-based, inclusive lines).
@@ -152,6 +156,9 @@ pub struct NamedReExport {
     pub origin: String,
     pub exported: String,
     pub line: usize,
+    /// `export type { A } from` or `export { type A } from`: the barrel exposes only the
+    /// TYPE meaning of the name, so a same-named value is not reachable through it.
+    pub type_only: bool,
 }
 
 /// One star re-export: `export * from 'specifier'`. (`export * as ns from` is NOT one of

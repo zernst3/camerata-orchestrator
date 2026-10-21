@@ -17,6 +17,8 @@
 //! the kind/field of, so a malformed/truncated/binary-ish source degrades to fewer (or zero)
 //! results, never a panic.
 
+use std::collections::HashMap;
+
 use tree_sitter::{Node, Tree};
 
 use super::{
@@ -168,6 +170,15 @@ fn walk_imports(node: Node, source: &str, out: &mut Vec<Import>) {
     }
 }
 
+/// Whether `node` (an import/export statement or one of its specifiers) carries the TS `type`
+/// modifier as a direct keyword child: `import type { A }`, `import { type A }`,
+/// `export type { A }`, `export { type A }`.
+fn has_type_keyword(node: Node) -> bool {
+    let mut cursor = node.walk();
+    let found = node.children(&mut cursor).any(|c| c.kind() == "type");
+    found
+}
+
 fn collect_import_statement(node: Node, source: &str, out: &mut Vec<Import>) {
     let Some(source_node) = node.child_by_field_name("source") else {
         return;
@@ -177,6 +188,7 @@ fn collect_import_statement(node: Node, source: &str, out: &mut Vec<Import>) {
     };
     let line = start_line(node);
     let mut cursor = node.walk();
+    let statement_type_only = has_type_keyword(node);
     let clause = node
         .children(&mut cursor)
         .find(|c| c.kind() == "import_clause");
@@ -187,6 +199,7 @@ fn collect_import_statement(node: Node, source: &str, out: &mut Vec<Import>) {
             names: Vec::new(),
             kind: ImportKind::SideEffect,
             line,
+            type_only: false,
         });
         return;
     };
@@ -198,12 +211,14 @@ fn collect_import_statement(node: Node, source: &str, out: &mut Vec<Import>) {
                 names: Vec::new(),
                 kind: ImportKind::Default,
                 line,
+                type_only: statement_type_only,
             }),
             "namespace_import" => out.push(Import {
                 specifier: specifier.to_string(),
                 names: Vec::new(),
                 kind: ImportKind::Namespace,
                 line,
+                type_only: statement_type_only,
             }),
             "named_imports" => {
                 let mut nc = part.walk();
@@ -219,6 +234,7 @@ fn collect_import_statement(node: Node, source: &str, out: &mut Vec<Import>) {
                             names: vec![text(name_node, source).to_string()],
                             kind: ImportKind::Named,
                             line,
+                            type_only: statement_type_only || has_type_keyword(spec),
                         });
                     }
                 }
@@ -256,6 +272,7 @@ fn collect_export_from(node: Node, source: &str, out: &mut Vec<Import>) {
                     names: vec![text(name_node, source).to_string()],
                     kind: ImportKind::ReExport,
                     line,
+                    type_only: has_type_keyword(node) || has_type_keyword(spec),
                 });
                 continue;
             }
@@ -268,6 +285,7 @@ fn collect_export_from(node: Node, source: &str, out: &mut Vec<Import>) {
         names: Vec::new(),
         kind: ImportKind::ReExport,
         line,
+        type_only: has_type_keyword(node),
     });
 }
 
@@ -299,6 +317,7 @@ fn collect_dynamic_import_or_require(node: Node, source: &str, out: &mut Vec<Imp
         names: Vec::new(),
         kind: ImportKind::Dynamic,
         line: start_line(node),
+        type_only: false,
     });
 }
 
@@ -314,16 +333,90 @@ pub fn exports(dialect: EcmaDialect, source: &str) -> ExportSurface {
         return out;
     };
     let root = tree.root_node();
+    let bindings = import_bindings(root, source);
     let mut cursor = root.walk();
     for node in root.children(&mut cursor) {
         if node.kind() == "export_statement" {
-            collect_export_statement(node, source, &mut out);
+            collect_export_statement(node, source, &bindings, &mut out);
         }
     }
     out
 }
 
-fn collect_export_statement(node: Node, source: &str, out: &mut ExportSurface) {
+/// A top-level import binding: the module it came from, the name that module exports it
+/// under (`"default"` for a default import), and whether the import was type-only.
+struct ImportBinding {
+    specifier: String,
+    origin: String,
+    type_only: bool,
+}
+
+/// The file's named and default import bindings by LOCAL name. `import { a as b }` maps `b`.
+/// A namespace import is not here: re-exporting one is an own export of a namespace object.
+fn import_bindings(root: Node, source: &str) -> HashMap<String, ImportBinding> {
+    let mut out = HashMap::new();
+    let mut cursor = root.walk();
+    for node in root.children(&mut cursor) {
+        if node.kind() != "import_statement" {
+            continue;
+        }
+        let Some(specifier) = node
+            .child_by_field_name("source")
+            .and_then(|s| string_literal_text(s, source))
+        else {
+            continue;
+        };
+        let statement_type_only = has_type_keyword(node);
+        let mut nc = node.walk();
+        let Some(clause) = node.children(&mut nc).find(|c| c.kind() == "import_clause") else {
+            continue;
+        };
+        let mut cc = clause.walk();
+        for part in clause.children(&mut cc) {
+            match part.kind() {
+                "identifier" => {
+                    out.insert(
+                        text(part, source).to_string(),
+                        ImportBinding {
+                            specifier: specifier.to_string(),
+                            origin: "default".to_string(),
+                            type_only: statement_type_only,
+                        },
+                    );
+                }
+                "named_imports" => {
+                    let mut sc = part.walk();
+                    for spec in part
+                        .children(&mut sc)
+                        .filter(|c| c.kind() == "import_specifier")
+                    {
+                        let Some(name) = spec.child_by_field_name("name") else {
+                            continue;
+                        };
+                        let local = spec.child_by_field_name("alias").unwrap_or(name);
+                        out.insert(
+                            text(local, source).to_string(),
+                            ImportBinding {
+                                specifier: specifier.to_string(),
+                                origin: text(name, source).to_string(),
+                                type_only: statement_type_only || has_type_keyword(spec),
+                            },
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+fn collect_export_statement(
+    node: Node,
+    source: &str,
+    bindings: &HashMap<String, ImportBinding>,
+    out: &mut ExportSurface,
+) {
     let line = start_line(node);
     let source_node = node.child_by_field_name("source");
     let specifier = source_node.and_then(|s| string_literal_text(s, source));
@@ -356,14 +449,28 @@ fn collect_export_statement(node: Node, source: &str, out: &mut ExportSurface) {
                 },
                 None => origin.clone(),
             };
+            let type_only = has_type_keyword(node) || has_type_keyword(spec);
             match (specifier, source_node) {
                 (Some(sp), _) => out.named_re_exports.push(NamedReExport {
                     specifier: sp.to_string(),
                     origin,
                     exported,
                     line,
+                    type_only,
                 }),
-                // `export { a, b as c }` with no source exposes local bindings.
+                // `import { a } from './x'; export { a }` forwards `a` exactly like
+                // `export { a } from './x'`, so it is recorded as the re-export it is.
+                (None, None) if bindings.contains_key(&origin) => {
+                    let b = &bindings[&origin];
+                    out.named_re_exports.push(NamedReExport {
+                        specifier: b.specifier.clone(),
+                        origin: b.origin.clone(),
+                        exported,
+                        line,
+                        type_only: type_only || b.type_only,
+                    });
+                }
+                // `export { a, b as c }` of a local declaration exposes it as an own name.
                 (None, None) => out.own.push(exported),
                 // A source that is not a plain string literal cannot be followed.
                 (None, Some(_)) => {}
@@ -978,13 +1085,15 @@ mod tests {
                     specifier: "./x".into(),
                     origin: "a".into(),
                     exported: "a".into(),
-                    line: 2
+                    line: 2,
+                    type_only: false,
                 },
                 NamedReExport {
                     specifier: "./x".into(),
                     origin: "b".into(),
                     exported: "c".into(),
-                    line: 2
+                    line: 2,
+                    type_only: false,
                 },
             ]
         );
@@ -1061,6 +1170,78 @@ mod tests {
             exports(EcmaDialect::TypeScript, src),
             ExportSurface::default()
         );
+    }
+
+    #[test]
+    fn imports_carry_the_type_only_flag_for_statement_and_inline_forms() {
+        let src = "import type { A } from 'x';\n\
+                   import { type B, c } from 'y';\n\
+                   import type D from 'z';\n\
+                   import E from 'w';\n";
+        let vs = imports(EcmaDialect::TypeScript, src);
+        let flag = |name: &str| {
+            vs.iter()
+                .find(|i| i.names == [name.to_string()])
+                .map(|i| i.type_only)
+        };
+        assert_eq!(flag("A"), Some(true), "{vs:#?}");
+        assert_eq!(flag("B"), Some(true), "{vs:#?}");
+        assert_eq!(flag("c"), Some(false), "{vs:#?}");
+        let defaults: Vec<(&str, bool)> = vs
+            .iter()
+            .filter(|i| i.kind == ImportKind::Default)
+            .map(|i| (i.specifier.as_str(), i.type_only))
+            .collect();
+        assert_eq!(defaults, [("z", true), ("w", false)]);
+    }
+
+    #[test]
+    fn exports_carry_the_type_only_flag_for_statement_and_inline_forms() {
+        let src = "export type { A } from './x';\nexport { type B, c } from './y';\n";
+        let ex = exports(EcmaDialect::TypeScript, src);
+        let flags: Vec<(&str, bool)> = ex
+            .named_re_exports
+            .iter()
+            .map(|r| (r.exported.as_str(), r.type_only))
+            .collect();
+        assert_eq!(flags, [("A", true), ("B", true), ("c", false)]);
+    }
+
+    #[test]
+    fn exports_local_export_of_an_imported_binding_is_a_named_re_export() {
+        let src = "import { a } from './x';\n\
+                   import { q as r } from './q';\n\
+                   import d from './d';\n\
+                   import type { T } from './t';\n\
+                   import * as ns from './n';\n\
+                   const local = 1;\n\
+                   export { a, r, d as dd, T, ns, local };\n";
+        let ex = exports(EcmaDialect::TypeScript, src);
+        let got: Vec<(&str, &str, &str, bool, usize)> = ex
+            .named_re_exports
+            .iter()
+            .map(|r| {
+                (
+                    r.specifier.as_str(),
+                    r.origin.as_str(),
+                    r.exported.as_str(),
+                    r.type_only,
+                    r.line,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("./x", "a", "a", false, 7),
+                ("./q", "q", "r", false, 7),
+                ("./d", "default", "dd", false, 7),
+                ("./t", "T", "T", true, 7),
+            ]
+        );
+        let mut own = ex.own.clone();
+        own.sort();
+        assert_eq!(own, ["local", "ns"]);
     }
 
     #[test]
