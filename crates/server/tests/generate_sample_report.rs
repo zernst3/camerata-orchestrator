@@ -383,10 +383,27 @@ async fn regenerate_sample_report() {
     );
 
     // Sanity: the reconciliation M1 was fixing.
+    //
+    // curated_total is 5, not 6: `SUPABASE-AUTH-EDGE-JWT-1` carries
+    // `confidence = "needs-review"`, and a needs-review finding is now HELD FOR REVIEW at any
+    // severity (`report_export::is_held_for_review`) rather than counted in the signed, curated
+    // action tiers — you do not sign off a finding you yourself flagged as needing a human call.
+    // The Sep-2026 fixture predated that routing and expected 6; the move curated -> held keeps
+    // the reconciliation whole (see below). Reconfirmed on the 2026-10-20 sample regen (W27).
     assert_eq!(json.methodology.candidates_reviewed, 10);
     assert_eq!(json.methodology.excluded_false_positive, 3);
-    assert_eq!(json.executive_summary.curated_total, 6);
+    assert_eq!(json.executive_summary.curated_total, 5);
+    assert_eq!(json.executive_summary.held_for_review, 1); // the needs-review AUTH-EDGE-JWT row
     assert_eq!(json.dependency_snapshot.rows.len(), 1);
+    // The reconciliation invariant, asserted whole so a future drift names itself:
+    // candidates_reviewed == curated + held + false_positive + dependency_advisories.
+    assert_eq!(
+        json.methodology.candidates_reviewed,
+        json.executive_summary.curated_total
+            + json.executive_summary.held_for_review
+            + json.methodology.excluded_false_positive
+            + json.executive_summary.dependency_advisories
+    );
     assert!(!json.executive_summary.is_override);
 
     // ═══ Write sample-report/data.json (pretty, reproducible byte-for-byte from this test) ═══
