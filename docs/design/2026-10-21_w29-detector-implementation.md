@@ -1133,7 +1133,7 @@ Safe twins (zero findings unless stated):
     named, exported constant and import that constant at every use, so that changing the value is
     one edit and a search for the constant's name finds every user."
   - With a home: "`orders-high` is defined once as the constant `ORDERS_QUEUE` in
-    `src/config/queues.ts:4`, but is written as a bare literal in 2 other files:
+    `src/queues.ts:4`, but is written as a bare literal in 2 other files:
     `src/worker/consume.ts:40` and `src/jobs/retry.ts:9`. Import the constant there instead of
     repeating the value."
   - `object = Some(value)`; the file list is complete (no "and N more"; a finding with 40 files
@@ -1178,20 +1178,70 @@ tests above, the TOML under the recorded go, `camerata corpus lock`. No server c
   the right shape repeated across files would be flagged (the residual risk), bounded by the
   separator rule, the position guards and the file exclusions.
 
-### 7. Open questions for the owner
+### 7. Open questions for the owner: answered
 
-1. **The narrow domain definition.** The work order describes domain literals by meaning (queue,
-   channel, bucket, flag, fee, size limit, route). This spec replaces meaning with four
-   deterministic shapes (separated lowercase names with `-`, `:` or `/`; route templates;
-   multi-word UPPER_SNAKE tokens; decimal rates in arithmetic) and drops dotted keys, snake_case,
-   single words and integers because no deterministic guard separates their domain uses from
-   their protocol, schema and styling uses. That is a real narrowing: a repo whose queue names are
-   `orders.created` gets no findings from this rule. Recommendation: ship the narrow rule; widen
-   only per shape, each with its own safe twins, when a client repo shows a shape the rule misses.
-2. **Two homes, no bare copies.** Two modules each defining their own constant with the same value
-   is also "more than one home". It is verifiable, but in a monorepo two apps may define it
-   separately on purpose because they cannot share a package. Recommendation: leave it out of v1
-   and record the count internally; revisit if it turns out to be the common shape in client code.
+Both questions were put to the owner and answered on 2026-10-21 (recorded in
+`docs/OVERNIGHT_DECISIONS.md`, DECISIONS MADE). The rule is built to these rulings.
+
+1. **The narrow domain definition: ship the narrow rule.** Only the four shapes in section 3 (a
+   separated lowercase name with `-`, `:` or `/`; a route template; a multi-word UPPER_SNAKE token;
+   a decimal rate in arithmetic) qualify. Dotted keys, snake_case strings, single words and
+   integers stay out. A repo whose queue names are `orders.created` gets no findings from this
+   rule. Widening happens later, one shape at a time, each with its own safe twins, when a client
+   repo shows a shape the rule misses.
+2. **Two homes, no bare copies: not a finding in v1.** Two modules each defining their own
+   constant with the same value is verifiable, but in a monorepo two apps may define it separately
+   on purpose because they cannot share a package. Leave it out; revisit if it turns out to be the
+   common shape in client code. (Two homes WITH a bare copy elsewhere is flagged, with a message
+   that names both homes; see "Build notes" below.)
+
+### 8. Build notes: where the build clarified or amended the spec above
+
+Written when the checker was built (`crates/checks/src/shared_constant_checker.rs`,
+`extract::literals`). Each item is a place the text above was silent, ambiguous or wrong, and what
+the build does.
+
+- **A constant under `config/` cannot be a home.** The first draft of the message example in
+  section 5 cited `src/config/queues.ts`, but F2 excludes `config/` at ANY depth (Angular's
+  `src/environments/` shows the globs are not root-anchored), so a constant under any `config`
+  directory is never read. The example now cites `src/queues.ts`. If a project keeps its constants
+  under `config/`, the rule cannot see them.
+- **N1's "every counted occurrence".** Read as: every BARE copy (after the home file's own copies
+  are set aside) must be an operand of arithmetic; a module-level constant that holds the rate is
+  exempt from the check. One bare copy that is not an operand (`opacity: 0.12`, `pick(0.12)`)
+  removes the value everywhere. A CSS-property value (O4) is not counted, so it neither supports
+  nor removes the value.
+- **`ModuleConst.exported` is carried but unused.** Home detection accepts any top-level constant
+  (spec step 4), and `const Q = 'x'; export { Q };` is exported without the declaration saying so,
+  so the message never tells the client to "export" it. The field is there for a later rule.
+- **Two or more homes plus a bare copy** is flagged (step 5 says `!homes.is_empty()`), but the
+  "defined once as" sentence would be false, so the message names every home: "is defined as the
+  constants `A` in `x:1` and `B` in `y:2`, but is also written as a bare literal in N other files".
+  Homes are deduplicated by `(file, name)`: a constant that lists the value twice is one home.
+- **V3 (environment names) applies to the SCREAMING_SNAKE shape only**, as its heading says;
+  V4 (typed members) to the token and SCREAMING_SNAKE shapes, not routes.
+- **ECMA decorators do not set `attribute`.** The ctx field is defined for Rust attributes and
+  Python decorators only; a TypeScript `@Processor('orders-high')` is therefore counted as a bare
+  use (it is the queue name). Revisit if decorators turn out to be noisy.
+- **"`as const` tuple used as a type source"** is detected within the declaring file only
+  (`typeof NAME` in a type in the same file). A tuple whose derived type lives in another file is
+  not recognised and its members stay candidates.
+- **The nearest-call walk** (ctx `callee`) also passes through ternaries, binary and `as`/
+  `satisfies`/`!`/`await` wrappers, and `new` expressions and tagged templates count as calls. It
+  stops at function boundaries and at a method call's receiver. The extra cases only ever add
+  exclusions.
+- **Python `//` counts as division** for N1, and `Literal[..]` is recognised both as a subscript
+  and as an annotation's generic type.
+- **The JavaScript grammar cannot parse JSX attributes named `class` or `for`** and recovers with
+  an error node. A declarator the grammar had to recover around never counts as a home; TSX files
+  parse these correctly.
+- **Value lists collide with real names.** The Tailwind prefix list (`order-`, `list-`, `content-`,
+  `select-`, `grid-`), the header prefixes (`cache-`, `content-`, `if-`, `x-`) and the locale rule
+  mean that a queue called `order-events` or a key prefix called `cache-orders` is excluded by
+  shape. The lists are the spec's; the cost is false negatives only.
+- **Root-level, config-shaped and tool-loaded file names** (DEAD-CODE G3) are re-implemented
+  privately in the checker, because the two checkers were built in parallel; hoist them into
+  `extract::paths` when both have landed.
 
 ## Scope note
 Dead-code, one-import-path, shared-constant, state-shape, needless-complexity are **deterministic**

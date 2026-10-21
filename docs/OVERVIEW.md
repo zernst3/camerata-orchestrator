@@ -32,7 +32,8 @@ THE CORPUS + ITS ENFORCEMENT
   rules         the ~417-rule corpus loader + schema + corpus gates + the CORPUS_FRESHNESS watermark
                 + per-rule `version` and the content-hash lock (CORPUS_LOCK.toml)
   checks        the deterministic CHECKERS: arch/import/layering/RLS/weak-rand/… + the AST
-                extractors (extract::ecma|python|rust_syn, resolver) + integration gate
+                extractors (extract::ecma|python|rust_syn, resolver, and the literal index
+                behind the cross-file ARCH-SHARED-CONSTANT-1 check) + integration gate
   linter-registry  stack→linter mapping
   camerata-check   thin check CLI
 
