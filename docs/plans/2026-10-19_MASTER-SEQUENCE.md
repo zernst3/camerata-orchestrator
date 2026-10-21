@@ -147,12 +147,23 @@ in rather than parked, per the owner, but it is slotted where its dependencies a
     flagging. The schema field stays (harmless, zero rules use it); we revisit only if a
     specific rule is ever found to teach something the ecosystem abandoned.
 
-16b. **CSV export in the product package** (Zach, 2026-10-20). Add plain-text CSVs (one per xlsx
-    DATA worksheet - All Findings, Deviations, Conventions, Dependencies, False Positives,
-    Coverage; NOT Index or the per-category duplicates) under `csv/` in the export ZIP, as a
-    second serializer over the SAME row structs the xlsx builds from (never a fourth data
-    source). Design: `docs/design/2026-10-20_csv-export.md`. **Sequence after W27's xlsx
-    worksheet changes** so the CSV set tracks the final sheet layout.
+16b. **Machine-readable exports (CSV + JSON per dataset) in the product ZIP** (Zach, 2026-10-20).
+    Every xlsx DATA worksheet (All Findings, Deviations, Conventions, Dependencies, False
+    Positives, Coverage; NOT Index or the per-category duplicates) emitted as BOTH a CSV and a
+    JSON, in nested `csv/` and `json/` folders inside the export ZIP, as additional serializers
+    over the SAME row structs the xlsx builds from (never a new data source). Closes the
+    asymmetry where `findings.json` mirrored only All Findings. `findings.json` stays at root as
+    the provenance-wrapped headline view. Design: `docs/design/2026-10-20_machine-readable-exports.md`.
+    **Sequence after W27's xlsx worksheet changes** so the set tracks the final sheet layout.
+
+16c. **Corpus staleness check** (Zach, 2026-10-20). A `crates/rules/CORPUS_FRESHNESS.toml`
+    watermark (per-domain last-CONFIRMED-current date), a non-fatal nag when a domain is past
+    its `warn_after_days` (quarterly default), a human confirm-then-watermark flow (running a
+    sweep never advances it), and an LLM sweep that checks each rule's pattern against current
+    ecosystem guidance. This is the process that ever sets W32's `superseded_since` /
+    `current_recommendation`. **Gated pre-first-client action: a full sweep + confirm of every
+    domain** before the first paid deliverable. Design:
+    `docs/design/2026-10-20_corpus-staleness-check.md`.
 
 ### PHASE 4 — W29, coverage expansion
 
