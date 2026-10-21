@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! END-TO-END: `SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1`'s signal-3 FIX — the shared-secret/
 //! signature compensating-control signal no longer treats an INCIDENTAL mention of a
 //! secret-named identifier (an UPDATE's assignment target, an INSERT column, a RAISE argument)

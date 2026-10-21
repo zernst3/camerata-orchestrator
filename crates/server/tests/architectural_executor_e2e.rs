@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! END-TO-END: the deterministic architectural-rule executor (Pass 1 — the seam + the
 //! Supabase RLS migration-replay checkers, wired into the brownfield SCAN only). See
 //! `docs/design/2026-07-26_architectural-executor-feasibility.md`.

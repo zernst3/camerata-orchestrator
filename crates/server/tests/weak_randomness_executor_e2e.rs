@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! END-TO-END: the deterministic `SEC-NO-WEAK-TOKEN-RANDOMNESS-1` checker
 //! (`WeakTokenRandomnessChecker`), wired into the brownfield SCAN, and proven to reach the
 //! CURATED finding set. See `docs/plans/2026-09-29_codebase-inspection-hardening.md`, D2.

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! Hermetic end-to-end regression net for PROJECT EXPORT / IMPORT round-trip.
 //!
 //! THE CLAIM under test (ADR `2026-06-21_project_config_vs_data_separation` + the

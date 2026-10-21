@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! END-TO-END: Pass 4c's two config-gated call-site AST checkers — the PRODUCTION
 //! `ARCH-HANDLER-NO-DB-1` (`camerata_checks::handler_no_db_checker::HandlerNoDbChecker`) and
 //! the `ARCH-STRICT-LAYERING-1` CALL facet

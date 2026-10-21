@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! Hermetic end-to-end WALK of the governed development pipeline.
 //!
 //! THE CLAIM under test: a single work item can be threaded across the governed-dev

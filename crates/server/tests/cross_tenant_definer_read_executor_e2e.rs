@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! END-TO-END: the deterministic `SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1` checker
 //! (`CrossTenantDefinerReadChecker`), wired into the brownfield SCAN, and proven to reach the
 //! CURATED finding set as HIGH with a grounded citation — not just the checker's own unit

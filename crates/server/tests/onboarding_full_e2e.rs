@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! Hermetic end-to-end regression net for the FULL onboarding WALK.
 //!
 //! Where `onboarding_flow_e2e.rs` exercises the onboarding PIECES in isolation

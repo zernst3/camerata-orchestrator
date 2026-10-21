@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! Hermetic end-to-end regression net for MODEL SELECTION wiring.
 //!
 //! THE CLAIM under test: for every entry point in camerata-orchestrator, the model id
