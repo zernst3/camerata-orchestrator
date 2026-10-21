@@ -176,7 +176,7 @@ fn walk_collect(root: &Path, dir: &Path, globs: &[&str], out: &mut Vec<(String, 
         };
         if file_type.is_dir() {
             let name = entry.file_name();
-            if crate::multilang::PRUNED_DIRS.contains(&name.to_string_lossy().as_ref()) {
+            if crate::multilang::is_pruned_dir(dir, name.to_string_lossy().as_ref()) {
                 continue;
             }
             walk_collect(root, &path, globs, out);
@@ -427,5 +427,27 @@ mod tests {
             "the stray root-level notes.sql must never be treated as a migration: {:?}",
             outcome
         );
+    }
+
+    #[test]
+    fn collect_interest_files_reads_a_source_bin_and_skips_dotnet_build_output() {
+        let dir = tmpdir();
+        for (rel, body) in [
+            ("src/bin/tool.rs", "fn main() {}\n"),
+            ("bin/cli.js", "console.log(1);\n"),
+            ("bin/Debug/net8.0/gen.js", "built\n"),
+            ("bin/Release/gen.js", "built\n"),
+            ("node_modules/x/y.js", "vendored\n"),
+        ] {
+            let path = dir.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+        let mut got: Vec<String> = collect_interest_files(dir.path(), &["**/*.rs", "**/*.js"])
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        got.sort();
+        assert_eq!(got, ["bin/cli.js", "src/bin/tool.rs"]);
     }
 }

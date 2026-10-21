@@ -86,8 +86,21 @@ pub(crate) const PRUNED_DIRS: &[&str] = &[
     ".venv",
     ".gradle",
     "obj",
-    "bin",
 ];
+
+/// The build-configuration folders .NET writes under `bin/`. `bin` itself is NOT in
+/// [`PRUNED_DIRS`]: it is also where Rust keeps `src/bin/*.rs` and Node keeps `bin/cli.js`, which
+/// are source. A directory named one of these directly under a `bin` directory is build output.
+const DOTNET_BUILD_CONFIGS: &[&str] = &["Debug", "Release"];
+
+/// Whether a walk should skip the directory `name` found inside `parent`: a [`PRUNED_DIRS`]
+/// name, or .NET build output (`bin/Debug`, `bin/Release`). `pub(crate)` for the same reason
+/// as [`PRUNED_DIRS`]: [`crate::arch_check_runner`]'s walk must prune exactly what the
+/// language detector prunes.
+pub(crate) fn is_pruned_dir(parent: &Path, name: &str) -> bool {
+    PRUNED_DIRS.contains(&name)
+        || (DOTNET_BUILD_CONFIGS.contains(&name) && parent.file_name().is_some_and(|p| p == "bin"))
+}
 
 // ─── coarse per-language layer-2 rule ids ────────────────────────────────────
 
@@ -1336,7 +1349,7 @@ fn walk_for_manifests(dir: &Path, out: &mut Vec<(WorktreeLanguage, PathBuf)>) {
         if file_type.is_dir() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if PRUNED_DIRS.contains(&name.as_ref()) {
+            if is_pruned_dir(dir, name.as_ref()) {
                 continue;
             }
             subdirs.push(path);
@@ -2650,6 +2663,43 @@ mod tests {
         let detected = detect_languages(&dir);
         assert_eq!(detected.len(), 1, "only root Cargo.toml: {detected:?}");
         assert_eq!(detected[0], (WorktreeLanguage::Rust, dir));
+    }
+
+    #[test]
+    fn is_pruned_dir_prunes_dotnet_build_output_but_not_a_source_bin() {
+        let p = Path::new;
+        assert!(is_pruned_dir(p("proj/bin"), "Debug"));
+        assert!(is_pruned_dir(p("bin"), "Release"));
+        assert!(is_pruned_dir(p("x"), "node_modules"));
+        assert!(is_pruned_dir(p("x"), "obj"));
+        assert!(!is_pruned_dir(p("x"), "bin"), "a bare bin is source");
+        assert!(!is_pruned_dir(p("src"), "bin"));
+        assert!(
+            !is_pruned_dir(p("proj"), "Debug"),
+            "Debug only counts under bin"
+        );
+        assert!(
+            !is_pruned_dir(p("proj/bin"), "debug"),
+            "the .NET names are exact"
+        );
+        assert!(!is_pruned_dir(p("proj/bin"), "Debugger"));
+    }
+
+    #[test]
+    fn detect_languages_prunes_dotnet_bin_output_but_walks_a_source_bin() {
+        let dir = tmp();
+        // A manifest in a hand-written `bin/` folder is a real project...
+        fs::create_dir_all(dir.join("tools/bin")).unwrap();
+        fs::write(dir.join("tools/bin/package.json"), "{}").unwrap();
+        // ...and one inside .NET compiler output is not.
+        fs::create_dir_all(dir.join("svc/bin/Debug/net8.0")).unwrap();
+        fs::write(dir.join("svc/bin/Debug/net8.0/package.json"), "{}").unwrap();
+        fs::create_dir_all(dir.join("svc/bin/Release")).unwrap();
+        fs::write(dir.join("svc/bin/Release/package.json"), "{}").unwrap();
+
+        let detected = detect_languages(&dir);
+        let dirs: Vec<_> = detected.iter().map(|(_, d)| d.clone()).collect();
+        assert_eq!(dirs, vec![dir.join("tools/bin")], "{detected:?}");
     }
 
     #[test]

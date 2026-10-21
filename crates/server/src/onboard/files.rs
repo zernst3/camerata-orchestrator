@@ -56,6 +56,12 @@ const CONFIG_TEXT_EXTS: &[&str] = &[
 /// that is paying to audit generated artifacts. Matched on ANY path segment, so
 /// `apps/web/node_modules/...` and `node_modules/...` both prune. Extend per-project via
 /// the `CAMERATA_SCAN_EXCLUDE_DIRS` env (comma-separated extra dir names).
+///
+/// `bin` is deliberately NOT here. It is pruned only as .NET build output (`bin/Debug`,
+/// `bin/Release`, see [`DOTNET_BUILD_CONFIGS`]), because a bare `bin` is also where Rust keeps
+/// its binary targets (`src/bin/*.rs`) and where Node and shell projects keep their executable
+/// scripts, which are hand-written source and, in a shell script, a very common place for a
+/// committed credential.
 const NOISE_DIRS: &[&str] = &[
     "node_modules",
     "bower_components",
@@ -70,7 +76,6 @@ const NOISE_DIRS: &[&str] = &[
     "build",
     "out",
     "obj",
-    "bin",
     ".next",
     ".nuxt",
     ".svelte-kit",
@@ -105,6 +110,10 @@ const NOISE_DIRS: &[&str] = &[
     "__snapshots__",
     "node_modules.bin",
 ];
+
+/// The build-configuration folders .NET writes under `bin/`. A `bin` segment directly followed
+/// by one of these is compiler output and is pruned like `obj/`; any other `bin/` is source.
+const DOTNET_BUILD_CONFIGS: &[&str] = &["Debug", "Release"];
 
 /// Generated / lock / vendored FILE basenames that carry no architectural signal but are
 /// large (lockfiles are often the single biggest text files in a repo).
@@ -265,7 +274,7 @@ pub(crate) fn is_noise_path(path: &str, extra_dirs: &[String]) -> bool {
     if is_engine_artifact(path) {
         return true;
     }
-    let mut segments = path.split('/');
+    let segments = path.split('/');
     let basename = path.rsplit('/').next().unwrap_or(path);
     if NOISE_FILES.contains(&basename) {
         return true;
@@ -273,7 +282,15 @@ pub(crate) fn is_noise_path(path: &str, extra_dirs: &[String]) -> bool {
     if NOISE_SUFFIXES.iter().any(|s| basename.ends_with(s)) {
         return true;
     }
-    segments.any(|seg| NOISE_DIRS.contains(&seg) || extra_dirs.iter().any(|d| d == seg))
+    let segs: Vec<&str> = segments.collect();
+    segs.iter().enumerate().any(|(i, seg)| {
+        extra_dirs.iter().any(|d| d == seg)
+            || NOISE_DIRS.contains(seg)
+            || (*seg == "bin"
+                && segs
+                    .get(i + 1)
+                    .is_some_and(|next| DOTNET_BUILD_CONFIGS.contains(next)))
+    })
 }
 
 /// Parse the `CAMERATA_SCAN_EXCLUDE_DIRS` env (comma-separated) into extra dir names.
@@ -559,4 +576,134 @@ fn read_local_repo_files_noise_denylist(
         truncated,
         excluded_noise,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn write(root: &std::path::Path, rel: &str, content: &str) {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, content).unwrap();
+    }
+
+    fn scan(root: &std::path::Path) -> ExtractedRepo {
+        read_local_repo_files(root).unwrap()
+    }
+
+    fn paths(extracted: &ExtractedRepo) -> Vec<String> {
+        let mut v: Vec<String> = extracted.files.iter().map(|(p, _)| p.clone()).collect();
+        v.sort();
+        v
+    }
+
+    // ── bin/ pruning: only .NET build output is noise ──────────────────────────
+
+    #[test]
+    fn only_dotnet_build_output_under_bin_is_noise() {
+        let none: &[String] = &[];
+        for pruned in [
+            "bin/Debug/net8.0/app.json",
+            "bin/Release/app.deps.json",
+            "src/Api/bin/Debug/net8.0/appsettings.json",
+            "bin/Debug",
+            "bin/Release",
+        ] {
+            assert!(is_noise_path(pruned, none), "{pruned} is build output");
+        }
+        for kept in [
+            "bin/cli.js",
+            "bin",
+            "bin/deploy.sh",
+            "src/bin/tool.rs",
+            "crates/x/src/bin/multi/main.rs",
+            "bin/debug/lowercase.rs",
+            "bin/Debugger/x.js",
+            "bin/ReleaseNotes.md",
+            "src/binary/x.rs",
+        ] {
+            assert!(!is_noise_path(kept, none), "{kept} is source");
+        }
+    }
+
+    #[test]
+    fn an_explicit_exclude_dir_named_bin_still_prunes_everything_under_it() {
+        let extra = vec!["bin".to_string()];
+        assert!(is_noise_path("bin/cli.js", &extra));
+        assert!(is_noise_path("src/bin/tool.rs", &extra));
+    }
+
+    #[test]
+    fn other_noise_dirs_are_unaffected_by_the_bin_change() {
+        let none: &[String] = &[];
+        for pruned in [
+            "obj/x.json",
+            "node_modules/x/y.js",
+            "target/debug/x.rs",
+            "dist/a.js",
+        ] {
+            assert!(is_noise_path(pruned, none), "{pruned}");
+        }
+    }
+
+    fn bin_fixture(root: &std::path::Path) {
+        write(root, "src/bin/tool.rs", "fn main() {}\n");
+        write(root, "bin/cli.js", "#!/usr/bin/env node\nconsole.log(1);\n");
+        write(root, "bin/Debug/net8.0/app.json", "{\"built\": true}\n");
+        write(root, "bin/Release/app.json", "{\"built\": true}\n");
+        write(root, "src/main.rs", "fn main() {}\n");
+    }
+
+    fn expect_bin_scan(extracted: &ExtractedRepo) {
+        assert_eq!(
+            paths(extracted),
+            ["bin/cli.js", "src/bin/tool.rs", "src/main.rs"],
+            "src/bin and a Node bin/ script are admitted; bin/Debug and bin/Release stay pruned"
+        );
+    }
+
+    #[test]
+    fn bin_scripts_are_admitted_and_dotnet_output_stays_pruned_in_a_non_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        bin_fixture(dir.path());
+        let extracted = scan(dir.path());
+        expect_bin_scan(&extracted);
+        // The directory walk prunes the .NET folders without reading them.
+        assert_eq!(extracted.excluded_noise, 0);
+    }
+
+    #[test]
+    fn bin_scripts_are_admitted_and_dotnet_output_stays_pruned_in_a_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        bin_fixture(dir.path());
+        let extracted = scan(dir.path());
+        expect_bin_scan(&extracted);
+        // The gitignore-aware walk sees each file and counts the .NET outputs as noise.
+        assert_eq!(extracted.excluded_noise, 2);
+    }
+
+    /// Security-coverage fix: `bin/` used to be pruned wholesale, so a credential committed in
+    /// a `bin/` deploy script was never read by the secrets floor.
+    #[test]
+    fn a_secret_planted_in_a_bin_script_is_now_caught_by_the_secrets_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        // A made-up 30-character literal assigned to a secret-named variable.
+        let script = concat!(
+            "#!/bin/sh\nAPI_KEY=\"Zq9Xk3Pm7Rt2",
+            "Vw5Yb8Nc4Jd6Hf1Ga0\"\ncurl -H \"x: $API_KEY\" https://example.test\n"
+        );
+        write(dir.path(), "bin/deploy.sh", script);
+        write(dir.path(), "src/main.rs", "fn main() {}\n");
+        let extracted = scan(dir.path());
+        let findings = crate::onboard::audit::audit_files("o/r", &extracted.files);
+        assert!(
+            findings.iter().any(|f| f.path == "bin/deploy.sh"),
+            "the floor must read bin/deploy.sh: {findings:#?}"
+        );
+    }
 }
