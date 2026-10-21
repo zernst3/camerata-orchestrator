@@ -2,8 +2,12 @@
 
 ## Status
 
-PROPOSAL, pending Zach's sign-off on the direction (a new structured axis vs prose). Surfaced by
-W24's platform-owned-table case; generalized because it is a whole CLASS, not one rule's quirk.
+APPROVED + PARTLY BUILT (2026-10-21). Zach signed off: structured axis named **`ownership`**,
+both arms land (build order didn't matter). The **dependency arm is BUILT + tested + green**; the
+`platform-managed`/`generated`/`vendored` branches are supported, tested infrastructure but
+currently DORMANT (the W24 platform-owned-table case is already correctly handled upstream by the
+RLS checker's non-emission — see "Implementation status" at the bottom). Surfaced by W24, but a
+whole CLASS, not one rule's quirk.
 
 ## The class
 
@@ -108,13 +112,12 @@ never every minor. Noted, not planned.)
   twin (a CVE with NO fix → external-dependency, in the "outside your control" section, out of
   the budget). This is the dependency arm of the class's positive/safe-twin pair.
 
-## Open sub-decisions for Zach
-1. **Axis name**: `ownership` vs `actionability` vs `locus`. (Recommend `ownership`.)
-2. ~~Does `external-dependency` belong here?~~ **RESOLVED (2026-10-21):** split it by OSV fix
-   data — a CVE WITH a patched version is `client-owned` (action: upgrade); a CVE with NO patch
-   is `external-dependency` (this class). See the "Dependency findings" section above.
-3. **Build scope**: the axis + the RLS platform-schema detector (the W24 instance) first, then
-   extend to the dependency/generated reasons; or all reasons at once.
+## Open sub-decisions for Zach — ALL RESOLVED (2026-10-21)
+1. ~~Axis name~~ **RESOLVED: `ownership`** (Zach).
+2. ~~Does `external-dependency` belong here?~~ **RESOLVED:** split by OSV fix data — a CVE WITH a
+   patch is `client-owned` (action: upgrade); a CVE with NO patch is `external-dependency`.
+3. ~~Build scope~~ **RESOLVED: both land; order didn't matter.** Built the dependency arm; the
+   platform-managed arm is already handled upstream (non-emission) so it is dormant infrastructure.
 
 ## Build outline (on sign-off)
 1. `Finding.ownership: Ownership` + `Finding.unfixable_action: Option<String>` (or fold the action
