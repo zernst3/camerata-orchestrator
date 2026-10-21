@@ -134,3 +134,9 @@ Investigated + fixed per Zach ("as long as it is investigated and fixed"):
    failure (synthetic test paths unchanged).
 Result: live_eslint_detects_a_real_exhaustive_deps_violation passes; all scan_tools (73) +
 tool_provisioning (31) tests green. Did NOT bandaid the test. Full-suite confirmation pending.
+
+## MILESTONE (2026-10-21): full workspace suite 100% GREEN
+`cargo test --workspace --no-fail-fast` = 5857 passed, 0 failed, 0 compile errors. The one
+red test (W30 eslint) is now green by a real two-factor fix, not a bandaid. Also caught+fixed
+a missed build_product_zip caller (inspect_export_equivalence integration test) during the
+final green sweep. Everything committed + pushed (…4177244). No known red tests remain.
