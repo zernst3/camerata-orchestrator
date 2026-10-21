@@ -1,16 +1,20 @@
 # Overnight autonomous run — decisions needed + progress log
 
-> ## ▶ RESUME HERE (updated 2026-10-21, after the Fable 5.1 audit)
-> A Fable audit of the older-model stretch found no lost work and no faked tests (5,864 / 0 / 6
-> ignored verified), but HEAD failed its own CI gate and the W29 design had two errors. Fixed so
-> far: lockfile + recent lints (`4eb3276`), W29 design corrected (`2f45aae`), master sequence
-> reconciled against the commit log. Full follow-up ledger: `docs/plans/2026-10-19_MASTER-SEQUENCE.md`
-> section 2b (item 21). **Next work: W29 detector verticals, `ARCH-ONE-IMPORT-PATH-1` first**, using
-> the CORRECTED algorithm in `docs/design/2026-10-21_w29-detector-implementation.md` (canonical
-> symbol through re-export edges; barrel-internal + test-file + aliased-re-export guards). Zach gave
-> the corpus go for all nine rules (2026-10-21); register + TOML each rule with its detector.
-> Zach's standing directive: keep developing the next thing; nothing is ever dropped; any defect
-> found MUST be fixed; sequencing matters least.
+> ## ▶ RESUME HERE (paused 2026-10-21 16:42 EDT for the session limit; resume 18:21)
+> Branch is green and pushed through 0a3f06f. Four agent branches were paused mid-flight, each in
+> `.claude/worktrees/agent-<id>`:
+> - `worktree-agent-a238d64a3cd7bf255`: live severity clamp + export gates 2/6/7. 6 commits, was
+>   on its final verification. Verify, merge, gate.
+> - `worktree-agent-acd63885ba5461cd8`: env-var test isolation (19a) + apply-time drift baseline.
+>   Uncommitted work in progress. Resume it.
+> - `worktree-agent-a22990345a394e726`: ARCH-DEAD-CODE-1 build (just started). Resume or relaunch.
+> - `worktree-agent-ad424f8e3583d3af6`: ARCH-SHARED-CONSTANT-1 build (just started). Resume or relaunch.
+> Specs: `docs/design/2026-10-21_w29-detector-implementation.md`. Owner rulings: DECISIONS MADE
+> below. After both detectors: Fable 5.1 adversarial review of each, then fix, merge, and
+> regenerate `CORPUS_LOCK.toml` (`camerata corpus lock`) at merge time.
+> Process: Opus directs; Sonnet builds against specs; Haiku does mechanical work; Fable 5.1 for
+> trap-heavy specs and adversarial review. Questions to Zach in plain language with terms defined.
+> Zach's standing directive: keep developing; nothing is ever dropped; fix every defect.
 
 
 Started 2026-10-20 (Zach logged off; autonomous continuation of the master sequence).
