@@ -398,6 +398,14 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
   IS flagged; "that is the rule working as intended." Two homes for one symbol is the defect
   whether or not the second home is an index file.
 
+- **Applied-rule drift has no baseline until first "accept"** (schema build, 2026-10-21): the
+  applied hash/version is written only by `accept_rule_drift`; `save_armed_to_project` creates
+  selections with no baseline and `upsert_base_rules` replaces the list, erasing baselines on
+  re-apply. So "a rule you applied changed upstream" silently covers nothing for a freshly applied
+  rule. The June feature spec intends detection from apply time. Decision (Opus, per the
+  never-defer-hardening directive): baseline at apply time and preserve baselines across
+  re-apply. Queued.
+
 ## 3. Explicitly NOT doing
 
 - `ARCH-OBSERVABILITY-CORRELATION-ID-1` stays `decision` — prior ruling, recorded in the roster.
