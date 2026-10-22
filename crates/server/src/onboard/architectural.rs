@@ -91,6 +91,11 @@ pub fn architectural_input<'a>(
 /// that is in fact used then looks unreachable.
 const RULES_NEEDING_COMPLETE_SCAN: &[&str] = &[camerata_checks::dead_code_checker::RULE_DEAD_CODE];
 
+/// Whether `rule_id` is one of the rules an incomplete scan withholds.
+pub fn is_withheld_on_incomplete_scan(rule_id: &str) -> bool {
+    RULES_NEEDING_COMPLETE_SCAN.contains(&rule_id)
+}
+
 /// `ids` without the rules that cannot be answered on an incomplete scan. Apply it to the armed
 /// set handed to [`audit_architectural`] AND to the set the ledger credits as a detector run, so
 /// a withheld rule is neither run nor reported as "verified clean": with no detector channel for

@@ -1084,6 +1084,21 @@ pub(crate) fn semantic_rule_ids_for_repo(
         .collect()
 }
 
+/// Queue the honest disclosure for a rule that has a registered checker but got no credited
+/// deterministic verdict for this repo: "the scan was incomplete" when the checker was withheld
+/// for that reason, "config-gated" otherwise (the architecture config it needs is absent).
+fn note_unanswered_checker_rule(
+    ledger: &mut crate::scan_ledger::ScanLedger,
+    rule_id: &str,
+    scan_incomplete: bool,
+) {
+    if scan_incomplete && architectural::is_withheld_on_incomplete_scan(rule_id) {
+        ledger.note_incomplete_scan_rule(rule_id);
+    } else {
+        ledger.note_config_gated_rule(rule_id);
+    }
+}
+
 // ── Orchestration functions ───────────────────────────────────────────────────────
 pub async fn suppression_registry(
     sources: &[(String, std::path::PathBuf)],
@@ -1709,7 +1724,11 @@ pub async fn audit_repos(
                                 if camerata_checks::arch_checker::any_registered_checker_answers(
                                     rid,
                                 ) {
-                                    pipeline_ledger.note_config_gated_rule(*rid);
+                                    note_unanswered_checker_rule(
+                                        &mut pipeline_ledger,
+                                        rid,
+                                        scan_incomplete,
+                                    );
                                 }
                             }
                         }
@@ -1765,7 +1784,11 @@ pub async fn audit_repos(
                             // branch above — this id has a real, registered, config-gated
                             // checker that still would not have answered it even if the toggle
                             // were on, since the config it needs is absent for this repo.
-                            pipeline_ledger.note_config_gated_rule(*rid);
+                            note_unanswered_checker_rule(
+                                &mut pipeline_ledger,
+                                rid,
+                                scan_incomplete,
+                            );
                         }
                     }
                 }

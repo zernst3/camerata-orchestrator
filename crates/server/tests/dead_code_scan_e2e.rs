@@ -173,6 +173,16 @@ async fn a_scan_that_hit_its_file_limit_does_not_run_the_dead_code_rule() {
         report.findings.iter().filter(|f| f.rule_id == RULE).count()
     );
     // The ledger must not read it as a clean run.
+    let note = report
+        .ledger
+        .rule(RULE)
+        .and_then(|e| e.coverage_note.clone())
+        .expect("the withheld rule carries a coverage note");
+    assert_eq!(note, camerata_server::scan_ledger::INCOMPLETE_SCAN_NOTE);
+    assert!(
+        note.contains("stopped at its file limit") && !note.contains("config-gated"),
+        "the disclosure says the scan was incomplete, not that config is missing: {note}"
+    );
     let credited_clean = report
         .ledger
         .rule(RULE)
