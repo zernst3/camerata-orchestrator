@@ -221,6 +221,20 @@ Investigated + fixed per Zach ("as long as it is investigated and fixed"):
 Result: live_eslint_detects_a_real_exhaustive_deps_violation passes; all scan_tools (73) +
 tool_provisioning (31) tests green. Did NOT bandaid the test. Full-suite confirmation pending.
 
+CORRECTION (2026-10-22, UI-REACT-HOOKS-LINT-1 review): "pinned" above meant CARET MAJORS
+(`eslint@^9` and friends). That stopped the eslint 10 / react-hooks 7 drift but not minor, patch
+or transitive drift, and the graded accuracy tests need repeatable tool behavior. It is now truly
+pinned: `ESLINT_NPM_PACKAGES` are exact versions (eslint 9.39.5, @typescript-eslint/parser and
+eslint-plugin 8.72.0, eslint-plugin-react-hooks 5.2.0, eslint-plugin-jest 28.14.0, the versions
+that were installed and verified), `eslint_packages_installed` compares the exact installed
+version (a right-major, wrong-minor workspace re-provisions), and `crates/server/assets/eslint/
+package-lock.json` (with the matching `package.json`) is committed and installed with
+`npm ci --prefer-offline`, so the transitive tree is fixed too. A test holds pins, manifest and
+lockfile together. Falls back to installing the exact pins if the lockfile cannot be read.
+Bumping eslint now means editing the three together and the bundled config; an `#[ignore]`d test
+(`fresh_eslint_provisioning_installs_the_pinned_tree_from_the_lockfile`) exercises a real fresh
+install and needs npm plus the registry or a warm cache.
+
 ## MILESTONE (2026-10-21): full workspace suite 100% GREEN
 `cargo test --workspace --no-fail-fast` = 5857 passed, 0 failed, 0 compile errors. The one
 red test (W30 eslint) is now green by a real two-factor fix, not a bandaid. Also caught+fixed

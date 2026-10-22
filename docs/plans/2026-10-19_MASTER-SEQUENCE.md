@@ -31,7 +31,7 @@ everything in sequence until we are ready to start the cycle again."*
 > | 16b exports + manifest | BUILT (`524a29b`, `54ac30f`, `9209482`, `b2d8524`, `4177244`); 3 of 7 design gates still missing, see 21 | |
 > | 16c corpus staleness | BUILT incl. CLI; LLM sweep agent + load/digest nag OPEN | `41fcb1d` et al. |
 > | 17 W29 | NEXT. Design corrected 2026-10-21 (`2f45aae`) | |
-> | 18 W30 residuals | eslint pin DONE `f52fb48`; other residuals OPEN | |
+> | 18 W30 residuals | eslint pin: caret majors `f52fb48`, EXACT versions + committed lockfile (`npm ci`) 2026-10-22; other residuals OPEN | |
 > | 19 engine/doc items | `Rejected:` strip DONE `a140459`; `resolve_fix` comment DONE (correction note in place); rest OPEN | |
 > | 19a env-var flake | OPEN (40 env mutations, 3 `#[serial]`) | |
 > | 19b eslint residual | DONE: real cause was version drift + macOS symlink canonicalization | `f52fb48`, `b8941a9`, `b76e8b1` |

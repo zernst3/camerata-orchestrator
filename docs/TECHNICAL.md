@@ -2031,20 +2031,27 @@ scan tier (`scan_tools`, bundled flat config plus `--rule` overrides, never the 
 for the two mechanical rules `JAVASCRIPT-REACT-RULES-OF-HOOKS-1` and
 `JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1`, which ground the raw eslint ids (`eslint_floor_category`).
 Each report is a preview finding at its line, kind Defect, capped at medium, whose detail is the
-lint message (the fix, instantiated for that hook and variable). The new rule deliberately carries
+lint message (the fix, instantiated for that hook and variable). The eslint run reports ONLY the
+rules the project selected: the bundled config keeps a warn-level baseline (`no-console`,
+`eqeqeq`, ...) so eslint always has a coherent base, and the scan runs with `--quiet` and then
+`scan_tools::keep_selected_eslint_findings` drops any finding whose rule id is not in the runnable
+selector set (before that, unselected baseline rows reached every client artifact and three of them
+grounded to corpus rules with citations). The new rule deliberately carries
 no `linter` source, so it is never routed to eslint a second time (a pinned test asserts exactly
 the two owners claim `react-hooks/*` and that all three selected together drive eslint once). Its
 checker reads only the repo's own lint setup and reports ONE finding when a React repo (`react` in
 dependencies, devDependencies or peerDependencies of a manifest outside example, fixture, docs,
-template and vendored folders) has no ESLint configuration that enables either rule. "Enabled" is
+template and vendored folders, AND React code: a `.jsx`/`.tsx` file or a module importing `react`
+or `react-dom` outside those folders) has no ESLint configuration that enables either rule. "Enabled" is
 decided only from plain JSON: `.eslintrc` / `.eslintrc.json` / the `package.json` `eslintConfig`
 field, via `plugin:react-hooks/*`, `react-app`, `next`, `airbnb/hooks`, or either rule on in
 `rules` or an `overrides` entry. Anything else is "unanswered" and reports nothing: flat configs and
 `.eslintrc.js` (JavaScript computes its config), YAML, unparseable JSON, an unknown key, any
 `extends` preset outside a short known-without-hooks list (`eslint:recommended`, `prettier`,
 `plugin:react/*`, `plugin:@typescript-eslint/*`, `plugin:jsx-a11y/*`, `plugin:import/*`), a manifest
-that depends on a shareable ESLint config, the hooks plugin or another linter (Biome, oxlint, xo),
-or a script handing ESLint its own config path. An unanswered repo is also declared through
+that depends on a shareable ESLint config, the hooks plugin, another linter (Biome, oxlint, xo) or a
+framework that lints internally (Gatsby, `react-scripts`), or any command string in the manifest
+(scripts, `lint-staged`, husky, ...) handing ESLint its own config, rules or plugins. An unanswered repo is also declared through
 `config_unsatisfied_for`, so the ledger does not credit a clean run; the rule is withheld on a
 truncated scan. It is a scan and CI rule (`runs_at_write_time` is false): closing the gap installs a
 dependency and picks its version, which the project's own rules send to a human. Code that breaks
@@ -2167,15 +2174,18 @@ first scan use:
 - **semgrep** — requires `python3` on PATH; creates a venv
   (`<tooling>/semgrep-venv/`), installs via pip. Health probe: `semgrep
   --version` exit 0. Idempotent (probe short-circuits on subsequent calls).
-- **eslint** — requires `npm` on PATH; creates `<tooling>/eslint/` with a minimal
-  `package.json`; installs every package in `ESLINT_NPM_PACKAGES` (`eslint`,
+- **eslint** — requires `npm` on PATH; creates `<tooling>/eslint/` with an exact-version
+  `package.json` and the committed `assets/eslint/package-lock.json`, and runs
+  `npm ci --prefer-offline`, so the whole tree (not just the majors) is the same on every
+  machine; installs every package in `ESLINT_NPM_PACKAGES` (exact versions, `eslint`,
   `@typescript-eslint/parser`, `@typescript-eslint/eslint-plugin`,
   `eslint-plugin-react-hooks`, `eslint-plugin-jest` - no formatter package, since
   the scan uses eslint's built-in `json` formatter); copies the bundled config.
   **The health probe covers the whole provisioned state, not just the binary:**
   `eslint_is_provisioned` requires that the binary answers, that EVERY required
-  package is present (probed by its own `package.json`, so a half-removed package
-  reads as absent), and that the workspace's flat config is byte-identical to the
+  package is present at its EXACT pinned version (probed by its own `package.json`, so
+  a half-removed package reads as absent and a right-major wrong-minor one re-provisions),
+  and that the workspace's flat config is byte-identical to the
   bundled asset (a content comparison, because the asset ships inside the binary
   and its on-disk mtime says nothing about which build wrote the workspace copy).
   Anything else re-provisions. The cost of a false negative is one

@@ -1569,6 +1569,31 @@ Two different things, two answers.
   the task did not touch. The gap finding is exactly the check that the `npm run lint`
   precondition holds.
 
+### 6a. Adversarial review round (2026-10-22): what changed
+
+- **The eslint tier leaked its baseline (pre-existing, client-visible).** The bundled config's
+  warn-level baseline (`no-console`, `no-unused-vars`, `eqeqeq`, `no-var`, `prefer-const`, ...)
+  became preview findings whether or not selected; `eqeqeq`, `no-var` and `prefer-const` even
+  grounded to `JAVASCRIPT-STRICT-EQUALITY-1`, `JAVASCRIPT-NO-VAR-1` and `JAVASCRIPT-CONST-DEFAULT-1`
+  with citations. Section 6's remark about "noise rules from the bundled baseline" understated it.
+  Fixed separately: `keep_selected_eslint_findings` (only rule ids in the runnable selector set),
+  `--quiet`, the one error-level baseline rule demoted to warn, an end-to-end test (fails with the
+  filter removed). The test that pinned the leak now asserts the filter.
+- **More hidden lint setup**: `gatsby` and `react-scripts` (CRA 3.x run `eslint-config-react-app`
+  themselves); ESLint given `--config`/`-c`/`--no-eslintrc`/`--rule`/`--plugin`/`--rulesdir`/
+  `--resolve-plugins-relative-to` in ANY string of the manifest, not only `scripts` (lint-staged,
+  husky, nano-staged, simple-git-hooks).
+- **React code gate** (orchestrator decision): the repo must have React CODE, a `.jsx`/`.tsx` file
+  or a module importing `react`/`react-dom`, outside auxiliary, test and story folders. A `react`
+  peer dependency in a plugin, Storybook-only use, react-email, or a bundler alias with no React
+  code is unanswered (silent, recorded as not assessed). The interest globs now include the module
+  extensions so the Layer-2 and CI file walks load them. Known cost: a Preact/Solid repo that uses
+  `.tsx` and also lists `react` passes the gate.
+- **Auxiliary folder names are case-insensitive** (`Docs/`, `Examples/`).
+- **Exact eslint pins**: `ESLINT_NPM_PACKAGES` are exact versions, the probe compares the exact
+  installed version, and a committed `assets/eslint/package-lock.json` is installed with
+  `npm ci --prefer-offline`. W30's earlier "pinned" meant caret majors.
+
 ### 7. Known false-negative limits (stated plainly)
 
 Flat configs and every other JavaScript or YAML configuration are never reported; partial
