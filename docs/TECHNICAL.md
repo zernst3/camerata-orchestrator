@@ -1979,6 +1979,43 @@ The server gate in `propose_corpus_rules` (`onboard.rs`) emits
 `is_auto_recommended: false` for them; the UI honours this directly (no
 re-derivation). See `docs/decisions/2026-06-22_opt_in_only_not_prechecked_fix.md`.
 
+### The literal index and `ARCH-SHARED-CONSTANT-1` (`crates/checks/src/shared_constant_checker.rs`)
+
+`camerata_checks::extract` is the shared per-language AST layer (`syn` for Rust, native
+tree-sitter grammars for TypeScript, TSX, JavaScript and Python). Besides `imports`, `exports`,
+`functions` and `method_calls` it exposes `extract::literals(lang, src)`, which returns every
+string and decimal-number literal as `Literal { value, kind, line, ctx }`. `ctx` is a
+`LiteralCtx` that records WHERE the literal sits, decided from the parent chain (tree-sitter) or
+a frame stack (Rust): whether it is an import specifier, the nearest enclosing call's callee and
+full callee text, a subscript and its receiver, an object key or the value of a named key, a JSX
+attribute value, a type position (union, enum initializer, `Literal[..]`, a Python `Enum` body, a
+tuple used as a `typeof` source), a Python decorator or Rust attribute, an operand of arithmetic,
+and the module-level constant it initializes (through objects, arrays and `as const`). Numbers are
+canonicalized (`.12`, `0.120` and `1.2e-1` are all `0.12`); interpolated strings, f-strings, byte
+strings and adjacent-string concatenations are not literals; Rust macro bodies are not descended
+but attribute token streams are. A field the walker cannot decide stays at its default, and the
+checkers read a default as "no reason to exclude".
+
+`SharedConstantChecker` (rule `ARCH-SHARED-CONSTANT-1`, corpus domain `universal`, registered in
+`arch_checker::all_checkers`) indexes the literals of every non-excluded source file by
+`(language family, kind, value)` and flags a domain value that is written as a bare literal in two
+or more files with no constant, or that has a module-level constant and is bare in at least one
+other file. "Domain value" is deliberately narrow (owner ruling, 2026-10-21): a hyphen, colon or
+slash separated lowercase name, a route template, a multi-word SCREAMING_SNAKE token, or a decimal
+rate strictly between 0 and 1 with at least two significant digits (never 0.5, 0.25, 0.75) that is
+an operand of arithmetic in every bare copy. Dotted keys, snake_case strings, single words and integers are out of scope. Guards run
+at four levels: file (tests, fixtures, config and settings, migrations, scripts, docs, generated
+code, declaration files, committed build output), value shape (protocol, style, platform and path
+tokens), occurrence (object keys, subscripts, non-route attribute arguments, CSS property values)
+and value (an i18n call or catalogue key, a class name, an environment variable name, a type
+member, a module specifier, a header name, a logger name, a query fragment, a DOM event name
+removes the value everywhere). Values are compared only inside one package (the nearest
+manifest directory or monorepo app), a constant in a configuration file still counts as a home,
+and test code (including Rust `#[cfg(test)]` modules) is never read. Two homes with no bare copy
+is not a finding. The checker emits
+`medium`; the corpus rule's `max_severity = "low"` clamps it at report time. The full algorithm
+and every trap are in `docs/design/2026-10-21_w29-detector-implementation.md`.
+
 ### Scan-time deterministic preview (`crates/server/src/scan_tools.rs`)
 
 Mechanical rules stay out of the AI review (above), but Camerata still gives the

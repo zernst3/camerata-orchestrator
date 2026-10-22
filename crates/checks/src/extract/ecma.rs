@@ -17,12 +17,15 @@
 //! the kind/field of, so a malformed/truncated/binary-ish source degrades to fewer (or zero)
 //! results, never a panic.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tree_sitter::{Node, Tree};
 
+use super::ancestry::{walk_with_ancestors, Home, Pos};
+
 use super::{
-    ExportSurface, FunctionSpan, Import, ImportKind, MethodCall, NamedReExport, StarReExport,
+    canonical_number, ExportSurface, FunctionSpan, Import, ImportKind, Literal, LiteralCtx,
+    LiteralKind, MethodCall, ModuleConst, NamedReExport, StarReExport,
 };
 
 /// Which of the three v1 ECMAScript-family grammars to parse `source` with.
@@ -721,6 +724,726 @@ fn walk_calls(node: Node, source: &str, out: &mut Vec<MethodCall>) {
     }
 }
 
+// ─── literals ────────────────────────────────────────────────────────────────────────────
+
+/// Node kinds the nearest-call walk passes through on its way up from a literal: containers
+/// (arrays, objects, pairs), grouping and spreads, templates, and the expression wrappers
+/// that carry a literal along unchanged (`a || 'x-y'`, `c ? 'x-y' : 'z-w'`, `'x-y' as T`).
+/// A function boundary is deliberately absent: a literal in a callback body belongs to the
+/// callback, not to the call that receives it.
+const CALLEE_PASS_THROUGH: &[&str] = &[
+    "array",
+    "object",
+    "pair",
+    "parenthesized_expression",
+    "spread_element",
+    "template_string",
+    "template_substitution",
+    "ternary_expression",
+    "binary_expression",
+    "as_expression",
+    "satisfies_expression",
+    "non_null_expression",
+    "await_expression",
+    "jsx_expression",
+    "type_assertion",
+    "sequence_expression",
+];
+
+/// The wrappers `value_of_key` looks through between a literal and the `pair` it is the value
+/// of. A call or a function ends the search: `{ env: foo('a-b') }` is not `env`'s value.
+const VALUE_WRAPPERS: &[&str] = &[
+    "parenthesized_expression",
+    "as_expression",
+    "satisfies_expression",
+    "non_null_expression",
+    "ternary_expression",
+    "binary_expression",
+    "await_expression",
+    "array",
+    "type_assertion",
+];
+
+/// The wrappers a module-level initializer may pass through and still be "the constant":
+/// objects, arrays and the type-level wrappers (`as const`, `satisfies T`). A call is not
+/// among them, so `const Q = register('x-y')` is not a home for `'x-y'`.
+const INITIALIZER_WRAPPERS: &[&str] = &[
+    "object",
+    "array",
+    "parenthesized_expression",
+    "as_expression",
+    "satisfies_expression",
+    "non_null_expression",
+    "type_assertion",
+];
+
+/// Ancestors that put a literal in a TYPE position rather than a value position.
+const TYPE_POSITION_KINDS: &[&str] = &[
+    "literal_type",
+    "enum_assignment",
+    "interface_declaration",
+    "type_alias_declaration",
+    "type_annotation",
+    "type_arguments",
+];
+
+/// Calls whose first argument is a module specifier (besides `require(..)` and `import(..)`).
+const SPECIFIER_CALLEES: &[&str] = &["require.resolve", "jest.mock", "vi.mock"];
+
+/// Extract every string and number literal with its [`LiteralCtx`]. See
+/// [`super::literals`] for what counts as a literal.
+pub fn literals(dialect: EcmaDialect, source: &str) -> Vec<Literal> {
+    let Some(mut tree) = parse(dialect, source) else {
+        return Vec::new();
+    };
+    // The JavaScript grammar cannot parse some JSX (an attribute named `class` or `for`). The
+    // TSX grammar can, so a JavaScript file that did not parse cleanly gets a second chance
+    // before the literals under its error nodes are given up.
+    if dialect == EcmaDialect::JavaScript && tree.root_node().has_error() {
+        if let Some(retry) = parse(EcmaDialect::Tsx, source).filter(|t| !t.root_node().has_error())
+        {
+            tree = retry;
+        }
+    }
+    let root = tree.root_node();
+    let type_sources = typeof_sources(root, source);
+    let mut out = Vec::new();
+    walk_with_ancestors(root, |pos| {
+        if let Some(literal) = literal_at(pos, source, &type_sources) {
+            out.push(literal);
+        }
+    });
+    out
+}
+
+/// The literal `node` is, when it is one (a string, a substitution-free template, or a plain
+/// decimal number); `None` for every other node.
+fn literal_at(pos: Pos, source: &str, type_sources: &HashSet<String>) -> Option<Literal> {
+    let node = pos.node;
+    if pos.under_error() {
+        return None;
+    }
+    let (value, kind) = match node.kind() {
+        "string" => (unescape_js(inner_text(node, source)?), LiteralKind::Str),
+        "template_string" => {
+            let mut cursor = node.walk();
+            let has_substitution = node
+                .children(&mut cursor)
+                .any(|c| c.kind() == "template_substitution");
+            if has_substitution {
+                return None;
+            }
+            (inner_text(node, source)?.to_string(), LiteralKind::Str)
+        }
+        "number" => (canonical_number(text(node, source))?, LiteralKind::Number),
+        _ => return None,
+    };
+    let mut ctx = literal_ctx(pos, source);
+    if !ctx.type_position {
+        ctx.type_position = ctx
+            .module_const
+            .as_ref()
+            .is_some_and(|m| type_sources.contains(&m.name));
+    }
+    Some(Literal {
+        value,
+        kind,
+        line: start_line(node),
+        ctx,
+    })
+}
+
+/// The text between a string/template node's delimiters (one character each side).
+fn inner_text<'s>(node: Node, source: &'s str) -> Option<&'s str> {
+    let full = text(node, source);
+    let mut chars = full.chars();
+    let first = chars.next()?;
+    let last = chars.next_back()?;
+    if !matches!(first, '\'' | '"' | '`') || last != first {
+        return None;
+    }
+    full.get(first.len_utf8()..full.len() - last.len_utf8())
+}
+
+/// Resolve JavaScript string escapes. Unknown escapes keep the escaped character; a line
+/// continuation (`\` + newline) vanishes.
+fn unescape_js(raw: &str) -> String {
+    if !raw.contains('\\') {
+        return raw.to_string();
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            None => out.push('\\'),
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('b') => out.push('\u{8}'),
+            Some('f') => out.push('\u{c}'),
+            Some('v') => out.push('\u{b}'),
+            Some('0') => out.push('\0'),
+            Some('\n') => {}
+            Some('x') => {
+                let hex: String = (0..2)
+                    .filter_map(|_| chars.next_if(char::is_ascii_hexdigit))
+                    .collect();
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(ch) if hex.len() == 2 => out.push(ch),
+                    _ => out.push('x'),
+                }
+            }
+            Some('u') => {
+                let code = if chars.next_if_eq(&'{').is_some() {
+                    let hex: String =
+                        std::iter::from_fn(|| chars.next_if(char::is_ascii_hexdigit)).collect();
+                    chars.next_if_eq(&'}');
+                    u32::from_str_radix(&hex, 16).ok()
+                } else {
+                    let hex: String = (0..4)
+                        .filter_map(|_| chars.next_if(char::is_ascii_hexdigit))
+                        .collect();
+                    (hex.len() == 4)
+                        .then(|| u32::from_str_radix(&hex, 16).ok())
+                        .flatten()
+                };
+                match code.and_then(char::from_u32) {
+                    Some(ch) => out.push(ch),
+                    None => out.push('u'),
+                }
+            }
+            Some(other) => out.push(other),
+        }
+    }
+    out
+}
+
+/// Names used as `typeof NAME` in a type: a module-level `as const` tuple that a type is
+/// derived from is a type source, so the literals in it are type members (a union by another
+/// route), not free-standing values.
+fn typeof_sources(root: Node, source: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    if !source.contains("typeof") {
+        return names;
+    }
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "type_query" {
+            if let Some(name) = leftmost_identifier(node, source) {
+                names.insert(name);
+            }
+        }
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        stack.extend(children);
+    }
+    names
+}
+
+/// The leftmost plain identifier under `node` (`typeof Routes.orders` gives `Routes`).
+fn leftmost_identifier(node: Node, source: &str) -> Option<String> {
+    let mut cur = node.named_child(0)?;
+    loop {
+        match cur.kind() {
+            "identifier" => return Some(text(cur, source).to_string()),
+            "member_expression" | "subscript_expression" | "nested_type_identifier" => {
+                cur = cur.named_child(0)?;
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn literal_ctx(pos: Pos, source: &str) -> LiteralCtx {
+    let mut ctx = LiteralCtx {
+        import_specifier: is_import_specifier(pos, source),
+        ..LiteralCtx::default()
+    };
+    apply_call_and_jsx(pos, source, &mut ctx);
+    apply_key_context(pos, source, &mut ctx);
+    ctx.type_position = in_type_position(pos);
+    ctx.arithmetic = in_arithmetic_position(pos, source);
+    module_const_of(pos, source).apply(&mut ctx);
+    ctx
+}
+
+/// Whether `node` is the source of an import/re-export, a `require`/`import()` argument, or the
+/// first argument of `jest.mock` / `vi.mock` / `require.resolve`.
+fn is_import_specifier(pos: Pos, source: &str) -> bool {
+    let node = pos.node;
+    let Some(up) = pos.parent() else {
+        return false;
+    };
+    let parent = up.node;
+    match parent.kind() {
+        "import_statement" | "export_statement" | "import_require_clause" => parent
+            .child_by_field_name("source")
+            .is_some_and(|s| s.id() == node.id()),
+        "arguments" => {
+            let is_first = first_named_non_comment(parent).is_some_and(|c| c.id() == node.id());
+            let Some(call) = up
+                .parent()
+                .map(|c| c.node)
+                .filter(|c| c.kind() == "call_expression")
+            else {
+                return false;
+            };
+            let Some(func) = call.child_by_field_name("function") else {
+                return false;
+            };
+            is_first
+                && (func.kind() == "import"
+                    || (func.kind() == "identifier" && text(func, source) == "require")
+                    || (func.kind() == "member_expression"
+                        && SPECIFIER_CALLEES.contains(&render_member_path(func, source).as_str())))
+        }
+        _ => false,
+    }
+}
+
+/// Fill `callee`, `callee_chain` (the nearest enclosing call) and `jsx_attr` by walking up
+/// through [`CALLEE_PASS_THROUGH`] nodes until a call, a JSX attribute or anything else.
+fn apply_call_and_jsx(pos: Pos, source: &str, ctx: &mut LiteralCtx) {
+    let mut cur = pos;
+    while let Some(up) = cur.parent() {
+        let parent = up.node;
+        match parent.kind() {
+            "arguments" => {
+                if let Some(call) = up
+                    .parent()
+                    .map(|c| c.node)
+                    .filter(|c| matches!(c.kind(), "call_expression" | "new_expression"))
+                {
+                    set_callee(call, source, ctx);
+                }
+                return;
+            }
+            // A tagged template: the template IS the call's `arguments`.
+            "call_expression"
+                if parent
+                    .child_by_field_name("arguments")
+                    .is_some_and(|a| a.id() == cur.node.id()) =>
+            {
+                set_callee(parent, source, ctx);
+                return;
+            }
+            "jsx_attribute" => {
+                ctx.jsx_attr = parent
+                    .named_child(0)
+                    .map(|n| text(n, source).to_string())
+                    .filter(|n| !n.is_empty());
+                return;
+            }
+            kind if CALLEE_PASS_THROUGH.contains(&kind) => cur = up,
+            _ => return,
+        }
+    }
+}
+
+fn set_callee(call: Node, source: &str, ctx: &mut LiteralCtx) {
+    let func = call
+        .child_by_field_name("function")
+        .or_else(|| call.child_by_field_name("constructor"));
+    let Some(func) = func else {
+        return;
+    };
+    let name = match func.kind() {
+        "identifier" => Some(text(func, source).to_string()),
+        "import" => Some("import".to_string()),
+        "member_expression" => func
+            .child_by_field_name("property")
+            .map(|p| text(p, source).to_string()),
+        _ => None,
+    };
+    if let Some(name) = name.filter(|n| !n.is_empty()) {
+        let chain: String = text(func, source)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .replace("?.", ".");
+        ctx.callee = Some(name);
+        ctx.callee_chain = Some(chain);
+    }
+}
+
+/// Fill `object_key`, `value_of_key`, `subscript` and `subscript_receiver`.
+fn apply_key_context(pos: Pos, source: &str, ctx: &mut LiteralCtx) {
+    let node = pos.node;
+    let Some(parent) = pos.parent().map(|p| p.node) else {
+        return;
+    };
+    let is = |field: &str| is_field_of(parent, field, node);
+    match parent.kind() {
+        "pair" | "pair_pattern" => ctx.object_key = is("key"),
+        "method_definition"
+        | "public_field_definition"
+        | "property_signature"
+        | "enum_assignment" => ctx.object_key = is("name"),
+        "subscript_expression" => {
+            ctx.subscript = is("index");
+            if ctx.subscript {
+                ctx.subscript_receiver = parent
+                    .child_by_field_name("object")
+                    .map(|o| text(o, source).to_string());
+            }
+        }
+        _ => {}
+    }
+    if ctx.object_key {
+        return;
+    }
+    let mut cur = pos;
+    while let Some(up) = cur.parent() {
+        let p = up.node;
+        if p.kind() == "pair" {
+            if is_field_of(p, "value", cur.node) {
+                ctx.value_of_key = p
+                    .child_by_field_name("key")
+                    .and_then(|k| key_text(k, source));
+            }
+            return;
+        }
+        if VALUE_WRAPPERS.contains(&p.kind()) {
+            cur = up;
+        } else {
+            return;
+        }
+    }
+}
+
+/// The text of an object key: an identifier, a number, or a string's unescaped content. A
+/// computed key (`[k]`) has no static text.
+fn key_text(key: Node, source: &str) -> Option<String> {
+    match key.kind() {
+        "property_identifier" | "identifier" | "private_property_identifier" | "number" => {
+            Some(text(key, source).to_string())
+        }
+        "string" => inner_text(key, source).map(unescape_js),
+        _ => None,
+    }
+}
+
+fn in_type_position(pos: Pos) -> bool {
+    let mut cur = pos.parent();
+    while let Some(p) = cur {
+        if TYPE_POSITION_KINDS.contains(&p.node.kind()) {
+            return true;
+        }
+        cur = p.parent();
+    }
+    false
+}
+
+fn in_arithmetic_position(pos: Pos, source: &str) -> bool {
+    let mut cur = pos;
+    while let Some(p) = cur
+        .parent()
+        .filter(|p| p.node.kind() == "parenthesized_expression")
+    {
+        cur = p;
+    }
+    let Some(parent) = cur.parent().map(|p| p.node) else {
+        return false;
+    };
+    let cur = cur.node;
+    let operator = |p: Node| {
+        p.child_by_field_name("operator")
+            .map(|o| text(o, source))
+            .unwrap_or_default()
+    };
+    match parent.kind() {
+        "binary_expression" => {
+            let op = operator(parent);
+            // `'rate ' + 0.12` is string concatenation, not arithmetic.
+            let concatenation = op == "+"
+                && ["left", "right"]
+                    .iter()
+                    .filter_map(|f| parent.child_by_field_name(f))
+                    .any(|side| {
+                        side.id() != cur.id() && matches!(side.kind(), "string" | "template_string")
+                    });
+            matches!(op, "+" | "-" | "*" | "/" | "%") && !concatenation
+        }
+        "augmented_assignment_expression" => {
+            matches!(operator(parent), "+=" | "-=" | "*=" | "/=" | "%=")
+                && parent
+                    .child_by_field_name("right")
+                    .is_some_and(|r| r.id() == cur.id())
+        }
+        _ => false,
+    }
+}
+
+/// Whether `child` is `parent`'s `field` child.
+fn is_field_of(parent: Node, field: &str, child: Node) -> bool {
+    parent
+        .child_by_field_name(field)
+        .is_some_and(|n| n.id() == child.id())
+}
+
+/// The first named child that is not a comment (a comment in an argument list is an extra,
+/// not an argument).
+fn first_named_non_comment(node: Node) -> Option<Node> {
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .find(|c| c.kind() != "comment");
+    found
+}
+
+fn module_const_of(pos: Pos, source: &str) -> Home {
+    let mut cur = pos;
+    loop {
+        let Some(up) = cur.parent() else {
+            return Home::None;
+        };
+        let parent = up.node;
+        match parent.kind() {
+            "variable_declarator" if is_field_of(parent, "value", cur.node) => {
+                return declarator_home(up, source);
+            }
+            "pair" if is_field_of(parent, "value", cur.node) => cur = up,
+            // `Object.freeze({ .. })` returns its argument: the constant is still the object.
+            "arguments" => match up.parent() {
+                Some(call)
+                    if is_object_freeze(call.node, source)
+                        && first_named_non_comment(parent)
+                            .is_some_and(|a| a.id() == cur.node.id()) =>
+                {
+                    cur = call;
+                }
+                _ => return Home::None,
+            },
+            "enum_assignment" if is_field_of(parent, "value", cur.node) => {
+                return enum_member_home(up, source);
+            }
+            "export_statement" if is_field_of(parent, "value", cur.node) => {
+                // `export default <expression>`; the declaration forms use another field.
+                return match up.parent() {
+                    Some(p) if p.node.kind() == "program" => Home::Const(ModuleConst {
+                        name: "default".to_string(),
+                        exported: true,
+                    }),
+                    _ => Home::None,
+                };
+            }
+            "assignment_expression" if is_field_of(parent, "right", cur.node) => {
+                return commonjs_home(up, source);
+            }
+            "public_field_definition" if is_field_of(parent, "value", cur.node) => {
+                return static_field_home(up, source);
+            }
+            kind if INITIALIZER_WRAPPERS.contains(&kind) => cur = up,
+            _ => return Home::None,
+        }
+    }
+}
+
+fn is_object_freeze(call: Node, source: &str) -> bool {
+    call.kind() == "call_expression"
+        && call
+            .child_by_field_name("function")
+            .is_some_and(|f| f.kind() == "member_expression" && text(f, source) == "Object.freeze")
+}
+
+/// `const NAME = ..` / `let` / `var` at module level, inside `export`, or inside a namespace.
+fn declarator_home(declarator_pos: Pos, source: &str) -> Home {
+    let declarator = declarator_pos.node;
+    let Some(name) = declarator.child_by_field_name("name") else {
+        return Home::None;
+    };
+    // A declarator the grammar had to recover around is not a reliable home.
+    if name.kind() != "identifier" || declarator.has_error() {
+        return Home::None;
+    }
+    let Some(declaration_pos) = declarator_pos.parent() else {
+        return Home::None;
+    };
+    if !matches!(
+        declaration_pos.node.kind(),
+        "lexical_declaration" | "variable_declaration"
+    ) {
+        return Home::None;
+    }
+    let Some(container_pos) = declaration_pos.parent() else {
+        return Home::None;
+    };
+    let name = text(name, source).to_string();
+    let (block, exported) = match container_pos.node.kind() {
+        "program" => {
+            return Home::Const(ModuleConst {
+                name,
+                exported: false,
+            })
+        }
+        "export_statement" => match container_pos.parent() {
+            Some(p) if p.node.kind() == "program" => {
+                return Home::Const(ModuleConst {
+                    name,
+                    exported: true,
+                });
+            }
+            Some(p) if p.node.kind() == "statement_block" => (p, true),
+            _ => return Home::None,
+        },
+        "statement_block" => (container_pos, false),
+        _ => return Home::None,
+    };
+    match namespace_path(block, source) {
+        Some(path) => Home::Const(ModuleConst {
+            name: format!("{path}.{name}"),
+            exported,
+        }),
+        None => Home::None,
+    }
+}
+
+/// The dotted name of the namespace whose body is `block` (`namespace A.B { .. }` is `A.B`,
+/// nested namespaces join), when every enclosing construct is a namespace reaching module level.
+fn namespace_path(block: Pos, source: &str) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut block = block;
+    loop {
+        let module = block
+            .parent()
+            .filter(|m| m.node.kind() == "internal_module")?;
+        let name = module.node.child_by_field_name("name")?;
+        parts.push(text(name, source).to_string());
+        // `namespace X {}` is an expression statement, `export namespace X {}` an export.
+        let holder = module
+            .parent()
+            .filter(|h| matches!(h.node.kind(), "expression_statement" | "export_statement"))?;
+        let outer = holder.parent()?;
+        match outer.node.kind() {
+            "program" => {
+                parts.reverse();
+                return Some(parts.join("."));
+            }
+            "statement_block" => block = outer,
+            _ => return None,
+        }
+    }
+}
+
+/// `enum E { Member = <literal> }` at module level.
+fn enum_member_home(member: Pos, source: &str) -> Home {
+    let Some(body) = member.parent() else {
+        return Home::None;
+    };
+    let Some(declaration) = body
+        .parent()
+        .filter(|d| d.node.kind() == "enum_declaration")
+    else {
+        return Home::None;
+    };
+    let Some(enum_name) = declaration.node.child_by_field_name("name") else {
+        return Home::None;
+    };
+    let exported = match declaration.parent() {
+        Some(c) if c.node.kind() == "program" => false,
+        Some(c) if c.node.kind() == "export_statement" => match c.parent() {
+            Some(p) if p.node.kind() == "program" => true,
+            _ => return Home::None,
+        },
+        _ => return Home::None,
+    };
+    let Some(member_name) = member
+        .node
+        .child_by_field_name("name")
+        .and_then(|n| key_text(n, source))
+    else {
+        return Home::None;
+    };
+    Home::Const(ModuleConst {
+        name: format!("{}.{member_name}", text(enum_name, source)),
+        exported,
+    })
+}
+
+/// `module.exports = ..` / `exports.NAME = ..` / `module.exports.NAME = ..` as a top-level
+/// statement.
+fn commonjs_home(assignment: Pos, source: &str) -> Home {
+    let Some(left) = assignment.node.child_by_field_name("left") else {
+        return Home::None;
+    };
+    let left_text: String = text(left, source)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let is_commonjs = left.kind() == "member_expression"
+        && (left_text == "module.exports"
+            || left_text.starts_with("exports.")
+            || left_text.starts_with("module.exports."));
+    let top_level_statement = assignment
+        .parent()
+        .filter(|s| s.node.kind() == "expression_statement")
+        .and_then(|s| s.parent())
+        .is_some_and(|p| p.node.kind() == "program");
+    if is_commonjs && top_level_statement {
+        Home::Const(ModuleConst {
+            name: left_text,
+            exported: true,
+        })
+    } else {
+        Home::None
+    }
+}
+
+/// A `static` class field: `Class.FIELD` is a home when the class is at module level, and
+/// unattributed (neither home nor bare) when the class sits anywhere else. An instance field is
+/// per-object state and is an ordinary value.
+fn static_field_home(field: Pos, source: &str) -> Home {
+    let mut cursor = field.node.walk();
+    let is_static = field
+        .node
+        .children(&mut cursor)
+        .any(|c| c.kind() == "static");
+    if !is_static {
+        return Home::None;
+    }
+    let Some(field_name) = field
+        .node
+        .child_by_field_name("name")
+        .and_then(|n| key_text(n, source))
+    else {
+        return Home::None;
+    };
+    let class = field
+        .parent()
+        .filter(|b| b.node.kind() == "class_body")
+        .and_then(|b| b.parent())
+        .filter(|c| {
+            matches!(
+                c.node.kind(),
+                "class_declaration" | "abstract_class_declaration"
+            )
+        });
+    let Some(class) = class else {
+        return Home::Unattributed;
+    };
+    let Some(class_name) = class.node.child_by_field_name("name") else {
+        return Home::Unattributed;
+    };
+    let exported = match class.parent() {
+        Some(c) if c.node.kind() == "program" => false,
+        Some(c)
+            if c.node.kind() == "export_statement"
+                && c.parent().is_some_and(|p| p.node.kind() == "program") =>
+        {
+            true
+        }
+        _ => return Home::Unattributed,
+    };
+    Home::Const(ModuleConst {
+        name: format!("{}.{field_name}", text(class_name, source)),
+        exported,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1266,5 +1989,781 @@ mod tests {
                 let _ = exports(dialect, src);
             }
         }
+    }
+
+    // ── literals ──────────────────────────────────────────────────────────────
+
+    use crate::extract::{canonical_number, Literal, LiteralCtx, LiteralKind, ModuleConst};
+
+    fn lits(dialect: EcmaDialect, src: &str) -> Vec<Literal> {
+        literals(dialect, src)
+    }
+
+    /// The single literal whose value is `value`; panics when there is not exactly one.
+    fn lit(dialect: EcmaDialect, src: &str, value: &str) -> Literal {
+        let all = lits(dialect, src);
+        let mut hits: Vec<Literal> = all.iter().filter(|l| l.value == value).cloned().collect();
+        assert_eq!(hits.len(), 1, "{value:?} in {all:#?}");
+        hits.remove(0)
+    }
+
+    fn ts(src: &str, value: &str) -> LiteralCtx {
+        lit(EcmaDialect::TypeScript, src, value).ctx
+    }
+
+    fn tsx(src: &str, value: &str) -> LiteralCtx {
+        lit(EcmaDialect::Tsx, src, value).ctx
+    }
+
+    #[test]
+    fn literal_strings_carry_value_kind_and_line() {
+        let src = "const a = 'orders-high';\n\nfoo(\"x:y\");\n";
+        let all = lits(EcmaDialect::TypeScript, src);
+        assert_eq!(all.len(), 2, "{all:#?}");
+        assert_eq!(all[0].value, "orders-high");
+        assert_eq!(all[0].kind, LiteralKind::Str);
+        assert_eq!(all[0].line, 1);
+        assert_eq!(all[1].value, "x:y");
+        assert_eq!(all[1].line, 3);
+    }
+
+    #[test]
+    fn literal_escape_sequences_are_unescaped() {
+        let src =
+            "f('it\\'s', \"a\\nb\", 'tab\\there', '\\u0041\\x42', '\\u{43}', 'back\\\\slash');\n";
+        let values: Vec<String> = lits(EcmaDialect::TypeScript, src)
+            .into_iter()
+            .map(|l| l.value)
+            .collect();
+        assert_eq!(
+            values,
+            ["it's", "a\nb", "tab\there", "AB", "C", "back\\slash"]
+        );
+    }
+
+    #[test]
+    fn literal_empty_string_is_the_empty_value() {
+        let all = lits(EcmaDialect::TypeScript, "f('');\n");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].value, "");
+    }
+
+    #[test]
+    fn literal_template_without_substitution_is_a_literal_with_raw_text() {
+        let all = lits(EcmaDialect::TypeScript, "f(`orders-high`);\n");
+        assert_eq!(all.len(), 1, "{all:#?}");
+        assert_eq!(all[0].value, "orders-high");
+        assert_eq!(all[0].kind, LiteralKind::Str);
+    }
+
+    #[test]
+    fn literal_template_with_substitution_is_skipped_but_nested_strings_are_not() {
+        let all = lits(
+            EcmaDialect::TypeScript,
+            "f(`/api/${v}`, `a-${c ? 'x-y' : 'z-w'}`);\n",
+        );
+        let values: Vec<&str> = all.iter().map(|l| l.value.as_str()).collect();
+        assert_eq!(values, ["x-y", "z-w"], "{all:#?}");
+    }
+
+    #[test]
+    fn literal_numbers_are_canonical_and_non_decimal_spellings_are_skipped() {
+        let src = "a(.12); a(0.120); a(1.2e-1); a(1_0); a(0x1F); a(10n); a(0b11);\n";
+        let values: Vec<(String, LiteralKind)> = lits(EcmaDialect::TypeScript, src)
+            .into_iter()
+            .map(|l| (l.value, l.kind))
+            .collect();
+        let n = LiteralKind::Number;
+        assert_eq!(
+            values,
+            [
+                ("0.12".to_string(), n),
+                ("0.12".to_string(), n),
+                ("0.12".to_string(), n),
+                ("10".to_string(), n)
+            ]
+        );
+        assert_eq!(canonical_number(".12").as_deref(), Some("0.12"));
+    }
+
+    #[test]
+    fn literal_works_for_all_three_dialects() {
+        let src = "const a = 'orders-high';\n";
+        for d in [
+            EcmaDialect::TypeScript,
+            EcmaDialect::Tsx,
+            EcmaDialect::JavaScript,
+        ] {
+            assert_eq!(lits(d, src).len(), 1, "{d:?}");
+        }
+    }
+
+    // ctx.import_specifier
+
+    #[test]
+    fn ctx_import_specifier_import_export_from_and_side_effect() {
+        for src in [
+            "import x from 'react-dom/client';",
+            "import { a } from 'react-dom/client';",
+            "import 'react-dom/client';",
+            "import * as ns from 'react-dom/client';",
+            "export * from 'react-dom/client';",
+            "export { a } from 'react-dom/client';",
+            "import type { T } from 'react-dom/client';",
+            "import x = require('react-dom/client');",
+        ] {
+            assert!(ts(src, "react-dom/client").import_specifier, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_import_specifier_require_dynamic_import_and_test_mocks() {
+        for src in [
+            "const x = require('react-dom/client');",
+            "const x = await import('react-dom/client');",
+            "jest.mock('react-dom/client');",
+            "vi.mock('react-dom/client', () => ({}));",
+            "require.resolve('react-dom/client');",
+        ] {
+            assert!(ts(src, "react-dom/client").import_specifier, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_import_specifier_is_false_for_ordinary_calls_and_later_arguments() {
+        assert!(!ts("foo('react-dom/client');", "react-dom/client").import_specifier);
+        assert!(!ts("jest.mock('x-y', 'react-dom/client');", "react-dom/client").import_specifier);
+        assert!(!ts("const a = 'react-dom/client';", "react-dom/client").import_specifier);
+        assert!(!ts("requireThing('react-dom/client');", "react-dom/client").import_specifier);
+    }
+
+    // ctx.callee, ctx.callee_chain
+
+    #[test]
+    fn ctx_callee_is_the_last_identifier_and_chain_is_the_full_text() {
+        let c = ts("i18n.t('errors-required');", "errors-required");
+        assert_eq!(c.callee.as_deref(), Some("t"));
+        assert_eq!(c.callee_chain.as_deref(), Some("i18n.t"));
+        let c = ts("logging.getLogger('svc-orders');", "svc-orders");
+        assert_eq!(c.callee.as_deref(), Some("getLogger"));
+        let c = ts("cn('items-center');", "items-center");
+        assert_eq!(c.callee.as_deref(), Some("cn"));
+        assert_eq!(c.callee_chain.as_deref(), Some("cn"));
+        let c = ts("res.headers.set('x-request-id', v);", "x-request-id");
+        assert_eq!(c.callee.as_deref(), Some("set"));
+        assert_eq!(c.callee_chain.as_deref(), Some("res.headers.set"));
+    }
+
+    #[test]
+    fn ctx_callee_walks_up_through_arrays_objects_parentheses_spreads_and_templates() {
+        for src in [
+            "cn(['items-center']);",
+            "cn({ a: 'items-center' });",
+            "cn(('items-center'));",
+            "cn(...['items-center']);",
+            "cn(`${cond ? 'items-center' : ''}`);",
+            "cn(cond && 'items-center');",
+            "cn(cond ? 'items-center' : 'x-y');",
+            "cn(a || 'items-center');",
+            "cn('items-center' as string);",
+            "cn(['a', { b: ['items-center'] }]);",
+        ] {
+            assert_eq!(
+                ts(src, "items-center").callee.as_deref(),
+                Some("cn"),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn ctx_callee_is_the_nearest_call() {
+        let c = ts("outer(inner('svc-orders'));", "svc-orders");
+        assert_eq!(c.callee.as_deref(), Some("inner"));
+    }
+
+    #[test]
+    fn ctx_callee_does_not_cross_a_function_boundary() {
+        for src in [
+            "foo(() => 'svc-orders');",
+            "foo(function () { return 'svc-orders'; });",
+            "foo(() => { bar = 'svc-orders'; });",
+        ] {
+            assert_eq!(ts(src, "svc-orders").callee, None, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_callee_is_none_outside_any_call() {
+        let c = ts("const a = 'svc-orders'; x = 'svc-orders2';", "svc-orders");
+        assert_eq!(c.callee, None);
+        assert_eq!(c.callee_chain, None);
+    }
+
+    #[test]
+    fn ctx_callee_covers_new_expressions_and_tagged_templates() {
+        let c = ts("new Logger('svc-orders');", "svc-orders");
+        assert_eq!(c.callee.as_deref(), Some("Logger"));
+        let c = ts("const a = css`flex-start`;", "flex-start");
+        assert_eq!(c.callee.as_deref(), Some("css"));
+        let c = ts("const a = styled.div`flex-start`;", "flex-start");
+        assert_eq!(c.callee.as_deref(), Some("div"));
+        assert_eq!(c.callee_chain.as_deref(), Some("styled.div"));
+    }
+
+    #[test]
+    fn ctx_callee_is_unrecognised_for_computed_callee_chains() {
+        let c = ts("getThing()('svc-orders');", "svc-orders");
+        assert_eq!(c.callee, None, "a call-result callee has no identifier");
+        assert_eq!(c.callee_chain, None);
+    }
+
+    // ctx.subscript, ctx.subscript_receiver
+
+    #[test]
+    fn ctx_subscript_with_receiver() {
+        let c = ts("const a = process.env['X_Y'];", "X_Y");
+        assert!(c.subscript);
+        assert_eq!(c.subscript_receiver.as_deref(), Some("process.env"));
+        let c = ts("const a = row[\"a-b\"];", "a-b");
+        assert!(c.subscript);
+        assert_eq!(c.subscript_receiver.as_deref(), Some("row"));
+    }
+
+    #[test]
+    fn ctx_subscript_is_false_for_an_array_literal_and_for_the_receiver_position() {
+        assert!(!ts("const a = ['a-b'];", "a-b").subscript);
+        assert!(!ts("const a = 'a-b'.length;", "a-b").subscript);
+        assert!(!ts("foo['a-b'.length];", "a-b").subscript);
+    }
+
+    // ctx.object_key, ctx.value_of_key
+
+    #[test]
+    fn ctx_object_key_for_string_keys() {
+        let c = ts("const a = { 'x-tenant': 1 };", "x-tenant");
+        assert!(c.object_key);
+        assert_eq!(c.value_of_key, None);
+        assert!(ts("const { 'x-tenant': t } = req;", "x-tenant").object_key);
+    }
+
+    #[test]
+    fn ctx_value_of_key_names_the_key() {
+        let c = ts(
+            "const a = { justifyContent: 'space-between' };",
+            "space-between",
+        );
+        assert_eq!(c.value_of_key.as_deref(), Some("justifyContent"));
+        assert!(!c.object_key);
+        let c = ts("const a = { 'x-env': 'A_B' };", "A_B");
+        assert_eq!(c.value_of_key.as_deref(), Some("x-env"));
+        let c = ts("const a = { env: cond ? 'a-b' : 'c-d' };", "a-b");
+        assert_eq!(c.value_of_key.as_deref(), Some("env"));
+        let c = ts("const a = { env: ['a-b'] };", "a-b");
+        assert_eq!(c.value_of_key.as_deref(), Some("env"));
+    }
+
+    #[test]
+    fn ctx_value_of_key_does_not_cross_a_call() {
+        let c = ts("const a = { env: foo('a-b') };", "a-b");
+        assert_eq!(c.value_of_key, None);
+        let c = ts("const a = { env: () => 'a-b' };", "a-b");
+        assert_eq!(c.value_of_key, None);
+    }
+
+    #[test]
+    fn ctx_value_of_key_is_none_for_computed_keys() {
+        let c = ts("const a = { [k]: 'a-b' };", "a-b");
+        assert_eq!(c.value_of_key, None);
+    }
+
+    // ctx.jsx_attr
+
+    #[test]
+    fn ctx_jsx_attr_direct_value_and_braced_value() {
+        let c = tsx(
+            "const a = <div className=\"items-center\" />;",
+            "items-center",
+        );
+        assert_eq!(c.jsx_attr.as_deref(), Some("className"));
+        let c = tsx(
+            "const a = <div className={'items-center'} />;",
+            "items-center",
+        );
+        assert_eq!(c.jsx_attr.as_deref(), Some("className"));
+        let c = tsx(
+            "const a = <label htmlFor={ok ? 'items-center' : 'x-y'} />;",
+            "items-center",
+        );
+        assert_eq!(c.jsx_attr.as_deref(), Some("htmlFor"));
+        let c = tsx("const a = <div class=\"items-center\" />;", "items-center");
+        assert_eq!(c.jsx_attr.as_deref(), Some("class"));
+        let c = lit(
+            EcmaDialect::JavaScript,
+            "const a = <div className=\"items-center\" />;",
+            "items-center",
+        )
+        .ctx;
+        assert_eq!(c.jsx_attr.as_deref(), Some("className"));
+    }
+
+    /// The JavaScript grammar cannot parse a keyword attribute name (`class=`, `for=`) and
+    /// recovers with an error node that re-parents the string as a declarator's value. A
+    /// recovered parse must never invent a home out of that.
+    #[test]
+    fn ctx_module_const_is_none_when_the_declaration_did_not_parse_cleanly() {
+        let c = lit(
+            EcmaDialect::JavaScript,
+            "const a = <div class=\"items-center\" />;",
+            "items-center",
+        )
+        .ctx;
+        assert_eq!(c.module_const, None);
+    }
+
+    #[test]
+    fn ctx_jsx_attr_is_none_outside_attributes_and_behind_a_call() {
+        let c = tsx("const a = <div>{'items-center'}</div>;", "items-center");
+        assert_eq!(c.jsx_attr, None);
+        let c = tsx(
+            "const a = <div className={cn('items-center')} />;",
+            "items-center",
+        );
+        assert_eq!(c.jsx_attr, None);
+        assert_eq!(c.callee.as_deref(), Some("cn"));
+    }
+
+    // ctx.type_position
+
+    #[test]
+    fn ctx_type_position_union_and_literal_types() {
+        for src in [
+            "type S = 'IN_PROGRESS' | 'DONE';",
+            "let s: 'IN_PROGRESS' | 'DONE';",
+            "function f(s: 'IN_PROGRESS'): void {}",
+            "const m: Record<'IN_PROGRESS' | 'DONE', number> = {};",
+            "interface I { s: 'IN_PROGRESS' }",
+        ] {
+            assert!(ts(src, "IN_PROGRESS").type_position, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_type_position_enum_member_initializer() {
+        assert!(ts("enum S { InProgress = 'IN_PROGRESS' }", "IN_PROGRESS").type_position);
+        assert!(ts("const enum S { InProgress = 'IN_PROGRESS' }", "IN_PROGRESS").type_position);
+    }
+
+    #[test]
+    fn ctx_type_position_const_tuple_used_as_a_type_source() {
+        let src = "export const STATUSES = ['IN_PROGRESS', 'DONE'] as const;\n\
+                   export type Status = (typeof STATUSES)[number];\n";
+        assert!(ts(src, "IN_PROGRESS").type_position);
+        let src = "export const STATUSES = ['IN_PROGRESS', 'DONE'] as const;\n\
+                   export type Status = typeof STATUSES[number];\n";
+        assert!(ts(src, "DONE").type_position);
+    }
+
+    #[test]
+    fn ctx_type_position_is_false_for_value_uses() {
+        for src in [
+            "if (s === 'IN_PROGRESS') {}",
+            "const a = 'IN_PROGRESS';",
+            "switch (s) { case 'IN_PROGRESS': break; }",
+            "export const STATUSES = ['IN_PROGRESS', 'DONE'] as const;",
+        ] {
+            assert!(!ts(src, "IN_PROGRESS").type_position, "{src}");
+        }
+    }
+
+    // ctx.attribute
+
+    #[test]
+    fn ctx_attribute_is_never_set_for_ecma_decorators() {
+        let src = "class A { @Get('/api/v1/orders') list() {} }\n";
+        assert!(!ts(src, "/api/v1/orders").attribute);
+    }
+
+    // ctx.arithmetic
+
+    #[test]
+    fn ctx_arithmetic_for_binary_operators_both_sides() {
+        for src in [
+            "total * 0.12;",
+            "0.12 * total;",
+            "total / 0.12;",
+            "total + 0.12;",
+            "total - 0.12;",
+            "total % 0.12;",
+            "total * (0.12);",
+            "const a = (total + fee) * 0.12;",
+        ] {
+            assert!(ts(src, "0.12").arithmetic, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_arithmetic_for_compound_assignment() {
+        for src in [
+            "x += 0.12;",
+            "x -= 0.12;",
+            "x *= 0.12;",
+            "x /= 0.12;",
+            "x %= 0.12;",
+        ] {
+            assert!(ts(src, "0.12").arithmetic, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_arithmetic_is_false_elsewhere() {
+        for src in [
+            "x < 0.12;",
+            "x === 0.12;",
+            "foo(0.12);",
+            "x = 0.12;",
+            "const a = { opacity: 0.12 };",
+            "x = [0.12];",
+            "x = cond ? 0.12 : 0;",
+            "x && 0.12;",
+            "x **= 0.12;",
+            "x = -0.12;",
+        ] {
+            assert!(!ts(src, "0.12").arithmetic, "{src}");
+        }
+    }
+
+    // ctx.module_const
+
+    fn mc(name: &str, exported: bool) -> Option<ModuleConst> {
+        Some(ModuleConst {
+            name: name.to_string(),
+            exported,
+        })
+    }
+
+    #[test]
+    fn ctx_module_const_whole_initializer_const_let_var() {
+        assert_eq!(
+            ts("const Q = 'orders-high';", "orders-high").module_const,
+            mc("Q", false)
+        );
+        assert_eq!(
+            ts("let Q = 'orders-high';", "orders-high").module_const,
+            mc("Q", false)
+        );
+        assert_eq!(
+            ts("var q = 'orders-high';", "orders-high").module_const,
+            mc("q", false)
+        );
+        assert_eq!(
+            ts("export const Q = 'orders-high';", "orders-high").module_const,
+            mc("Q", true)
+        );
+    }
+
+    #[test]
+    fn ctx_module_const_through_as_const_objects_and_arrays() {
+        let c = ts(
+            "export const Routes = { orders: '/api/orders' } as const;",
+            "/api/orders",
+        );
+        assert_eq!(c.module_const, mc("Routes", true));
+        let c = ts("export const Q = ['orders-high'] as const;", "orders-high");
+        assert_eq!(c.module_const, mc("Q", true));
+        let c = ts(
+            "const Routes = { a: { b: '/api/orders' } } satisfies Record<string, unknown>;",
+            "/api/orders",
+        );
+        assert_eq!(c.module_const, mc("Routes", false));
+        let c = ts("const Q = ('orders-high');", "orders-high");
+        assert_eq!(c.module_const, mc("Q", false));
+    }
+
+    #[test]
+    fn ctx_module_const_is_none_behind_a_call() {
+        assert_eq!(
+            ts("const Q = f('orders-high');", "orders-high").module_const,
+            None
+        );
+        assert_eq!(
+            ts("export const Q = { a: g('orders-high') };", "orders-high").module_const,
+            None
+        );
+        assert_eq!(
+            ts("const Q = () => 'orders-high';", "orders-high").module_const,
+            None
+        );
+    }
+
+    #[test]
+    fn ctx_module_const_is_none_when_not_top_level() {
+        for src in [
+            "function f() { const Q = 'orders-high'; }",
+            "if (x) { const Q = 'orders-high'; }",
+            "class A { Q = 'orders-high'; }",
+            "const f = () => { const Q = 'orders-high'; };",
+        ] {
+            assert_eq!(ts(src, "orders-high").module_const, None, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_module_const_is_none_for_destructuring_and_object_keys() {
+        assert_eq!(
+            ts("const { a } = { a: 'orders-high' };", "orders-high").module_const,
+            None
+        );
+        assert_eq!(
+            ts("const Q = { 'orders-high': 1 };", "orders-high").module_const,
+            None
+        );
+    }
+
+    #[test]
+    fn literal_malformed_input_does_not_panic() {
+        for src in [
+            "const a = '",
+            "const a = `${",
+            "<div className=\"",
+            "type T = 'a' |",
+            "\u{0}\u{1}\u{2}",
+            "enum {",
+            "",
+        ] {
+            for dialect in [
+                EcmaDialect::TypeScript,
+                EcmaDialect::Tsx,
+                EcmaDialect::JavaScript,
+            ] {
+                let _ = lits(dialect, src);
+            }
+        }
+    }
+
+    // ── more home shapes ──────────────────────────────────────────────────────
+
+    #[test]
+    fn ctx_module_const_through_object_freeze() {
+        assert_eq!(
+            ts(
+                "export const Q = Object.freeze({ A: 'orders-high' });",
+                "orders-high"
+            )
+            .module_const,
+            mc("Q", true)
+        );
+        assert_eq!(
+            ts(
+                "const Q = Object.freeze(['orders-high'] as const);",
+                "orders-high"
+            )
+            .module_const,
+            mc("Q", false)
+        );
+        // Only `Object.freeze` is transparent; any other call is not the constant.
+        for src in [
+            "const Q = Object.assign({ A: 'orders-high' });",
+            "const Q = freeze({ A: 'orders-high' });",
+            "const Q = Object.freeze(make('orders-high'));",
+            "const Q = Object.freeze(0, 'orders-high');",
+        ] {
+            assert_eq!(ts(src, "orders-high").module_const, None, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_module_const_export_default_is_a_home_named_default() {
+        for src in [
+            "export default { ORDERS: 'orders-high' };",
+            "export default 'orders-high';",
+            "export default ['orders-high'];",
+            "export default { a: { b: 'orders-high' } } as const;",
+        ] {
+            assert_eq!(
+                ts(src, "orders-high").module_const,
+                mc("default", true),
+                "{src}"
+            );
+        }
+        for src in [
+            "export default defineConfig({ q: 'orders-high' });",
+            "export default function f() { return 'orders-high'; }",
+            "export default () => 'orders-high';",
+        ] {
+            assert_eq!(ts(src, "orders-high").module_const, None, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_module_const_commonjs_exports() {
+        assert_eq!(
+            ts("module.exports = { ORDERS: 'orders-high' };", "orders-high").module_const,
+            mc("module.exports", true)
+        );
+        assert_eq!(
+            ts("exports.ORDERS = 'orders-high';", "orders-high").module_const,
+            mc("exports.ORDERS", true)
+        );
+        assert_eq!(
+            ts("module.exports.ORDERS = 'orders-high';", "orders-high").module_const,
+            mc("module.exports.ORDERS", true)
+        );
+        for src in [
+            "window.ORDERS = 'orders-high';",
+            "this.q = 'orders-high';",
+            "function f() { exports.ORDERS = 'orders-high'; }",
+            "module.exports = make('orders-high');",
+        ] {
+            assert_eq!(ts(src, "orders-high").module_const, None, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_module_const_enum_members_are_homes_and_stay_type_positions() {
+        let c = ts(
+            "export enum Routes { Orders = '/api/orders' }",
+            "/api/orders",
+        );
+        assert_eq!(c.module_const, mc("Routes.Orders", true));
+        assert!(c.type_position);
+        assert_eq!(
+            ts("enum E { A = 'x-y' }", "x-y").module_const,
+            mc("E.A", false)
+        );
+        assert_eq!(
+            ts("export const enum K { A = 'ORDERS_HIGH' }", "ORDERS_HIGH").module_const,
+            mc("K.A", true)
+        );
+        assert_eq!(
+            ts("function f() { enum E { A = 'x-y' } }", "x-y").module_const,
+            None
+        );
+    }
+
+    #[test]
+    fn ctx_module_const_namespace_members() {
+        assert_eq!(
+            ts(
+                "export namespace Q { export const ORDERS = 'orders-high'; }",
+                "orders-high"
+            )
+            .module_const,
+            mc("Q.ORDERS", true)
+        );
+        assert_eq!(
+            ts(
+                "namespace A.B { export const X = 'orders-high'; }",
+                "orders-high"
+            )
+            .module_const,
+            mc("A.B.X", true)
+        );
+        assert_eq!(
+            ts("namespace N { const X = 'orders-high'; }", "orders-high").module_const,
+            mc("N.X", false)
+        );
+        assert_eq!(
+            ts(
+                "function f() { namespace N { export const X = 'orders-high'; } }",
+                "orders-high"
+            )
+            .module_const,
+            None
+        );
+    }
+
+    #[test]
+    fn ctx_module_const_static_class_fields_of_a_module_level_class() {
+        assert_eq!(
+            ts(
+                "export class Q { static ORDERS = 'orders-high'; }",
+                "orders-high"
+            )
+            .module_const,
+            mc("Q.ORDERS", true)
+        );
+        assert_eq!(
+            ts(
+                "class Q { static readonly ORDERS = 'orders-high'; }",
+                "orders-high"
+            )
+            .module_const,
+            mc("Q.ORDERS", false)
+        );
+        // An instance field is per-object state, not a shared constant.
+        assert_eq!(
+            ts("class Q { orders = 'orders-high'; }", "orders-high").module_const,
+            None
+        );
+        assert!(!ts("class Q { orders = 'orders-high'; }", "orders-high").unattributed);
+        // A static field of a class the walker cannot name is neither a home nor a bare copy.
+        for src in [
+            "function f() { class Q { static ORDERS = 'orders-high'; } }",
+            "const Q = class { static ORDERS = 'orders-high'; };",
+        ] {
+            let c = ts(src, "orders-high");
+            assert_eq!(c.module_const, None, "{src}");
+            assert!(c.unattributed, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_first_argument_skips_comments() {
+        assert!(
+            ts(
+                "const m = import(/* webpackChunkName: \"x\" */ 'lodash-es');",
+                "lodash-es"
+            )
+            .import_specifier
+        );
+        assert!(ts("jest.mock(/* c */ 'lodash-es');", "lodash-es").import_specifier);
+        assert!(ts("require(// c\n 'lodash-es');", "lodash-es").import_specifier);
+        assert!(!ts("foo(/* c */ 'x-y', 'lodash-es');", "lodash-es").import_specifier);
+    }
+
+    #[test]
+    fn ctx_arithmetic_is_false_for_string_concatenation() {
+        for src in [
+            "const m = 'rate ' + 0.12;",
+            "const m = 0.12 + ' rate';",
+            "const m = `rate ` + 0.12;",
+            "const m = 0.12 + `${x}`;",
+        ] {
+            let all = lits(EcmaDialect::TypeScript, src);
+            let hit = all.iter().find(|l| l.value == "0.12").unwrap();
+            assert!(!hit.ctx.arithmetic, "{src}");
+        }
+        // `-`, `*` and a numeric `+` are still arithmetic.
+        for src in [
+            "const m = 'rate' - 0.12;",
+            "const m = 'rate' * 0.12;",
+            "const m = total + 0.12;",
+            "const m = 1 + 0.12;",
+            "const m = ('a' + b) * 0.12;",
+        ] {
+            assert!(ts(src, "0.12").arithmetic, "{src}");
+        }
+    }
+
+    #[test]
+    fn literals_under_error_nodes_are_not_read() {
+        // `class` as a JSX attribute name makes the JavaScript grammar recover with an error
+        // node; with the TSX re-parse available the literal is read cleanly instead.
+        let all = lits(
+            EcmaDialect::JavaScript,
+            "export const A = () => <div class=\"is-active\">a</div>;\n",
+        );
+        let hit = all.iter().find(|l| l.value == "is-active").unwrap();
+        assert_eq!(hit.ctx.jsx_attr.as_deref(), Some("class"));
+        // Unrecoverable input never yields a literal from inside a recovered region.
+        let broken = lits(
+            EcmaDialect::TypeScript,
+            "foo(@@@ 'orders-high' @@@);\nbar('x-y');\n",
+        );
+        assert!(
+            broken.iter().all(|l| l.value != "orders-high"),
+            "{broken:#?}"
+        );
     }
 }

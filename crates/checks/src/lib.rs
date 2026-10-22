@@ -139,6 +139,13 @@ pub mod query_grammar_injection_checker;
 /// `crates/rules/principles/javascript/arch-one-import-path-1.toml`.
 pub mod one_import_path_checker;
 
+/// `ARCH-SHARED-CONSTANT-1` (W29, `docs/design/2026-10-21_w29-detector-implementation.md`):
+/// a domain value (a separated lowercase name, a route template, a multi-word upper-case token,
+/// or a decimal rate in arithmetic) written as a bare literal in several modules instead of one
+/// named home. Reads [`extract::literals`]; the definition of "domain value" is deliberately
+/// narrow. See `crates/rules/principles/universal/arch-shared-constant-1.toml`.
+pub mod shared_constant_checker;
+
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
 /// checker registry — "Plug point B" in
 /// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.3. Composed into

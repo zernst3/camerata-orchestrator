@@ -24,6 +24,7 @@
 //! already carries and the SQL splitter's existing discipline (see
 //! `docs/design/2026-07-27_ast-extractor-layer.md` §1).
 
+mod ancestry;
 pub mod ecma;
 pub mod enclosing;
 pub mod paths;
@@ -181,6 +182,95 @@ pub struct ExportSurface {
     pub star_re_exports: Vec<StarReExport>,
 }
 
+/// Whether a [`Literal`] is a string or a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LiteralKind {
+    Str,
+    Number,
+}
+
+/// A literal's enclosing top-level constant: `export const ORDERS_QUEUE = 'orders-high'`,
+/// `ORDERS_QUEUE: Final = 'orders-high'` or `pub const BUCKET: &str = "user-uploads";`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleConst {
+    pub name: String,
+    /// Whether another module can import it: `export` (ECMA), no leading underscore
+    /// (Python), `pub` (Rust).
+    pub exported: bool,
+}
+
+/// Where a [`Literal`] sits. Every field is decided from the parent chain of the literal node
+/// (tree-sitter) or from a context stack carried by the `syn` visitor (Rust). Never a guess:
+/// a shape the walker does not recognise leaves the field at its default, and the checkers
+/// read a default field as "no reason to exclude this occurrence".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LiteralCtx {
+    /// Source of `import`/`export ... from`/`require()`/`import()`/`import_module()`; also the
+    /// first argument of `jest.mock`, `vi.mock`, `require.resolve`.
+    pub import_specifier: bool,
+    /// Last identifier of the nearest enclosing call's callee chain (`i18n.t(..)` is `"t"`,
+    /// `logging.getLogger(..)` is `"getLogger"`, `cn(..)` is `"cn"`), walking up through
+    /// arrays, objects, parentheses, spreads and template literals; `None` when no call
+    /// encloses it.
+    pub callee: Option<String>,
+    /// The full callee text of that same call (`res.headers.set`, `os.environ.get`), so a
+    /// guard can ask whether the receiver is a headers object or the environment.
+    pub callee_chain: Option<String>,
+    /// For a subscript: the receiver expression's text (`process.env`, `os.environ`, `row`).
+    pub subscript_receiver: Option<String>,
+    /// The literal IS a key of an object/dict literal (`{ 'a-b': 1 }`).
+    pub object_key: bool,
+    /// The literal is a VALUE in an object/dict literal: the key's text (identifier or string).
+    pub value_of_key: Option<String>,
+    /// `x['a-b']` / `x["a-b"]` subscript.
+    pub subscript: bool,
+    /// JSX/TSX attribute name when the literal is that attribute's value, directly or inside
+    /// `{...}`; `None` otherwise.
+    pub jsx_attr: Option<String>,
+    /// Inside a TS union/literal type, enum member initializer, `as const` tuple used as a type
+    /// source, Python `Literal[...]`, or a Python `Enum` class body assignment.
+    pub type_position: bool,
+    /// Inside a Rust `#[...]` attribute or a Python decorator expression.
+    pub attribute: bool,
+    /// Direct operand of a binary arithmetic expression (`* / + - %`) or compound assignment.
+    pub arithmetic: bool,
+    /// The literal is the whole initializer, or sits inside an object/array initializer reached
+    /// without passing a call, of a top-level `const`/`let`/`var` (ECMA), a module-level
+    /// `NAME = ...` or `NAME: Final = ...` (Python), or a `const`/`static` item (Rust).
+    pub module_const: Option<ModuleConst>,
+    /// The literal sits in a constant-like declaration the walker recognises but cannot attribute
+    /// to a nameable home (a class body that is not at module level). Checkers neither count it
+    /// as a home nor as a bare copy: it is an unmodelled shape, so it stays silent.
+    pub unattributed: bool,
+}
+
+/// One string or number literal. `value` is the unescaped content for a string and the
+/// canonical text for a number (see [`canonical_number`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Literal {
+    pub value: String,
+    pub kind: LiteralKind,
+    pub line: usize,
+    pub ctx: LiteralCtx,
+}
+
+/// Canonical text of a numeric literal: digit separators (`_`) removed, parsed to `f64` and
+/// printed in its shortest round-trip form, so `.12`, `0.12`, `0.120` and `1.2e-1` all become
+/// `0.12`. `None` for anything that is not a plain decimal number (hex, octal, binary, BigInt,
+/// imaginary, non-finite): those can never be a rate, so they are not extracted.
+pub fn canonical_number(raw: &str) -> Option<String> {
+    let cleaned: String = raw.chars().filter(|c| *c != '_').collect();
+    if cleaned.is_empty()
+        || !cleaned
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
+    {
+        return None;
+    }
+    let n: f64 = cleaned.parse().ok()?;
+    n.is_finite().then(|| format!("{n}"))
+}
+
 /// Extract every import/use declaration from `source`, dispatching to the per-language
 /// parser. Never panics: a parse failure yields an empty vec (fewer findings, never a crash
 /// — see module docs).
@@ -230,6 +320,20 @@ pub fn method_calls(lang: SourceLang, source: &str) -> Vec<MethodCall> {
     }
 }
 
+/// Extract every string and number literal from `source` with the context each one sits in
+/// (see [`LiteralCtx`]). Interpolated strings (`` `a${b}` ``, f-strings), Python byte strings
+/// and adjacent-string concatenations are not literals and are skipped; Rust macro bodies are
+/// not descended. Never panics (same contract as [`imports`]).
+pub fn literals(lang: SourceLang, source: &str) -> Vec<Literal> {
+    match lang {
+        SourceLang::Rust => rust_syn::literals(source),
+        SourceLang::TypeScript => ecma::literals(ecma::EcmaDialect::TypeScript, source),
+        SourceLang::Tsx => ecma::literals(ecma::EcmaDialect::Tsx, source),
+        SourceLang::JavaScript => ecma::literals(ecma::EcmaDialect::JavaScript, source),
+        SourceLang::Python => python::literals(source),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +368,7 @@ mod tests {
             assert!(imports(lang, "").is_empty());
             assert!(functions(lang, "").is_empty());
             assert!(method_calls(lang, "").is_empty());
+            assert!(literals(lang, "").is_empty());
             assert_eq!(exports(lang, ""), ExportSurface::default());
         }
     }
@@ -282,5 +387,24 @@ mod tests {
             exports(SourceLang::Python, "def a(): pass"),
             ExportSurface::default()
         );
+    }
+
+    #[test]
+    fn canonical_number_spellings_collapse_to_one_value() {
+        for raw in [
+            ".12", "0.12", "0.120", "0.1200", "1.2e-1", "0_0.12", "12e-2",
+        ] {
+            assert_eq!(canonical_number(raw).as_deref(), Some("0.12"), "{raw}");
+        }
+        assert_eq!(canonical_number("1_000.5").as_deref(), Some("1000.5"));
+        assert_eq!(canonical_number("86400").as_deref(), Some("86400"));
+        assert_eq!(canonical_number("1.0").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn canonical_number_rejects_non_decimal_spellings() {
+        for raw in ["0x1F", "0b101", "0o17", "10n", "3j", "", "abc", "1e999"] {
+            assert_eq!(canonical_number(raw), None, "{raw}");
+        }
     }
 }
