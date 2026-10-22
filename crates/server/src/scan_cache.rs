@@ -77,6 +77,14 @@ pub struct ScanManifest {
     /// a prior manifest) — no migration or manual cache-bust needed.
     #[serde(default)]
     pub ai_covered: bool,
+    /// The clone-candidate judge's verdicts (Wave C, `onboard::clone_advisory`), keyed by the
+    /// CONTENT of the question so an unchanged family on a re-scan is never re-billed. Persisted
+    /// beside the file fingerprints in the app data directory, never in the client's repository.
+    /// `serde(default)` and additive: a manifest written before this field existed loads with an
+    /// empty cache and `MANIFEST_VERSION` is not bumped (the verdicts are an optimisation, never
+    /// evidence, so a missing cache only costs one scan's judge calls).
+    #[serde(default)]
+    pub clone_verdicts: crate::onboard::clone_advisory::VerdictCache,
 }
 
 /// Fingerprint the selected rule set (ids + their repo bindings) so a change to the selection
@@ -198,6 +206,7 @@ pub struct ManifestBuilder {
     files: BTreeMap<String, BTreeMap<String, String>>,
     findings: Vec<Finding>,
     ai_covered: bool,
+    clone_verdicts: crate::onboard::clone_advisory::VerdictCache,
 }
 
 impl ManifestBuilder {
@@ -221,6 +230,16 @@ impl ManifestBuilder {
         self
     }
 
+    /// Carry the clone judge's verdict cache (the prior manifest's verdicts plus this scan's) into
+    /// the manifest being built, so the next scan can reuse them.
+    pub fn with_clone_verdicts(
+        mut self,
+        verdicts: crate::onboard::clone_advisory::VerdictCache,
+    ) -> Self {
+        self.clone_verdicts = verdicts;
+        self
+    }
+
     /// Record one repo's full current file set (fingerprinting each) and the AI findings that
     /// apply to it after this scan. `ai_findings` must already be the post-merge AI set for the
     /// repo (fresh ∪ carried); deterministic-floor findings should NOT be passed here.
@@ -241,6 +260,7 @@ impl ManifestBuilder {
             files: self.files,
             findings: self.findings,
             ai_covered: self.ai_covered,
+            clone_verdicts: self.clone_verdicts,
         }
     }
 }
@@ -852,6 +872,7 @@ mod tests {
             },
             findings: vec![],
             ai_covered: true,
+            clone_verdicts: Default::default(),
         };
 
         let p = partition(Some(&stale), "me/api", &files);

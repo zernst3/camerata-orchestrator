@@ -104,6 +104,32 @@ fn skip_count(index: &crate::extract::clone::CloneIndex) -> u32 {
     u32::try_from(skipped).unwrap_or(u32::MAX)
 }
 
+/// Indexed ECMAScript files in a React-family package: the scope of UI-SHARED-PRIMITIVE-1.
+fn count_ui_files(ctx: &mut Ctx<'_>, index: &crate::extract::clone::CloneIndex) -> u32 {
+    let skipped: HashSet<&str> = index.skipped.iter().map(|(p, _)| p.as_str()).collect();
+    let paths: Vec<&str> = ctx
+        .files
+        .iter()
+        .map(|(p, _)| p.as_str())
+        .filter(|p| !skipped.contains(p))
+        .filter(|p| {
+            matches!(
+                crate::extract::lang_for_path(p),
+                Some(
+                    crate::extract::SourceLang::TypeScript
+                        | crate::extract::SourceLang::Tsx
+                        | crate::extract::SourceLang::JavaScript
+                )
+            )
+        })
+        .collect();
+    let count = paths
+        .into_iter()
+        .filter(|p| ctx.in_react_package(p))
+        .count();
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
 /// Build the candidates of every armed rule over `files`. Deterministic; never panics; an unarmed
 /// rule costs nothing (the index is not even built when no clone rule is armed).
 pub fn candidates(files: &[(String, String)], armed: &HashSet<&str>) -> CandidateSet {
@@ -121,8 +147,12 @@ pub fn candidates(files: &[(String, String)], armed: &HashSet<&str>) -> Candidat
         files_skipped: skip_count(&index),
         families: u32::try_from(index.families.len()).unwrap_or(u32::MAX),
         truncated: index.truncated,
+        ui_files: 0,
     };
     let mut ctx = Ctx::new(files);
+    if rules.contains(&CloneRule::SharedPrimitive) {
+        set.index.ui_files = count_ui_files(&mut ctx, &index);
+    }
     // Families that share a first member are processed together, so a file's tokens are read
     // while they are still cached. The order affects time only: the output is ranked.
     let mut order: Vec<&CloneFamily> = index.families.iter().collect();

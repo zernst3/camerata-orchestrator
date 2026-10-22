@@ -131,3 +131,26 @@ fn candidates_beyond_the_cap_are_counted_and_the_ranking_keeps_the_best() {
 fn the_judge_cap_is_a_constant_of_one_hundred_and_sixty() {
     assert_eq!(CLONE_JUDGE_MAX_PER_RULE, 160);
 }
+
+#[test]
+fn ui_files_counts_only_indexed_files_in_react_family_packages() {
+    let react = r#"{ "dependencies": { "react": "18" } }"#;
+    let solid = r#"{ "dependencies": { "solid-js": "1" } }"#;
+    let component = "export function Box({ items }) {\n  return <ul>{items.map((i) => <li key={i}>{i}</li>)}</ul>;\n}\n";
+    let input = files(&[
+        ("apps/web/package.json", react),
+        ("apps/web/src/Box.tsx", component),
+        ("apps/web/src/util.ts", "export const one = 1;\n"),
+        ("apps/web/src/Box.test.tsx", component),
+        ("apps/solid/package.json", solid),
+        ("apps/solid/src/Box.tsx", component),
+        ("services/api/main.py", "print('hi')\n"),
+    ]);
+    let set = candidates(&input, &armed(&[CloneRule::SharedPrimitive]));
+    // Box.tsx and util.ts under the React package; the test file is skipped by the detector, the
+    // Solid package and the Python file are out of scope.
+    assert_eq!(set.index.ui_files, 2, "{:?}", set.index);
+    // Counted only when the rule is armed.
+    let other = candidates(&input, &armed(&[CloneRule::SingleSourceLogic]));
+    assert_eq!(other.index.ui_files, 0);
+}

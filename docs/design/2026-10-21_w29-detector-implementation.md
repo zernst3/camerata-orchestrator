@@ -2565,6 +2565,148 @@ worst case at the registry's Haiku 4.5 price, about $0.05 to $0.10 on a typical 
 unchanged re-scan. For comparison the audit pass runs on the audit model over every chunk of
 the repo; the judge never sees a file.
 
+## Wave C build notes: the producer, the seam and the corpus rules (2026-10-22)
+
+Built as `crates/checks/src/clone_rules.rs` plus `clone_rules/{bindings,compare,composed,context,
+decision,facts,judge,names,naming,primitive,single_source}.rs` and tests under
+`clone_rules/tests/`; `crates/server/src/onboard/clone_advisory.rs` plus `clone_advisory/{cache,
+findings,prompt}.rs` and tests under `clone_advisory/tests/`; the three corpus TOMLs; an end-to-end
+test, `crates/server/tests/clone_advisory_e2e.rs`, that runs the whole `audit_repos` pipeline with a
+scripted model. The sections above stand; this list is every place the build decided something the
+spec left open or departed from it, and why. The detector API is used as built (section 8).
+
+**W.1 Producer shape.**
+- `Candidate.facts` is one `CandidateFacts { token_len, sites, agree, disagreements, rule }` with a
+  `RuleFacts` enum (`Logic`, `Naming`, `Primitive`) for what only one rule knows, instead of per-rule
+  fact structs. `sites` is every place a candidate lives, which is the one list the finding, the judge
+  input and the transcript read; for a naming module roll-up it is the union of every pair's sites, and
+  `family` is the longest pair's family.
+- `CandidateSet.by_rule` is ranked and capped (as specified) and gains `found(rule)` (judged plus
+  `over_cap`). `IndexSummary` gains `files_skipped`, `families` and `ui_files` (see W.5). An ARMED rule
+  always has an entry, empty when it found nothing, so the seam can tell "ran, nothing" from "not armed".
+- Disagreements are deduplicated per member and per pair of texts (a block that repeats `total` versus
+  `subtotal` five times is one named difference at its first position), and a difference is a named
+  token pair with both lines, never a characterization.
+- Rust `?` is not a ternary: the ternary test is skipped for Rust, and for other languages needs at
+  least one token between the `?` and the `:` (`x?: T` is an optional member, not a branch).
+
+**W.2 ARCH-SINGLE-SOURCE-LOGIC-1.**
+- The decision test (a decision keyword, operator family or ternary, AND a literal or property name)
+  counts only tokens OUTSIDE `catch`/`except` clauses and `throw`/`raise` statements. The spec excludes
+  a sequence whose only decision tokens sit there; requiring both halves outside is the stricter,
+  false-negative-leaning reading. The `throw`/`raise` region ends at a `;` at its own depth, the close of
+  the enclosing block, or (Python) the end of its line; over-extending only removes tokens from the test.
+- "Distinct token kinds" is read as distinct normalized token ids in the shared sequence (at least 8).
+- "Every member is inside a function" is: the member's item is a function, or an `extract::functions`
+  span contains the member's lines, or it is a module-level statement in a file that is not config
+  shaped (`is_config_shaped` became `pub(crate)`).
+- `composed_variant` uses its own import reader (`clone_rules/bindings.rs`): `extract::imports` records no
+  name for a default import (`import Modal from '..'`), which would have made the guard blind to the
+  commonest component import. The guard fires when the shared sequence has an `$ID (` call at the same
+  offset in every copy, the same callee text in every copy, imported in every copy's file from one module
+  after resolving relative specifiers against the importing file (`./pricing` in `src/a.ts` and
+  `../src/pricing` elsewhere are one module). A Rust `self::`/`super::` path is made unique to its file so
+  it can never compare equal.
+
+**W.3 ARCH-NAMING-ONE-CONCEPT-1.**
+- "Covers at least 90% of one function span" is read as at least 90% of one TOP-LEVEL function item of
+  the detector's tokenization (`ItemTokens.kind == "function"`, which includes `const f = () => {}`).
+  Methods inside a class or an `impl` block are one `class`/`impl` item and are not read in v1; that is a
+  false negative added to section 9.
+- The wrapper guard is: a member's span calls (an `$ID (` token) a name another member declares, from
+  another file, and its file imports that name. The roll-up links only candidates that span exactly two
+  files; a candidate that spans three or more stays a function candidate so no file is lost. A roll-up's
+  `token_len` is the sum of its pairs'.
+- Name words treat an acronym run as one word (`HTTPResponse` is `http`, `response`); a name that the
+  verb/noise removal would empty keeps its words (`get` and `set` stay different).
+
+**W.4 UI-SHARED-PRIMITIVE-1.**
+- A UI unit also includes a component: a function whose body renders JSX. Without it a copy-pasted
+  component (the clone is the whole function, so no sub-region is a separate family) would never be a
+  candidate, which would miss the rule's plainest case. The mechanism mark and the judge still decide.
+- Marks that depend on a name (a hook call, `addEventListener`, `ref.current`, `document.`) are read from
+  each copy's source, because Structural mode collapses those names, and the mechanism must fire in EVERY
+  copy (the intersection of the copies' marks). A `function useX(` declaration is not a hook call.
+- A copy in a package outside the React-family scope is dropped from the candidate, not the whole family:
+  the remaining copies must still span two files and at most 40 places. The package gate reads the
+  nearest `package.json` among the scan's files (`dependencies`, `devDependencies`, `peerDependencies`).
+- The composed-variant exclusion counts a default-imported tag as imported (W.2's reader).
+
+**W.5 The seam.**
+- `audit_repos` is now a thin wrapper that builds the real `Llm` and calls `audit_repos_with_llm(llm:
+  &dyn LlmPort, ...)`. The signature of `audit_repos` and every caller are unchanged; the new function is
+  what lets a test run the whole pipeline with a scripted model, which the spec's "audit_repos end-to-end
+  test with the stub model" requires.
+- The judge takes a `JudgeRequest` struct instead of the spec's long argument list, and reports
+  `rejected` (a definite non-affirmative verdict) and `model_calls` in addition to the spec's counts.
+- **The verdict cache is a field of the scan manifest**, `ScanManifest.clone_verdicts` (`serde(default)`,
+  `MANIFEST_VERSION` unchanged), not a separate sidecar file. It lives in the same app-data file the
+  manifest already does, never in the repo; it needs no new store, no new project-id plumbing and no
+  change to `audit_repos`' signature, and "Full scan (ignore incremental cache)" correctly re-asks.
+  It is seeded from the prior manifest even when that manifest is unusable as an AI baseline (the keys are
+  content). Capped at 4,000 verdicts, oldest dropped first.
+- The cache key is path-independent AND order-independent: the exact-mode differences are an unordered
+  set of text pairs (a moved file can swap which copy sorts first), and the single-source decision tokens
+  are included only when the copies agree (they are read from the first copy otherwise).
+- Offline never reads the cache: "zero findings" is absolute when no model is available.
+- `resolve_clone_judge_model(None)` is what `audit_repos` calls; no caller pick is plumbed through the
+  scan request (that would change a signature used by about 30 callers for a knob nobody has asked for).
+  The environment override works today. `ScanProvenance.clone_judge_model` is stamped when the judge made
+  at least one call this scan (cache hits make none), the way `audit_model` is stamped only when a model ran.
+  It is on `ScanProvenance` (so it is in the persisted report and any machine read of it); the PDF cover
+  and the workbook print only the audit and calibration models today and were not changed, because the
+  three artifacts are held equal by cross-artifact gates and a new cover row is a presentation decision.
+- Not-assessed rows: the spec emits one when no model ran or a batch failed. The build also emits the one
+  row when candidates were left `unsure`, got no verdict, or lay beyond the 160 cap, with the counts, so a
+  rule with candidates it could not decide never reads clean. Reason: `PassFailed` for no model or a
+  failure, `ModelDeclined` for undecided.
+- Ledger: a rule is `ran` only when every candidate found got a definite verdict (a rule with nothing
+  found ran clean). `ADVISORY_UNAVAILABLE_NOTE` has no `N` (the count is in the row; a note that varies
+  could not be matched by the integrity gate); `ADVISORY_PARTIAL_NOTE` and `note_advisory_partial_rule`
+  cover a judgment that ran and fell short. The integrity gate classifies the unavailable note as
+  `ScopedOut` (it is only recorded when no model was available, the same disclosed scope choice as
+  "AI/semantic review not requested"); a partial judgment's reason is deliberately unrecognised, so it
+  stays a defect if the semantic pass did not settle the rule.
+- The ledger loop skips the clone ids by arm (`CLONE_ADVISORY_CHANNEL`), as specified.
+- **The convention row is decided after the semantic pass**, not right after the judge: its condition,
+  "no finding under that id from ANY tier", needs the semantic pass's findings, which do not exist yet at
+  the specified call point. The judge runs where the spec puts it; `convention_rows` is called when the
+  repo's AI findings are merged in. It is stricter than the spec in four ways, all toward silence: the rule
+  must be FULLY assessed (nothing unjudged, nothing over the cap), at least one source file must have been
+  read, the UI rule needs a React-family file in scope (`ui_files > 0`), and the corpus must be loaded to
+  name the convention. A deterministic-only scan with zero candidates therefore still states the fact.
+- **`evaluated_option_id` is `None`, not the violating option.** The export resolves a finding's Fix
+  through `evaluated_option_id` first, and the violating options carry no remediation (the fix text is on
+  the default option), so naming the violating option made the Fix line vanish and, under C5-8, the row be
+  held. Every other deterministic checker's defect leaves it `None`. Tested end to end through
+  `build_report_json` (`a_judged_scan_ships_the_confirmed_finding_and_stamps_the_judge`).
+- The concept clause reads "which appears to be the premium discount calculation" (the prompt asks for a
+  noun phrase beginning with "the"); the spec's example verbs ("compute", "derive") cannot be chosen
+  without knowing the concept. The phrase is scrubbed (control characters, quotes, backticks and dashes
+  removed, 80 characters at most) because it is model output reaching a client sentence.
+- Live-preview progress: the seam streams its findings into the job (`add_findings`) but does not emit
+  `det_tool_*` events; the UI's tool-name map has no label for it and the step is dominated by one model call.
+- The transcript session is `clone-judge:<rule id>` as specified; in a multi-repo scan the later repo
+  replaces the earlier one's session (the role line names the repo).
+
+**W.6 `camerata-check`.** The three ids are reported in a new `unsupported_rule_ids` field (`serde(default)`,
+so older output still parses), the human output says `NOT CLEAN` and names them, and `clean` is `false`.
+The default gate still exits 0 (a CI file that lists every corpus rule id must not be locked out of the
+binary), and `--strict` exits 1: a strict gate must not pass on a rule it never checked. They are not folded
+into `unmatched_rule_ids`, which means "no checker answers this id at all" (a typo, or a deferred rule). A run
+with no `--rule-id` is unchanged: it states what its registered checkers did.
+
+**W.7 Corpus.** All three rules are `enforcement = "architectural"`, `kind = "defect"`, `verification =
+"policy"` with internal sources, and each `qualifies` states that the result is a reviewed assessment on top of
+a deterministic search, with every exclusion and the 160-candidate limit. Single-source is `max_severity =
+"high"`; the other two `"low"`. The pinned layer histogram moves `universal` 133 to 136 (the ui rule keeps
+`layer = "universal"`). `domain_to_glob("ui")` is `**/*.{jsx,tsx,ts,js,css}`.
+
+**W.8 Measured.** On this repository's `crates/` (493 files read, 350 indexed, 866 families), release build,
+the producer takes 2.0 s: 94 single-source, 7 naming and 0 shared-primitive candidates (no React package), none
+over the cap. The 20,000-file budget in section 8.8 is dominated by the detector; the funnel adds one
+tokenization per file that belongs to a family.
+
 ## Owner questions for Wave C
 
 None that change what a rule means. Every choice above is decided and justified in place; the

@@ -95,6 +95,7 @@ fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanRepor
             }],
             audit_model: Some("test-model".to_string()),
             calibration_model: Some("test-cal-model".to_string()),
+            clone_judge_model: None,
             mode: "parallel".to_string(),
             thorough: false,
             deep: false,

@@ -357,6 +357,7 @@ async fn regenerate_sample_report() {
             ],
             audit_model: Some("anthropic/claude-opus-5".to_string()),
             calibration_model: Some("anthropic/claude-sonnet-5".to_string()),
+            clone_judge_model: None,
             mode: "parallel".to_string(),
             thorough: false,
             deep: false,

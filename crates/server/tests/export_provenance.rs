@@ -62,6 +62,7 @@ fn report_with_refs(refs: Vec<AuditedRef>, audited: &[&str]) -> ScanReport {
             audited_refs: refs,
             audit_model: None,
             calibration_model: None,
+            clone_judge_model: None,
             mode: "parallel".to_string(),
             thorough: false,
             deep: false,

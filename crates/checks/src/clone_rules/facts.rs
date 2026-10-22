@@ -205,6 +205,10 @@ pub struct IndexSummary {
     pub families: u32,
     /// A cap fired: the index is partial and an absence proves nothing.
     pub truncated: bool,
+    /// Files UI-SHARED-PRIMITIVE-1 could read: indexed TypeScript, TSX or JavaScript files in a
+    /// package that depends on a React-family library. Zero means the rule has nothing in scope
+    /// in this repo, so "nothing found" says nothing. Counted only when that rule is armed.
+    pub ui_files: u32,
 }
 
 /// Every candidate of every armed rule.
