@@ -364,6 +364,11 @@ pub fn eslint_args(config_path: &str, runnable_selectors: &[String]) -> Vec<Stri
         config_path.to_string(),
         "--format".to_string(),
         ESLINT_FORMATTER.to_string(),
+        // The bundled config carries a "warn"-level baseline so eslint always has a coherent
+        // base; a selected rule is passed below at "error". `--quiet` drops every warning at the
+        // source, so the baseline cannot reach the output (see also
+        // [`keep_selected_eslint_findings`], which enforces the same on what is parsed).
+        "--quiet".to_string(),
     ];
     for sel in runnable_selectors {
         args.push("--rule".to_string());
@@ -371,6 +376,25 @@ pub fn eslint_args(config_path: &str, runnable_selectors: &[String]) -> Vec<Stri
     }
     args.push(".".to_string());
     args
+}
+
+/// Keep only the eslint findings whose rule id is one of the `selected` selectors (the
+/// runnable set handed to `--rule`).
+///
+/// # Why this exists
+///
+/// Camerata's bundled eslint config enables a baseline of core rules (`no-console`,
+/// `eqeqeq`, `no-var`, `prefer-const`, ...). Every message eslint printed used to become a
+/// preview [`Finding`], so a scan that selected only the React Hooks rules still shipped
+/// `no-console` and `eqeqeq` rows into `report.findings` and from there into every client
+/// artifact, and `eqeqeq` / `no-var` / `prefer-const` even grounded to
+/// `JAVASCRIPT-STRICT-EQUALITY-1`, `JAVASCRIPT-NO-VAR-1` and `JAVASCRIPT-CONST-DEFAULT-1`
+/// with their citations, selected or not. The scan reports what the project selected.
+pub fn keep_selected_eslint_findings(findings: Vec<Finding>, selected: &[String]) -> Vec<Finding> {
+    findings
+        .into_iter()
+        .filter(|f| selected.iter().any(|s| s == &f.rule_id))
+        .collect()
 }
 
 pub fn note_finding(repo: &str, tool: &str, message: impl Into<String>) -> Finding {
@@ -1628,7 +1652,7 @@ async fn run_one_tool<'r>(
                             ),
                         });
                     }
-                    Ok((fs, gaps))
+                    Ok((keep_selected_eslint_findings(fs, &runnable), gaps))
                 }
                 Err(e) => Err(tool_output_error(
                     ScanTool::Eslint,
@@ -3552,6 +3576,65 @@ mod tests {
             console.severity, "medium",
             "eslint severity 1 (warning) maps to medium"
         );
+
+        // The parser is faithful to eslint's output: it does not know which rules the project
+        // selected. The selection filter is a separate step (`keep_selected_eslint_findings`),
+        // and THAT is what stops the bundled baseline (`no-console`, `eqeqeq`, ...) from
+        // reaching the report as findings nobody asked for. Only `no-var` was selected here.
+        let kept = keep_selected_eslint_findings(findings, &["no-var".to_string()]);
+        let ids: Vec<&str> = kept.iter().map(|f| f.rule_id.as_str()).collect();
+        assert_eq!(ids, ["no-var"], "{kept:?}");
+    }
+
+    /// The baseline-leak filter: only findings whose eslint rule id is in the runnable selector
+    /// set survive, for core, plugin and scoped ids alike; an empty selection keeps nothing.
+    #[test]
+    fn keep_selected_eslint_findings_keeps_only_the_selected_rule_ids() {
+        let mk = |rule: &str| {
+            preview_finding("me/web", ScanTool::Eslint, "a.js", 1, rule, "warning", "m")
+        };
+        let all = vec![
+            mk("no-console"),
+            mk("eqeqeq"),
+            mk("react-hooks/exhaustive-deps"),
+            mk("@typescript-eslint/no-explicit-any"),
+            mk("react-hooks/rules-of-hooks"),
+        ];
+        let selectors = vec![
+            "react-hooks/exhaustive-deps".to_string(),
+            "@typescript-eslint/no-explicit-any".to_string(),
+        ];
+        let kept = keep_selected_eslint_findings(all.clone(), &selectors);
+        let ids: Vec<&str> = kept.iter().map(|f| f.rule_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "react-hooks/exhaustive-deps",
+                "@typescript-eslint/no-explicit-any"
+            ]
+        );
+        assert!(keep_selected_eslint_findings(all, &[]).is_empty());
+    }
+
+    /// Belt and braces: `--quiet` drops every warning-level baseline row at the source, and the
+    /// baseline's one `error`-level rule (`no-duplicate-case`) is demoted to `warn` so `--quiet`
+    /// removes it too. A selected rule is always passed at `error`, so it survives `--quiet`.
+    #[test]
+    fn eslint_runs_quiet_and_the_bundled_baseline_has_no_error_level_rule() {
+        let args = eslint_args("/cfg/c.mjs", &["eqeqeq".to_string()]);
+        assert!(args.iter().any(|a| a == "--quiet"), "{args:?}");
+
+        let config = include_str!("../assets/eslint/camerata.config.mjs");
+        let code_lines: Vec<&str> = config
+            .lines()
+            .map(str::trim)
+            .filter(|l| !(l.starts_with("//") || l.starts_with('*') || l.starts_with("/*")))
+            .collect();
+        assert!(
+            code_lines.iter().all(|l| !l.contains("\"error\"")),
+            "a baseline rule at error level would survive --quiet and reach the report"
+        );
+        assert!(config.contains("\"no-duplicate-case\": \"warn\""));
     }
 
     /// req_c11: a `fatal` parse error is NEVER emitted as a finding (it is not a statement

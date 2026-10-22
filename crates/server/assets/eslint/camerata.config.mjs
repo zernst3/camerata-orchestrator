@@ -133,8 +133,10 @@ const config = [
       "no-prototype-builtins": "warn",
       // Disallow assignment in conditions (a common logic bug)
       "no-cond-assign": ["warn", "always"],
-      // Disallow duplicate case labels in switch
-      "no-duplicate-case": "error",
+      // Disallow duplicate case labels in switch. "warn" like every other baseline rule: the
+      // scan runs eslint with --quiet and reports only the rules the project selected, so a
+      // baseline rule at error level would be the one baseline row that leaked past --quiet.
+      "no-duplicate-case": "warn",
       // Disallow empty block statements without a comment
       "no-empty": ["warn", { allowEmptyCatch: true }],
       // Require error handling in callbacks (node style)
