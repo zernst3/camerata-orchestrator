@@ -38,6 +38,7 @@ pub mod auto_fire;
 pub mod checkpoint;
 pub mod clarify;
 pub mod clarify_resume;
+pub mod client_provenance;
 pub mod connections;
 mod corpus_freshness;
 /// `POST /api/apps` (Part 2 of the Rust-fullstack scaffolder): drives
@@ -16392,11 +16393,12 @@ async fn export_product(
         }
     }
 
-    // `rules_last_reviewed` is honestly None until the first confirmed corpus sweep populates
-    // the corpus watermark file; the manifest field is present either way. (Operator-facing
-    // maintenance text is deliberately NOT sourced here: see the client-artifact gate in the
-    // lib.rs tests.)
-    let provenance = ManifestProvenance::from_cover(&json.cover);
+    // Commit per repo, the corpus digest and the rules-last-reviewed date all come from the one
+    // sanctioned provenance bridge (`client_provenance`); `rules_last_reviewed` is honestly
+    // None until every rule a scan used has been reviewed. No maintenance text is sourced here:
+    // see the client-artifact gate in the lib.rs tests.
+    let provenance =
+        crate::client_provenance::export_provenance(&report, &json.cover, corpus.as_ref());
 
     let stem = report_filename_stem(&report);
     let readme = product_export_readme(&stem, &provenance);
@@ -16515,44 +16517,70 @@ fn zip_now() -> zip::DateTime {
     .unwrap_or_default()
 }
 
-/// Zip the PDF + xlsx + `findings.json` + README.txt into one in-memory archive (Deflate
-/// compression) for the product-export response body. The ONLY I/O here is the in-memory
-/// `Cursor<Vec<u8>>` — no temp files, matching `report_export`'s own "tiny, no persistence"
-/// contract.
-///
-/// `pub`: this is the ONE zip-assembly function — both `export_product` (HTTP) and
-/// `camerata inspect --export` (headless CLI) call it directly over their own
-/// pdf/xlsx/findings.json/README bytes, so the two entry points can never produce
-/// different zip layouts. See `crates/cli/src/inspect_cmd.rs`.
+/// One inspected repository in the manifest's `inspection.repos`: its name and the exact commit
+/// the scan read, so a recipient can tie the findings to a state of the code.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProvenanceRepo {
+    /// `owner/repo`, as on the report cover.
+    pub name: String,
+    /// Full commit SHA (`git rev-parse HEAD`) the scan recorded for this repo. `None` when the
+    /// source dir was not a git repo or the scan could not read it: an honest absence, never a
+    /// guess.
+    pub commit: Option<String>,
+    /// True when the working tree had uncommitted changes at scan time, so `commit` is the base
+    /// the scanned code was modified from, not an exact description of it. Always `false` while
+    /// `commit` is `None` (there is nothing to be dirty relative to).
+    pub dirty: bool,
+}
+
 /// Provenance for the product ZIP's `manifest.json` `inspection` block (design:
-/// `docs/design/2026-10-20_machine-readable-exports.md`). The caller fills what it has; the hard
-/// fields are `Option` so the manifest's SHAPE is always complete even before every value is
-/// wired. `engine_version` is not here — the manifest fills it from the server crate's own
-/// `CARGO_PKG_VERSION`, so it can never drift from the binary that produced the package.
+/// `docs/design/2026-10-20_machine-readable-exports.md`). The hard fields are `Option` so the
+/// manifest's SHAPE is always complete even when a value was not recorded. `engine_version` is
+/// not here: the manifest fills it from the server crate's own `CARGO_PKG_VERSION`, so it can
+/// never drift from the binary that produced the package.
+///
+/// Both export entry points (`export_product`, `camerata inspect --export`) build this through
+/// [`crate::client_provenance::export_provenance`], the one place that fills every field.
 #[derive(Debug, Clone, Default)]
 pub struct ManifestProvenance {
-    /// Repositories inspected (names), from the report cover.
-    pub repos: Vec<String>,
+    /// Repositories inspected, each with the commit the scan recorded for it.
+    pub repos: Vec<ProvenanceRepo>,
     /// ISO/human generated-at, from the report cover.
     pub generated_at: String,
-    /// The exact commit SHA scanned, when the caller recorded one.
-    pub commit: Option<String>,
-    /// A deterministic content digest of the rule corpus, when computed.
+    /// A deterministic content digest of the rule corpus, when computed
+    /// ([`camerata_rules::corpus_version`]).
     pub corpus_version: Option<String>,
-    /// The client-visible staleness date ("rules last reviewed on …"), from the corpus
-    /// freshness watermark. `None` until the first confirmed sweep — an honest absence, never a
-    /// fabricated date.
+    /// The client-visible staleness date ("rules last reviewed on …"): the oldest effective
+    /// review date across the rules the scan used
+    /// (assembled in [`crate::client_provenance`]). `None` while any used rule has never
+    /// been reviewed: an honest absence, never a fabricated date.
     pub rules_last_reviewed: Option<String>,
 }
 
 impl ManifestProvenance {
-    /// The report cover's repos and generated-at, with every other field absent. The one place
-    /// the two export entry points (`export_product`, `camerata inspect --export`) seed their
-    /// provenance, so they cannot seed it differently. Callers fill `commit`, `corpus_version`
-    /// and `rules_last_reviewed` on the result when they have them.
+    /// The report cover's repos and generated-at, with each repo's commit taken from the cover's
+    /// `audited_refs` (the git identity the scan recorded), and `corpus_version` and
+    /// `rules_last_reviewed` absent. Callers that have the corpus fill those two through
+    /// [`crate::client_provenance::export_provenance`].
     pub fn from_cover(cover: &crate::report_export::CoverJson) -> Self {
+        let repos = cover
+            .repos
+            .iter()
+            .map(|name| {
+                // The first ref for this repo that actually recorded a commit.
+                let recorded = cover
+                    .audited_refs
+                    .iter()
+                    .find(|r| r.repo == *name && r.sha.is_some());
+                ProvenanceRepo {
+                    name: name.clone(),
+                    commit: recorded.and_then(|r| r.sha.clone()),
+                    dirty: recorded.is_some_and(|r| r.dirty),
+                }
+            })
+            .collect();
         Self {
-            repos: cover.repos.clone(),
+            repos,
             generated_at: cover.generated_at.clone(),
             ..Self::default()
         }
@@ -16569,9 +16597,19 @@ impl ManifestProvenance {
     /// `null` (the field always exists, so a consumer can tell "not recorded" from "not
     /// supported"). Rendered from the same fields as [`Self::readme_lines`].
     pub fn inspection_json(&self) -> serde_json::Value {
+        let repos: Vec<serde_json::Value> = self
+            .repos
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "name": r.name,
+                    "commit": r.commit,
+                    "dirty": r.dirty,
+                })
+            })
+            .collect();
         serde_json::json!({
-            "repos": self.repos,
-            "commit": self.commit,
+            "repos": repos,
             "engine_version": self.engine_version(),
             "corpus_version": self.corpus_version,
             "rules_last_reviewed": self.rules_last_reviewed,
@@ -16584,13 +16622,21 @@ impl ManifestProvenance {
     /// than no line. Gate 7 (`tests/product_export_manifest_gates.rs`) holds this equal to the
     /// manifest.
     pub fn readme_lines(&self) -> String {
+        let names: Vec<&str> = self.repos.iter().map(|r| r.name.as_str()).collect();
         let mut out = format!(
             "Repos inspected: {}\nGenerated: {}\n",
-            self.repos.join(", "),
+            names.join(", "),
             self.generated_at
         );
-        if let Some(commit) = &self.commit {
-            out.push_str(&format!("Commit: {commit}\n"));
+        for repo in &self.repos {
+            if let Some(commit) = &repo.commit {
+                let note = if repo.dirty {
+                    " (the working tree had uncommitted changes)"
+                } else {
+                    ""
+                };
+                out.push_str(&format!("Commit ({}): {commit}{note}\n", repo.name));
+            }
         }
         out.push_str(&format!("Engine version: {}\n", self.engine_version()));
         if let Some(corpus) = &self.corpus_version {
@@ -16684,6 +16730,15 @@ pub fn build_manifest(
     bytes
 }
 
+/// Zip the PDF + xlsx + `findings.json` + README.txt into one in-memory archive (Deflate
+/// compression) for the product-export response body. The ONLY I/O here is the in-memory
+/// `Cursor<Vec<u8>>` — no temp files, matching `report_export`'s own "tiny, no persistence"
+/// contract.
+///
+/// `pub`: this is the ONE zip-assembly function — both `export_product` (HTTP) and
+/// `camerata inspect --export` (headless CLI) call it directly over their own
+/// pdf/xlsx/findings.json/README bytes, so the two entry points can never produce
+/// different zip layouts. See `crates/cli/src/inspect_cmd.rs`.
 pub fn build_product_zip(
     stem: &str,
     pdf_bytes: &[u8],
@@ -25752,6 +25807,48 @@ mod tests {
             .collect()
     }
 
+    /// The corpus-freshness code an artifact builder must never reference: the maintenance
+    /// types, the nag formatter, the marker list, the watermark file, and the one sanctioned
+    /// client-date function (which only the provenance bridge may name).
+    const FRESHNESS_IDENTIFIERS: &[&str] = &[
+        "CorpusFreshness",
+        "FreshnessReport",
+        "format_staleness_nag",
+        "OPERATOR_ONLY_MARKERS",
+        "corpus_freshness",
+        "CORPUS_FRESHNESS",
+        "due_soon",
+        "client_rules_last_reviewed",
+    ];
+
+    /// EXACTLY what `client_provenance.rs` may name: the watermark type and its path (to read
+    /// the file), and the sanctioned function that turns it into the one client-visible date.
+    /// Everything else in [`FRESHNESS_IDENTIFIERS`] (the nag, the report types, the markers, the
+    /// due-soon logic) stays forbidden there too. Widening this list is widening what a client
+    /// artifact can be told about maintenance state; it needs a design decision, not a test edit.
+    const SANCTIONED_BRIDGE_IDENTIFIERS: &[&str] = &[
+        "CorpusFreshness",
+        "corpus_freshness_path",
+        "client_rules_last_reviewed",
+    ];
+
+    /// The [`FRESHNESS_IDENTIFIERS`] that appear in `src`, after setting aside the identifiers
+    /// in `sanctioned`. A source that names only sanctioned identifiers returns empty. Longer
+    /// sanctioned names are removed first so one never leaves a fragment of another behind.
+    fn freshness_identifiers_in(src: &str, sanctioned: &[&str]) -> Vec<&'static str> {
+        let mut sanctioned: Vec<&str> = sanctioned.to_vec();
+        sanctioned.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        let mut remaining = src.to_string();
+        for id in sanctioned {
+            remaining = remaining.replace(id, "");
+        }
+        FRESHNESS_IDENTIFIERS
+            .iter()
+            .copied()
+            .filter(|id| remaining.contains(id))
+            .collect()
+    }
+
     /// Every file in a zip as `(path, lossy text)`, recursing into nested zip containers (the
     /// xlsx inside the product zip is itself a zip of XML parts, and its strings live in there).
     fn artifact_texts(zip_bytes: &[u8], prefix: &str, out: &mut Vec<(String, String)>) {
@@ -25878,7 +25975,33 @@ mod tests {
             .expect("json builds"),
         );
         let stem = report_filename_stem(&report);
-        let readme = product_export_readme(&stem, &ManifestProvenance::from_cover(&json.cover));
+        // The package's provenance comes through the one sanctioned bridge, against a watermark
+        // whose domain is OVERDUE (the case the operator nag is written for). The manifest and
+        // README then carry the one client-visible date, and the scan below proves nothing else
+        // about maintenance state came with it.
+        let mut audited = report.as_scan_report().clone();
+        audited.provenance.audited_rule_ids = vec!["SEC-NO-HARDCODED-SECRETS-1".to_string()];
+        let mut watermarked_corpus = camerata_rules::RuleSet::default();
+        watermarked_corpus.push(camerata_rules::bare_rule(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "sec",
+        ));
+        let overdue = camerata_rules::CorpusFreshness::parse(
+            "warn_after_days = 1\n[confirmed]\nsec = \"2020-01-01\"\n",
+        )
+        .expect("watermark parses");
+        let provenance = crate::client_provenance::export_provenance_with(
+            &audited,
+            &json.cover,
+            Some(&watermarked_corpus),
+            Some(&overdue),
+        );
+        assert_eq!(
+            provenance.rules_last_reviewed.as_deref(),
+            Some("2020-01-01"),
+            "anti-vacuity: the sanctioned date is in the package under test"
+        );
+        let readme = product_export_readme(&stem, &provenance);
         let zip_bytes = build_product_zip(
             &stem,
             b"%PDF-1.7 stand-in",
@@ -25886,7 +26009,7 @@ mod tests {
             &findings_bytes,
             &readme,
             &extra,
-            &ManifestProvenance::default(),
+            &provenance,
         )
         .expect("zip assembles");
 
@@ -25938,15 +26061,10 @@ mod tests {
         );
 
         // ── Source-level: the export builders do not even reference the freshness code ────
-        const FRESHNESS_IDENTIFIERS: &[&str] = &[
-            "CorpusFreshness",
-            "FreshnessReport",
-            "format_staleness_nag",
-            "OPERATOR_ONLY_MARKERS",
-            "corpus_freshness",
-            "CORPUS_FRESHNESS",
-            "due_soon",
-        ];
+        //
+        // Exactly one file may touch it: `client_provenance.rs`, the bridge that produces the
+        // single client-visible review date, and only through `SANCTIONED_BRIDGE_IDENTIFIERS`.
+        // Every artifact builder, and both export callers, name none of it.
         let lib_src = include_str!("lib.rs");
         let start = lib_src
             .find("async fn export_product(")
@@ -25963,17 +26081,102 @@ mod tests {
                 "lib.rs (export_product .. build_product_zip)",
                 export_section,
             ),
+            (
+                "cli inspect_cmd.rs (the headless export caller)",
+                include_str!("../../cli/src/inspect_cmd.rs"),
+            ),
         ] {
-            let found: Vec<&&str> = FRESHNESS_IDENTIFIERS
-                .iter()
-                .filter(|id| src.contains(**id))
-                .collect();
+            let found = freshness_identifiers_in(src, &[]);
             assert!(
                 found.is_empty(),
                 "{name} references corpus-freshness code {found:?}; freshness is operator-only \
-                 and must not be wired into a client-artifact builder"
+                 and must not be wired into a client-artifact builder or an export caller. The \
+                 only sanctioned path is client_provenance::export_provenance"
             );
         }
+        let bridge = include_str!("client_provenance.rs");
+        let found = freshness_identifiers_in(bridge, SANCTIONED_BRIDGE_IDENTIFIERS);
+        assert!(
+            found.is_empty(),
+            "client_provenance.rs references operator-only freshness code {found:?}; it may \
+             name only {SANCTIONED_BRIDGE_IDENTIFIERS:?}"
+        );
+        // Anti-vacuity: the bridge really does use every sanctioned identifier, so the
+        // allowance above is a description of the code and not a blanket pass.
+        for id in SANCTIONED_BRIDGE_IDENTIFIERS {
+            assert!(
+                bridge.contains(id),
+                "client_provenance.rs no longer uses {id}; drop it from the allowance"
+            );
+        }
+    }
+
+    /// The gate's scanner has to be able to FAIL. These pin its behavior on fixture sources:
+    /// the sanctioned date path passes in the bridge, and nothing else does, in the bridge or
+    /// anywhere. Without this, loosening the allowance for the one date would also silently
+    /// loosen the gate for the nag text it exists to keep out.
+    #[test]
+    fn freshness_gate_allows_only_the_sanctioned_date_path() {
+        // Exactly the sanctioned names, no more: pinned so a widened allowance shows in review.
+        assert_eq!(
+            SANCTIONED_BRIDGE_IDENTIFIERS,
+            &[
+                "CorpusFreshness",
+                "corpus_freshness_path",
+                "client_rules_last_reviewed"
+            ]
+        );
+        // Every sanctioned name is itself in the forbidden-in-builders list.
+        for id in SANCTIONED_BRIDGE_IDENTIFIERS {
+            assert!(
+                freshness_identifiers_in(id, &[]).len() == 1,
+                "{id} must be forbidden outside the bridge"
+            );
+        }
+
+        // The sanctioned path, as the bridge writes it, is clean in the bridge...
+        let sanctioned_only =
+            "let w = CorpusFreshness::load(&camerata_rules::corpus_freshness_path());\n\
+                               client_rules_last_reviewed(&w, &used)";
+        assert_eq!(
+            freshness_identifiers_in(sanctioned_only, SANCTIONED_BRIDGE_IDENTIFIERS),
+            Vec::<&str>::new()
+        );
+        // ...and is a violation anywhere else.
+        assert_eq!(
+            freshness_identifiers_in(sanctioned_only, &[]),
+            vec![
+                "CorpusFreshness",
+                "corpus_freshness",
+                "client_rules_last_reviewed"
+            ]
+        );
+
+        // The nag, banner and report vocabulary stays forbidden even in the bridge: each of
+        // these, appended to an otherwise sanctioned source, is caught.
+        for operator_only in [
+            "format_staleness_nag(&report)",
+            "FreshnessReport",
+            "OPERATOR_ONLY_MARKERS",
+            "CORPUS_FRESHNESS.toml",
+            "w.due_soon(today)",
+            "payload[\"corpus_freshness\"]",
+        ] {
+            let src = format!("{sanctioned_only}\n{operator_only}");
+            assert!(
+                !freshness_identifiers_in(&src, SANCTIONED_BRIDGE_IDENTIFIERS).is_empty(),
+                "the bridge scan must catch {operator_only:?}"
+            );
+        }
+
+        // A sanctioned name does not shield an operator one it merely sits next to.
+        assert_eq!(
+            freshness_identifiers_in(
+                "CorpusFreshness::load(p); let r: FreshnessReport = w.report();",
+                SANCTIONED_BRIDGE_IDENTIFIERS
+            ),
+            vec!["FreshnessReport"]
+        );
     }
 
     /// Gate 6 (coverage clause) of `docs/design/2026-10-20_machine-readable-exports.md`: the
@@ -25988,7 +26191,11 @@ mod tests {
             ("json/all-findings.json".to_string(), b"[]".to_vec()),
         ];
         let prov = ManifestProvenance {
-            repos: vec!["acme-portal".to_string()],
+            repos: vec![ProvenanceRepo {
+                name: "acme-portal".to_string(),
+                commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+                dirty: false,
+            }],
             generated_at: "2026-10-21T00:00:00Z".to_string(),
             ..Default::default()
         };
@@ -26018,7 +26225,11 @@ mod tests {
         let manifest: serde_json::Value = serde_json::from_str(&manifest_str).unwrap();
 
         // Provenance block present and populated from the caller.
-        assert_eq!(manifest["inspection"]["repos"][0], "acme-portal");
+        assert_eq!(manifest["inspection"]["repos"][0]["name"], "acme-portal");
+        assert_eq!(
+            manifest["inspection"]["repos"][0]["commit"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
         assert!(manifest["inspection"]["engine_version"]
             .as_str()
             .unwrap()

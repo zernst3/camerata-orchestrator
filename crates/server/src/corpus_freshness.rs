@@ -13,7 +13,8 @@
 //! Freshness is the operator's maintenance concern. Nothing in this module may reach a client
 //! artifact (PDF, xlsx, CSV/JSON, README); `tests::no_corpus_freshness_text_reaches_any_client_
 //! artifact` in `lib.rs` is the gate. The client-visible "rules last reviewed" date in the
-//! export manifest is a separate, deliberate field and is unchanged.
+//! export manifest is a separate, deliberate field: it is produced by `client_provenance`, the
+//! one file the gate lets name the sanctioned date function, and not by anything in this module.
 
 use std::path::Path;
 

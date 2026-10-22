@@ -542,7 +542,11 @@ async fn regenerate_sample_report() {
         xlsx_export::build_json_exports(&sealed_for_zip, &dispositions, Some(&corpus), &opts)
             .expect("sample json exports"),
     );
-    let provenance = camerata_server::ManifestProvenance::from_cover(&json.cover);
+    let provenance = camerata_server::client_provenance::export_provenance(
+        &sealed_for_zip,
+        &json.cover,
+        Some(&corpus),
+    );
     let readme = camerata_server::product_export_readme("camerata-sample-audit", &provenance);
     let zip_bytes = camerata_server::build_product_zip(
         "camerata-sample-audit",
