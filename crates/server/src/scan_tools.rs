@@ -3896,11 +3896,17 @@ def get_user_safe_constant():
     /// `eslint` binary on PATH is not enough here (unlike `which_semgrep`, which only
     /// needs semgrep itself): the assertion below needs `eslint-plugin-react-hooks`
     /// registered, which only Camerata's OWN managed workspace + bundled config provide.
-    fn cached_eslint_workspace_with_react_hooks_plugin() -> Option<std::path::PathBuf> {
+    ///
+    /// READ-ONLY by construction: it asks the full health probe
+    /// ([`tool_provisioning::eslint_is_provisioned`]) and returns `None` for a workspace that is
+    /// stale or half-installed, so the live test SKIPS rather than driving a re-provision. A test
+    /// process is also refused provisioning into the real tooling dir outright (see
+    /// `tool_provisioning::refuse_real_tooling_in_test_process`); this probe is what keeps the
+    /// skip decision honest instead of letting the refusal surface as a confusing test failure.
+    async fn cached_eslint_workspace_with_react_hooks_plugin() -> Option<std::path::PathBuf> {
         let tooling = tool_provisioning::tooling_dir()?;
         let workspace = tool_provisioning::eslint_workspace_dir(&tooling);
-        let bin = tool_provisioning::eslint_bin(&workspace);
-        if !bin.exists() {
+        if !tool_provisioning::eslint_is_provisioned(&workspace).await {
             return None;
         }
         let plugin_marker = workspace
@@ -3921,7 +3927,10 @@ def get_user_safe_constant():
     /// eslint workspace with the react-hooks plugin is cached on this machine.
     #[tokio::test]
     async fn live_eslint_detects_a_real_exhaustive_deps_violation() {
-        if cached_eslint_workspace_with_react_hooks_plugin().is_none() {
+        if cached_eslint_workspace_with_react_hooks_plugin()
+            .await
+            .is_none()
+        {
             eprintln!(
                 "skipping live_eslint_detects_a_real_exhaustive_deps_violation: no cached \
                  Camerata eslint workspace with eslint-plugin-react-hooks provisioned on this \
@@ -4101,7 +4110,10 @@ export function Thing({ id }) {
     #[tokio::test]
     async fn live_eslint_reports_a_conditional_hook_and_a_missing_dependency_once_and_spares_their_safe_twins(
     ) {
-        if cached_eslint_workspace_with_react_hooks_plugin().is_none() {
+        if cached_eslint_workspace_with_react_hooks_plugin()
+            .await
+            .is_none()
+        {
             eprintln!(
                 "skipping live_eslint_reports_a_conditional_hook_and_a_missing_dependency_once_\
                  and_spares_their_safe_twins: no cached Camerata eslint workspace with \
@@ -4196,13 +4208,14 @@ export function Thing({ id }) {
     /// the bundled flat config, nothing more (unlike
     /// `cached_eslint_workspace_with_react_hooks_plugin`, this test needs no plugin: it uses
     /// CORE eslint rules precisely so it exercises the formatter/plumbing axis in isolation).
-    fn cached_eslint_workspace() -> Option<std::path::PathBuf> {
+    ///
+    /// READ-ONLY, like `cached_eslint_workspace_with_react_hooks_plugin`: it uses the full health
+    /// probe, so a stale or half-installed workspace makes the live test skip instead of
+    /// triggering (or racing) a re-provision of the shared tree.
+    async fn cached_eslint_workspace() -> Option<std::path::PathBuf> {
         let tooling = tool_provisioning::tooling_dir()?;
         let workspace = tool_provisioning::eslint_workspace_dir(&tooling);
-        if !tool_provisioning::eslint_bin(&workspace).exists() {
-            return None;
-        }
-        if !tool_provisioning::eslint_config_path(&workspace).exists() {
+        if !tool_provisioning::eslint_is_provisioned(&workspace).await {
             return None;
         }
         Some(workspace)
@@ -4224,7 +4237,7 @@ export function Thing({ id }) {
     /// eslint workspace is cached on this machine — it never provisions over the network.
     #[tokio::test]
     async fn req_c11_live_eslint_json_formatter_finds_what_the_npm_sarif_formatter_could_not() {
-        let Some(workspace) = cached_eslint_workspace() else {
+        let Some(workspace) = cached_eslint_workspace().await else {
             eprintln!(
                 "skipping req_c11_live_eslint_json_formatter_finds_what_the_npm_sarif_\
                  formatter_could_not: no cached Camerata eslint workspace on this machine"

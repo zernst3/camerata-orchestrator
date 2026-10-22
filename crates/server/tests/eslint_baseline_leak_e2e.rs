@@ -17,12 +17,16 @@ use std::path::Path;
 use camerata_server::ai_audit::ScanMode;
 use camerata_server::onboard::{self, SelectedRule};
 
-fn workspace_with_hooks_plugin_is_cached() -> bool {
+/// READ-ONLY probe of the shared workspace: the full health probe (binary answers, every pinned
+/// package installed, config current), so a stale or half-installed workspace makes this test
+/// skip instead of letting `audit_repos` drive a re-provision of the tree every other scan and
+/// test is using. (A test process is also refused provisioning into the real tooling dir.)
+async fn workspace_with_hooks_plugin_is_cached() -> bool {
     let Some(tooling) = camerata_server::tool_provisioning::tooling_dir() else {
         return false;
     };
     let workspace = camerata_server::tool_provisioning::eslint_workspace_dir(&tooling);
-    camerata_server::tool_provisioning::eslint_bin(&workspace).exists()
+    camerata_server::tool_provisioning::eslint_is_provisioned(&workspace).await
         && workspace
             .join("node_modules")
             .join("eslint-plugin-react-hooks")
@@ -46,7 +50,7 @@ fn write(root: &Path, rel: &str, content: &str) {
 
 #[tokio::test]
 async fn a_scan_that_selects_only_the_hooks_rules_reports_no_baseline_eslint_rows() {
-    if !workspace_with_hooks_plugin_is_cached() {
+    if !workspace_with_hooks_plugin_is_cached().await {
         eprintln!(
             "skipping: no cached Camerata eslint workspace with eslint-plugin-react-hooks on this \
              machine (this test never provisions over the network)"
