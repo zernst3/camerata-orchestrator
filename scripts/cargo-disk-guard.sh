@@ -21,7 +21,13 @@
 #   < TIER2_GIB     delete target/*/incremental and target/release in idle repos
 #   < TIER3_GIB     delete the whole target/ of every idle repo (full rebuild next time)
 #
-# Usage: scripts/cargo-disk-guard.sh [--dry-run]
+# Usage: scripts/cargo-disk-guard.sh [--dry-run] [--throttle]
+#
+# macOS privacy (TCC): a launchd job cannot read ~/Documents unless the executable it runs
+# (/bin/bash here) has Full Disk Access. Without it every scheduled run logs "Operation not
+# permitted" and does nothing. The weekly cargo-sweep job had the same silent failure. Either grant
+# Full Disk Access (System Settings > Privacy & Security > Full Disk Access), or trigger this from
+# a Claude Code hook with --throttle, which runs inside an already-permitted process.
 
 set -u
 
@@ -36,7 +42,26 @@ VOLUME="${CARGO_GUARD_VOLUME:-/System/Volumes/Data}"
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 DRY_RUN=0
-[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+THROTTLE=0
+for a in "$@"; do
+    case "$a" in
+        --dry-run) DRY_RUN=1 ;;
+        # --throttle: exit immediately if a run finished in the last 30 minutes. Lets a frequent
+        # trigger (a Claude Code hook that fires every turn) call this cheaply.
+        --throttle) THROTTLE=1 ;;
+    esac
+done
+STAMP="${CARGO_GUARD_STAMP:-$HOME/Library/Caches/cargo-disk-guard.stamp}"
+if [ "$THROTTLE" = 1 ] && [ -f "$STAMP" ] && [ -n "$(find "$STAMP" -mmin -30 2>/dev/null)" ]; then
+    exit 0
+fi
+# A second concurrent run (launchd + hook) would only duplicate work; skip if one is running.
+LOCK="${STAMP}.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+    [ -n "$(find "$LOCK" -mmin -60 2>/dev/null)" ] && exit 0
+    rmdir "$LOCK" 2>/dev/null; mkdir "$LOCK" 2>/dev/null || exit 0
+fi
+trap 'rmdir "$LOCK" 2>/dev/null; [ "$DRY_RUN" = 1 ] || touch "$STAMP"' EXIT
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') cargo-disk-guard: $*"; }
 
