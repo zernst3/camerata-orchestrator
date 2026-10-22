@@ -2859,6 +2859,89 @@ mod tests {
         }
     }
 
+    // ── review fixes: test code ────────────────────────────────────────────────
+
+    #[test]
+    fn python_test_modules_are_not_counted_cases_17_18_51_98() {
+        // 17: Django's tests.py exercising the route the app also uses.
+        let v = run_pairs(vec![
+            (
+                "orders/client.py",
+                "def fetch(c):\n    return c.get('/api/v1/orders')\n",
+            ),
+            (
+                "orders/tests.py",
+                "def t(c):\n    c.get('/api/v1/orders')\n",
+            ),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        // 18: pytest's test_*.py.
+        let v = run_pairs(vec![
+            (
+                "orders/client.py",
+                "def fetch(c):\n    return c.get('/api/v1/orders')\n",
+            ),
+            (
+                "orders/test_client.py",
+                "def test_x(c):\n    c.get('/api/v1/orders')\n",
+            ),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        // 51: a status literal asserted in tests.py.
+        let v = run_pairs(vec![
+            (
+                "orders/services.py",
+                "def status(x):\n    return 'in-progress'\n",
+            ),
+            (
+                "orders/tests.py",
+                "def test_a():\n    assert status('x') == 'in-progress'\n",
+            ),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        // 98: tests.py, a tests/ directory and one real use: one copy.
+        let c = "c.get('/api/v1/orders')\n";
+        let v = run_pairs(vec![
+            ("orders/tests.py", c),
+            ("orders/tests/test_x.py", c),
+            ("orders/x.py", c),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        // The control: two ordinary modules are flagged.
+        let v = run_pairs(vec![("orders/x.py", c), ("orders/y.py", c)]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
+    #[test]
+    fn rust_test_only_code_is_not_counted_cases_27_56_78() {
+        // 27: a value asserted inside an inline test module.
+        let v = run_pairs(vec![
+            ("src/api.rs", "pub fn publish_all() { publish(\"orders-high\"); }\n"),
+            (
+                "src/worker.rs",
+                "pub fn run() { subscribe(Q); }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { let expected = \"orders-high\"; assert!(expected.len() > 0); }\n}\n",
+            ),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        // 56: two files whose only copy is inside a test module.
+        let t = "#[cfg(test)]\nmod tests { fn t() { let q = \"orders-high\"; } }\n";
+        let v = run_pairs(vec![("src/a.rs", t), ("src/b.rs", t)]);
+        assert!(v.is_empty(), "{v:#?}");
+        // 78: a constant defined in a test module is not the application's home.
+        let v = run_pairs(vec![
+            (
+                "src/a.rs",
+                "#[cfg(test)]\nmod tests { const Q: &str = \"orders-high\"; }\n",
+            ),
+            ("src/b.rs", "fn b() { publish(\"orders-high\"); }\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        // The control: the same copies outside test code are flagged.
+        let plain = "fn t() { let q = \"orders-high\"; }\n";
+        let v = run_pairs(vec![("src/a.rs", plain), ("src/b.rs", plain)]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
     // ── contract ───────────────────────────────────────────────────────────────
 
     #[test]

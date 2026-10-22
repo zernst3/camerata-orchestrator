@@ -444,6 +444,54 @@ fn callee_of_path(func: &syn::Expr) -> Option<(String, String)> {
     Some((last, render_receiver(func)))
 }
 
+/// Whether an attribute marks the item it sits on as test-only: `#[test]` (or a runner's
+/// `#[tokio::test]`, `#[rstest]`) or a `cfg` that holds only under test (`cfg(test)`,
+/// `cfg(all(test, ..))`; `cfg(not(test))` is the opposite and does not count).
+fn is_test_attribute(attr: &syn::Attribute) -> bool {
+    let path = attr.path();
+    if path
+        .segments
+        .last()
+        .is_some_and(|seg| seg.ident == "test" || seg.ident == "rstest")
+    {
+        return true;
+    }
+    if !path.is_ident("cfg") {
+        return false;
+    }
+    match &attr.meta {
+        syn::Meta::List(list) => tokens_require_test(list.tokens.clone(), false),
+        _ => false,
+    }
+}
+
+/// Whether `test` appears in `tokens` outside any `not(..)`.
+fn tokens_require_test(tokens: proc_macro2::TokenStream, negated: bool) -> bool {
+    let mut previous_not = false;
+    for tree in tokens {
+        match tree {
+            proc_macro2::TokenTree::Ident(id) => {
+                if id == "test" && !negated {
+                    return true;
+                }
+                previous_not = id == "not";
+            }
+            proc_macro2::TokenTree::Group(g) => {
+                if tokens_require_test(g.stream(), negated || previous_not) {
+                    return true;
+                }
+                previous_not = false;
+            }
+            _ => previous_not = false,
+        }
+    }
+    false
+}
+
+fn is_test_only(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(is_test_attribute)
+}
+
 impl<'ast> Visit<'ast> for LiteralVisitor {
     // A macro body is a bare token stream: nothing in it has a position the guards could use.
     fn visit_macro(&mut self, _node: &'ast syn::Macro) {}
@@ -463,7 +511,36 @@ impl<'ast> Visit<'ast> for LiteralVisitor {
         self.block_depth -= 1;
     }
 
+    // Test-only code (`#[cfg(test)]` modules, `#[test]` fns) is not application code: a value
+    // asserted in a test is not a copy of the application's constant.
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if !is_test_only(&node.attrs) {
+            syn::visit::visit_item_mod(self, node);
+        }
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if !is_test_only(&node.attrs) {
+            syn::visit::visit_item_fn(self, node);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if !is_test_only(&node.attrs) {
+            syn::visit::visit_impl_item_fn(self, node);
+        }
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        if !is_test_only(&node.attrs) {
+            syn::visit::visit_item_impl(self, node);
+        }
+    }
+
     fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
+        if is_test_only(&node.attrs) {
+            return;
+        }
         for attr in &node.attrs {
             self.visit_attribute(attr);
         }
@@ -472,6 +549,9 @@ impl<'ast> Visit<'ast> for LiteralVisitor {
     }
 
     fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {
+        if is_test_only(&node.attrs) {
+            return;
+        }
         for attr in &node.attrs {
             self.visit_attribute(attr);
         }
@@ -1185,6 +1265,52 @@ mod tests {
             "",
         ] {
             let _ = lits(src);
+        }
+    }
+
+    // ── test-only code is not read ────────────────────────────────────────────
+
+    #[test]
+    fn literal_cfg_test_modules_and_test_fns_are_not_read() {
+        for src in [
+            "#[cfg(test)]\nmod tests { fn t() { let q = \"orders-high\"; } }\n",
+            "#[cfg(test)]\nmod tests { const Q: &str = \"orders-high\"; }\n",
+            "#[cfg(all(test, feature = \"x-y\"))]\nmod tests { fn t() { g(\"orders-high\"); } }\n",
+            "#[test]\nfn t() { g(\"orders-high\"); }\n",
+            "#[tokio::test]\nasync fn t() { g(\"orders-high\"); }\n",
+            "#[rstest]\n#[test]\nfn t() { g(\"orders-high\"); }\n",
+            "struct S;\nimpl S {\n    #[test]\n    fn t() { g(\"orders-high\"); }\n}\n",
+            "#[cfg(test)]\nimpl S { fn t() { g(\"orders-high\"); } }\n",
+            "#[cfg(test)]\nconst Q: &str = \"orders-high\";\n",
+            "#[cfg(test)]\nstatic Q: &str = \"orders-high\";\n",
+            "#[cfg(test)]\nfn helper() { g(\"orders-high\"); }\n",
+        ] {
+            assert!(
+                lits(src).iter().all(|l| l.value != "orders-high"),
+                "{src}: {:#?}",
+                lits(src)
+            );
+        }
+    }
+
+    #[test]
+    fn literal_code_outside_test_items_is_still_read() {
+        for src in [
+            "fn f() { g(\"orders-high\"); }\n#[cfg(test)]\nmod tests { fn t() {} }\n",
+            "#[cfg(not(test))]\nfn f() { g(\"orders-high\"); }\n",
+            "#[cfg(feature = \"test\")]\nfn f() { g(\"orders-high\"); }\n",
+            "#[cfg(any(unix, windows))]\nfn f() { g(\"orders-high\"); }\n",
+            "#[derive(Debug)]\nfn f() { g(\"orders-high\"); }\n",
+            "#[cfg(test)]\nmod tests {}\nfn f() { g(\"orders-high\"); }\n",
+        ] {
+            assert_eq!(
+                lits(src)
+                    .iter()
+                    .filter(|l| l.value == "orders-high")
+                    .count(),
+                1,
+                "{src}"
+            );
         }
     }
 }
