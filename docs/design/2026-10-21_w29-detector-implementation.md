@@ -813,10 +813,27 @@ safe-twin test; the places the build chose something the text above left open or
   `NOISE_DIRS` and `PRUNED_DIRS`; this also fixed the secrets floor not reading `bin/` scripts.
   `reachable_from` is left unchanged (a new `reachable_from_all` sits beside it). A scan whose
   REFERENCE list hit its own cap is treated like a truncated one.
-- **Layer 2 (open question)**: the rule runs at the write-time gate too (`NativeArchCheckRunner`
-  runs any armed checker). A file an agent has just written and not yet wired in is reported,
-  which may bounce multi-step work. Whether to mark the rule scan/CI-tier only is the owner's
-  call; nothing here changes it.
+- **Layer 2: decided, not armed (orchestrator, 2026-10-21).** `ArchChecker::runs_at_write_time`
+  (default `true`) is `false` for the dead-code checker, and `NativeArchCheckRunner` skips such
+  checkers, so the write-time gate never reports ARCH-DEAD-CODE-1. A story may legitimately end
+  with scaffolding that nothing imports yet, and the bounce would teach agents to paste
+  `keep-file:` markers to make the rule go away. The scan and the CI binary still run it.
+- **Review fixes (2026-10-21).** Tool folders `migrations`, `seeders`, `seeds` and `deploy` are
+  never candidates at any depth; Rails importmap `pin_all_from` and an Ember `app/` folder are
+  loaded by convention; `.mjs/.cjs/.mts/.cts` are audited code and generated code
+  (`.gen.*`, `.generated.*`, `generated/`, `__generated__/`) is handed to the checker as reference
+  text instead of dropped, since codegen is often the only importer; a folder holding a non-source
+  file that live code still names is never rolled up; `instrumentation-client.*` and
+  `mdx-components.*` are config-shaped; `spec/`, `__fixtures__/` and `*_spec` are test paths;
+  ERB and other-language sources are in the interest globs; `bin/x64/Debug` and
+  `bin/Any CPU/Release` are pruned as .NET output; liveness is one linear worklist; a main-guard
+  window no longer splits a multibyte character; a rule withheld on a truncated scan carries
+  its own ledger note ("the scan stopped at its file limit"), not the config-gated one.
+- **Coverage note (recorded, not changed).** R7 roots a whole package when a manifest entry
+  (`main`, `bin`, `exports`, `types`) names a file the scan cannot see, which includes any
+  `main: "dist/index.js"` whose output is not committed. That makes the rule silent on many
+  `npm init` style repositories. This is the safe direction (false negative) and is accepted for
+  v1; a later version could resolve a missing `dist/` entry to its `src/` source.
 
 ## ARCH-SHARED-CONSTANT-1: the algorithm and its traps
 

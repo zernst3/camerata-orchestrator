@@ -1718,8 +1718,8 @@ Implementation note: `is_governance_or_corpus_artifact`, `is_self_referential_sn
 (`multilang.rs`, the Layer-2 and `detect_languages` feed, shared with `arch_check_runner`) used to
 prune any directory named `bin`. That hid Rust `src/bin/*.rs` targets and Node or shell scripts, and
 it meant the secrets floor never read a credential committed in a `bin/` deploy script. Now only
-.NET build output is pruned: a `bin` segment directly followed by `Debug` or `Release`
-(`DOTNET_BUILD_CONFIGS`; `files::is_noise_path` and `multilang::is_pruned_dir`). An explicit
+.NET build output is pruned: a `Debug` or `Release` folder anywhere below a `bin`
+segment (`bin/Debug`, `bin/x64/Debug`; `DOTNET_BUILD_CONFIGS`; `files::is_noise_path` and `multilang::is_pruned_dir`). An explicit
 `CAMERATA_SCAN_EXCLUDE_DIRS=bin` still prunes every `bin/`.
 
 ### The reference-text tier
@@ -1727,8 +1727,9 @@ it meant the secrets floor never read a credential committed in a `bin/` deploy 
 Some rules reason from the ABSENCE of a reference (`ARCH-DEAD-CODE-1`: nothing imports this file, and
 its name appears in no live file), so they must see the files that mention source files without being
 source: HTML, single-file components (`.vue`, `.svelte`, `.astro`), Markdown/MDX, stylesheets,
-template languages and build-runner files (`Makefile`, `Procfile`, `Justfile`). `files.rs` admits
-them (`is_reference_text`, `REFERENCE_TEXT_EXTS`) under the same noise, size and UTF-8 rules into
+template languages and build-runner files (`Makefile`, `Procfile`, `Justfile`), and GENERATED code
+(`.gen.*`, `.generated.*`, `generated/`, `__generated__/`: pruned from the audited list, but often the
+only importer of hand-written files). `files.rs` admits them (`is_reference_text`, `REFERENCE_TEXT_EXTS`) under the same noise, size and UTF-8 rules into
 `ExtractedRepo.reference_files`, a list kept SEPARATE from `files` on purpose:
 
 - the AI digest (`ai_audit::build_digest`) and the secrets floor (`audit_files`) keep reading
@@ -2016,8 +2017,9 @@ surface, framework or tool convention path, computed-load folder, executable scr
 appears as a whole word in a live file, run to a fixed point. Rust is decided separately by the
 `mod`-declaration closure from the crate roots (`extract::rust_syn::mod_decls`). It declares
 `config_unsatisfied_for` for a repo with no source in these languages so a Java repo never reads
-"dead code: clean". It needs the reference-text tier and a complete scan (above), and it runs at the
-Layer-2 gate too, where a newly written file that nothing imports yet would be reported.
+"dead code: clean". It needs the reference-text tier and a complete scan (above). It is a scan and CI
+rule only: `ArchChecker::runs_at_write_time` is `false` for it, so `NativeArchCheckRunner` (Layer 2)
+never runs it and an agent is never bounced for a file it has not wired in yet.
 
 **`opt_in_only` rules** (`CICD-CODEQL-SECURITY-SCAN-1`,
 `CICD-SEMGREP-SECURITY-SCAN-1`) are NEVER auto-recommended or pre-checked in the
