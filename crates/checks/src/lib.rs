@@ -154,6 +154,14 @@ pub mod shared_constant_checker;
 /// `crates/rules/principles/universal/arch-dead-code-1.toml`.
 pub mod dead_code_checker;
 
+/// The candidate producer for `ARCH-SINGLE-SOURCE-LOGIC-1`, `ARCH-NAMING-ONE-CONCEPT-1` and
+/// `UI-SHARED-PRIMITIVE-1` (W29 Wave C, `docs/design/2026-10-21_w29-detector-implementation.md`).
+/// Deliberately NOT registered in [`arch_checker::all_checkers`]: whether a repeated block is
+/// one decision, one concept or one UI mechanism is a judgment, so this module produces
+/// candidates only and the server's advisory seam puts a model judgment between a candidate and
+/// a finding. Reads the shared clone index ([`extract::clone`]).
+pub mod clone_rules;
+
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
 /// checker registry — "Plug point B" in
 /// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.3. Composed into

@@ -74,7 +74,7 @@ const CONFIG_BASENAME_PREFIXES: &[&str] = &[
 
 /// Whether a path is root-level, inside or named like a dot-directory, or shaped like a file a
 /// tool loads by name (`*.config.*`, `*rc.js`, `*.setup.*`, `middleware.*` and the like).
-pub(super) fn is_config_shaped(path: &str) -> bool {
+pub(crate) fn is_config_shaped(path: &str) -> bool {
     if !path.contains('/') {
         return true;
     }
