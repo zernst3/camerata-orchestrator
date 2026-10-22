@@ -1995,8 +1995,9 @@ mod tests {
     /// `DISABLE_SEMGREP_ENV_VAR`'s doc comment) so this doesn't depend on whether semgrep
     /// happens to be installed on the machine running the test.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn run_scan_tools_reports_semgrep_as_attempted_even_when_it_fails() {
-        std::env::set_var(DISABLE_SEMGREP_ENV_VAR, "1");
+        let _env = camerata_test_env::EnvGuard::set(DISABLE_SEMGREP_ENV_VAR, "1");
         let rules = vec![rule_with(
             "SEC-NO-RAW-SQL-CONCAT-1",
             EnforcementKind::Mechanical,
@@ -2014,7 +2015,6 @@ mod tests {
             None,
         )
         .await;
-        std::env::remove_var(DISABLE_SEMGREP_ENV_VAR);
 
         assert!(
             findings.is_empty(),

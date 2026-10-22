@@ -1199,12 +1199,12 @@ mod render_tests {
 mod tests {
     // `CAMERATA_BFF_URL` is a process-global env override (see crate::bff_base()). `cargo test` runs
     // tests on parallel threads, so every Tier-2 test below that sets it carries
-    // `#[serial_test::serial(bff_env)]`, which serializes them crate-wide (and, unlike a std mutex
+    // `#[serial_test::serial(process_env)]`, which serializes them crate-wide (and, unlike a std mutex
     // guard, is safe to hold across the test's `.await`s).
 
     // ── Tier-2: fetch_clarifications_for_story — GET the story's clarifications ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_clarifications_for_story_gets_and_parses() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1220,9 +1220,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let clars = super::fetch_clarifications_for_story("story-9").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(clars.len(), 2, "both clarifications parse");
         assert_eq!(clars[0].id, "c1");
@@ -1233,7 +1232,7 @@ mod tests {
 
     // ── Tier-2: fetch_open_clarifications_for_story — same GET, filters answered ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_open_clarifications_for_story_filters_answered() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1248,9 +1247,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let open = super::fetch_open_clarifications_for_story("story-9").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(
             open.len(),
@@ -1262,7 +1260,7 @@ mod tests {
 
     // ── Tier-2: fetch_all_open_clarifications — GET the cross-story queue ────────
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_all_open_clarifications_gets_and_parses() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1278,9 +1276,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let clars = super::fetch_all_open_clarifications().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(clars.len(), 2);
         assert_eq!(clars[0].question, "Q1");
@@ -1296,7 +1293,7 @@ mod tests {
     // keeps animating through the resumed pass even when answered from the app-wide NEEDS YOU
     // queue rather than the story's own (possibly long-since-unmounted) live-run view.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_all_open_clarifications_parses_run_id_when_present_and_absent() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1311,9 +1308,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let clars = super::fetch_all_open_clarifications().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(clars.len(), 2);
         assert_eq!(
@@ -1329,7 +1325,7 @@ mod tests {
 
     // ── Tier-2: fetch_open_uow_escalations — GET ?open=true, keep subject_kind=="uow" ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_open_uow_escalations_filters_to_uow_subjects() {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1356,9 +1352,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let uow = super::fetch_open_uow_escalations().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(
             uow.len(),
@@ -1371,7 +1366,7 @@ mod tests {
 
     // ── Tier-2: answer_uow_escalation — POST {answer, action}, parse the result ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn answer_uow_escalation_posts_answer_and_action() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1393,9 +1388,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::answer_uow_escalation("esc-7", "Approved: proceed.", "approve").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let out = out.expect("the resolved escalation parses");
         assert_eq!(out.id, "esc-7");
@@ -1417,7 +1411,7 @@ mod tests {
     // the instant the OLD (now `done`) run's poll loop sees it finish. This test proves the
     // wire field survives deserialization end to end.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn answer_uow_escalation_parses_the_resumed_run_id_on_approve() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1435,9 +1429,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::answer_uow_escalation("esc-8", "Approved: proceed.", "approve").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let out = out.expect("the resolved escalation parses");
         assert_eq!(
@@ -1449,7 +1442,7 @@ mod tests {
 
     // ── Tier-2: chat_uow_escalation — POST {message, model}, parse the result ───
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn chat_uow_escalation_posts_message_and_model() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1475,10 +1468,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out =
             super::chat_uow_escalation("esc-3", "Why did this stop?", "claude-sonnet-5").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let out = out.expect("the escalation with the appended turns parses");
         assert_eq!(out.conversation.len(), 2);
@@ -1488,7 +1480,7 @@ mod tests {
 
     // ── Tier-2: answer_clarification — POST {selected, free_text, answered_by} ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn answer_clarification_posts_selected_and_free_text() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1508,14 +1500,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::answer_clarification(
             "clar-2",
             vec!["Postgres".to_string()],
             Some("lean toward managed".to_string()),
         )
         .await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "a 2xx answer is reported as success");
         // `.expect(1)` asserts the exact {selected, free_text, answered_by} body was posted.
@@ -1523,7 +1514,7 @@ mod tests {
 
     // ── Tier-2: answer_clarification — a null free_text serializes to JSON null ─
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn answer_clarification_omits_free_text_as_null() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1543,9 +1534,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::answer_clarification("clar-5", vec!["Yes".to_string()], None).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(
             ok,
@@ -1555,7 +1545,7 @@ mod tests {
 
     // ── Tier-2: answer_clarification — a non-2xx response is reported as false ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn answer_clarification_reports_failure_on_non_2xx() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1567,9 +1557,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::answer_clarification("clar-9", vec!["X".to_string()], None).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(!ok, "a 500 from the answer endpoint is reported as failure");
     }

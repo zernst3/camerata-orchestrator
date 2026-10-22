@@ -36,6 +36,7 @@ members = [
     "crates/deploy",          # Tier-2 BYO-infra publish: DeployTarget seam + local + Azure adapter
     "crates/linter-registry", # citation validator: canonical linter rule-id lists + corpus scan report
     "crates/scaffold",        # Rust-fullstack PWA scaffolder (Part 1): vetted Dioxus-fullstack skeleton + ScaffoldStrategy fit-check seam (docs/plans/2026-07-09_product-owner-head-vibe-mode.md)
+    "crates/test-env",    # TEST SUPPORT ONLY (dev-dependency of env-mutating test suites): EnvGuard RAII env-var override + the `process_env` serial-key discipline test
     "tools/corpus-verifier",  # MAINTAINER-ONLY repo-governance tool: promote rules grounded -> verified via branch + PR. NOT part of the shipped app; never a dependency of any app crate.
 ]
 # `crates/scaffold/templates/skeleton` is an embedded template tree (its Cargo.toml

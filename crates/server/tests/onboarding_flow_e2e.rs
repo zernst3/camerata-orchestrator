@@ -25,7 +25,7 @@ use camerata_server::suppression::{
 
 // `propose_corpus_rules` reads a process-global env var (`CAMERATA_CORPUS_PATH`) and the
 // corpus on disk. Serialize the env-mutating test so it never races a parallel test.
-// The env-mutating test carries `#[serial_test::serial(corpus_env)]`, so it never races a
+// The env-mutating test carries `#[serial_test::serial(process_env)]`, so it never races a
 // parallel test and (unlike a std mutex guard) is safe to hold across its `.await`s.
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -136,7 +136,7 @@ fn scope2_each_flag_independently_gates_its_lane() {
 // ════════════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-#[serial_test::serial(corpus_env)]
+#[serial_test::serial(process_env)]
 async fn scope3_propose_corpus_rules_returns_the_corpus_library() {
     // Write a tiny, self-contained corpus so the proposal is deterministic + isolated from
     // the real bundled corpus. (Hermetic: local temp dir, no network.)
@@ -164,7 +164,7 @@ directive = "Prefer explicit, robust code over terse code."
     )
     .unwrap();
 
-    std::env::set_var("CAMERATA_CORPUS_PATH", dir.path());
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_CORPUS_PATH", dir.path());
 
     // Repos with a `rust` stack: the rust rule is SUGGESTED (recommended + bound to the repo),
     // the universal rule is always present. With repos provided, the full library is returned
@@ -196,7 +196,6 @@ directive = "Prefer explicit, robust code over terse code."
     // No repos at all -> the WHOLE corpus library is still returned (un-suggested), which is
     // the handler's `corpus_rules` all-rules reference path. Same tiny corpus -> our 2 rules.
     let whole = camerata_server::onboard::propose_corpus_rules(&[]).await;
-    std::env::remove_var("CAMERATA_CORPUS_PATH");
     let whole_ids: Vec<&str> = whole.iter().map(|r| r.id.as_str()).collect();
     assert!(
         whole_ids.contains(&"RUST-DOMAIN-1") && whole_ids.contains(&"UNIVERSAL-1"),

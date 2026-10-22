@@ -4302,8 +4302,9 @@ mod tests {
     /// here to stay token-free and prove there is no SERVER-side block independent of the LLM
     /// path at all). `RUST-DOMAIN-7` is a real corpus rule with `default = false`.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn no_default_rule_with_no_chosen_option_does_not_block_the_scan() {
-        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let selected = vec![SelectedRule {
             id: "RUST-DOMAIN-7".to_string(),
@@ -4355,12 +4356,13 @@ mod tests {
     /// that the AI passes are bypassed. (`run_ai_review = false` is exactly the path that skips
     /// every `audit_repo` / deep-tier LLM call, so this test never touches a model.)
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn deterministic_only_runs_floor_and_skips_ai() {
         // Disable the always-on dep-audit pass so this test does not trigger
         // `ensure_osv_scanner` → `download_osv_scanner` (live network request).
         // This test exercises the deterministic floor + scan-mode selector logic,
         // not dep-audit. See `crate::dep_audit::DISABLE_ENV_VAR`.
-        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, _manifest) = audit_repos(
             &sources,
@@ -4401,12 +4403,13 @@ mod tests {
     /// the floor is skipped — the secret is NOT flagged. Pairing AI-off keeps the test from
     /// invoking a model; the assertion isolates the deterministic-floor gate.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn deterministic_off_skips_floor() {
         // Disable the always-on dep-audit pass so this test does not trigger
         // `ensure_osv_scanner` → `download_osv_scanner` (live network request).
         // This test exercises the scan-mode selector (deterministic gate), not dep-audit.
         // See `crate::dep_audit::DISABLE_ENV_VAR`.
-        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, _manifest) = audit_repos(
             &sources,
@@ -4451,11 +4454,12 @@ mod tests {
     /// This is the ordering regression guard: if dep-audit ever drifts back inside
     /// audit_repos, the floor-only assertion will fail.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn audit_repos_does_not_call_dep_audit() {
         // DISABLE_DEP_AUDIT silences the provisioning path in run_dep_audit, but that
         // function is no longer called from audit_repos at all — so this env var is
         // belt-and-suspenders (and matches what real test callers set for isolation).
-        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let jobs = crate::jobs::JobStore::new();
         let jid = jobs.create("audit", None);
@@ -4512,8 +4516,9 @@ mod tests {
     /// (never silently dropped), `blocked` stays FALSE (this is a real partial result, not
     /// "nothing ran"), and the floor still catches the planted secret.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn blocked_resolution_with_deterministic_requested_still_runs_the_floor() {
-        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, manifest) = audit_repos(
             &sources,
@@ -4686,8 +4691,9 @@ mod tests {
     /// no longer any resolution that proceeds on the CLI while claiming an `Api` gate — `Api`
     /// with no key is `Blocked`, full stop.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn api_backend_resolution_never_downgrades_to_cli_silently() {
-        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, _manifest) = audit_repos(
             &sources,
@@ -4744,8 +4750,9 @@ mod tests {
     /// "the AI ran and found nothing". This is the core bug: before this fix the manifest was
     /// indistinguishable from a real AI-covered scan.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn ai_off_run_stamps_manifest_ai_covered_false_but_still_records_fingerprints() {
-        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (_report, manifest) = audit_repos(
             &sources,
@@ -4788,8 +4795,9 @@ mod tests {
     /// exactly like a manually-toggled AI-off run. A blocked project must never poison the cache
     /// with a false "AI found nothing" baseline either.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn blocked_run_stamps_manifest_ai_covered_false() {
-        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, manifest) = audit_repos(
             &sources,
@@ -4835,8 +4843,9 @@ mod tests {
     /// asserts on is pushed unconditionally before the `run_ai_review` gate is even consulted,
     /// so it faithfully proves the `effective_prior`/`partition` decision regardless.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn ai_covered_false_prior_is_ignored_even_when_rules_match() {
-        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (dir, sources) = scratch_repo_with_secret();
         let content = std::fs::read_to_string(dir.path().join("config.rs")).unwrap();
 
@@ -4895,8 +4904,9 @@ mod tests {
     /// `audit_repo` call is skipped entirely (see its own `files.is_empty()` guard) — zero model
     /// calls, proving reuse rather than a fresh audit is what produced the finding.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn ai_covered_true_prior_is_reused_when_rules_and_content_match() {
-        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (dir, sources) = scratch_repo_with_secret();
         let content = std::fs::read_to_string(dir.path().join("config.rs")).unwrap();
 
@@ -4974,8 +4984,9 @@ mod tests {
     /// `ai_covered_false_prior_is_ignored_even_when_rules_match` for why that note still proves
     /// the gate fired.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn legacy_manifest_json_self_heals_through_audit_repos() {
-        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (dir, sources) = scratch_repo_with_secret();
         let content = std::fs::read_to_string(dir.path().join("config.rs")).unwrap();
         let fp = crate::scan_cache::content_fingerprint(&content);

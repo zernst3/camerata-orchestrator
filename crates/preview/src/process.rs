@@ -274,31 +274,32 @@ mod tests {
     use super::*;
 
     #[test]
-    #[serial_test::serial(camerata_dx_bin_env)]
+    #[serial_test::serial(process_env)]
     fn dx_bin_defaults_to_bare_dx_without_override() {
-        std::env::remove_var("CAMERATA_DX_BIN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_DX_BIN");
         assert_eq!(dx_bin(), PathBuf::from("dx"));
     }
 
     #[test]
-    #[serial_test::serial(camerata_dx_bin_env)]
+    #[serial_test::serial(process_env)]
     fn dx_bin_honors_env_override() {
-        std::env::set_var("CAMERATA_DX_BIN", "/opt/homebrew/bin/dx");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DX_BIN", "/opt/homebrew/bin/dx");
         let resolved = dx_bin();
-        std::env::remove_var("CAMERATA_DX_BIN");
         assert_eq!(resolved, PathBuf::from("/opt/homebrew/bin/dx"));
     }
 
     #[test]
-    #[serial_test::serial(camerata_dx_bin_env)]
+    #[serial_test::serial(process_env)]
     fn dx_bin_ignores_a_blank_override() {
-        std::env::set_var("CAMERATA_DX_BIN", "   ");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DX_BIN", "   ");
         let resolved = dx_bin();
-        std::env::remove_var("CAMERATA_DX_BIN");
         assert_eq!(resolved, PathBuf::from("dx"));
     }
 
+    // `PreviewLaunchConfig::new` READS `CAMERATA_DX_BIN` (via `dx_bin()`), so it shares the
+    // key with the tests that mutate it.
     #[test]
+    #[serial_test::serial(process_env)]
     fn launch_config_url_uses_the_configured_port() {
         let cfg = PreviewLaunchConfig::new("/tmp/some-app", 8123);
         assert_eq!(cfg.url(), "http://127.0.0.1:8123/");
@@ -312,6 +313,7 @@ mod tests {
     /// wasm-bindgen-cli on a cold machine, and 5-20s of real compile time per the spike).
     /// Run manually with `cargo test -p camerata-preview -- --ignored spawns_a_real_dx_serve`.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     #[ignore]
     async fn spawns_a_real_dx_serve_and_reports_a_url() {
         let app_dir = PathBuf::from("/Users/zacharyernst/Documents/Repos/itinerary-app");

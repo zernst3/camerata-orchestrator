@@ -1396,7 +1396,7 @@ mod tests {
     // future server-response shape change will fail these before it reaches prod.
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_design_blank_parses_design_id() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1412,9 +1412,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::api_design_blank("Epic", None, None).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(
             result.as_deref(),
@@ -1424,7 +1423,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_design_publish_parses_nodes_as_success() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1439,9 +1438,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (ok, msg) = super::api_design_publish("root-1").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "nodes present => success");
         assert!(
@@ -1534,7 +1532,7 @@ mod tests {
     // ── Designs-persistence: saved-designs list ──────────────────────────────────
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_designs_parses_summaries_array() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1566,9 +1564,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::fetch_designs("proj-7").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(out.len(), 2, "both designs parse");
         assert_eq!(out[0].id, "draft-a");
@@ -1584,7 +1581,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_designs_empty_array_yields_empty_vec() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1599,15 +1596,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::fetch_designs("proj-7").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(out.is_empty(), "empty designs array => empty vec");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn delete_design_returns_true_on_ok_body() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1622,15 +1618,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::delete_design("draft-a").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "{{ ok: true }} => delete succeeded");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn delete_design_returns_false_on_404() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1645,15 +1640,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::delete_design("missing").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(!ok, "404 (no ok:true) => false");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_design_status_posts_status_and_reads_success() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1670,9 +1664,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::set_design_status("draft-a", "archived").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "2xx => status update succeeded");
     }

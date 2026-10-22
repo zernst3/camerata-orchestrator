@@ -1415,7 +1415,7 @@ mod tests {
     // `CAMERATA_BFF_URL` is a process-global env var. Every Tier-2 test below sets it (to a
     // mock-server URI) then removes it. `cargo test` runs tests on parallel threads, so two such
     // tests overlapping would clobber each other's override and point a helper at the wrong server.
-    // Every such test carries `#[serial_test::serial(bff_env)]`, which serializes them crate-wide
+    // Every such test carries `#[serial_test::serial(process_env)]`, which serializes them crate-wide
     // (and, unlike a std mutex guard, is safe to hold across the test's `.await`s).
 
     // ── Tier-2 UI test: a network helper against a MOCK BFF (wiremock) ──────────
@@ -1424,7 +1424,7 @@ mod tests {
     // via the CAMERATA_BFF_URL seam. (The env override is process-global; this is the only test that
     // reads bff_base(), so it can't race another helper.)
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn add_chat_learning_resolves_active_then_posts_the_reply() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1450,9 +1450,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::add_chat_learning("A durable learning.").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "resolves the active project, then posts the learning");
         // `.expect(1)` on the POST mock asserts (on server drop) it was hit once with the exact
@@ -1463,7 +1462,7 @@ mod tests {
     // The request CONTRACT for the chat turn is load-bearing: a wrong field name (prompt / model /
     // system / history) silently breaks grounding or model selection. body_json asserts every field.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn send_chat_posts_prompt_model_system_and_history() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1487,7 +1486,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let history = vec![
             super::ChatHistoryTurn {
                 role: "user",
@@ -1505,7 +1504,6 @@ mod tests {
             history,
         )
         .await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let resp = res.expect("2xx with a valid ChatResp body parses");
         assert_eq!(resp.text, "It is blocked on the gate.");
@@ -1516,7 +1514,7 @@ mod tests {
     // real `claude` CLI error and a generic "no response"). Asserts both the status and the body
     // text make it into the Err string.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn send_chat_surfaces_backend_error_body() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1530,9 +1528,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let res = super::send_chat("hi", "m", "s", Vec::new()).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let err = res.expect_err("a 500 must be an Err");
         assert!(
@@ -1547,7 +1544,7 @@ mod tests {
 
     // ── Tier-2: save_app_chat_model POSTs {model} to /api/settings/chat-model ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn save_app_chat_model_posts_model_body() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1563,15 +1560,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::save_app_chat_model("claude-sonnet-4").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "a 2xx response must be reported as success");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn save_app_chat_model_reports_failure_on_non_2xx() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1583,9 +1579,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::save_app_chat_model("x").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(
             !ok,
@@ -1595,7 +1590,7 @@ mod tests {
 
     // ── Tier-2: fetch_app_chat_model GETs /api/settings and reads chat_model ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_app_chat_model_parses_chat_model_field() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1610,15 +1605,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let model = super::fetch_app_chat_model().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(model, Some("claude-opus-5".to_string()));
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_app_chat_model_returns_none_for_blank_model() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1633,9 +1627,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let model = super::fetch_app_chat_model().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(
             model, None,
@@ -1648,7 +1641,7 @@ mod tests {
     // label is composed (price · tool-use · context · cache). A wrong field here makes the selector
     // mislabel models.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_models_parses_registry_and_builds_labels() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1683,9 +1676,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let resp = super::fetch_models().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let resp = resp.expect("registry response must parse into ModelsResp");
         assert_eq!(resp.models.len(), 2);
@@ -1742,7 +1734,7 @@ mod tests {
 
     // ── Tier-2: fetch_rules_catalog GETs /api/corpus-rules and renders a catalog ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_rules_catalog_renders_sorted_catalog_lines() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1769,9 +1761,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let catalog = super::fetch_rules_catalog().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let catalog = catalog.expect("non-empty rule corpus yields Some(catalog)");
         assert!(
@@ -1800,7 +1791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_rules_catalog_returns_none_for_empty_corpus() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1812,9 +1803,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let catalog = super::fetch_rules_catalog().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(
             catalog, None,
@@ -1826,7 +1816,7 @@ mod tests {
     // The dedicated endpoint returns {"ok":true,"units_of_work":[...]}; the helper must parse the
     // OBJECT wrapper (parsing it as a bare array was the bug that silently emptied dev-state).
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_uow_snapshot_parses_object_wrapper_from_context_endpoint() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1843,9 +1833,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let snaps = super::fetch_uow_snapshot().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let snaps = snaps.expect("the context endpoint must yield Some");
         assert_eq!(snaps.len(), 1);
@@ -1856,7 +1845,7 @@ mod tests {
     // When the context endpoint is unavailable (404), the helper falls back to the legacy bare-array
     // /api/uow endpoint.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_uow_snapshot_falls_back_to_legacy_uow_endpoint() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1875,9 +1864,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let snaps = super::fetch_uow_snapshot().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let snaps = snaps.expect("legacy /api/uow fallback must yield Some");
         assert_eq!(snaps.len(), 1);
@@ -1887,7 +1875,7 @@ mod tests {
     // ── Tier-2: fetch_project_context_sections GETs /api/projects/active/context ──
     // Asserts the four-tuple projection: name, scan section, selected-rules section, ruleset summary.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_project_context_sections_projects_all_four_fields() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1905,9 +1893,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (name, scan, selected, ruleset) = super::fetch_project_context_sections().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(name, Some("agora-api".to_string()));
         assert_eq!(scan, Some("Total findings: 3\n".to_string()));
@@ -1917,7 +1904,7 @@ mod tests {
 
     // When the context reports `ok: false` (no active project), all four fields degrade to None.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_project_context_sections_all_none_when_not_ok() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1931,9 +1918,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let tuple = super::fetch_project_context_sections().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(
             tuple,
@@ -1944,7 +1930,7 @@ mod tests {
 
     // Whitespace-only sections must be filtered to None (empty sections are not meaningful grounding).
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_project_context_sections_filters_whitespace_sections() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1961,9 +1947,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (name, scan, selected, ruleset) = super::fetch_project_context_sections().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(name, None, "whitespace-only project_name filters to None");
         assert_eq!(scan, None, "whitespace-only scan section filters to None");

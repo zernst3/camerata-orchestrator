@@ -339,7 +339,7 @@ mod tests {
 
     // ── wiremock: fetch_readiness parses { ok, readiness, repos } ─────────────────
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_readiness_parses_state_and_repos() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -359,9 +359,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::fetch_readiness("proj-7").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let r = out.expect("readiness parsed");
         assert_eq!(r.state, ProjectReadiness::Partial);
@@ -373,7 +372,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_readiness_unknown_project_pauses() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -389,9 +388,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::fetch_readiness("nope").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let r = out.expect("still parses");
         assert_eq!(r.state, ProjectReadiness::Unlinked);
@@ -400,7 +398,7 @@ mod tests {
 
     // ── wiremock: link_repo success returns the new readiness ─────────────────────
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn link_repo_success_returns_new_readiness() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -419,9 +417,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::link_repo("proj-7", "acme/beta", "/local/acme/beta").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         match out {
             LinkOutcome::Linked(r) => assert_eq!(r.state, ProjectReadiness::Ready),
@@ -431,7 +428,7 @@ mod tests {
 
     // ── wiremock: link_repo 400 { ok:false, error } surfaces the error ────────────
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn link_repo_rejection_surfaces_error() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -447,9 +444,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::link_repo("proj-7", "acme/beta", "/wrong/folder").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         match out {
             LinkOutcome::Rejected(msg) => {

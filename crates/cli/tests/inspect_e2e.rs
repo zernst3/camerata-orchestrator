@@ -78,7 +78,11 @@ fn typst_on_path() -> bool {
         .is_some()
 }
 
+// Serial with the env-mutating test below: the scan pipeline this drives READS
+// `CAMERATA_DISABLE_DEP_AUDIT` / the semgrep opt-out, so it must not observe that test's
+// overrides mid-flight.
 #[tokio::test]
+#[serial_test::serial(process_env)]
 async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
     if !typst_on_path() {
         eprintln!("skipping deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip: typst not on PATH");
@@ -189,6 +193,7 @@ fn stage_minimal_git_repo(dest: &Path) {
 /// — that env var is what turns the attempt into a clean, deterministic failure instead of a
 /// real (and in this environment, network-dependent) provisioning attempt.
 #[tokio::test]
+#[serial_test::serial(process_env)]
 async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run() {
     if !typst_on_path() {
         eprintln!(
@@ -198,8 +203,9 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
         return;
     }
 
-    std::env::set_var(camerata_server::scan_tools::DISABLE_SEMGREP_ENV_VAR, "1");
-    std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+    let _semgrep_off =
+        camerata_test_env::EnvGuard::set(camerata_server::scan_tools::DISABLE_SEMGREP_ENV_VAR, "1");
+    let _dep_audit_off = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
 
     let repo_dir = tempfile::tempdir().expect("create temp dir for the synthetic git repo");
     stage_minimal_git_repo(repo_dir.path());
@@ -218,9 +224,6 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
     };
 
     let outcome = run_inspect_with_key_presence(args, false).await;
-
-    std::env::remove_var(camerata_server::scan_tools::DISABLE_SEMGREP_ENV_VAR);
-    std::env::remove_var("CAMERATA_DISABLE_DEP_AUDIT");
 
     let outcome = outcome.expect(
         "a headless inspection must never refuse to export, even when a deterministic pass \

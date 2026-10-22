@@ -578,8 +578,9 @@ mod tests {
     /// error, run completes). Token-free, no network, no agent: a real local git repo is
     /// built with a guaranteed conflict and the runner is driven end to end.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn conflict_with_live_mode_off_aborts_and_fails_closed() {
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
         let base = std::env::temp_dir().join(format!("cam-upd-run-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
@@ -646,8 +647,9 @@ mod tests {
     /// A CLEAN merge completes for real even with live mode off (it is local git — no
     /// token, no model, no agent needed).
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn clean_merge_succeeds_with_live_mode_off() {
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
         let base = std::env::temp_dir().join(format!("cam-upd-clean-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
@@ -710,8 +712,9 @@ mod tests {
     /// (a git mutation). The run stays in its terminal Cancelled state (never AwaitingQa),
     /// and HEAD is unchanged — no merge commit landed.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn cancelled_run_does_not_merge_or_advance() {
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
         let base = std::env::temp_dir().join(format!("cam-upd-cancel-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();

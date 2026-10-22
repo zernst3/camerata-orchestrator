@@ -45,6 +45,10 @@ clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# `tests/inspect_e2e.rs` mutates process env (the dep-audit / semgrep opt-outs): EnvGuard restores
+# on drop and `#[serial_test::serial(process_env)]` is the workspace-wide key (crates/test-env).
+serial_test = "3"
+camerata-test-env = { path = "../test-env" }
 # Stands up a fake BFF so the HTTP-adapter subcommand handlers (`src/http_cmd.rs`) can be
 # tested against a known request/response contract without a real server — same idiom as
 # `crates/client` and `crates/mcp`.

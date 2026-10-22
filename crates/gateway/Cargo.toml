@@ -48,6 +48,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-# "sync" for the tokio Mutex that serializes the env-mutating tests: unlike a std MutexGuard,
-# it may be held across a test's awaits.
 tokio = { workspace = true, features = ["sync"] }
+# Env-mutating tests use EnvGuard (restore-on-drop) and the workspace-wide
+# `#[serial_test::serial(process_env)]` key (async-safe: held across a test's awaits). This
+# replaced two uncoordinated tokio Mutexes (`ENV_LOCK`, `CLARIFY_ENV_LOCK`) that both guarded
+# `CAMERATA_RULES_FILE` without excluding each other. See crates/test-env.
+serial_test = "3"
+camerata-test-env = { path = "../test-env" }

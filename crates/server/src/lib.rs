@@ -940,6 +940,9 @@ impl AppState {
             .get(crate::credentials::ANTHROPIC_API_KEY)
         {
             Ok(Some(key)) if !key.trim().is_empty() => {
+                // The one sanctioned production env write (see `clippy.toml`): single-threaded
+                // startup, before any request thread exists, so there is no concurrent reader.
+                #[allow(clippy::disallowed_methods)]
                 std::env::set_var("ANTHROPIC_API_KEY", key);
             }
             Ok(_) => {}
@@ -3826,12 +3829,17 @@ async fn import_project_ruleset(
     Path(id): Path<String>,
     Json(incoming): Json<crate::project::ProjectRuleset>,
 ) -> Json<serde_json::Value> {
+    let corpus = load_corpus_for_baseline().await;
     let updated = state.projects.update(&id, |p| {
+        let known_before = selected_rule_ids(&p.ruleset);
         p.upsert_base_rules(
             incoming.selections.clone(),
             incoming.cross_repo.clone(),
             incoming.process.clone(),
         );
+        // Rules new to this project are baselined from the corpus; ones it already had keep
+        // their baseline (inherited by the upsert) or their absence of one.
+        baseline_new_to_project(&mut p.ruleset, &known_before, corpus.as_ref());
         // Merge imported custom rules by name (imported wins), never dropping
         // existing ones that aren't in the import.
         p.merge_custom(&incoming.custom);
@@ -7294,8 +7302,10 @@ async fn onboard_arm(
     };
 
     // Save the armed ruleset to the active project (create one if none) so the
-    // project is the source of truth and re-emit works.
-    save_armed_to_project(&state, &req.rules, &req.custom);
+    // project is the source of truth and re-emit works. Baselines the rules against the
+    // corpus they are about to be emitted from, so drift detection starts at apply time.
+    let corpus = load_corpus_for_baseline().await;
+    save_armed_to_project(&state, &req.rules, &req.custom, corpus.as_ref());
 
     // Only repo-local rules emit into repo files; cross-repo + process rules are
     // project-level (the gates read them from the project store). Defensively normalize the
@@ -7354,8 +7364,10 @@ async fn onboard_apply(
     // whose repos all have explicit local folders can apply without one.
     let workspace_root = state.settings.workspace_root();
 
-    // Source of truth: save the armed ruleset to the active project (create one if none).
-    save_armed_to_project(&state, &req.rules, &req.custom);
+    // Source of truth: save the armed ruleset to the active project (create one if none),
+    // baselining each rule against the corpus it is emitted from (apply-time drift baseline).
+    let corpus = load_corpus_for_baseline().await;
+    save_armed_to_project(&state, &req.rules, &req.custom, corpus.as_ref());
 
     // Defensively normalize the leaked single-repo sentinel out of the INCOMING rules'
     // repos (the UI can POST it directly) BEFORE any clone loop, mapping it to the active
@@ -8032,12 +8044,20 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
     };
 
     let has_rules = !selections.is_empty() || !cross_repo.is_empty() || !process.is_empty();
+    let corpus = if has_rules {
+        load_corpus_for_baseline().await
+    } else {
+        None
+    };
     state.projects.update(&pid, |p| {
         if has_rules {
-            // Replace the base rules from onboarding; custom rules are preserved.
-            p.ruleset.selections = selections.clone();
-            p.ruleset.cross_repo = cross_repo.clone();
-            p.ruleset.process = process.clone();
+            // Replace the base rules from onboarding; custom rules are preserved. Goes
+            // through `upsert_base_rules` so a baseline written by an earlier Apply is
+            // carried across this rebuild-from-draft instead of erased; rules new to the
+            // project are baselined from the corpus.
+            let known_before = selected_rule_ids(&p.ruleset);
+            p.upsert_base_rules(selections.clone(), cross_repo.clone(), process.clone());
+            baseline_new_to_project(&mut p.ruleset, &known_before, corpus.as_ref());
         }
         // Upsert the draft's custom rules (#49) by name (preserve any pre-existing).
         for c in &custom {
@@ -8860,10 +8880,16 @@ async fn onboard_greenfield(
 /// one from the rules' repos if none exists). This is the upsert: it replaces the
 /// project's BASE rules (selections / cross-repo / process) and leaves custom rules
 /// untouched.
+///
+/// This is an APPLY: the rules are about to be emitted at their current corpus text, so each
+/// selection is (re)baselined against `corpus` ([`rebaseline_selections`]) and drift detection
+/// covers it from this moment. Without a corpus (or for a rule it lacks) nothing is invented,
+/// and `upsert_base_rules` carries the project's existing baseline across the replace.
 fn save_armed_to_project(
     state: &AppState,
     rules: &[crate::arm::ArmRule],
     custom: &[crate::project::CustomRule],
+    corpus: Option<&camerata_rules::RuleSet>,
 ) {
     use crate::project::RuleSelection;
     // First pass: gather the REAL repos this arm touches, skipping the UI-internal
@@ -8905,6 +8931,9 @@ fn save_armed_to_project(
             _ => selections.push(s),
         }
     }
+    rebaseline_selections(&mut selections, corpus);
+    rebaseline_selections(&mut cross, corpus);
+    rebaseline_selections(&mut process, corpus);
     let pid = match state.projects.active() {
         Some(p) => p.id,
         None => match state
@@ -15795,6 +15824,90 @@ fn baseline_selection(sel: &mut crate::project::RuleSelection, rule: &camerata_r
     sel.applied_version = rule.version;
 }
 
+/// Load the on-disk corpus so a save can baseline the rules it writes. `None` when the corpus
+/// directory is missing: the caller then writes no new baselines (it never invents one) and
+/// existing baselines survive via `Project::upsert_base_rules`. Parse failures of individual
+/// rule files are tolerated (lenient load), so a rule that failed to parse is simply "not in
+/// the corpus" here and stays unbaselined.
+async fn load_corpus_for_baseline() -> Option<camerata_rules::RuleSet> {
+    let corpus_path = camerata_rules::corpus_path();
+    if !corpus_path.exists() {
+        return None;
+    }
+    let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    Some(corpus)
+}
+
+/// APPLY semantics: (re)baseline every selection whose rule is in `corpus`, overwriting any
+/// existing baseline. Applying a rule emits the CURRENT corpus directive into the repos, so
+/// the baseline must be "the corpus as it stands now" (the same acceptance
+/// [`accept_rule_drift`] records); keeping an older baseline would report drift against a
+/// directive that was just applied. Rules the corpus does not carry (or no corpus at all)
+/// are left untouched.
+fn rebaseline_selections(
+    selections: &mut [crate::project::RuleSelection],
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    let Some(corpus) = corpus else { return };
+    for sel in selections {
+        if let Some(rule) = corpus.get_by_id(&sel.rule_id) {
+            baseline_selection(sel, rule);
+        }
+    }
+}
+
+/// SAVE (non-apply) semantics: baseline only the selections that have none, from `corpus`.
+/// An existing baseline, legacy hash included, is never overwritten: a save that is not an
+/// apply has not re-emitted anything, so it accepts nothing new.
+fn baseline_missing(
+    selections: &mut [crate::project::RuleSelection],
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    let Some(corpus) = corpus else { return };
+    for sel in selections.iter_mut().filter(|s| !s.is_baselined()) {
+        if let Some(rule) = corpus.get_by_id(&sel.rule_id) {
+            baseline_selection(sel, rule);
+        }
+    }
+}
+
+/// Every rule id the ruleset currently selects, across all three lists.
+fn selected_rule_ids(
+    ruleset: &crate::project::ProjectRuleset,
+) -> std::collections::BTreeSet<String> {
+    ruleset
+        .selections
+        .iter()
+        .chain(&ruleset.cross_repo)
+        .chain(&ruleset.process)
+        .map(|s| s.rule_id.clone())
+        .collect()
+}
+
+/// After a non-apply replace of the base rules (an import, the onboarding "complete"):
+/// baseline the selections of rules that are NEW to the project (not in `known_before`),
+/// from `corpus`. A rule the project already selected keeps exactly what it had (its baseline
+/// via `upsert_base_rules`, or none if it was never baselined, as before), so saving an
+/// unrelated change never rewrites or invents a baseline for an existing selection.
+fn baseline_new_to_project(
+    ruleset: &mut crate::project::ProjectRuleset,
+    known_before: &std::collections::BTreeSet<String>,
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    let Some(corpus) = corpus else { return };
+    for sel in ruleset
+        .selections
+        .iter_mut()
+        .chain(ruleset.cross_repo.iter_mut())
+        .chain(ruleset.process.iter_mut())
+        .filter(|s| !s.is_baselined() && !known_before.contains(&s.rule_id))
+    {
+        if let Some(rule) = corpus.get_by_id(&sel.rule_id) {
+            baseline_selection(sel, rule);
+        }
+    }
+}
+
 /// `POST /api/projects/:id/rule-drift/:rule_id/accept` — accept the corpus update
 /// for a drifted rule.
 ///
@@ -15902,6 +16015,7 @@ async fn set_rule_override(
     Path((id, rule_id)): Path<(String, String)>,
     Json(req): Json<SetRuleOverrideReq>,
 ) -> Json<serde_json::Value> {
+    let corpus = load_corpus_for_baseline().await;
     let updated = state.projects.update(&id, |p| {
         // Find or create the selection for this rule.
         if let Some(sel) = p
@@ -15926,6 +16040,10 @@ async fn set_rule_override(
                 repos: Vec::new(),
                 ..Default::default()
             });
+            // A rule newly selected into the project is baselined at the corpus as it stands.
+            if let Some(created) = p.ruleset.selections.last_mut() {
+                baseline_missing(std::slice::from_mut(created), corpus.as_ref());
+            }
         }
     });
     match updated {
@@ -15976,6 +16094,7 @@ async fn set_repo_rule_override(
     Path((id, repo, rule_id)): Path<(String, String, String)>,
     Json(req): Json<SetRepoRuleOverrideReq>,
 ) -> Json<serde_json::Value> {
+    let corpus = load_corpus_for_baseline().await;
     let updated = state.projects.update(&id, |p| {
         // Find or create a REPO-SCOPED selection for this rule.
         if let Some(sel) = p
@@ -15996,6 +16115,10 @@ async fn set_repo_rule_override(
                 repos: vec![repo.clone()],
                 ..Default::default()
             });
+            // A rule newly selected into the project is baselined at the corpus as it stands.
+            if let Some(created) = p.ruleset.selections.last_mut() {
+                baseline_missing(std::slice::from_mut(created), corpus.as_ref());
+            }
         }
     });
     match updated {
@@ -16889,6 +17012,7 @@ mod tests {
     /// stored value is the ENTIRE input — no env fallback of any kind
     /// (`docs/design/2026-09-22_per-project-backend.md`).
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn get_settings_includes_chat_backend_and_api_key_present() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         state
@@ -16920,6 +17044,7 @@ mod tests {
     /// `POST /api/settings/chat-backend` persists a valid backend and echoes it plus
     /// `api_key_present`; the stored setting reflects the new value.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn post_chat_backend_persists_valid_value() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state.clone());
@@ -16949,9 +17074,10 @@ mod tests {
     /// `POST /api/settings/chat-backend` persists to the settings store WITHOUT touching
     /// process env at all — there is no `CAMERATA_LLM_BACKEND` env var to mutate anymore.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn post_chat_backend_does_not_mutate_process_env() {
         // Sentinel value the handler must NOT touch (proving no env write happens at all).
-        std::env::set_var("CAMERATA_LLM_BACKEND", "sentinel-untouched");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LLM_BACKEND", "sentinel-untouched");
 
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state.clone());
@@ -16979,7 +17105,6 @@ mod tests {
             Ok("sentinel-untouched"),
             "the handler must not mutate CAMERATA_LLM_BACKEND"
         );
-        std::env::remove_var("CAMERATA_LLM_BACKEND");
     }
 
     // ── Pass 2 (provider-safety UI): settings routes + the picker's data route ──────
@@ -16988,6 +17113,7 @@ mod tests {
     /// no pin) when nothing has ever been set — the same fail-safe guarantee
     /// `SettingsStore::provider_policy` gives at the store layer, now visible over HTTP.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn get_settings_includes_default_safe_mode_and_no_pin() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state);
@@ -17385,10 +17511,11 @@ mod tests {
     /// own message — no model call, no findings. Mirrors the main audit's
     /// `blocked_resolution_aborts_the_whole_scan_before_any_work` guard, at the endpoint layer.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn rescan_alternatives_blocked_when_project_is_api_backend_with_no_key() {
         // Defensive against the known cross-test env-var race (see
         // `resolve_backend_for_project_gathers_the_three_inputs_correctly`'s doc comment).
-        std::env::remove_var("ANTHROPIC_API_KEY");
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let p = state
             .projects
@@ -17436,8 +17563,9 @@ mod tests {
     /// Asserts the gate itself never refuses the request; it does not assert findings content
     /// (no live model runs in this test suite).
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn rescan_alternatives_proceeds_on_cli_backend_project() {
-        std::env::remove_var("ANTHROPIC_API_KEY");
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let p = state
             .projects
@@ -17883,6 +18011,7 @@ mod tests {
                 arm_rule("PROC-1", "process", &["me/api"]),
             ],
             &[],
+            None,
         );
         let p = state.projects.active().expect("a project was created");
         assert_eq!(p.ruleset.selections.len(), 1, "repo-local -> selections");
@@ -17908,6 +18037,7 @@ mod tests {
                 arm_rule("XREPO-1", "cross-repo", &[&sentinel]),
             ],
             &[],
+            None,
         );
         let p = state.projects.active().expect("a project was created");
         assert!(
@@ -17959,6 +18089,7 @@ mod tests {
             &state,
             &[arm_rule("REPO-1", "repo-local", &["me/api"])],
             &[],
+            None,
         );
         let after = state.projects.get(&p.id).unwrap();
         assert_eq!(after.ruleset.selections.len(), 1);
@@ -18709,6 +18840,7 @@ mod tests {
     /// escalation, resolved with Approve, RESUMES from its checkpoint (consuming it once-only) and
     /// records the decision on the UoW trail. Drives the real `answer_escalation` handler.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn uow_escalation_approve_resumes_and_consumes_checkpoint() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let (esc_id, ckpt_id) = seed_paused_uow_run(&state, "me/api#7");
@@ -18765,6 +18897,7 @@ mod tests {
     /// checkpoint (so the run can't be re-spawned) and records the abandonment. Drives the real
     /// `answer_escalation` handler.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn uow_escalation_reject_stops_and_consumes_checkpoint() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let (esc_id, ckpt_id) = seed_paused_uow_run(&state, "me/api#8");
@@ -18919,6 +19052,7 @@ mod tests {
     /// layer (arm_files_for_repo always produces current content) is covered by the
     /// `re_emit_for_onboarded_project_always_writes_current_content` test in arm.rs.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn emit_project_local_route_runs_for_onboarded_project_no_workspace_guard() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
 
@@ -20259,9 +20393,10 @@ mod tests {
     /// #20: with no GitHub token the list endpoint degrades gracefully — `ok:false`,
     /// an empty list, and a hint — instead of erroring or panicking.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn github_issues_list_is_token_optional_and_never_panics() {
         // Ensure no token is visible to this test process.
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -20327,6 +20462,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn start_run_proceeds_once_decisions_are_approved() {
         let state = AppState::seeded();
         let story = "GATE-2";
@@ -20374,8 +20510,9 @@ mod tests {
     /// attached. A user must never be able to click "Run" and watch a fabricated dev cycle
     /// complete with real-looking compliance evidence while zero code was written.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn start_run_without_live_fails_and_does_not_advance_or_attach() {
-        std::env::remove_var("CAMERATA_LIVE_BUILD"); // ensure live mode is OFF
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD"); // ensure live mode is OFF
         let state = AppState::seeded();
         let story = "HONEST-1";
 
@@ -20475,6 +20612,7 @@ mod tests {
 
     /// Once the active run is done, a fresh start proceeds (the guard only blocks LIVE runs).
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn lifecycle9_start_proceeds_once_prior_run_is_done() {
         let state = AppState::seeded();
         let story = "SF-2";
@@ -20854,6 +20992,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn get_investigation_reports_note_present_and_decisions() {
         let state = seeded_with_artifacts().await;
         let story = "REVIEW-1";
@@ -21073,6 +21212,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn dev_run_tiered_path_starts_once_decisions_are_approved() {
         let state = AppState::seeded();
         let story = "TIER-GATE-2";
@@ -21204,9 +21344,9 @@ mod tests {
     /// same "live mode is off" placeholder note again, which isn't useful, so this must be
     /// a real refusal, not a silent no-op success.
     #[tokio::test]
-    #[serial_test::serial(camerata_live_build)]
+    #[serial_test::serial(process_env)]
     async fn rerun_investigation_refuses_honestly_when_live_mode_off() {
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
         let state = AppState::seeded();
         let story = "INV-RERUN-1";
         state.uow.begin_investigation(story).unwrap(); // now Investigating
@@ -21243,9 +21383,9 @@ mod tests {
     /// `rerun-investigation` 409s when the story is still at Intake — investigation has not
     /// started, so `begin-investigation` is the right endpoint there, not a re-run.
     #[tokio::test]
-    #[serial_test::serial(camerata_live_build)]
+    #[serial_test::serial(process_env)]
     async fn rerun_investigation_409s_when_still_at_intake() {
-        std::env::set_var("CAMERATA_LIVE_BUILD", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LIVE_BUILD", "1");
         let state = AppState::seeded();
         let story = "INV-RERUN-2";
         state.uow.get_or_create(story); // stays at Intake
@@ -21261,7 +21401,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let json = body_json(resp).await;
         assert!(json["reason"]
@@ -21275,9 +21414,9 @@ mod tests {
     /// Intake on the first begin); `rerun-investigation` spawns a fresh pass instead,
     /// WITHOUT repeating that transition.
     #[tokio::test]
-    #[serial_test::serial(camerata_live_build)]
+    #[serial_test::serial(process_env)]
     async fn rerun_investigation_spawns_run_for_investigating_story_without_409() {
-        std::env::set_var("CAMERATA_LIVE_BUILD", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LIVE_BUILD", "1");
         let state = AppState::seeded();
         let story = "INV-RERUN-3";
         state.uow.begin_investigation(story).unwrap(); // now Investigating
@@ -21304,7 +21443,6 @@ mod tests {
             "returns a pollable run id"
         );
         assert_eq!(json["story_id"], story);
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
 
         // The stage is STILL Investigating IMMEDIATELY after the response — the endpoint
         // itself must not repeat the Intake → Investigating transition (that repetition is
@@ -21570,6 +21708,7 @@ mod tests {
     /// success-branch of the watcher is covered separately by
     /// `stamp_on_success_advances_stage_and_attaches_evidence`.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn resumed_run_without_live_refuses_and_freezes_provenance_without_advancing() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let story = "me/api#7";
@@ -21949,8 +22088,9 @@ mod tests {
     /// POST /api/workitems/pull degrades gracefully with no token: it returns an
     /// empty item list plus a hint, never an error.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_pull_no_token_returns_empty_with_message() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -21974,8 +22114,9 @@ mod tests {
     /// POST /api/workitems/comments degrades gracefully with no token: it returns an
     /// empty comment list (never an error) so the modal renders "No comments."
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_comments_no_token_returns_empty() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -21999,8 +22140,9 @@ mod tests {
     /// POST /api/workitems/assignees degrades gracefully with no token: it returns an
     /// empty user list so the @-autocomplete simply shows no suggestions.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_assignees_no_token_returns_empty() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -22023,8 +22165,9 @@ mod tests {
 
     /// GET /api/me returns `{ login: null }` with no token (the UI hides "Assign to me").
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn me_no_token_returns_null_login() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -22050,8 +22193,9 @@ mod tests {
     /// POST /api/workitems/assign errors without a token (there is nothing to assign
     /// against), and rejects an empty assignee.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_assign_requires_token_and_nonempty_assignee() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -22080,8 +22224,9 @@ mod tests {
     /// POST /api/workitems/updated-check degrades gracefully with no token: it returns an
     /// empty updates list (never an error) so a background poll is silent.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_updated_check_no_token_returns_empty() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -22109,8 +22254,9 @@ mod tests {
     /// second (created=false, same uow_id, no duplicate). Token-free: the spine row is
     /// seeded from the id alone, so this is hermetic.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn uow_from_workitem_dedups_by_external_ref() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // ISOLATION: the dedup + listing are now project-scoped; activate a project whose
         // repos cover the work item's repo (`o/r`).
@@ -22150,8 +22296,9 @@ mod tests {
     /// GET /api/uows returns each UoW with the WorkItem it references (resolved from
     /// the spine, repo set) and its lifecycle stage.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn uows_list_carries_workitem_and_stage() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // ISOLATION: /api/uows is project-scoped; activate a project covering `o/r`.
         state.projects.create("P", vec!["o/r".to_string()]).unwrap();
@@ -22229,7 +22376,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
     }
 
     /// The work-item id parser produces the (repo, number) the comment/refresh paths
@@ -22386,10 +22532,11 @@ mod tests {
     /// even when the LLM is unavailable (token-free): the endpoint degrades gracefully
     /// with a clear note rather than crashing, and the user message is recorded.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn author_endpoint_appends_chat_without_token() {
         // Ensure no API key is set so the LLM path returns the graceful note (the CLI may
         // or may not exist on CI; either way the user turn is appended and we get a 200).
-        std::env::remove_var("ANTHROPIC_API_KEY");
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let uow_store = state.uow.clone();
         let app = router(state);
@@ -22428,8 +22575,9 @@ mod tests {
     /// `POST /api/uow/:id/publish` rejects (non-2xx) with a clear reason when no GitHub
     /// token is configured.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn publish_without_token_is_rejected_with_reason() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let uow_store = state.uow.clone();
         let app = router(state);
@@ -25073,8 +25221,10 @@ mod tests {
     /// by something. The silent-knowledge-loss class this fix closes is specifically "the
     /// pass-claimed-to-cover-it tool never ran AND nothing else ever checked it either".
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn semgrep_covered_rule_never_reads_verified_clean_when_the_pass_does_not_run() {
-        std::env::set_var(crate::scan_tools::DISABLE_SEMGREP_ENV_VAR, "1");
+        let _env =
+            camerata_test_env::EnvGuard::set(crate::scan_tools::DISABLE_SEMGREP_ENV_VAR, "1");
 
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -25139,8 +25289,6 @@ mod tests {
         .await;
         report.excluded_mechanical_rules = excluded_mechanical;
         merge_scan_preview(&mut report, &sources, &preview_rules, Some(&corpus), None).await;
-
-        std::env::remove_var(crate::scan_tools::DISABLE_SEMGREP_ENV_VAR);
 
         let entry = report
             .ledger
@@ -25571,6 +25719,7 @@ mod tests {
     /// `typst` being on PATH (the PDF half needs it); the workbook half runs unconditionally
     /// via the other degenerate-input tests in `xlsx_export`.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
         if !typst_on_path() {
             eprintln!(
@@ -25813,6 +25962,7 @@ mod tests {
     /// the export builders for freshness identifiers, so a future wiring is caught at the
     /// import, before it ever produces output.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn no_corpus_freshness_text_reaches_any_client_artifact() {
         // ── Anti-vacuity: the operator surfaces really do carry the markers ──────────────
         let operator_json = updates_payload(
@@ -26643,9 +26793,10 @@ mod tests {
 
     /// When the GitHub token is absent, `POST /api/uow/:story_id/intake/ship` returns 400.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn intake_ship_returns_bad_request_when_no_github_token() {
         // Remove the token from the test env so the handler detects its absence.
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
 
         let state = AppState::seeded();
         let app = router(state);
@@ -26683,8 +26834,9 @@ mod tests {
     /// — never a scaffold, never a GitHub call, even with no workspace root or token
     /// configured at all.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn create_app_from_scratch_target_returns_reason_without_scaffolding() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::seeded();
         let app = router(state);
         let req = Request::builder()
@@ -26711,8 +26863,9 @@ mod tests {
     /// A `Skeleton` (default target) request with no workspace root configured fails
     /// soft: `ok:false` with a message naming the workspace, never a 500.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn create_app_skeleton_without_workspace_root_fails_soft() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::seeded();
         let app = router(state);
         let req = Request::builder()
@@ -26740,8 +26893,9 @@ mod tests {
     /// A `Skeleton` request with a workspace root but no GitHub token fails soft:
     /// `ok:false` with a message naming the missing token.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn create_app_skeleton_without_github_token_fails_soft() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::seeded();
         let tmp = tempfile::tempdir().expect("tempdir");
         state
@@ -27189,6 +27343,7 @@ mod tests {
     /// describes for Feature A ("the picker's available Claude models become a function
     /// of the active backend").
     #[test]
+    #[serial_test::serial(process_env)]
     fn use_live_anthropic_models_requires_both_api_backend_and_key() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         // API backend selected, but no key yet.
@@ -27389,9 +27544,10 @@ mod tests {
     /// the credential env-fallback test flaky. The driver path now reads the key store-first, so
     /// no env mutation is needed for a freshly-saved key to take effect.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn set_anthropic_credential_does_not_mutate_process_env() {
         // Sentinel value the handler must NOT overwrite.
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-sentinel");
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-sentinel");
 
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         let app = router(state.clone());
@@ -27423,11 +27579,11 @@ mod tests {
             Ok("sk-ant-sentinel"),
             "the handler must not mutate ANTHROPIC_API_KEY"
         );
-        std::env::remove_var("ANTHROPIC_API_KEY");
     }
 
     /// `AppState::github_token()` prefers the credential store over the env var.
     #[test]
+    #[serial_test::serial(process_env)]
     fn github_token_method_prefers_store_over_env() {
         // Set a value in the store.
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
@@ -27437,7 +27593,7 @@ mod tests {
             .expect("set must succeed");
 
         // Ensure the env var is NOT set so we are testing the store path.
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
 
         let resolved = state.github_token();
         assert_eq!(
@@ -27449,13 +27605,13 @@ mod tests {
 
     /// `AppState::github_token()` falls back to env var when store is empty.
     #[test]
+    #[serial_test::serial(process_env)]
     fn github_token_method_falls_back_to_env_when_store_empty() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         // Store is empty (MemoryCredentialStore starts empty).
 
-        std::env::set_var("CAMERATA_GITHUB_TOKEN", "env_token");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_GITHUB_TOKEN", "env_token");
         let resolved = state.github_token();
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
 
         assert_eq!(
             resolved.as_deref(),
@@ -27482,15 +27638,15 @@ mod tests {
     /// `anthropic_api_key_present` returns true when only the env var is set (empty
     /// keychain), and false when neither source has a key.
     #[test]
+    #[serial_test::serial(process_env)]
     fn anthropic_api_key_present_reflects_env_when_keychain_empty() {
         let store = crate::credentials::MemoryCredentialStore::new();
         // Neither source set → false.
-        std::env::remove_var("ANTHROPIC_API_KEY");
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
         assert!(!anthropic_api_key_present(&store));
         // Env-only → true.
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-env");
+        let _env2 = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env");
         let present = anthropic_api_key_present(&store);
-        std::env::remove_var("ANTHROPIC_API_KEY");
         assert!(present, "env var alone makes the key present");
     }
 
@@ -27501,6 +27657,7 @@ mod tests {
     /// using the keychain path for the key (not the env var) so this test can't race the
     /// env-var-based tests around it.
     #[test]
+    #[serial_test::serial(process_env)]
     fn resolve_backend_for_project_gathers_the_two_inputs_correctly() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
 
@@ -27510,7 +27667,7 @@ mod tests {
         // poisoned by another test's ANTHROPIC_API_KEY mutation running concurrently (the
         // known env-var race noted on
         // `credentials::tests::resolve_falls_back_to_env_when_store_empty`).
-        std::env::remove_var("ANTHROPIC_API_KEY");
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
         assert_eq!(
             resolve_backend_for_project(&state, None),
             crate::llm::BackendResolution::Cli
@@ -28219,6 +28376,7 @@ mod tests {
     /// Exercises schema enforcement, node materialization, tree listing, node deletion,
     /// and publish (no-token error path). Mirrors `hierarchy_schema_http_round_trip_and_export`.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn design_draft_tree_http_round_trip() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         let p = state
@@ -28993,6 +29151,284 @@ mod tests {
             2,
             "no filter scans every project"
         );
+    }
+
+    // ── Drift baseline at APPLY time ──────────────────────────────────────────────
+    //
+    // Defect: the baseline (`applied_hash` / `applied_version` / `applied_directive`) was only
+    // ever written by `accept_rule_drift`, so a freshly applied rule had NONE and could never
+    // report drift; and `upsert_base_rules` replaced the lists wholesale, erasing any baseline
+    // on re-apply. Semantics fixed here: APPLYING a rule means accepting the corpus as it
+    // stands (the apply emits the current directive into the repos), so every apply
+    // (re)baselines against the current corpus; any save that is NOT an apply (an import, an
+    // override edit, the onboarding "complete") keeps an existing baseline and only fills a
+    // missing one.
+
+    /// The active project of `state`, after a `save_armed_to_project` call.
+    fn applied_project(state: &AppState) -> crate::project::Project {
+        state.projects.active().expect("a project exists")
+    }
+
+    #[test]
+    fn a_freshly_applied_rule_shows_drift_after_an_upstream_change() {
+        let before = drift_corpus("Do the thing the old way.", Some(1));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        save_armed_to_project(
+            &state,
+            &[arm_rule("DRIFT-FIX-1", "repo-local", &["me/api"])],
+            &[],
+            Some(&before),
+        );
+
+        let sel = &applied_project(&state).ruleset.selections[0];
+        let rule = corpus_rule(&before);
+        assert_eq!(
+            sel.applied_hash.as_deref(),
+            Some(rule.content_hash().as_str())
+        );
+        assert_eq!(sel.applied_version, Some(1));
+        assert_eq!(
+            sel.applied_directive.as_deref(),
+            Some("Do the thing the old way.")
+        );
+
+        // Nothing changed upstream yet: in sync.
+        let projects = state.projects.list();
+        assert!(drift_for_projects(&projects, None, &before).is_empty());
+
+        // The corpus moves: the applied rule now reports drift (this was silently empty).
+        let after = drift_corpus("Do the thing the new way.", Some(2));
+        let drift = drift_for_projects(&projects, None, &after);
+        assert_eq!(drift.len(), 1, "{drift:?}");
+        assert_eq!(drift[0]["changed"], true);
+        assert_eq!(drift[0]["applied_version"], 1);
+        assert_eq!(drift[0]["current_version"], 2);
+    }
+
+    #[test]
+    fn apply_baselines_cross_repo_and_process_selections_too() {
+        let set = drift_corpus("Do the thing.", Some(4));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        save_armed_to_project(
+            &state,
+            &[
+                arm_rule("DRIFT-FIX-1", "cross-repo", &["me/api", "me/web"]),
+                arm_rule("DRIFT-FIX-1", "process", &["me/api"]),
+            ],
+            &[],
+            Some(&set),
+        );
+        let p = applied_project(&state);
+        let hash = corpus_rule(&set).content_hash();
+        assert_eq!(
+            p.ruleset.cross_repo[0].applied_hash.as_deref(),
+            Some(hash.as_str())
+        );
+        assert_eq!(
+            p.ruleset.process[0].applied_hash.as_deref(),
+            Some(hash.as_str())
+        );
+        assert_eq!(p.ruleset.process[0].applied_version, Some(4));
+    }
+
+    #[test]
+    fn a_rule_the_corpus_does_not_know_is_left_unbaselined() {
+        let set = drift_corpus("Do the thing.", Some(1));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        save_armed_to_project(
+            &state,
+            &[arm_rule("GATE-ONLY-1", "repo-local", &["me/api"])],
+            &[],
+            Some(&set),
+        );
+        let sel = &applied_project(&state).ruleset.selections[0];
+        assert!(sel.applied_hash.is_none() && sel.applied_version.is_none());
+    }
+
+    #[test]
+    fn re_applying_re_baselines_to_the_current_corpus() {
+        let before = drift_corpus("Old.", Some(1));
+        let after = drift_corpus("New.", Some(2));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let rules = [arm_rule("DRIFT-FIX-1", "repo-local", &["me/api"])];
+
+        save_armed_to_project(&state, &rules, &[], Some(&before));
+        assert_eq!(
+            drift_for_projects(&state.projects.list(), None, &after).len(),
+            1,
+            "drifted after the upstream change"
+        );
+
+        // Re-apply against the new corpus: the emitted directive is now v2, so the baseline
+        // follows it and the drift is cleared (exactly what accept_rule_drift would do).
+        save_armed_to_project(&state, &rules, &[], Some(&after));
+        let sel = &applied_project(&state).ruleset.selections[0];
+        assert_eq!(sel.applied_version, Some(2));
+        assert_eq!(sel.applied_directive.as_deref(), Some("New."));
+        assert!(drift_for_projects(&state.projects.list(), None, &after).is_empty());
+    }
+
+    #[test]
+    fn re_applying_without_a_corpus_keeps_the_existing_baseline() {
+        let before = drift_corpus("Old.", Some(1));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let rules = [arm_rule("DRIFT-FIX-1", "repo-local", &["me/api"])];
+        save_armed_to_project(&state, &rules, &[], Some(&before));
+        let baselined = applied_project(&state).ruleset.selections[0].clone();
+
+        // Corpus unavailable at re-apply time: the baseline must survive, not be erased.
+        save_armed_to_project(&state, &rules, &[], None);
+        assert_eq!(applied_project(&state).ruleset.selections[0], baselined);
+    }
+
+    #[test]
+    fn saving_other_selections_keeps_an_untouched_selections_baseline() {
+        let before = drift_corpus("Old.", Some(1));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        save_armed_to_project(
+            &state,
+            &[arm_rule("DRIFT-FIX-1", "repo-local", &["me/api"])],
+            &[],
+            Some(&before),
+        );
+        let baselined = applied_project(&state).ruleset.selections[0].clone();
+        let pid = applied_project(&state).id;
+
+        // An unrelated edit that resends the selections WITHOUT their baseline fields (an
+        // import / a client that does not round-trip them) plus a brand-new rule.
+        state.projects.update(&pid, |p| {
+            p.upsert_base_rules(
+                vec![
+                    crate::project::RuleSelection {
+                        rule_id: "DRIFT-FIX-1".to_string(),
+                        chosen_option: None,
+                        repos: vec!["me/api".to_string()],
+                        ..Default::default()
+                    },
+                    crate::project::RuleSelection {
+                        rule_id: "OTHER-1".to_string(),
+                        repos: vec!["me/api".to_string()],
+                        ..Default::default()
+                    },
+                ],
+                Vec::new(),
+                Vec::new(),
+            );
+        });
+        let p = applied_project(&state);
+        assert_eq!(p.ruleset.selections[0], baselined, "baseline carried over");
+        assert!(
+            p.ruleset.selections[1].applied_hash.is_none(),
+            "the new, never-applied rule is not given a baseline by an upsert"
+        );
+
+        // ...and the preserved baseline still detects upstream drift.
+        let after = drift_corpus("New.", Some(2));
+        assert_eq!(drift_for_projects(&[p], None, &after).len(), 1);
+    }
+
+    #[test]
+    fn a_changed_chosen_option_is_a_new_decision_and_does_not_inherit_the_old_baseline() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("P", vec!["me/api".to_string()])
+            .unwrap();
+        state.projects.update(&p.id, |proj| {
+            proj.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: "DRIFT-FIX-1".to_string(),
+                chosen_option: Some("a".to_string()),
+                repos: vec!["me/api".to_string()],
+                applied_hash: Some("sha256:abc".to_string()),
+                applied_directive: Some("A".to_string()),
+                applied_version: Some(1),
+            });
+            proj.upsert_base_rules(
+                vec![crate::project::RuleSelection {
+                    rule_id: "DRIFT-FIX-1".to_string(),
+                    chosen_option: Some("b".to_string()),
+                    repos: vec!["me/api".to_string()],
+                    ..Default::default()
+                }],
+                Vec::new(),
+                Vec::new(),
+            );
+        });
+        let sel = &state.projects.get(&p.id).unwrap().ruleset.selections[0];
+        assert!(sel.applied_hash.is_none() && sel.applied_directive.is_none());
+    }
+
+    #[test]
+    fn legacy_and_unbaselined_selections_still_report_as_before() {
+        let set = drift_corpus("Do the thing.", Some(3));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("P", vec!["me/api".to_string()])
+            .unwrap();
+        // One legacy-hash selection, one never-baselined selection.
+        state.projects.update(&p.id, |proj| {
+            proj.ruleset.selections = vec![
+                crate::project::RuleSelection {
+                    rule_id: "DRIFT-FIX-1".to_string(),
+                    repos: vec!["me/api".to_string()],
+                    applied_hash: Some("00ff00ff00ff00ff".to_string()),
+                    ..Default::default()
+                },
+                crate::project::RuleSelection {
+                    rule_id: "UNBASELINED-1".to_string(),
+                    repos: vec!["me/api".to_string()],
+                    ..Default::default()
+                },
+            ];
+        });
+        let before_save = drift_for_projects(&state.projects.list(), None, &set);
+        assert_eq!(before_save.len(), 1, "legacy surfaced, unbaselined silent");
+        assert_eq!(before_save[0]["legacy_baseline"], true);
+
+        // A non-apply save (resending the same selections) must not rewrite the legacy
+        // baseline or conjure one for the unbaselined rule that the corpus does not know.
+        state.projects.update(&p.id, |proj| {
+            let same = proj.ruleset.selections.clone();
+            proj.upsert_base_rules(same, Vec::new(), Vec::new());
+        });
+        let after_save = drift_for_projects(&state.projects.list(), None, &set);
+        assert_eq!(after_save, before_save);
+        let sels = state.projects.get(&p.id).unwrap().ruleset.selections;
+        assert_eq!(sels[0].applied_hash.as_deref(), Some("00ff00ff00ff00ff"));
+        assert!(sels[1].applied_hash.is_none());
+    }
+
+    #[test]
+    fn baseline_missing_fills_only_unbaselined_selections_from_the_corpus() {
+        let set = drift_corpus("Do the thing.", Some(2));
+        let mut sels = vec![
+            crate::project::RuleSelection {
+                rule_id: "DRIFT-FIX-1".to_string(),
+                ..Default::default()
+            },
+            crate::project::RuleSelection {
+                rule_id: "DRIFT-FIX-1".to_string(),
+                applied_hash: Some("00ff00ff00ff00ff".to_string()),
+                ..Default::default()
+            },
+            crate::project::RuleSelection {
+                rule_id: "NOT-IN-CORPUS-1".to_string(),
+                ..Default::default()
+            },
+        ];
+        baseline_missing(&mut sels, Some(&set));
+        assert_eq!(
+            sels[0].applied_hash.as_deref(),
+            Some(corpus_rule(&set).content_hash().as_str())
+        );
+        assert_eq!(
+            sels[1].applied_hash.as_deref(),
+            Some("00ff00ff00ff00ff"),
+            "an existing (even legacy) baseline is never overwritten by a non-apply save"
+        );
+        assert!(sels[2].applied_hash.is_none());
+        baseline_missing(&mut sels, None); // no corpus: a no-op, never a panic
     }
 
     #[test]

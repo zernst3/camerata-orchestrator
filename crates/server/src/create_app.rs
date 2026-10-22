@@ -480,8 +480,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn skeleton_without_github_token_fails_clearly() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = crate::AppState::seeded();
         state
             .settings()

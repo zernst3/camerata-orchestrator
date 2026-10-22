@@ -1562,7 +1562,7 @@ mod tests {
     // not running concurrently with a test that reads bff_base() expecting production.
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_routines_gets_the_routines_list() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1580,9 +1580,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let routines = super::fetch_routines().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let routines = routines.expect("body parses into Vec<RoutineView>");
         assert_eq!(routines.len(), 1);
@@ -1592,7 +1591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_projects_gets_the_projects_list() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1607,9 +1606,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let projects = super::fetch_projects().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let projects = projects.expect("body parses into Vec<ProjectView>");
         assert_eq!(projects.len(), 1);
@@ -1618,7 +1616,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_open_escalations_uses_open_query() {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1638,9 +1636,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let escs = super::fetch_open_escalations().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let escs = escs.expect("body parses into Vec<EscalationView>");
         assert_eq!(escs.len(), 1);
@@ -1650,7 +1647,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_models_parses_registry_and_builds_labels() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1676,9 +1673,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let resp = super::fetch_models().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let resp = resp.expect("registry parses into ModelsResp");
         assert_eq!(resp.models.len(), 2);
@@ -1700,7 +1696,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_routine_templates_gets_the_templates_list() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1718,9 +1714,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let tmpls = super::fetch_routine_templates().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let tmpls = tmpls.expect("body parses into Vec<RoutineTemplate>");
         assert_eq!(tmpls.len(), 1);
@@ -1729,7 +1724,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn instantiate_from_template_posts_to_instantiate_path() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1745,9 +1740,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let rt = super::instantiate_from_template("t1").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let rt = rt.expect("instantiate returns a RoutineView");
         assert_eq!(rt.id, "r-new");
@@ -1755,7 +1749,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn create_routine_posts_the_full_payload() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1776,7 +1770,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let created = super::create_routine(
             "Nightly",
             "daily 09:00",
@@ -1787,14 +1781,13 @@ mod tests {
             "claude-x",
         )
         .await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(created.is_some(), "create_routine returns the new routine");
         // body_json + expect(1) assert the exact payload reached the server.
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn update_routine_puts_to_the_id_path_with_payload() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1815,7 +1808,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let updated = super::update_routine(
             "r1",
             "Renamed",
@@ -1827,14 +1820,13 @@ mod tests {
             "m1",
         )
         .await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let updated = updated.expect("update returns the routine");
         assert_eq!(updated.name, "Renamed");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_enabled_posts_enabled_flag() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1851,16 +1843,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let r = super::set_enabled("r1", true).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let r = r.expect("returns the updated routine");
         assert!(r.enabled);
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn provision_posts_to_provision_path() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1877,16 +1868,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let r = super::provision("r1").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let r = r.expect("returns the provisioned routine");
         assert!(r.provisioned);
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn run_now_posts_to_run_path() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1903,9 +1893,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let r = super::run_now("r1").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let r = r.expect("returns the routine with a last_run summary");
         let last = r.last_run.expect("run_now records a summary");
@@ -1914,7 +1903,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn delete_routine_deletes_the_id_path() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1927,15 +1916,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::delete_routine("r1").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "a 2xx delete reports success");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn delete_routine_reports_failure_on_404() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1947,15 +1935,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::delete_routine("missing").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(!ok, "a non-2xx delete reports failure");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn chat_escalation_posts_message_and_model() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1979,9 +1966,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let esc = super::chat_escalation("e1", "why did you stop?", "claude-x").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let esc = esc.expect("returns the escalation with the conversation appended");
         assert_eq!(esc.conversation.len(), 2);
@@ -1989,7 +1975,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn answer_escalation_posts_answer_and_action() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2010,9 +1996,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let esc = super::answer_escalation("e1", "go with option B", "approve").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let esc = esc.expect("returns the resolved escalation");
         assert_eq!(esc.status, "resolved");
@@ -2020,7 +2005,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn draft_prompt_posts_intent_and_extracts_prompt() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2038,9 +2023,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let drafted = super::draft_prompt("scan deps nightly", "read-only", "claude-x").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let (prompt, authored_by) = drafted.expect("draft returns (prompt, authored_by)");
         assert_eq!(prompt, "You are a dependency scanner...");
@@ -2048,7 +2032,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn draft_prompt_defaults_authored_by_to_scaffold_when_absent() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2062,9 +2046,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let drafted = super::draft_prompt("x", "read-only", "m").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let (prompt, authored_by) = drafted.expect("draft returns a tuple");
         assert_eq!(prompt, "scaffolded prompt");

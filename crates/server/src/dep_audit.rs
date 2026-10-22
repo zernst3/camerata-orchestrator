@@ -762,6 +762,7 @@ mod tests {
     // provisioning failed.
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn provisioning_failure_emits_coverage_note_not_panic() {
         use tempfile::TempDir;
         // A fresh temp tooling dir: no cached binary inside it.  ensure_osv_scanner
@@ -794,6 +795,7 @@ mod tests {
     /// (read-only, empty, no cached binary and no network write capability).
     /// The function must return a coverage note describing the failure, not panic.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn no_cached_binary_and_impossible_tooling_dir_emits_note() {
         // /nonexistent-tooling-xyz: does not exist, cannot be created (root-owned
         // path segment).  ensure_osv_scanner will try PATH (likely fails), try the
@@ -955,12 +957,12 @@ mod tests {
     /// This is the test-isolation escape hatch; tests that exercise audit_repos but not
     /// dep-audit specifically must set this env var.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn disable_env_var_skips_all_network_activity() {
-        std::env::set_var(DISABLE_ENV_VAR, "1");
+        let _env = camerata_test_env::EnvGuard::set(DISABLE_ENV_VAR, "1");
         let tooling = std::path::Path::new("/nonexistent-tooling-for-disable-test");
         let repo_dir = std::path::Path::new("/nonexistent-repo-for-disable-test");
         let (findings, note) = run_dep_audit_with_tooling("acme/api", repo_dir, tooling).await;
-        std::env::remove_var(DISABLE_ENV_VAR);
         assert!(findings.is_empty(), "DISABLE → no findings");
         assert!(note.is_none(), "DISABLE → no coverage note (silent skip)");
     }

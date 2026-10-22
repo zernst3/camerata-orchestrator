@@ -11690,15 +11690,17 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(process_env)]
     fn apply_env_defaults_fills_blank_fields_only() {
-        // Real env mutation, scoped to this one test and cleaned up immediately after — every
-        // other precedence case above goes through the pure `resolve_brand`/`resolve_prepared_by`
-        // helpers instead specifically to avoid relying on process-global env state.
-        // SAFETY-ish note: `cargo test` runs this crate's tests in threads within one process;
-        // if this ever becomes flaky under parallel execution, these var names are unique
-        // enough (`CAMERATA_REPORT_BRAND`/`_PREPARED_BY`) that no other test should collide.
-        std::env::set_var(REPORT_BRAND_ENV, "Env Agency");
-        std::env::set_var(REPORT_PREPARED_BY_ENV, "Env Preparer");
+        // Real env mutation, scoped to this one test and restored by the `EnvGuard`s on drop —
+        // every other precedence case above goes through the pure `resolve_brand`/
+        // `resolve_prepared_by` helpers instead specifically to avoid relying on process-global
+        // env state. `cargo test` runs this crate's tests on threads of one process, and other
+        // tests (the product-export / client-artifact ones) DO read these vars through
+        // `apply_env_defaults`, so every test that touches them carries the shared
+        // `process_env` serial key.
+        let _env = camerata_test_env::EnvGuard::set(REPORT_BRAND_ENV, "Env Agency");
+        let _env2 = camerata_test_env::EnvGuard::set(REPORT_PREPARED_BY_ENV, "Env Preparer");
 
         let mut blank = ReportOptions::default();
         blank.apply_env_defaults();
@@ -11713,9 +11715,6 @@ mod tests {
         already_set.apply_env_defaults();
         assert_eq!(already_set.brand, "Cantus Works");
         assert_eq!(already_set.prepared_by, "Zachary Ernst");
-
-        std::env::remove_var(REPORT_BRAND_ENV);
-        std::env::remove_var(REPORT_PREPARED_BY_ENV);
     }
 
     // ── FIX 6: the real severity x effort priority grid ─────────────────────────

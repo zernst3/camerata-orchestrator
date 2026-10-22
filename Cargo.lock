@@ -690,6 +690,7 @@ dependencies = [
  "camerata-maintenance",
  "camerata-rules",
  "camerata-server",
+ "camerata-test-env",
  "camerata-worktracker",
  "chrono",
  "clap",
@@ -697,6 +698,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "serial_test",
  "tempfile",
  "tokio",
  "wiremock",
@@ -856,11 +858,13 @@ dependencies = [
  "camerata-agent",
  "camerata-core",
  "camerata-rules",
+ "camerata-test-env",
  "regex",
  "rmcp",
  "schemars",
  "serde",
  "serde_json",
+ "serial_test",
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
@@ -904,10 +908,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "camerata-api-types",
+ "camerata-test-env",
  "keyring",
  "reqwest",
  "serde",
  "serde_json",
+ "serial_test",
  "tokio",
  "wiremock",
 ]
@@ -976,6 +982,7 @@ name = "camerata-preview"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "camerata-test-env",
  "serde",
  "serial_test",
  "tempfile",
@@ -1033,6 +1040,7 @@ dependencies = [
  "camerata-persistence",
  "camerata-rules",
  "camerata-scaffold",
+ "camerata-test-env",
  "camerata-worktracker",
  "chrono",
  "csv",
@@ -1066,11 +1074,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "camerata-test-env"
+version = "0.0.0"
+
+[[package]]
 name = "camerata-ui"
 version = "0.0.0"
 dependencies = [
  "anyhow",
  "camerata-api-types",
+ "camerata-test-env",
  "camerata-ui-core",
  "camerata-worktracker",
  "chorale-core",
