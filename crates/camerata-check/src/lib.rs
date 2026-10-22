@@ -361,6 +361,25 @@ mod tests {
         }
     }
 
+    /// Options scoped to exactly the config-gated rules (the ones whose checkers consult
+    /// `.camerata/architecture.toml` and abstain without it, D3): the import-boundary family,
+    /// handler-no-db and strict-layering. The D3 parity tests use this so they exercise ONLY
+    /// the checkers they are about, not always-on checkers (e.g. ARCH-DEAD-CODE-1) that
+    /// legitimately report on a tiny fixture repo with no entry point.
+    fn config_gated_opts(root: &Path) -> Options {
+        let mut o = opts(root);
+        o.rule_ids = [
+            "ARCH-HANDLER-NO-DB-1",
+            "ARCH-STRICT-LAYERING-1",
+            "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1",
+            "ARCH-API-DTOS-1",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        o
+    }
+
     // ── clean repo -> clean report, exit code 0 ───────────────────────────────
 
     #[test]
@@ -458,7 +477,12 @@ mod tests {
             "export function listOrders(db: Db) {\n  return db.query('select * from orders');\n}\n",
         )
         .unwrap();
-        let report = run(&opts(dir.path())).expect("must not err");
+        let report = run(&config_gated_opts(dir.path())).expect("must not err");
+        assert!(
+            report.checkers_run > 0,
+            "the config-gated checkers must actually be selected, or this test proves nothing: \
+             {report:?}"
+        );
         assert!(
             report.clean,
             "an unconfigured repo must get zero deterministic findings from config-gated \
@@ -521,7 +545,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut o = opts(dir.path());
+        let mut o = config_gated_opts(dir.path());
         o.config_override = Some(cfg_path);
         let report = run(&o).expect("must not err");
         assert!(
@@ -590,7 +614,13 @@ mod tests {
             "export function listOrders(db: Db) {\n  return db.query('select * from orders');\n}\n",
         )
         .unwrap();
-        let report = run(&opts(dir.path())).expect("malformed config must degrade, never error");
+        let report = run(&config_gated_opts(dir.path()))
+            .expect("malformed config must degrade, never error");
+        assert!(
+            report.checkers_run > 0,
+            "the config-gated checkers must actually be selected, or this test proves nothing: \
+             {report:?}"
+        );
         assert!(
             report.clean,
             "malformed config must be treated as absent (D3), not crash: {report:?}"

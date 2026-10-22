@@ -37,6 +37,26 @@ fn bin() -> Command {
     Command::cargo_bin("camerata-check").expect("camerata-check binary must build")
 }
 
+/// The config-gated rule ids: checkers that consult `.camerata/architecture.toml` and abstain
+/// without it (D3). The D3 parity tests scope to exactly these via `--rule-id`, so they
+/// exercise only the checkers they are about and not always-on checkers (e.g.
+/// ARCH-DEAD-CODE-1) that legitimately report on a tiny fixture repo with no entry point.
+const CONFIG_GATED_RULE_IDS: [&str; 4] = [
+    "ARCH-HANDLER-NO-DB-1",
+    "ARCH-STRICT-LAYERING-1",
+    "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1",
+    "ARCH-API-DTOS-1",
+];
+
+/// `bin()` with `--rule-id` already applied for every config-gated rule.
+fn config_gated_bin() -> Command {
+    let mut cmd = bin();
+    for id in CONFIG_GATED_RULE_IDS {
+        cmd.arg("--rule-id").arg(id);
+    }
+    cmd
+}
+
 // ── known violation: non-zero exit, finding present in both output formats ──
 
 #[test]
@@ -112,7 +132,47 @@ fn clean_fixture_json_reports_clean_true() {
 #[test]
 fn no_config_repo_config_gated_rules_do_not_hard_fail() {
     let repo = server_fixture("handler_no_db_unconfigured_repo");
-    bin().arg(&repo).assert().success();
+    config_gated_bin().arg(&repo).assert().success();
+}
+
+// ── dead code runs in the CI gate (design: "scan tier and CI only") ─────────
+
+#[test]
+fn ci_gate_reports_dead_code_for_an_orphaned_file() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let write = |rel: &str, body: &str| {
+        let path = tmp.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    };
+    // A real entry point (package.json `main`) that imports one live module, plus one file
+    // nothing imports or names anywhere: a genuine orphan.
+    write("package.json", r#"{"private":true,"main":"src/app.ts"}"#);
+    write("src/app.ts", "import './used';\n");
+    write("src/used.ts", "export const used = 1;\n");
+    write("src/orphan.ts", "export const orphan = 1;\n");
+
+    let output = bin()
+        .arg(tmp.path())
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("must run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+    let dead: Vec<&serde_json::Value> = value["violations"]
+        .as_array()
+        .expect("violations must be an array")
+        .iter()
+        .filter(|v| v["rule_id"] == "ARCH-DEAD-CODE-1")
+        .collect();
+    assert_eq!(
+        dead.len(),
+        1,
+        "exactly the orphan must be reported, not the entry point or its import: {stdout}"
+    );
+    assert_eq!(dead[0]["file"], "src/orphan.ts", "{stdout}");
 }
 
 // ── adversarial: malformed SQL / malformed config / binary file never panics ─
@@ -214,11 +274,11 @@ fn config_override_flag_is_honored() {
     .unwrap();
 
     // Without the override: unconfigured repo -> clean (D3).
-    bin().arg(&repo).assert().success();
+    config_gated_bin().arg(&repo).assert().success();
 
     // With the override: the same repo now has a config that makes HandlerNoDbChecker
     // deterministic, so the direct-DB-call handler must now fail the gate.
-    bin()
+    config_gated_bin()
         .arg(&repo)
         .arg("--config")
         .arg(&cfg_path)
