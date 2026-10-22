@@ -364,8 +364,33 @@ impl LiteralVisitor {
                 module_const,
                 ..Frame::default()
             },
-            |v| v.visit_expr(expr),
+            |v| v.visit_expr(peel_initializer(expr)),
         );
+    }
+
+    fn visit_lazy_static(&mut self, tokens: proc_macro2::TokenStream) {
+        use syn::parse::Parser;
+        // A body that does not parse as `static ref` items is left unread.
+        let _ = (|input: syn::parse::ParseStream| -> syn::Result<()> {
+            while !input.is_empty() {
+                let attrs = input.call(syn::Attribute::parse_outer)?;
+                let vis: syn::Visibility = input.parse()?;
+                input.parse::<syn::Token![static]>()?;
+                input.parse::<syn::Token![ref]>()?;
+                let ident: syn::Ident = input.parse()?;
+                input.parse::<syn::Token![:]>()?;
+                let _ty: syn::Type = input.parse()?;
+                input.parse::<syn::Token![=]>()?;
+                let expr: syn::Expr = input.parse()?;
+                input.parse::<syn::Token![;]>()?;
+                if !is_test_only(&attrs) {
+                    let public = matches!(vis, syn::Visibility::Public(_));
+                    self.visit_const_initializer(&ident, public, &expr);
+                }
+            }
+            Ok(())
+        })
+        .parse2(tokens);
     }
 
     fn visit_attribute_strings(&mut self, attr: &syn::Attribute) {
@@ -444,6 +469,77 @@ fn callee_of_path(func: &syn::Expr) -> Option<(String, String)> {
     Some((last, render_receiver(func)))
 }
 
+/// The expression a constant initializer really holds, looking through the wrappers that add
+/// nothing to its meaning: parentheses and references, `.to_string()` / `.to_owned()` /
+/// `.into()`, `String::from(..)` / `Cow::Borrowed(..)`, the lazy-static constructors
+/// (`LazyLock::new(|| ..)`, `Lazy::new`, `LazyCell::new`, `OnceLock::from`) and the closure or
+/// single-expression block they take. Anything else (a call to a function of the project, a
+/// block with statements) is returned as is and so is not looked through.
+fn peel_initializer(expr: &syn::Expr) -> &syn::Expr {
+    match expr {
+        syn::Expr::Paren(p) => peel_initializer(&p.expr),
+        syn::Expr::Group(g) => peel_initializer(&g.expr),
+        syn::Expr::Reference(r) => peel_initializer(&r.expr),
+        syn::Expr::MethodCall(m)
+            if m.args.is_empty()
+                && matches!(
+                    m.method.to_string().as_str(),
+                    "to_string" | "to_owned" | "into"
+                ) =>
+        {
+            peel_initializer(&m.receiver)
+        }
+        syn::Expr::Call(c) if c.args.len() == 1 && is_transparent_constructor(&c.func) => {
+            peel_initializer(&c.args[0])
+        }
+        syn::Expr::Closure(cl) if cl.inputs.is_empty() => peel_initializer(&cl.body),
+        syn::Expr::Block(b) if b.attrs.is_empty() && b.label.is_none() => {
+            match b.block.stmts.as_slice() {
+                [syn::Stmt::Expr(e, None)] => peel_initializer(e),
+                _ => expr,
+            }
+        }
+        _ => expr,
+    }
+}
+
+/// `String::from`, `Cow::Borrowed` / `Owned` / `from`, `{Lazy, LazyLock, LazyCell}::new` and
+/// `{OnceLock, OnceCell}::from`, by their last two path segments.
+fn is_transparent_constructor(func: &syn::Expr) -> bool {
+    let syn::Expr::Path(p) = func else {
+        return false;
+    };
+    let segments: Vec<String> = p
+        .path
+        .segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect();
+    let [.., owner, name] = segments.as_slice() else {
+        return false;
+    };
+    matches!(
+        (owner.as_str(), name.as_str()),
+        ("String", "from")
+            | ("Cow", "Borrowed" | "Owned" | "from")
+            | ("Lazy" | "LazyLock" | "LazyCell", "new")
+            | ("OnceLock" | "OnceCell", "from")
+    )
+}
+
+/// The literal a function returns when its whole body is that literal (`{ "x" }` or
+/// `{ return "x"; }`, with the same conversions a constant initializer may carry): such a
+/// function is a constant with a call syntax.
+fn trivial_literal_body(block: &syn::Block) -> Option<&syn::Expr> {
+    let expr = match block.stmts.as_slice() {
+        [syn::Stmt::Expr(syn::Expr::Return(r), _)] => r.expr.as_deref()?,
+        [syn::Stmt::Expr(e, None)] => e,
+        _ => return None,
+    };
+    let peeled = peel_initializer(expr);
+    matches!(peeled, syn::Expr::Lit(_)).then_some(peeled)
+}
+
 /// Whether an attribute marks the item it sits on as test-only: `#[test]` (or a runner's
 /// `#[tokio::test]`, `#[rstest]`) or a `cfg` that holds only under test (`cfg(test)`,
 /// `cfg(all(test, ..))`; `cfg(not(test))` is the opposite and does not count).
@@ -494,7 +590,18 @@ fn is_test_only(attrs: &[syn::Attribute]) -> bool {
 
 impl<'ast> Visit<'ast> for LiteralVisitor {
     // A macro body is a bare token stream: nothing in it has a position the guards could use.
-    fn visit_macro(&mut self, _node: &'ast syn::Macro) {}
+    // The one exception is `lazy_static!`, whose body is a list of ordinary `static ref`
+    // items and so is parsed as such.
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if node
+            .path
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident == "lazy_static")
+        {
+            self.visit_lazy_static(node.tokens.clone());
+        }
+    }
 
     fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
         self.visit_attribute_strings(node);
@@ -520,14 +627,28 @@ impl<'ast> Visit<'ast> for LiteralVisitor {
     }
 
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        if !is_test_only(&node.attrs) {
-            syn::visit::visit_item_fn(self, node);
+        if is_test_only(&node.attrs) {
+            return;
+        }
+        match trivial_literal_body(&node.block).filter(|_| self.block_depth == 0) {
+            Some(literal) => {
+                let public = matches!(node.vis, syn::Visibility::Public(_));
+                self.visit_const_initializer(&node.sig.ident, public, literal);
+            }
+            None => syn::visit::visit_item_fn(self, node),
         }
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        if !is_test_only(&node.attrs) {
-            syn::visit::visit_impl_item_fn(self, node);
+        if is_test_only(&node.attrs) {
+            return;
+        }
+        match trivial_literal_body(&node.block).filter(|_| self.block_depth == 0) {
+            Some(literal) => {
+                let public = matches!(node.vis, syn::Visibility::Public(_));
+                self.visit_const_initializer(&node.sig.ident, public, literal);
+            }
+            None => syn::visit::visit_impl_item_fn(self, node),
         }
     }
 
@@ -1245,9 +1366,9 @@ mod tests {
         for src in [
             "fn f() { const Q: &str = \"orders-high\"; }\n",
             "fn f() { static Q: &str = \"orders-high\"; }\n",
-            "const Q: Lazy<String> = Lazy::new(|| \"orders-high\".into());\n",
-            "const Q: String = String::from(\"orders-high\");\n",
-            "const Q: &str = { \"orders-high\" };\n",
+            "const Q: Lazy<String> = Lazy::new(|| build(\"orders-high\"));\n",
+            "const Q: String = make(\"orders-high\");\n",
+            "const Q: &str = { let a = 1; \"orders-high\" };\n",
             "fn f() { let q = \"orders-high\"; }\n",
         ] {
             assert_eq!(ctx(src, "orders-high").module_const, None, "{src}");
@@ -1311,6 +1432,76 @@ mod tests {
                 1,
                 "{src}"
             );
+        }
+    }
+
+    // ── more home shapes ──────────────────────────────────────────────────────
+
+    #[test]
+    fn ctx_module_const_through_lazy_statics() {
+        for src in [
+            "pub static Q: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| \"orders-high\".to_string());\n",
+            "pub static Q: Lazy<String> = Lazy::new(|| String::from(\"orders-high\"));\n",
+            "pub static Q: once_cell::sync::Lazy<&str> = once_cell::sync::Lazy::new(|| \"orders-high\");\n",
+            "pub static Q: LazyCell<String> = LazyCell::new(|| { \"orders-high\".to_owned() });\n",
+            "pub static Q: LazyLock<String> = LazyLock::new(|| \"orders-high\".into());\n",
+            "pub static Q: OnceLock<&str> = OnceLock::from(\"orders-high\");\n",
+        ] {
+            assert_eq!(ctx(src, "orders-high").module_const, mc("Q", true), "{src}");
+        }
+        // Any other call in the initializer is not the constant.
+        for src in [
+            "pub static Q: Lazy<String> = Lazy::new(|| build(\"orders-high\"));\n",
+            "pub static Q: Lazy<String> = Lazy::new(|| { let a = 1; \"orders-high\".to_string() });\n",
+            "pub static Q: Lazy<usize> = Lazy::new(|| \"orders-high\".len());\n",
+        ] {
+            assert_eq!(ctx(src, "orders-high").module_const, None, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_module_const_inside_lazy_static_macro() {
+        let src = "lazy_static! {\n    pub static ref Q: String = \"orders-high\".to_string();\n    static ref R: &'static str = \"orders-low\";\n}\n";
+        let all = lits(src);
+        let q = all.iter().find(|l| l.value == "orders-high").unwrap();
+        assert_eq!(q.ctx.module_const, mc("Q", true));
+        assert_eq!(q.line, 2);
+        let r = all.iter().find(|l| l.value == "orders-low").unwrap();
+        assert_eq!(r.ctx.module_const, mc("R", false));
+        // Other macros stay opaque.
+        assert!(lits(
+            "println!(\"orders-high\");\nthread_local! { static Q: &str = \"orders-high\"; }\n"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn ctx_module_const_function_whose_body_is_just_the_literal() {
+        for src in [
+            "pub fn queue() -> &'static str { \"orders-high\" }\n",
+            "pub fn queue() -> String { \"orders-high\".to_string() }\n",
+            "pub fn queue() -> String { String::from(\"orders-high\") }\n",
+            "pub fn queue() -> &'static str { return \"orders-high\"; }\n",
+            "pub const fn queue() -> &'static str { \"orders-high\" }\n",
+            "impl A { pub fn queue() -> &'static str { \"orders-high\" } }\n",
+        ] {
+            assert_eq!(
+                ctx(src, "orders-high").module_const,
+                mc(
+                    "queue",
+                    src.contains("pub fn") || src.contains("pub const fn")
+                ),
+                "{src}"
+            );
+        }
+        for src in [
+            "pub fn queue() -> usize { let a = 1; \"orders-high\".len() }\n",
+            "pub fn queue(flag: bool) -> &'static str { if flag { \"orders-high\" } else { \"x-y\" } }\n",
+            "pub fn queue() -> &'static str { log(); \"orders-high\" }\n",
+            "pub fn queue() { publish(\"orders-high\") }\n",
+            "fn outer() { fn queue() -> &'static str { \"orders-high\" } }\n",
+        ] {
+            assert_eq!(ctx(src, "orders-high").module_const, None, "{src}");
         }
     }
 }

@@ -8,6 +8,8 @@
 
 use tree_sitter::Node;
 
+use super::{LiteralCtx, ModuleConst};
+
 /// A node together with its ancestors (root first, nearest parent last).
 #[derive(Clone, Copy)]
 pub(crate) struct Pos<'a, 't> {
@@ -16,6 +18,12 @@ pub(crate) struct Pos<'a, 't> {
 }
 
 impl<'a, 't> Pos<'a, 't> {
+    /// Whether the node or any ancestor is a tree-sitter error node: a region the grammar had
+    /// to recover around, whose structure cannot be trusted.
+    pub fn under_error(self) -> bool {
+        self.node.is_error() || self.chain.iter().any(|n| n.is_error())
+    }
+
     /// The parent, or `None` at the root.
     pub fn parent(self) -> Option<Pos<'a, 't>> {
         let (parent, rest) = self.chain.split_last()?;
@@ -50,6 +58,27 @@ pub(crate) fn walk_with_ancestors<'t>(root: Node<'t>, mut visit: impl FnMut(Pos<
                 return;
             }
             chain.pop();
+        }
+    }
+}
+
+/// What the home climb found for a literal.
+pub(crate) enum Home {
+    /// The literal initializes this named constant.
+    Const(ModuleConst),
+    /// A constant-like declaration the walker cannot name; neither a home nor a bare copy.
+    Unattributed,
+    /// Not the initializer of a constant.
+    None,
+}
+
+impl Home {
+    /// Record the verdict on the literal's context.
+    pub fn apply(self, ctx: &mut LiteralCtx) {
+        match self {
+            Home::Const(home) => ctx.module_const = Some(home),
+            Home::Unattributed => ctx.unattributed = true,
+            Home::None => {}
         }
     }
 }

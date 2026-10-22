@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use tree_sitter::{Node, Tree};
 
-use super::ancestry::{walk_with_ancestors, Pos};
+use super::ancestry::{walk_with_ancestors, Home, Pos};
 
 use super::{
     canonical_number, ExportSurface, FunctionSpan, Import, ImportKind, Literal, LiteralCtx,
@@ -793,9 +793,18 @@ const SPECIFIER_CALLEES: &[&str] = &["require.resolve", "jest.mock", "vi.mock"];
 /// Extract every string and number literal with its [`LiteralCtx`]. See
 /// [`super::literals`] for what counts as a literal.
 pub fn literals(dialect: EcmaDialect, source: &str) -> Vec<Literal> {
-    let Some(tree) = parse(dialect, source) else {
+    let Some(mut tree) = parse(dialect, source) else {
         return Vec::new();
     };
+    // The JavaScript grammar cannot parse some JSX (an attribute named `class` or `for`). The
+    // TSX grammar can, so a JavaScript file that did not parse cleanly gets a second chance
+    // before the literals under its error nodes are given up.
+    if dialect == EcmaDialect::JavaScript && tree.root_node().has_error() {
+        if let Some(retry) = parse(EcmaDialect::Tsx, source).filter(|t| !t.root_node().has_error())
+        {
+            tree = retry;
+        }
+    }
     let root = tree.root_node();
     let type_sources = typeof_sources(root, source);
     let mut out = Vec::new();
@@ -811,6 +820,9 @@ pub fn literals(dialect: EcmaDialect, source: &str) -> Vec<Literal> {
 /// decimal number); `None` for every other node.
 fn literal_at(pos: Pos, source: &str, type_sources: &HashSet<String>) -> Option<Literal> {
     let node = pos.node;
+    if pos.under_error() {
+        return None;
+    }
     let (value, kind) = match node.kind() {
         "string" => (unescape_js(inner_text(node, source)?), LiteralKind::Str),
         "template_string" => {
@@ -955,7 +967,7 @@ fn literal_ctx(pos: Pos, source: &str) -> LiteralCtx {
     apply_key_context(pos, source, &mut ctx);
     ctx.type_position = in_type_position(pos);
     ctx.arithmetic = in_arithmetic_position(pos, source);
-    ctx.module_const = module_const_of(pos, source);
+    module_const_of(pos, source).apply(&mut ctx);
     ctx
 }
 
@@ -972,7 +984,7 @@ fn is_import_specifier(pos: Pos, source: &str) -> bool {
             .child_by_field_name("source")
             .is_some_and(|s| s.id() == node.id()),
         "arguments" => {
-            let is_first = parent.named_child(0).is_some_and(|c| c.id() == node.id());
+            let is_first = first_named_non_comment(parent).is_some_and(|c| c.id() == node.id());
             let Some(call) = up
                 .parent()
                 .map(|c| c.node)
@@ -1144,7 +1156,18 @@ fn in_arithmetic_position(pos: Pos, source: &str) -> bool {
             .unwrap_or_default()
     };
     match parent.kind() {
-        "binary_expression" => matches!(operator(parent), "+" | "-" | "*" | "/" | "%"),
+        "binary_expression" => {
+            let op = operator(parent);
+            // `'rate ' + 0.12` is string concatenation, not arithmetic.
+            let concatenation = op == "+"
+                && ["left", "right"]
+                    .iter()
+                    .filter_map(|f| parent.child_by_field_name(f))
+                    .any(|side| {
+                        side.id() != cur.id() && matches!(side.kind(), "string" | "template_string")
+                    });
+            matches!(op, "+" | "-" | "*" | "/" | "%") && !concatenation
+        }
         "augmented_assignment_expression" => {
             matches!(operator(parent), "+=" | "-=" | "*=" | "/=" | "%=")
                 && parent
@@ -1162,43 +1185,261 @@ fn is_field_of(parent: Node, field: &str, child: Node) -> bool {
         .is_some_and(|n| n.id() == child.id())
 }
 
-/// The top-level `const`/`let`/`var` whose initializer is, or contains (through
-/// [`INITIALIZER_WRAPPERS`] only), this literal.
-fn module_const_of(pos: Pos, source: &str) -> Option<ModuleConst> {
+/// The first named child that is not a comment (a comment in an argument list is an extra,
+/// not an argument).
+fn first_named_non_comment(node: Node) -> Option<Node> {
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .find(|c| c.kind() != "comment");
+    found
+}
+
+fn module_const_of(pos: Pos, source: &str) -> Home {
     let mut cur = pos;
-    let declarator_pos = loop {
-        let up = cur.parent()?;
+    loop {
+        let Some(up) = cur.parent() else {
+            return Home::None;
+        };
         let parent = up.node;
         match parent.kind() {
-            "variable_declarator" if is_field_of(parent, "value", cur.node) => break up,
-            "variable_declarator" => return None,
+            "variable_declarator" if is_field_of(parent, "value", cur.node) => {
+                return declarator_home(up, source);
+            }
             "pair" if is_field_of(parent, "value", cur.node) => cur = up,
-            "pair" => return None,
+            // `Object.freeze({ .. })` returns its argument: the constant is still the object.
+            "arguments" => match up.parent() {
+                Some(call)
+                    if is_object_freeze(call.node, source)
+                        && first_named_non_comment(parent)
+                            .is_some_and(|a| a.id() == cur.node.id()) =>
+                {
+                    cur = call;
+                }
+                _ => return Home::None,
+            },
+            "enum_assignment" if is_field_of(parent, "value", cur.node) => {
+                return enum_member_home(up, source);
+            }
+            "export_statement" if is_field_of(parent, "value", cur.node) => {
+                // `export default <expression>`; the declaration forms use another field.
+                return match up.parent() {
+                    Some(p) if p.node.kind() == "program" => Home::Const(ModuleConst {
+                        name: "default".to_string(),
+                        exported: true,
+                    }),
+                    _ => Home::None,
+                };
+            }
+            "assignment_expression" if is_field_of(parent, "right", cur.node) => {
+                return commonjs_home(up, source);
+            }
+            "public_field_definition" if is_field_of(parent, "value", cur.node) => {
+                return static_field_home(up, source);
+            }
             kind if INITIALIZER_WRAPPERS.contains(&kind) => cur = up,
-            _ => return None,
+            _ => return Home::None,
         }
-    };
+    }
+}
+
+fn is_object_freeze(call: Node, source: &str) -> bool {
+    call.kind() == "call_expression"
+        && call
+            .child_by_field_name("function")
+            .is_some_and(|f| f.kind() == "member_expression" && text(f, source) == "Object.freeze")
+}
+
+/// `const NAME = ..` / `let` / `var` at module level, inside `export`, or inside a namespace.
+fn declarator_home(declarator_pos: Pos, source: &str) -> Home {
     let declarator = declarator_pos.node;
-    let name = declarator.child_by_field_name("name")?;
+    let Some(name) = declarator.child_by_field_name("name") else {
+        return Home::None;
+    };
     // A declarator the grammar had to recover around is not a reliable home.
     if name.kind() != "identifier" || declarator.has_error() {
-        return None;
+        return Home::None;
     }
-    let declaration_pos = declarator_pos.parent()?;
+    let Some(declaration_pos) = declarator_pos.parent() else {
+        return Home::None;
+    };
     if !matches!(
         declaration_pos.node.kind(),
         "lexical_declaration" | "variable_declaration"
     ) {
-        return None;
+        return Home::None;
     }
-    let container_pos = declaration_pos.parent()?;
-    let exported = match container_pos.node.kind() {
-        "program" => false,
-        "export_statement" if container_pos.parent()?.node.kind() == "program" => true,
-        _ => return None,
+    let Some(container_pos) = declaration_pos.parent() else {
+        return Home::None;
     };
-    Some(ModuleConst {
-        name: text(name, source).to_string(),
+    let name = text(name, source).to_string();
+    let (block, exported) = match container_pos.node.kind() {
+        "program" => {
+            return Home::Const(ModuleConst {
+                name,
+                exported: false,
+            })
+        }
+        "export_statement" => match container_pos.parent() {
+            Some(p) if p.node.kind() == "program" => {
+                return Home::Const(ModuleConst {
+                    name,
+                    exported: true,
+                });
+            }
+            Some(p) if p.node.kind() == "statement_block" => (p, true),
+            _ => return Home::None,
+        },
+        "statement_block" => (container_pos, false),
+        _ => return Home::None,
+    };
+    match namespace_path(block, source) {
+        Some(path) => Home::Const(ModuleConst {
+            name: format!("{path}.{name}"),
+            exported,
+        }),
+        None => Home::None,
+    }
+}
+
+/// The dotted name of the namespace whose body is `block` (`namespace A.B { .. }` is `A.B`,
+/// nested namespaces join), when every enclosing construct is a namespace reaching module level.
+fn namespace_path(block: Pos, source: &str) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut block = block;
+    loop {
+        let module = block
+            .parent()
+            .filter(|m| m.node.kind() == "internal_module")?;
+        let name = module.node.child_by_field_name("name")?;
+        parts.push(text(name, source).to_string());
+        // `namespace X {}` is an expression statement, `export namespace X {}` an export.
+        let holder = module
+            .parent()
+            .filter(|h| matches!(h.node.kind(), "expression_statement" | "export_statement"))?;
+        let outer = holder.parent()?;
+        match outer.node.kind() {
+            "program" => {
+                parts.reverse();
+                return Some(parts.join("."));
+            }
+            "statement_block" => block = outer,
+            _ => return None,
+        }
+    }
+}
+
+/// `enum E { Member = <literal> }` at module level.
+fn enum_member_home(member: Pos, source: &str) -> Home {
+    let Some(body) = member.parent() else {
+        return Home::None;
+    };
+    let Some(declaration) = body
+        .parent()
+        .filter(|d| d.node.kind() == "enum_declaration")
+    else {
+        return Home::None;
+    };
+    let Some(enum_name) = declaration.node.child_by_field_name("name") else {
+        return Home::None;
+    };
+    let exported = match declaration.parent() {
+        Some(c) if c.node.kind() == "program" => false,
+        Some(c) if c.node.kind() == "export_statement" => match c.parent() {
+            Some(p) if p.node.kind() == "program" => true,
+            _ => return Home::None,
+        },
+        _ => return Home::None,
+    };
+    let Some(member_name) = member
+        .node
+        .child_by_field_name("name")
+        .and_then(|n| key_text(n, source))
+    else {
+        return Home::None;
+    };
+    Home::Const(ModuleConst {
+        name: format!("{}.{member_name}", text(enum_name, source)),
+        exported,
+    })
+}
+
+/// `module.exports = ..` / `exports.NAME = ..` / `module.exports.NAME = ..` as a top-level
+/// statement.
+fn commonjs_home(assignment: Pos, source: &str) -> Home {
+    let Some(left) = assignment.node.child_by_field_name("left") else {
+        return Home::None;
+    };
+    let left_text: String = text(left, source)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let is_commonjs = left.kind() == "member_expression"
+        && (left_text == "module.exports"
+            || left_text.starts_with("exports.")
+            || left_text.starts_with("module.exports."));
+    let top_level_statement = assignment
+        .parent()
+        .filter(|s| s.node.kind() == "expression_statement")
+        .and_then(|s| s.parent())
+        .is_some_and(|p| p.node.kind() == "program");
+    if is_commonjs && top_level_statement {
+        Home::Const(ModuleConst {
+            name: left_text,
+            exported: true,
+        })
+    } else {
+        Home::None
+    }
+}
+
+/// A `static` class field: `Class.FIELD` is a home when the class is at module level, and
+/// unattributed (neither home nor bare) when the class sits anywhere else. An instance field is
+/// per-object state and is an ordinary value.
+fn static_field_home(field: Pos, source: &str) -> Home {
+    let mut cursor = field.node.walk();
+    let is_static = field
+        .node
+        .children(&mut cursor)
+        .any(|c| c.kind() == "static");
+    if !is_static {
+        return Home::None;
+    }
+    let Some(field_name) = field
+        .node
+        .child_by_field_name("name")
+        .and_then(|n| key_text(n, source))
+    else {
+        return Home::None;
+    };
+    let class = field
+        .parent()
+        .filter(|b| b.node.kind() == "class_body")
+        .and_then(|b| b.parent())
+        .filter(|c| {
+            matches!(
+                c.node.kind(),
+                "class_declaration" | "abstract_class_declaration"
+            )
+        });
+    let Some(class) = class else {
+        return Home::Unattributed;
+    };
+    let Some(class_name) = class.node.child_by_field_name("name") else {
+        return Home::Unattributed;
+    };
+    let exported = match class.parent() {
+        Some(c) if c.node.kind() == "program" => false,
+        Some(c)
+            if c.node.kind() == "export_statement"
+                && c.parent().is_some_and(|p| p.node.kind() == "program") =>
+        {
+            true
+        }
+        _ => return Home::Unattributed,
+    };
+    Home::Const(ModuleConst {
+        name: format!("{}.{field_name}", text(class_name, source)),
         exported,
     })
 }
@@ -2260,9 +2501,8 @@ mod tests {
         for src in [
             "function f() { const Q = 'orders-high'; }",
             "if (x) { const Q = 'orders-high'; }",
-            "class A { static Q = 'orders-high'; }",
+            "class A { Q = 'orders-high'; }",
             "const f = () => { const Q = 'orders-high'; };",
-            "namespace N { export const Q = 'orders-high'; }",
         ] {
             assert_eq!(ts(src, "orders-high").module_const, None, "{src}");
         }
@@ -2299,5 +2539,231 @@ mod tests {
                 let _ = lits(dialect, src);
             }
         }
+    }
+
+    // ── more home shapes ──────────────────────────────────────────────────────
+
+    #[test]
+    fn ctx_module_const_through_object_freeze() {
+        assert_eq!(
+            ts(
+                "export const Q = Object.freeze({ A: 'orders-high' });",
+                "orders-high"
+            )
+            .module_const,
+            mc("Q", true)
+        );
+        assert_eq!(
+            ts(
+                "const Q = Object.freeze(['orders-high'] as const);",
+                "orders-high"
+            )
+            .module_const,
+            mc("Q", false)
+        );
+        // Only `Object.freeze` is transparent; any other call is not the constant.
+        for src in [
+            "const Q = Object.assign({ A: 'orders-high' });",
+            "const Q = freeze({ A: 'orders-high' });",
+            "const Q = Object.freeze(make('orders-high'));",
+            "const Q = Object.freeze(0, 'orders-high');",
+        ] {
+            assert_eq!(ts(src, "orders-high").module_const, None, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_module_const_export_default_is_a_home_named_default() {
+        for src in [
+            "export default { ORDERS: 'orders-high' };",
+            "export default 'orders-high';",
+            "export default ['orders-high'];",
+            "export default { a: { b: 'orders-high' } } as const;",
+        ] {
+            assert_eq!(
+                ts(src, "orders-high").module_const,
+                mc("default", true),
+                "{src}"
+            );
+        }
+        for src in [
+            "export default defineConfig({ q: 'orders-high' });",
+            "export default function f() { return 'orders-high'; }",
+            "export default () => 'orders-high';",
+        ] {
+            assert_eq!(ts(src, "orders-high").module_const, None, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_module_const_commonjs_exports() {
+        assert_eq!(
+            ts("module.exports = { ORDERS: 'orders-high' };", "orders-high").module_const,
+            mc("module.exports", true)
+        );
+        assert_eq!(
+            ts("exports.ORDERS = 'orders-high';", "orders-high").module_const,
+            mc("exports.ORDERS", true)
+        );
+        assert_eq!(
+            ts("module.exports.ORDERS = 'orders-high';", "orders-high").module_const,
+            mc("module.exports.ORDERS", true)
+        );
+        for src in [
+            "window.ORDERS = 'orders-high';",
+            "this.q = 'orders-high';",
+            "function f() { exports.ORDERS = 'orders-high'; }",
+            "module.exports = make('orders-high');",
+        ] {
+            assert_eq!(ts(src, "orders-high").module_const, None, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_module_const_enum_members_are_homes_and_stay_type_positions() {
+        let c = ts(
+            "export enum Routes { Orders = '/api/orders' }",
+            "/api/orders",
+        );
+        assert_eq!(c.module_const, mc("Routes.Orders", true));
+        assert!(c.type_position);
+        assert_eq!(
+            ts("enum E { A = 'x-y' }", "x-y").module_const,
+            mc("E.A", false)
+        );
+        assert_eq!(
+            ts("export const enum K { A = 'ORDERS_HIGH' }", "ORDERS_HIGH").module_const,
+            mc("K.A", true)
+        );
+        assert_eq!(
+            ts("function f() { enum E { A = 'x-y' } }", "x-y").module_const,
+            None
+        );
+    }
+
+    #[test]
+    fn ctx_module_const_namespace_members() {
+        assert_eq!(
+            ts(
+                "export namespace Q { export const ORDERS = 'orders-high'; }",
+                "orders-high"
+            )
+            .module_const,
+            mc("Q.ORDERS", true)
+        );
+        assert_eq!(
+            ts(
+                "namespace A.B { export const X = 'orders-high'; }",
+                "orders-high"
+            )
+            .module_const,
+            mc("A.B.X", true)
+        );
+        assert_eq!(
+            ts("namespace N { const X = 'orders-high'; }", "orders-high").module_const,
+            mc("N.X", false)
+        );
+        assert_eq!(
+            ts(
+                "function f() { namespace N { export const X = 'orders-high'; } }",
+                "orders-high"
+            )
+            .module_const,
+            None
+        );
+    }
+
+    #[test]
+    fn ctx_module_const_static_class_fields_of_a_module_level_class() {
+        assert_eq!(
+            ts(
+                "export class Q { static ORDERS = 'orders-high'; }",
+                "orders-high"
+            )
+            .module_const,
+            mc("Q.ORDERS", true)
+        );
+        assert_eq!(
+            ts(
+                "class Q { static readonly ORDERS = 'orders-high'; }",
+                "orders-high"
+            )
+            .module_const,
+            mc("Q.ORDERS", false)
+        );
+        // An instance field is per-object state, not a shared constant.
+        assert_eq!(
+            ts("class Q { orders = 'orders-high'; }", "orders-high").module_const,
+            None
+        );
+        assert!(!ts("class Q { orders = 'orders-high'; }", "orders-high").unattributed);
+        // A static field of a class the walker cannot name is neither a home nor a bare copy.
+        for src in [
+            "function f() { class Q { static ORDERS = 'orders-high'; } }",
+            "const Q = class { static ORDERS = 'orders-high'; };",
+        ] {
+            let c = ts(src, "orders-high");
+            assert_eq!(c.module_const, None, "{src}");
+            assert!(c.unattributed, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_first_argument_skips_comments() {
+        assert!(
+            ts(
+                "const m = import(/* webpackChunkName: \"x\" */ 'lodash-es');",
+                "lodash-es"
+            )
+            .import_specifier
+        );
+        assert!(ts("jest.mock(/* c */ 'lodash-es');", "lodash-es").import_specifier);
+        assert!(ts("require(// c\n 'lodash-es');", "lodash-es").import_specifier);
+        assert!(!ts("foo(/* c */ 'x-y', 'lodash-es');", "lodash-es").import_specifier);
+    }
+
+    #[test]
+    fn ctx_arithmetic_is_false_for_string_concatenation() {
+        for src in [
+            "const m = 'rate ' + 0.12;",
+            "const m = 0.12 + ' rate';",
+            "const m = `rate ` + 0.12;",
+            "const m = 0.12 + `${x}`;",
+        ] {
+            let all = lits(EcmaDialect::TypeScript, src);
+            let hit = all.iter().find(|l| l.value == "0.12").unwrap();
+            assert!(!hit.ctx.arithmetic, "{src}");
+        }
+        // `-`, `*` and a numeric `+` are still arithmetic.
+        for src in [
+            "const m = 'rate' - 0.12;",
+            "const m = 'rate' * 0.12;",
+            "const m = total + 0.12;",
+            "const m = 1 + 0.12;",
+            "const m = ('a' + b) * 0.12;",
+        ] {
+            assert!(ts(src, "0.12").arithmetic, "{src}");
+        }
+    }
+
+    #[test]
+    fn literals_under_error_nodes_are_not_read() {
+        // `class` as a JSX attribute name makes the JavaScript grammar recover with an error
+        // node; with the TSX re-parse available the literal is read cleanly instead.
+        let all = lits(
+            EcmaDialect::JavaScript,
+            "export const A = () => <div class=\"is-active\">a</div>;\n",
+        );
+        let hit = all.iter().find(|l| l.value == "is-active").unwrap();
+        assert_eq!(hit.ctx.jsx_attr.as_deref(), Some("class"));
+        // Unrecoverable input never yields a literal from inside a recovered region.
+        let broken = lits(
+            EcmaDialect::TypeScript,
+            "foo(@@@ 'orders-high' @@@);\nbar('x-y');\n",
+        );
+        assert!(
+            broken.iter().all(|l| l.value != "orders-high"),
+            "{broken:#?}"
+        );
     }
 }

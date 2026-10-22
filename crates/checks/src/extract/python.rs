@@ -18,7 +18,7 @@
 
 use tree_sitter::{Node, Tree};
 
-use super::ancestry::{walk_with_ancestors, Pos};
+use super::ancestry::{walk_with_ancestors, Home, Pos};
 
 use super::{
     canonical_number, FunctionSpan, Import, ImportKind, Literal, LiteralCtx, LiteralKind,
@@ -359,7 +359,18 @@ const INITIALIZER_WRAPPERS: &[&str] = &[
 ];
 
 /// Base classes whose body assignments are enum members.
-const ENUM_BASES: &[&str] = &["Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "ReprEnum"];
+const ENUM_BASES: &[&str] = &[
+    "Enum",
+    "IntEnum",
+    "StrEnum",
+    "Flag",
+    "IntFlag",
+    "ReprEnum",
+    // Django's enumeration types.
+    "Choices",
+    "TextChoices",
+    "IntegerChoices",
+];
 
 /// Extract every string and number literal with its [`LiteralCtx`]. See
 /// [`super::literals`] for what counts as a literal.
@@ -386,6 +397,9 @@ pub fn literals(source: &str) -> Vec<Literal> {
 
 fn literal_at(pos: Pos, source: &str) -> Option<Literal> {
     let node = pos.node;
+    if pos.under_error() {
+        return None;
+    }
     let (value, kind) = match node.kind() {
         "string" => (string_value(node, source)?, LiteralKind::Str),
         "integer" | "float" => (canonical_number(text(node, source))?, LiteralKind::Number),
@@ -491,7 +505,7 @@ fn literal_ctx(pos: Pos, source: &str) -> LiteralCtx {
     ctx.type_position = in_type_position(pos, source);
     ctx.attribute = has_ancestor(pos, "decorator");
     ctx.arithmetic = in_arithmetic_position(pos, source);
-    ctx.module_const = module_const_of(pos, source);
+    module_const_of(pos, source).apply(&mut ctx);
     ctx
 }
 
@@ -511,6 +525,16 @@ fn is_field_of(parent: Node, field: &str, child: Node) -> bool {
     parent
         .child_by_field_name(field)
         .is_some_and(|n| n.id() == child.id())
+}
+
+/// The first named child that is not a comment (a comment in an argument list is an extra,
+/// not an argument).
+fn first_named_non_comment(node: Node) -> Option<Node> {
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .find(|c| c.kind() != "comment");
+    found
 }
 
 /// Fill `import_specifier`, `callee` and `callee_chain` from the nearest enclosing call, found
@@ -535,9 +559,8 @@ fn apply_call_context(pos: Pos, source: &str, ctx: &mut LiteralCtx) {
                     _ => None,
                 };
                 if let Some(name) = name.filter(|n| !n.is_empty()) {
-                    let first = parent
-                        .named_child(0)
-                        .is_some_and(|c| c.id() == cur.node.id());
+                    let first =
+                        first_named_non_comment(parent).is_some_and(|c| c.id() == cur.node.id());
                     ctx.import_specifier = first
                         && cur.node.id() == pos.node.id()
                         && matches!(name.as_str(), "import_module" | "__import__");
@@ -586,6 +609,21 @@ fn apply_key_context(pos: Pos, source: &str, ctx: &mut LiteralCtx) {
                 ctx.value_of_key = p
                     .child_by_field_name("key")
                     .and_then(|k| key_text(k, source));
+                // `attrs={'autocomplete': '..'}` is a Django widget's HTML attributes.
+                let widget_attrs = up
+                    .parent()
+                    .filter(|d| d.node.kind() == "dictionary")
+                    .and_then(|d| d.parent())
+                    .is_some_and(|kw| {
+                        kw.node.kind() == "keyword_argument"
+                            && kw
+                                .node
+                                .child_by_field_name("name")
+                                .is_some_and(|n| text(n, source) == "attrs")
+                    });
+                if widget_attrs {
+                    ctx.jsx_attr = ctx.value_of_key.clone();
+                }
             }
             return;
         }
@@ -679,7 +717,18 @@ fn in_arithmetic_position(pos: Pos, source: &str) -> bool {
         .map(|o| text(o, source))
         .unwrap_or_default();
     match parent.kind() {
-        "binary_operator" => matches!(operator, "+" | "-" | "*" | "/" | "%" | "//"),
+        "binary_operator" => {
+            // `'rate ' + 0.12` is string concatenation, not arithmetic.
+            let concatenation = operator == "+"
+                && ["left", "right"]
+                    .iter()
+                    .filter_map(|f| parent.child_by_field_name(f))
+                    .any(|side| {
+                        side.id() != cur.id()
+                            && matches!(side.kind(), "string" | "concatenated_string")
+                    });
+            matches!(operator, "+" | "-" | "*" | "/" | "%" | "//") && !concatenation
+        }
         "augmented_assignment" => {
             matches!(operator, "+=" | "-=" | "*=" | "/=" | "%=" | "//=")
                 && is_field_of(parent, "right", cur)
@@ -688,37 +737,78 @@ fn in_arithmetic_position(pos: Pos, source: &str) -> bool {
     }
 }
 
-/// The module-level `NAME = ...` / `NAME: T = ...` whose value is, or contains (through
-/// [`INITIALIZER_WRAPPERS`] only), this literal.
-fn module_const_of(pos: Pos, source: &str) -> Option<ModuleConst> {
+/// The `NAME = ...` / `NAME: T = ...` whose value is, or contains (through
+/// [`INITIALIZER_WRAPPERS`] only), this literal: a module-level constant, or an attribute in
+/// the body of a module-level class (`Class.NAME`). A class body anywhere else is unattributed.
+fn module_const_of(pos: Pos, source: &str) -> Home {
     let mut cur = pos;
     let assignment_pos = loop {
-        let up = cur.parent()?;
+        let Some(up) = cur.parent() else {
+            return Home::None;
+        };
         let parent = up.node;
         match parent.kind() {
             "assignment" if is_field_of(parent, "right", cur.node) => break up,
-            "assignment" => return None,
             "pair" if is_field_of(parent, "value", cur.node) => cur = up,
-            "pair" => return None,
             kind if INITIALIZER_WRAPPERS.contains(&kind) => cur = up,
-            _ => return None,
+            _ => return Home::None,
         }
     };
     let assignment = assignment_pos.node;
-    let name = assignment.child_by_field_name("left")?;
+    let Some(name) = assignment.child_by_field_name("left") else {
+        return Home::None;
+    };
     if name.kind() != "identifier" || assignment.has_error() {
-        return None;
-    }
-    let statement = assignment_pos.parent()?;
-    if statement.node.kind() != "expression_statement"
-        || statement.parent()?.node.kind() != "module"
-    {
-        return None;
+        return Home::None;
     }
     let name = text(name, source).to_string();
-    Some(ModuleConst {
-        exported: !name.starts_with('_'),
-        name,
+    let Some(container) = assignment_pos
+        .parent()
+        .filter(|s| s.node.kind() == "expression_statement")
+        .and_then(|s| s.parent())
+    else {
+        return Home::None;
+    };
+    match container.node.kind() {
+        "module" => Home::Const(ModuleConst {
+            exported: !name.starts_with('_'),
+            name,
+        }),
+        "block" => class_attribute_home(container, &name, source),
+        _ => Home::None,
+    }
+}
+
+/// `block` is a class body when its parent is a `class_definition`; anything else (a function,
+/// an `if`) is ordinary code.
+fn class_attribute_home(block: Pos, attribute: &str, source: &str) -> Home {
+    let Some(class) = block
+        .parent()
+        .filter(|c| c.node.kind() == "class_definition")
+    else {
+        return Home::None;
+    };
+    let Some(class_name) = class.node.child_by_field_name("name") else {
+        return Home::Unattributed;
+    };
+    // A decorated class sits under a `decorated_definition` wrapper.
+    let holder = class
+        .parent()
+        .filter(|p| p.node.kind() == "decorated_definition")
+        .or_else(|| class.parent());
+    let at_module_level = match holder {
+        Some(h) if h.node.kind() == "module" => true,
+        Some(h) if h.node.kind() == "decorated_definition" => {
+            h.parent().is_some_and(|m| m.node.kind() == "module")
+        }
+        _ => false,
+    };
+    if !at_module_level {
+        return Home::Unattributed;
+    }
+    Home::Const(ModuleConst {
+        name: format!("{}.{attribute}", text(class_name, source)),
+        exported: !attribute.starts_with('_'),
     })
 }
 
@@ -1261,7 +1351,6 @@ mod tests {
             "Q = {'a': g('orders-high')}\n",
             "Q = lambda: 'orders-high'\n",
             "def f():\n    Q = 'orders-high'\n",
-            "class A:\n    Q = 'orders-high'\n",
             "if x:\n    Q = 'orders-high'\n",
             "a = b = 'orders-high'\n",
             "a, b = 'orders-high', 'x'\n",
@@ -1285,5 +1374,122 @@ mod tests {
         ] {
             let _ = lits(src);
         }
+    }
+
+    // ── more home shapes ──────────────────────────────────────────────────────
+
+    #[test]
+    fn ctx_module_const_class_body_assignments_of_a_module_level_class() {
+        let c = ctx("class Queues:\n    ORDERS = 'orders-high'\n", "orders-high");
+        assert_eq!(c.module_const, mc("Queues.ORDERS", true));
+        assert!(!c.unattributed);
+        assert_eq!(
+            ctx(
+                "class Queues:\n    ORDERS: str = 'orders-high'\n",
+                "orders-high"
+            )
+            .module_const,
+            mc("Queues.ORDERS", true)
+        );
+        assert_eq!(
+            ctx(
+                "class Queues:\n    _ORDERS = ('orders-high',)\n",
+                "orders-high"
+            )
+            .module_const,
+            mc("Queues._ORDERS", false)
+        );
+        assert_eq!(
+            ctx(
+                "@dataclass\nclass Queues:\n    ORDERS = 'orders-high'\n",
+                "orders-high"
+            )
+            .module_const,
+            mc("Queues.ORDERS", true)
+        );
+        assert_eq!(
+            ctx(
+                "class Queues(Base):\n    ORDERS = {'a': 'orders-high'}\n",
+                "orders-high"
+            )
+            .module_const,
+            mc("Queues.ORDERS", true)
+        );
+    }
+
+    #[test]
+    fn ctx_class_body_assignments_elsewhere_are_unattributed_not_bare() {
+        for src in [
+            "class A:\n    class B:\n        Q = 'orders-high'\n",
+            "def f():\n    class C:\n        Q = 'orders-high'\n",
+            "if x:\n    class C:\n        Q = 'orders-high'\n",
+        ] {
+            let c = ctx(src, "orders-high");
+            assert_eq!(c.module_const, None, "{src}");
+            assert!(c.unattributed, "{src}");
+        }
+        // Method bodies and `self` attributes are ordinary code.
+        for src in [
+            "class A:\n    def f(self):\n        q = 'orders-high'\n",
+            "class A:\n    def __init__(self):\n        self.q = 'orders-high'\n",
+        ] {
+            let c = ctx(src, "orders-high");
+            assert_eq!(c.module_const, None, "{src}");
+            assert!(!c.unattributed, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_type_position_django_choices_classes() {
+        for base in [
+            "models.TextChoices",
+            "TextChoices",
+            "models.IntegerChoices",
+            "Choices",
+        ] {
+            let src =
+                format!("class Status({base}):\n    IN_PROGRESS = 'in-progress', 'In progress'\n");
+            let c = ctx(&src, "in-progress");
+            assert!(c.type_position, "{src}");
+            assert_eq!(c.module_const, mc("Status.IN_PROGRESS", true), "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_first_argument_skips_comments() {
+        let src =
+            "import importlib\nm = importlib.import_module(\n    # plugin\n    'plugins-core')\n";
+        assert!(ctx(src, "plugins-core").import_specifier);
+        let src = "m = import_module('x-y',\n    # c\n    'plugins-core')\n";
+        assert!(!ctx(src, "plugins-core").import_specifier);
+    }
+
+    #[test]
+    fn ctx_arithmetic_is_false_for_string_concatenation() {
+        for src in [
+            "m = 'rate ' + 0.12\n",
+            "m = 0.12 + ' rate'\n",
+            "m = f'{x}' + 0.12\n",
+            "m = 'a' 'b' + 0.12\n",
+        ] {
+            assert!(!ctx(src, "0.12").arithmetic, "{src}");
+        }
+        for src in ["m = total + 0.12\n", "m = 'a' * 0.12\n", "m = 1 + 0.12\n"] {
+            assert!(ctx(src, "0.12").arithmetic, "{src}");
+        }
+    }
+
+    #[test]
+    fn ctx_jsx_attr_names_the_widget_attribute_in_a_django_attrs_dict() {
+        let src = "pw = forms.CharField(widget=forms.PasswordInput(attrs={'autocomplete': 'current-password'}))\n";
+        assert_eq!(
+            ctx(src, "current-password").jsx_attr.as_deref(),
+            Some("autocomplete")
+        );
+        let src = "w = Select(attrs={'class': 'form-control', 'data-x': 'a-b'})\n";
+        assert_eq!(ctx(src, "form-control").jsx_attr.as_deref(), Some("class"));
+        // Other keyword arguments and dicts are not HTML attributes.
+        assert_eq!(ctx("w = make(opts={'k': 'a-b'})\n", "a-b").jsx_attr, None);
+        assert_eq!(ctx("w = {'k': 'a-b'}\n", "a-b").jsx_attr, None);
     }
 }

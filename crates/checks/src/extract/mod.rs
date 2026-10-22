@@ -238,6 +238,10 @@ pub struct LiteralCtx {
     /// without passing a call, of a top-level `const`/`let`/`var` (ECMA), a module-level
     /// `NAME = ...` or `NAME: Final = ...` (Python), or a `const`/`static` item (Rust).
     pub module_const: Option<ModuleConst>,
+    /// The literal sits in a constant-like declaration the walker recognises but cannot attribute
+    /// to a nameable home (a class body that is not at module level). Checkers neither count it
+    /// as a home nor as a bare copy: it is an unmodelled shape, so it stays silent.
+    pub unattributed: bool,
 }
 
 /// One string or number literal. `value` is the unescaped content for a string and the
