@@ -1393,7 +1393,7 @@ impl Rule {
 // ────────────────────────────────────────────────────────────────────────────
 
 /// All loaded rules, indexed for fast lookup by id and by domain.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct RuleSet {
     /// Ordered list preserving load order (stable iteration).
     rules: Vec<Rule>,

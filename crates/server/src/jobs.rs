@@ -8,7 +8,8 @@
 //! decoupled from the request.
 //!
 //! In-memory and ephemeral (like the transcript store): a job lives for the app session. The
-//! findings accumulated while running are a RAW preview (pre-final-dedup/calibration); the
+//! findings accumulated while running are a RAW preview (pre-final-dedup/calibration, but already
+//! severity-bounded: see `JobStore::add_findings`); the
 //! `report` set on completion is the authoritative result the UI switches to.
 
 use std::collections::HashMap;
@@ -18,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 
 use camerata_liveness::LivenessTracker;
+
+use camerata_rules::RuleSet;
 
 use crate::onboard::{Finding, ScanReport};
 
@@ -29,6 +32,10 @@ pub struct JobMeta {
     pub tracker: LivenessTracker,
     /// Set to `true` when a cancel has been requested; checked by the job worker.
     pub cancel_requested: Arc<std::sync::atomic::AtomicBool>,
+    /// The rule corpus the job's scan runs against, registered by the scan (see
+    /// [`JobStore::set_preview_corpus`]) so the live preview can apply the same severity
+    /// bounds the final report will. Released when the job ends.
+    pub preview_corpus: Option<Arc<RuleSet>>,
 }
 
 /// The lifecycle status of one deterministic scan tool, mirroring how the AI passes stream
@@ -148,6 +155,7 @@ impl JobStore {
             // LivenessTracker::new() initialises to current wall clock (not stalled).
             tracker: LivenessTracker::new(),
             cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            preview_corpus: None,
         };
         if let Ok(mut m) = self.job_meta.lock() {
             m.insert(id.clone(), meta);
@@ -188,9 +196,47 @@ impl JobStore {
         self.with(id, |j| j.done += n);
     }
 
+    /// Register (or, with `None`, clear) the rule corpus the job's scan runs against. From then
+    /// on [`Self::add_findings`] bounds every streamed finding by the corpus's authored severity
+    /// bounds. The scan calls this once, at the top of `audit_repos`, where its corpus is in
+    /// scope; no streaming call site has to carry the corpus itself. Released when the job
+    /// finishes, fails or is cancelled.
+    pub fn set_preview_corpus(&self, id: &str, corpus: Option<&RuleSet>) {
+        if let Ok(mut m) = self.job_meta.lock() {
+            if let Some(meta) = m.get_mut(id) {
+                meta.preview_corpus = corpus.map(|c| Arc::new(c.clone()));
+            }
+        }
+    }
+
+    /// The corpus registered for `id`, if any (see [`Self::set_preview_corpus`]).
+    pub(crate) fn preview_corpus_for(&self, id: &str) -> Option<Arc<RuleSet>> {
+        self.job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .and_then(|m| m.preview_corpus.clone())
+    }
+
     /// Append findings discovered by a pass (live preview).
-    pub fn add_findings(&self, id: &str, findings: Vec<Finding>) {
+    ///
+    /// The preview is RAW in that it precedes the final dedup and calibration, but it is never
+    /// UNBOUNDED: every finding is run through the same severity chain as the final report
+    /// ([`crate::severity_bounds::apply_scan_severity_bounds`]: floor, C4-R1, ceilings) before it
+    /// is stored, so a finding cannot flash a severity above its rule's `max_severity` and then
+    /// drop when the report lands. With no corpus registered for the job, the bounds that need
+    /// none (the deviation ceiling's default, C4-R1) still apply, as in a scan that ran without
+    /// one. The streamed `kind` is whatever the producer had assigned by now, so a bound that
+    /// needs a kind (the floor, the deviation ceiling) applies only once the producer set it.
+    pub fn add_findings(&self, id: &str, mut findings: Vec<Finding>) {
+        let corpus = self.preview_corpus_for(id);
+        crate::severity_bounds::apply_scan_severity_bounds(&mut findings, corpus.as_deref());
         self.with(id, |j| j.findings.extend(findings));
+    }
+
+    /// Release the job's registered corpus: it is only needed while findings are streaming.
+    fn release_preview_corpus(&self, id: &str) {
+        self.set_preview_corpus(id, None);
     }
 
     /// Register a deterministic tool that is about to run (status `starting`), growing the
@@ -317,6 +363,7 @@ impl JobStore {
         self.with(id, |job| {
             job.status = "cancelled".to_string();
         });
+        self.release_preview_corpus(id);
     }
 
     /// Finish the job with the authoritative report.
@@ -336,6 +383,7 @@ impl JobStore {
                                // deep report within a project deterministically (not by HashMap order).
             j.completed_at_ms = Some(now_ms);
         });
+        self.release_preview_corpus(id);
     }
 
     /// Fail the job with a reason.
@@ -350,6 +398,7 @@ impl JobStore {
             j.status = "failed".to_string();
             j.message = Some(message.into());
         });
+        self.release_preview_corpus(id);
     }
 
     /// Snapshot a job's state (None for an unknown id).
@@ -457,6 +506,126 @@ mod tests {
         let j = store.get(&id).unwrap();
         assert_eq!(j.status, "done");
         assert!(j.report.is_some());
+    }
+
+    /// A corpus with one rule that declares `max_severity = "low"`.
+    fn ceiling_corpus() -> RuleSet {
+        let mut rule = camerata_rules::bare_rule("CEIL-1", "test-fixture");
+        rule.max_severity = Some("low".to_string());
+        let mut set = RuleSet::default();
+        set.push(rule);
+        set
+    }
+
+    fn streamed_severities(store: &JobStore, id: &str) -> Vec<String> {
+        store
+            .get(id)
+            .unwrap()
+            .findings
+            .iter()
+            .map(|f| f.severity.clone())
+            .collect()
+    }
+
+    /// The live preview must never show a severity the finished scan cannot end with: a finding
+    /// whose rule declares a ceiling is clamped the moment it is streamed, not at the final
+    /// report. FAILS BEFORE THE FIX: `add_findings` stored the producer's severity verbatim, so
+    /// a `critical` flashed in the cockpit and then dropped to `low`.
+    #[test]
+    fn streamed_findings_never_exceed_a_declared_ceiling() {
+        let store = JobStore::new();
+        let id = store.create("audit", None);
+        store.set_preview_corpus(&id, Some(&ceiling_corpus()));
+
+        let mut critical = finding("CEIL-1");
+        critical.severity = "critical".into();
+        let unbounded = finding("OTHER-1"); // no rule, no bound: keeps its own severity
+        store.add_findings(&id, vec![critical, unbounded]);
+
+        assert_eq!(streamed_severities(&store, &id), vec!["low", "high"]);
+    }
+
+    /// Every path that streams a finding goes through `add_findings`, so the bound applies to
+    /// each of them without the call sites having to remember it.
+    #[test]
+    fn every_streamed_batch_is_bounded_not_just_the_first() {
+        let store = JobStore::new();
+        let id = store.create("audit", None);
+        store.set_preview_corpus(&id, Some(&ceiling_corpus()));
+        for _ in 0..3 {
+            let mut f = finding("CEIL-1");
+            f.severity = "critical".into();
+            store.add_findings(&id, vec![f]);
+        }
+        assert_eq!(streamed_severities(&store, &id), vec!["low", "low", "low"]);
+    }
+
+    /// The preview shows the same C4-R1 `info` for an unlocated finding as the final report.
+    #[test]
+    fn a_streamed_unlocated_finding_is_already_info() {
+        let store = JobStore::new();
+        let id = store.create("audit", None);
+        store.set_preview_corpus(&id, Some(&ceiling_corpus()));
+        let mut f = finding("OTHER-1");
+        f.path = String::new();
+        f.line = 0;
+        store.add_findings(&id, vec![f]);
+        assert_eq!(streamed_severities(&store, &id), vec!["info"]);
+    }
+
+    /// With no corpus registered the bounds that need no corpus (the deviation ceiling's
+    /// `medium` default, C4-R1) still apply, exactly as for a scan that ran without a corpus;
+    /// the per-rule ceiling, which needs the corpus, does not.
+    #[test]
+    fn with_no_corpus_registered_only_the_corpus_free_bounds_apply() {
+        let store = JobStore::new();
+        let id = store.create("audit", None);
+        let mut ceiling_rule = finding("CEIL-1");
+        ceiling_rule.severity = "critical".into();
+        let mut unlocated = finding("OTHER-1");
+        unlocated.path = String::new();
+        unlocated.line = 0;
+        store.add_findings(&id, vec![ceiling_rule, unlocated]);
+        assert_eq!(streamed_severities(&store, &id), vec!["critical", "info"]);
+    }
+
+    /// The corpus is per job and is released when the job ends, however it ends.
+    #[test]
+    fn the_preview_corpus_is_per_job_and_released_when_the_job_ends() {
+        let store = JobStore::new();
+        let a = store.create("audit", None);
+        let b = store.create("audit", None);
+        store.set_preview_corpus(&a, Some(&ceiling_corpus()));
+        assert!(store.preview_corpus_for(&a).is_some());
+        assert!(
+            store.preview_corpus_for(&b).is_none(),
+            "a corpus registered for one job must not bound another job's preview"
+        );
+
+        store.finish(&a, ScanReport::gated(&["me/api".to_string()]));
+        assert!(store.preview_corpus_for(&a).is_none(), "released on finish");
+
+        let failed = store.create("audit", None);
+        store.set_preview_corpus(&failed, Some(&ceiling_corpus()));
+        store.fail(&failed, "boom");
+        assert!(
+            store.preview_corpus_for(&failed).is_none(),
+            "released on fail"
+        );
+
+        let cancelled = store.create("audit", None);
+        store.set_preview_corpus(&cancelled, Some(&ceiling_corpus()));
+        store.cancel(&cancelled);
+        assert!(
+            store.preview_corpus_for(&cancelled).is_none(),
+            "released on cancel"
+        );
+
+        // Registering `None` clears an earlier registration.
+        let c = store.create("audit", None);
+        store.set_preview_corpus(&c, Some(&ceiling_corpus()));
+        store.set_preview_corpus(&c, None);
+        assert!(store.preview_corpus_for(&c).is_none());
     }
 
     #[test]

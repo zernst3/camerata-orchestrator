@@ -27,6 +27,7 @@ use std::path::Path;
 
 use camerata_api_types::audit::{DeviationKind, FindingKind};
 use camerata_server::ai_audit::ScanMode;
+use camerata_server::jobs::JobStore;
 use camerata_server::onboard::{
     self, AuditedRef, Finding, LanguageVolume, ScanProvenance, ScanReport, SelectedRule,
 };
@@ -535,6 +536,14 @@ fn stage_git_repo(dest: &Path, files: &[(&str, &str)]) {
 }
 
 async fn scan(repo_dir: &Path, corpus: Option<&camerata_rules::RuleSet>) -> onboard::ScanReport {
+    scan_with_job(repo_dir, corpus, None).await
+}
+
+async fn scan_with_job(
+    repo_dir: &Path,
+    corpus: Option<&camerata_rules::RuleSet>,
+    job: Option<(&JobStore, &str)>,
+) -> onboard::ScanReport {
     let sources = vec![("e2e/split-import-path".to_string(), repo_dir.to_path_buf())];
     let selected = vec![SelectedRule {
         id: "ARCH-ONE-IMPORT-PATH-1".to_string(),
@@ -550,7 +559,7 @@ async fn scan(repo_dir: &Path, corpus: Option<&camerata_rules::RuleSet>) -> onbo
         ScanMode::Sequential,
         false,
         None,
-        None,
+        job,
         None,
         false,
         false,
@@ -622,4 +631,113 @@ async fn audit_repos_applies_the_corpus_ceiling_to_a_live_architectural_finding(
         raw[0].severity, "medium",
         "control: with no corpus there is no authored bound, so the checker's severity stands"
     );
+}
+
+// ── The mid-scan preview ──────────────────────────────────────────────────────────────────
+
+fn stage_split_import_repo(dest: &Path) {
+    stage_git_repo(
+        dest,
+        &[
+            ("lib/x.ts", "export function a() {}\n"),
+            ("lib/index.ts", "export { a } from './x';\n"),
+            ("app/one.ts", "import { a } from '../lib';\n"),
+            ("app/two.ts", "import { a } from '../lib/x';\n"),
+        ],
+    );
+}
+
+/// The live preview (`JobStore::findings`, what the cockpit polls mid-scan) must never carry a
+/// severity above a declared ceiling, even though it streams BEFORE the final bounds. Driven
+/// through the real `audit_repos` with the real corpus: the architectural checker emits
+/// `medium` for `ARCH-ONE-IMPORT-PATH-1`, whose rule declares `max_severity = "low"`.
+///
+/// FAILS BEFORE THE FIX: `add_findings` stored the checker's `medium` verbatim, so the preview
+/// showed `medium` while the final report said `low`. The control proves the clamp comes from
+/// the corpus (with none, the preview keeps the checker's `medium`), and the last assertion
+/// proves the preview and the final report agree.
+#[tokio::test]
+async fn the_mid_scan_preview_never_exceeds_a_declared_ceiling() {
+    let Some(corpus) = real_corpus().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    stage_split_import_repo(dir.path());
+
+    let store = JobStore::new();
+    let id = store.create("audit", None);
+    let report = scan_with_job(dir.path(), Some(&corpus), Some((&store, &id))).await;
+
+    let preview = store.get(&id).unwrap().findings;
+    let streamed: Vec<&Finding> = preview
+        .iter()
+        .filter(|f| f.rule_id == "ARCH-ONE-IMPORT-PATH-1")
+        .collect();
+    assert_eq!(streamed.len(), 1, "the checker must stream: {streamed:?}");
+    assert_eq!(
+        streamed[0].severity, "low",
+        "the PREVIEW must already carry the ceiling"
+    );
+    let finished: Vec<&Finding> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == "ARCH-ONE-IMPORT-PATH-1")
+        .collect();
+    assert_eq!(finished.len(), 1);
+    assert_eq!(
+        streamed[0].severity, finished[0].severity,
+        "the preview and the final report must agree"
+    );
+
+    let control_store = JobStore::new();
+    let control_id = control_store.create("audit", None);
+    let _ = scan_with_job(dir.path(), None, Some((&control_store, &control_id))).await;
+    let control = control_store.get(&control_id).unwrap().findings;
+    let raw = control
+        .iter()
+        .find(|f| f.rule_id == "ARCH-ONE-IMPORT-PATH-1")
+        .expect("the checker streams without a corpus too");
+    assert_eq!(
+        raw.severity, "medium",
+        "control: with no corpus there is no authored bound, so the preview keeps medium"
+    );
+}
+
+/// The same property over the WHOLE real corpus, through the streaming entry point itself:
+/// for every rule that declares a ceiling, a `critical` streamed into a job's preview ranks no
+/// higher than that ceiling. The non-empty assertion turns a corpus with no ceilings into a
+/// failure rather than a vacuous pass.
+#[tokio::test]
+async fn every_real_corpus_ceiling_holds_in_the_streamed_preview() {
+    let Some(corpus) = real_corpus().await else {
+        return;
+    };
+    let declaring: Vec<(String, String)> = corpus
+        .iter()
+        .filter_map(|r| r.max_severity.clone().map(|c| (r.id.0.clone(), c)))
+        .collect();
+    assert!(
+        !declaring.is_empty(),
+        "no corpus rule declares a ceiling, so this property is vacuous"
+    );
+    let store = JobStore::new();
+    let id = store.create("audit", None);
+    store.set_preview_corpus(&id, Some(&corpus));
+    store.add_findings(
+        &id,
+        declaring
+            .iter()
+            .map(|(rule_id, _)| located(rule_id, "critical", FindingKind::Defect))
+            .collect(),
+    );
+    let streamed = store.get(&id).unwrap().findings;
+    assert_eq!(streamed.len(), declaring.len());
+    for (finding, (rule_id, ceiling)) in streamed.iter().zip(&declaring) {
+        assert_eq!(&finding.rule_id, rule_id);
+        assert!(
+            rank(&finding.severity) >= rank(ceiling),
+            "{rule_id} declares max_severity = {ceiling:?} but the streamed preview carries {:?}",
+            finding.severity
+        );
+    }
 }
