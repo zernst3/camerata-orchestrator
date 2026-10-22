@@ -32,6 +32,12 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-21 (Opus, on the Fable review's evidence): ARCH-DEAD-CODE-1 does NOT run at the Layer-2
+  write-time gate in v1 (new `ArchChecker::runs_at_write_time`, false for dead-code). A story may
+  legitimately end with scaffolding or an externally consumed file, and a bounce would teach agents
+  to paste `keep-file:` markers. Scan tier and CI only. Re-evaluate once scan-tier false-positive
+  data exists.
+
 - 2026-10-21 (Opus, within Zach's "narrow" ruling, false-positive-safe narrowings after the
   Fable review of ARCH-SHARED-CONSTANT-1): N1 rates require >= 2 significant digits (keeps 0.12,
   0.075; drops 0.9, 0.001, 1e-9); Django URL-name callees (reverse, reverse_lazy, redirect,
