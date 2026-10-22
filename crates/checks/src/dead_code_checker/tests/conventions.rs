@@ -444,3 +444,20 @@ fn positive_sibling_an_app_directory_without_ember_is_still_checked() {
     ]);
     assert_flags_only(&f, "app/routes/billing-history.js");
 }
+
+#[test]
+fn next_src_layout_special_files_are_never_candidates() {
+    let manifest = private_with(r#""next":"15""#);
+    let f = files(vec![
+        ("package.json", manifest.as_str()),
+        ("next.config.mjs", "export default {};\n"),
+        ("src/middleware.ts", "export {};\n"),
+        ("src/proxy.ts", "export {};\n"),
+        ("src/instrumentation.ts", "export {};\n"),
+        ("src/instrumentation-client.ts", "export {};\n"),
+        ("src/mdx-components.tsx", "export const useMDXComponents = () => ({});\n"),
+        ("src/app/layout.tsx", "export default 1;\n"),
+        ("src/app/page.tsx", "export default 1;\n"),
+    ]);
+    assert_silent(&f);
+}

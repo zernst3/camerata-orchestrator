@@ -54,6 +54,8 @@ const CONFIG_BASENAME_PREFIXES: &[&str] = &[
     "setuptests.",
     "test-setup.",
     "instrumentation.",
+    "instrumentation-client.",
+    "mdx-components.",
     "middleware.",
     "proxy.",
     "service-worker.",

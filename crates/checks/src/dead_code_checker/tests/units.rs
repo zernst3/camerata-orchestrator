@@ -171,6 +171,8 @@ fn config_shaped_paths_cover_root_level_dot_dirs_and_tool_basenames() {
         "src/register.ts",
         "src/vite-env.ts",
         "src/next-env.ts",
+        "src/instrumentation-client.ts",
+        "src/mdx-components.tsx",
     ] {
         assert!(is_config_shaped(p), "{p}");
     }
