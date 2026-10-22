@@ -1,10 +1,10 @@
 //! The liveness computation: which candidate files can be reached from the entry points,
 //! the files that are alive by definition, and the mention guard, run to a fixed point.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::extract::paths::emitted_js_paths;
-use crate::extract::resolver::{build_import_graph, reachable_from_all, ResolvedImport};
+use crate::extract::resolver::{build_import_graph, ResolvedImport};
 
 use super::conventions::Conventions;
 use super::dynamic::dynamic_roots;
@@ -134,38 +134,50 @@ pub(super) fn analyze(files: &[(String, String)]) -> Vec<crate::arch_checker::Ar
     let index = MentionIndex::build(files, &keys);
 
     // Alive = reachable over imports from the roots (ECMAScript and Python), plus everything
-    // the `mod` closure compiles from the Rust roots.
-    let liveness = |roots: &HashSet<String>| -> HashSet<String> {
-        let mut live = reachable_from_all(&graph, roots.iter().map(String::as_str));
-        let rust_roots: Vec<String> = roots
-            .iter()
-            .filter(|p| p.ends_with(".rs"))
-            .cloned()
-            .collect();
-        live.extend(rust.declared(&rust_roots));
-        live
-    };
-    let mut live = liveness(&roots);
-    loop {
-        let mut grew = false;
-        for &i in &pending {
-            let path = &files[i].0;
-            if live.contains(path) || roots.contains(path) {
-                continue;
-            }
-            let mentioned = index
-                .mentioners(&key_of_candidate[&i])
-                .iter()
-                .any(|&m| m != i && live.contains(&files[m].0));
-            if mentioned {
-                roots.insert(path.clone());
-                grew = true;
+    // the `mod` closure compiles from the Rust roots, plus every candidate named in a live file.
+    // One worklist: a file is expanded once, when it becomes live, along its import edges, its
+    // `mod` declarations and the candidates its text names, so the cost is linear however long
+    // a chain of mentions is.
+    let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
+    for edge in &graph {
+        edges
+            .entry(edge.from_file.as_str())
+            .or_default()
+            .push(edge.to_file.as_str());
+    }
+    // path -> the pending candidates its text names.
+    let mut names_candidates: HashMap<&str, Vec<&str>> = HashMap::new();
+    for &i in &pending {
+        for &m in index.mentioners(&key_of_candidate[&i]) {
+            if m != i {
+                names_candidates
+                    .entry(files[m].0.as_str())
+                    .or_default()
+                    .push(files[i].0.as_str());
             }
         }
-        if !grew {
-            break;
+    }
+    let mut live: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    for root in &roots {
+        if live.insert(root.clone()) {
+            queue.push_back(root.clone());
         }
-        live = liveness(&roots);
+    }
+    while let Some(file) = queue.pop_front() {
+        let imported = edges.get(file.as_str()).into_iter().flatten().copied();
+        let declared = rust.targets_of(&file).iter().map(String::as_str);
+        let named = names_candidates
+            .get(file.as_str())
+            .into_iter()
+            .flatten()
+            .copied();
+        for next in imported.chain(declared).chain(named) {
+            if !live.contains(next) {
+                live.insert(next.to_string());
+                queue.push_back(next.to_string());
+            }
+        }
     }
 
     let dead_paths: BTreeSet<&str> = candidates

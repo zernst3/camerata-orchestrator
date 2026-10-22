@@ -908,3 +908,29 @@ fn the_write_time_feed_reads_other_languages_source_so_their_mentions_count() {
     assert!(paths.contains(&"services/runner.go"), "{paths:?}");
     assert_silent(&loaded);
 }
+
+#[test]
+fn a_deep_mention_only_chain_is_resolved_in_linear_time() {
+    // File i only names file i+1 in a comment; nothing imports anything. Each mention makes the
+    // next file live, so the fixed point has as many rounds as the chain is long.
+    const N: usize = 4000;
+    let mut pairs: Vec<(String, String)> = vec![(
+        "package.json".to_string(),
+        r#"{"private":true,"main":"src/link0.ts"}"#.to_string(),
+    )];
+    for i in 0..N {
+        pairs.push((
+            format!("src/link{i}.ts"),
+            format!("// next: link{}\nexport const v{i} = {i};\n", i + 1),
+        ));
+    }
+    pairs.push(("src/stranded_end.ts".into(), "export const e = 1;\n".into()));
+    let started = std::time::Instant::now();
+    let got = flagged(&pairs);
+    let elapsed = started.elapsed();
+    assert_eq!(got, ["src/stranded_end.ts"]);
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "a {N}-deep mention chain took {elapsed:?}"
+    );
+}

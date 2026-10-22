@@ -14,7 +14,7 @@
 //! `src/bin` path in `Cargo.toml` (a bin target may own `#[path]` declarations), or a
 //! dependency on `automod`, `mod_use` or `include_dir` (macro-generated declarations).
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::extract::resolver::{directory_of, normalize_join, rust_src_root};
 use crate::extract::rust_syn::{mod_decls, ModDecl};
@@ -126,9 +126,12 @@ impl RustPlan {
         is_rust(path) && rust_src_root(path).is_some_and(|root| self.checked.contains(&root))
     }
 
-    /// Every file the checked crates compile: the closure of `mod` declarations from the crate
+    /// (Test-only: the scan folds this closure into its liveness worklist.) Every file the checked
+    /// crates compile: the closure of `mod` declarations from the crate
     /// roots plus `extra_roots` (files alive by other evidence).
+    #[cfg(test)]
     pub(super) fn declared(&self, extra_roots: &[String]) -> HashSet<String> {
+        use std::collections::VecDeque;
         let mut seen: HashSet<String> = self.roots.iter().cloned().collect();
         let mut queue: VecDeque<String> = self.roots.iter().cloned().collect();
         for root in extra_roots {
@@ -144,6 +147,11 @@ impl RustPlan {
             }
         }
         seen
+    }
+
+    /// The files `path`'s `mod` statements declare.
+    pub(super) fn targets_of(&self, path: &str) -> &[String] {
+        self.targets.get(path).map_or(&[], Vec::as_slice)
     }
 
     /// The crate roots of the checked crates.
