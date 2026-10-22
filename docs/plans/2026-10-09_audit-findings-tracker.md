@@ -607,7 +607,8 @@ unconditionally. A floor raises, so an over-broad one is a false alarm shipped t
 2. **A real location.** Empty `path` AND `line == 0` means nothing concrete was established to
    rate. Declining there, rather than relying on running before C4-R1, makes the floor
    order-independent with respect to that safety net: it cannot undo it from any position, in any
-   exporter, including the xlsx partition, which does not apply C4-R1 at all.
+   exporter. (As of 2026-10-21 every exporter and the live scan apply C4-R1 in the shared
+   chain, `severity_bounds::bounded_severity`; the xlsx partition no longer differs.)
 
 ## The corpus-load gate
 

@@ -1245,6 +1245,14 @@ pub async fn audit_repos(
     // the recommendation prompt and as the fallback when the model's answer can't be trusted.
     chosen_options: &std::collections::HashMap<String, String>,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
+    // The live preview streams findings into the job as passes complete, BEFORE the final dedup,
+    // calibration and bounds. Hand the job the corpus up front so every streamed batch (the
+    // floor, the architectural checkers, carried-forward findings, each AI pass, dep-audit) is
+    // bounded by the same chain the report will be, and the preview never shows a severity the
+    // scan cannot end with. See `JobStore::add_findings`.
+    if let Some((jstore, jid)) = job {
+        jstore.set_preview_corpus(jid, corpus);
+    }
     // THE GATE: resolved before anything else — no file read, no deterministic tool, no
     // model call, UNLESS a local (non-AI) pass was actually requested. A `Blocked` project
     // must never make an AI/model call — that part of the gate is absolute — but it must

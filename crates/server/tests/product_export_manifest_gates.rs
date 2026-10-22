@@ -13,7 +13,7 @@
 //!
 //! - **Gate 7, provenance parity.** The README is the human rendering of the manifest's
 //!   `inspection` block. Both are rendered from ONE [`ManifestProvenance`], and these tests
-//!   hold them equal field by field (commit, engine version, corpus version,
+//!   hold them equal field by field (commit per repo, engine version, corpus version,
 //!   rules-last-reviewed, repos, generated-at), including the absent-value case, where the
 //!   README must omit the line rather than print a placeholder while the manifest carries an
 //!   explicit `null`.
@@ -122,12 +122,15 @@ fn build_zip(provenance: &ManifestProvenance) -> Vec<u8> {
 /// A provenance with every optional field present, so no parity check can pass on `None == None`.
 fn full_provenance() -> ManifestProvenance {
     let json = report_json();
-    ManifestProvenance {
-        commit: Some("a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".to_string()),
-        corpus_version: Some("sha256:9f86d081884c7d659a2feaa0c55ad015".to_string()),
-        rules_last_reviewed: Some("2026-10-18".to_string()),
-        ..ManifestProvenance::from_cover(&json.cover)
-    }
+    let mut provenance = ManifestProvenance::from_cover(&json.cover);
+    // Both repos carry a commit (the fixture report only recorded one, so this also covers the
+    // README rendering a commit line per repo), one of them dirty.
+    provenance.repos[0].commit = Some("a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".to_string());
+    provenance.repos[1].commit = Some("0f1e2d3c4b5a69788796a5b4c3d2e1f001122334".to_string());
+    provenance.repos[1].dirty = true;
+    provenance.corpus_version = Some("sha256:9f86d081884c7d659a2feaa0c55ad015".to_string());
+    provenance.rules_last_reviewed = Some("2026-10-18".to_string());
+    provenance
 }
 
 fn read_entries(zip_bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
@@ -254,7 +257,8 @@ fn gate6_a_file_swapped_without_updating_the_manifest_is_caught() {
 struct ReadmeProvenance {
     repos: Option<String>,
     generated: Option<String>,
-    commit: Option<String>,
+    /// repo name -> (commit, "uncommitted changes" note present), from `Commit (repo): sha`.
+    commits: BTreeMap<String, (String, bool)>,
     engine_version: Option<String>,
     corpus_version: Option<String>,
     rules_last_reviewed: Option<String>,
@@ -267,8 +271,14 @@ fn parse_readme_provenance(readme: &str) -> ReadmeProvenance {
             p.repos = Some(v.to_string());
         } else if let Some(v) = line.strip_prefix("Generated: ") {
             p.generated = Some(v.to_string());
-        } else if let Some(v) = line.strip_prefix("Commit: ") {
-            p.commit = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix("Commit (") {
+            let (repo, rest) = v.split_once("): ").expect("a `Commit (repo): sha` line");
+            let note = " (the working tree had uncommitted changes)";
+            let (sha, dirty) = match rest.strip_suffix(note) {
+                Some(sha) => (sha, true),
+                None => (rest, false),
+            };
+            p.commits.insert(repo.to_string(), (sha.to_string(), dirty));
         } else if let Some(v) = line.strip_prefix("Engine version: ") {
             p.engine_version = Some(v.to_string());
         } else if let Some(v) = line.strip_prefix("Corpus version: ") {
@@ -298,22 +308,34 @@ fn gate7_readme_provenance_lines_equal_the_manifest_provenance() {
     let (readme, manifest) = readme_and_manifest(&build_zip(&provenance));
     let parsed = parse_readme_provenance(&readme);
 
-    let manifest_repos: Vec<String> = manifest["inspection"]["repos"]
-        .as_array()
-        .unwrap()
+    let manifest_repos = manifest["inspection"]["repos"].as_array().unwrap();
+    let manifest_names: Vec<String> = manifest_repos
         .iter()
-        .map(|r| r.as_str().unwrap().to_string())
+        .map(|r| r["name"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(
-        manifest_repos,
+        manifest_names,
         vec!["acme/portal".to_string(), "acme/web".to_string()]
     );
-    assert_eq!(parsed.repos, Some(manifest_repos.join(", ")));
+    assert_eq!(parsed.repos, Some(manifest_names.join(", ")));
     assert_eq!(
         parsed.generated,
         manifest["generated_at"].as_str().map(str::to_string)
     );
-    assert_eq!(parsed.commit, manifest_str(&manifest, "commit"));
+    // Each repo's commit, and whether its tree was dirty, is the same in both renderings.
+    let manifest_commits: BTreeMap<String, (String, bool)> = manifest_repos
+        .iter()
+        .map(|r| {
+            (
+                r["name"].as_str().unwrap().to_string(),
+                (
+                    r["commit"].as_str().unwrap().to_string(),
+                    r["dirty"].as_bool().unwrap(),
+                ),
+            )
+        })
+        .collect();
+    assert_eq!(parsed.commits, manifest_commits);
     assert_eq!(
         parsed.engine_version,
         manifest_str(&manifest, "engine_version")
@@ -329,8 +351,15 @@ fn gate7_readme_provenance_lines_equal_the_manifest_provenance() {
 
     // And none of them is vacuous.
     assert_eq!(
-        parsed.commit.as_deref(),
-        Some("a1b2c3d4e5f60718293a4b5c6d7e8f9012345678")
+        parsed.commits.get("acme/portal"),
+        Some(&(
+            "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".to_string(),
+            false
+        ))
+    );
+    assert_eq!(
+        parsed.commits.get("acme/web"),
+        Some(&("0f1e2d3c4b5a69788796a5b4c3d2e1f001122334".to_string(), true))
     );
     assert_eq!(
         parsed.corpus_version.as_deref(),
@@ -351,14 +380,21 @@ fn gate7_readme_provenance_lines_equal_the_manifest_provenance() {
 fn gate7_every_value_in_the_manifest_inspection_block_appears_in_the_readme() {
     let (readme, manifest) = readme_and_manifest(&build_zip(&full_provenance()));
     let inspection = manifest["inspection"].as_object().unwrap();
-    assert!(inspection.len() >= 5, "{inspection:?}");
+    assert!(inspection.len() >= 4, "{inspection:?}");
     for (key, value) in inspection {
         let rendered: Vec<String> = match value {
             serde_json::Value::Null => continue,
             serde_json::Value::String(s) => vec![s.clone()],
+            // `repos`: each entry is `{ name, commit, dirty }`; name and commit are printed.
             serde_json::Value::Array(items) => items
                 .iter()
-                .map(|i| i.as_str().expect("repos are strings").to_string())
+                .flat_map(|i| {
+                    let repo = i.as_object().expect("repos are objects");
+                    ["name", "commit"]
+                        .into_iter()
+                        .filter_map(|k| repo[k].as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
                 .collect(),
             other => panic!("inspection.{key} has an unrendered shape: {other}"),
         };
@@ -380,16 +416,19 @@ fn gate7_every_value_in_the_manifest_inspection_block_appears_in_the_readme() {
 /// print a fabricated date").
 #[test]
 fn gate7_absent_provenance_is_null_in_the_manifest_and_omitted_from_the_readme() {
-    let json = report_json();
+    // A scan that recorded no git identity (not a git checkout): no commit for any repo.
+    let mut json = report_json();
+    json.cover.audited_refs.clear();
     let provenance = ManifestProvenance::from_cover(&json.cover);
-    assert!(provenance.commit.is_none());
+    assert_eq!(provenance.repos.len(), 2);
+    assert!(provenance.repos.iter().all(|r| r.commit.is_none()));
     assert!(provenance.corpus_version.is_none());
     assert!(provenance.rules_last_reviewed.is_none());
 
     let (readme, manifest) = readme_and_manifest(&build_zip(&provenance));
     let parsed = parse_readme_provenance(&readme);
 
-    for key in ["commit", "corpus_version", "rules_last_reviewed"] {
+    for key in ["corpus_version", "rules_last_reviewed"] {
         assert!(
             manifest["inspection"]
                 .get(key)
@@ -397,7 +436,12 @@ fn gate7_absent_provenance_is_null_in_the_manifest_and_omitted_from_the_readme()
             "inspection.{key} must be present and null: {manifest}"
         );
     }
-    assert_eq!(parsed.commit, None, "{readme}");
+    assert!(parsed.commits.is_empty(), "{readme}");
+    // Every repo entry is still present, with an explicit null commit.
+    for repo in manifest["inspection"]["repos"].as_array().unwrap() {
+        assert!(repo["commit"].is_null(), "{repo}");
+        assert_eq!(repo["dirty"], false, "{repo}");
+    }
     assert_eq!(parsed.corpus_version, None, "{readme}");
     assert_eq!(parsed.rules_last_reviewed, None, "{readme}");
     assert!(

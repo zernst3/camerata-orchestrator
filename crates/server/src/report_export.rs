@@ -598,8 +598,7 @@ pub(crate) fn clamp_to_rule_max_severity(
 ///    nothing concrete to rate, and [`downgrade_unlocated_above_informational`] (C4-R1) exists
 ///    to force exactly that shape to `info`. Declining the floor there, rather than relying on
 ///    running before C4-R1, makes the floor ORDER-INDEPENDENT with respect to that safety net:
-///    it cannot undo it from any position, in any exporter, including the xlsx partition, which
-///    does not apply C4-R1 at all.
+///    it cannot undo it from any position in the chain.
 ///
 /// # Where this sits relative to the ceiling
 ///
@@ -696,7 +695,14 @@ pub(crate) fn clamp_deviation_severity(
 /// finding. A client should still see "something was flagged, but the scan couldn't pin down
 /// where," rather than losing the observation entirely (the over-tell rule, applied here at the
 /// pipeline-integrity level rather than a triage-confidence one).
-fn downgrade_unlocated_above_informational(severity: String, f: &Finding) -> String {
+///
+/// This is a property of the FINDING (an unlocated finding is not actionable at its stated
+/// severity), not of how one artifact presents it, so it lives in the shared bound chain
+/// ([`crate::severity_bounds::bounded_severity`]: floor, then this, then the ceilings) and every
+/// surface applies it: the live scan, the PDF, and the workbook / CSV / JSON / `findings.json`.
+/// Until 2026-10-21 only the PDF did, so one unlocated finding read `info` in the PDF and `high`
+/// everywhere else.
+pub(crate) fn downgrade_unlocated_above_informational(severity: String, f: &Finding) -> String {
     if severity != "info" && f.path.is_empty() && f.line == 0 {
         "info".to_string()
     } else {
@@ -3872,25 +3878,14 @@ pub fn build_report_json(
         }
         let disposition = classify(f, wire);
         let reason = wire.map(|d| d.reason.clone()).unwrap_or_default();
-        let severity = normalize_severity(&f.severity);
-        // W8 (W5-Q2): the rule's own `min_severity` FLOOR, applied FIRST so every downstream
-        // integrity downgrade and both ceilings still get the last word — see
-        // `raise_to_rule_min_severity`'s doc comment for the kind/location preconditions that
-        // keep a floor from inflating an informational or unlocated row.
-        let severity = raise_to_rule_min_severity(severity, f, corpus);
-        // C4-R1: the null-location safety net — see `downgrade_unlocated_above_informational`'s
-        // doc comment. Applied here (once, alongside normalization) so every downstream section
-        // — matrix bucketing, curated findings, the scorecard — sees the ALREADY-downgraded
-        // severity and can never independently re-derive the pre-downgrade one.
-        let severity = downgrade_unlocated_above_informational(severity, f);
-        // E2 + A5.2: the rule's own `max_severity` ceiling, then the deviation ceiling (default
-        // medium, per-rule authored escape hatch, kind-gated so a Defect under the same rule is
-        // untouched). Applied last so they win over everything upstream (the model's own call,
-        // the D5 floor, the D6/D7 ceiling rules, and the unlocated-above-informational
-        // downgrade just above) — see `clamp_to_rule_max_severity`'s and
-        // `clamp_deviation_severity`'s doc comments. One shared definition with the workbook
-        // and the live scan: `severity_bounds::apply_severity_ceilings`.
-        let severity = crate::severity_bounds::apply_severity_ceilings(severity, f, corpus);
+        // Every severity bound, in one shared definition: normalize, the rule's `min_severity`
+        // FLOOR (W8), the C4-R1 null-location safety net, then the `max_severity` and deviation
+        // ceilings (E2, A5.2), which get the last word. The live scan and the workbook / CSV /
+        // JSON partition call the same function, so no surface can disagree with the PDF; see
+        // `severity_bounds`. Applied here once, so every downstream section (matrix bucketing,
+        // curated findings, the scorecard) sees the ALREADY-bounded severity and can never
+        // independently re-derive the pre-bound one.
+        let severity = crate::severity_bounds::bounded_severity(f, corpus);
         live.push((f, disposition, reason, severity));
     }
     let review_state = if auditor_touched_any_finding {
@@ -6068,7 +6063,7 @@ mod tests {
     /// empty path AND `line == 0` established nothing concrete to rate, and
     /// `downgrade_unlocated_above_informational` forces that shape to `info`. The floor
     /// declines it at its own precondition, so the guarantee holds from ANY position in the
-    /// chain and in any exporter — including the xlsx partition, which does not apply C4-R1.
+    /// chain and on any surface.
     #[test]
     fn req_w8_the_floor_cannot_defeat_the_unlocated_downgrade() {
         let corpus = ruleset_with_min_severity("FLOOR-1", "critical", None);

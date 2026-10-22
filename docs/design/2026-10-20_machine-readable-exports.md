@@ -245,7 +245,7 @@ what was written, the right-hand column says so.
 | 4 | Set gate: exactly the eight `csv/*.csv` and eight `json/*.json`, no Index, no per-category duplicates | `json_exports_cover_every_table_and_parse`, `csv_exports_cover_every_table_and_survive_nasty_cells`; gate 2 asserts the dataset names in both formats | |
 | 5 | e2e: `generate_sample_report` also writes the sample package | `tests/generate_sample_report.rs` | The sample ZIP (with `csv/`, `json/`, `manifest.json`) is built through the shipping `product_export_readme` and `build_product_zip`. The generator does NOT write `sample-report/csv/` and `sample-report/json/` as loose folders beside the PDF, as the design asked; the files exist only inside `camerata-sample-audit.zip`. |
 | 6 | Manifest integrity: every `files[]` sha256 equals the actual hash; `files[]` covers every member except `manifest.json`; a corrupted byte is caught | coverage clause: `manifest_lists_and_hashes_every_file_except_itself` (`lib.rs`); corruption clause: `tests/product_export_manifest_gates.rs` | Corruption flips one bit of each exported file in turn, re-zips with valid CRCs under the original manifest, and requires the check to flag exactly that file (plus a clean control and a swapped-file case). |
-| 7 | Provenance parity: the README's commit / engine version / corpus version / rules-last-reviewed equal the manifest's | `tests/product_export_manifest_gates.rs` | Both render from one `ManifestProvenance` (`readme_lines`, `inspection_json`). Covers the populated case, a generic "every manifest `inspection` value appears in the README" check, and the absent case (null in the manifest, line omitted from the README). |
+| 7 | Provenance parity: the README's commit per repo / engine version / corpus version / rules-last-reviewed equal the manifest's | `tests/product_export_manifest_gates.rs` | Both render from one `ManifestProvenance` (`readme_lines`, `inspection_json`). Covers the populated case, a generic "every manifest `inspection` value appears in the README" check, and the absent case (null in the manifest, line omitted from the README). |
 
 ## Resolved decisions (Zach, 2026-10-20)
 
@@ -327,15 +327,52 @@ above was wrong or the build stopped short of it.
    consumer cannot learn the columns from an empty export.
 7. **Column order is `serde_json`'s `preserve_order`, now requested explicitly.** It had been
    enabled only through feature unification with an unrelated crate.
-8. **Manifest provenance is thinner than specified.** The design shows
-   `inspection.repos[] = { name, commit }` (a commit per repo). The build has
-   `inspection.repos` as a list of names and ONE optional top-level `commit`. And although
-   `commit`, `corpus_version` and `rules_last_reviewed` exist in the struct, the manifest and
-   the README, no call site populates them yet (`export_product`, `camerata inspect --export`
-   and the sample generator all seed from the report cover only), so today the manifest carries
-   `null` for all three and the README omits those lines. The per-repo shape and the corpus
-   digest function are still to be built; gates 6 and 7 hold the rendering and parity ready for
-   when they are.
+8. **Manifest provenance is now fully wired, with three deliberate differences from the
+   sketch.** Before, `commit`, `corpus_version` and `rules_last_reviewed` existed in the struct
+   but no call site filled them, so every package shipped `null` for all three. All three
+   callers (`export_product`, `camerata inspect --export`, the `generate_sample_report` test)
+   now build `ManifestProvenance` through one function,
+   `client_provenance::export_provenance` (`crates/server/src/client_provenance.rs`):
+   - **Commit is per repo, as designed.** `inspection.repos` is `[{ name, commit, dirty }]`,
+     taken from the scan's recorded `AuditedRef` (the cover's `audited_refs`). The top-level
+     `commit` is gone: with a commit per repo it was redundant and wrong for a multi-repo scan.
+     `commit` is `null` for a repo the scan could not read as a git checkout. `dirty` is an
+     addition the sketch lacked: it is true when the tree had uncommitted changes at scan time,
+     in which case `commit` is the base the scanned code was modified from, not an exact
+     description of it. The README prints `Commit (<repo>): <sha>` per repo, with a note when
+     dirty.
+   - **`corpus_version` is `camerata_rules::corpus_version`**, `sha256:` over the sorted
+     `(id, version, content hash)` of every rule (exactly the `CORPUS_LOCK.toml` content, with
+     its own domain-separation tag), not "a sha256 over the sorted rule files". It is the digest
+     of the WHOLE corpus the exporting process loaded, not of the subset the scan audited. When
+     the scan and the export run on one build (the CLI always, the server unless rebuilt in
+     between) that is the scan's corpus; a server that was rebuilt with a different corpus
+     between scan and export would stamp the newer one. A rule with no `version` contributes as
+     `-`.
+   - **`rules_last_reviewed` is `camerata_rules::client_rules_last_reviewed`**: the OLDEST
+     effective review date (`effective_review_date`, the later of a rule's own `last_reviewed`
+     and its domain watermark) across the rules the scan audited
+     (`provenance.audited_rule_ids`), so the client is never told the rules are fresher than the
+     least-reviewed one. It is `None`, and the README omits the line, when any audited rule has
+     never been reviewed, when an audited id is not in the loaded corpus (a custom rule has no
+     review record), when the scan audited nothing, or when there is no corpus or no readable
+     watermark. Today no domain has been confirmed, so every real package carries `null` here;
+     that is the honest value, and it becomes a date only once the first confirmed sweep covers
+     every domain a scan used.
+
+   **The freshness gate.** This date is the one deliberate exception to "no corpus-freshness
+   code in a client-artifact builder" (`no_corpus_freshness_text_reaches_any_client_artifact`).
+   The exception is one file, not a loosening: `client_provenance.rs` is the bridge, and the gate
+   lets it name exactly `CorpusFreshness`, `corpus_freshness_path` and
+   `client_rules_last_reviewed` (`SANCTIONED_BRIDGE_IDENTIFIERS`). The nag formatter, the report
+   types, the marker list, the due-soon logic and the watermark file name stay forbidden there
+   too. The artifact builders (`report_export.rs`, `xlsx_export.rs`, the export section of
+   `lib.rs`) and the CLI's `inspect_cmd.rs` are scanned with NO allowance, so they cannot name
+   even the sanctioned function; they receive a finished `ManifestProvenance`.
+   `freshness_gate_allows_only_the_sanctioned_date_path` pins that the scanner can still fail
+   (the nag, `FreshnessReport`, the markers and `due_soon` are each caught, in the bridge too),
+   and `tests/export_provenance.rs` proves the packages carry the date and no maintenance text
+   even from a watermark with overdue domains.
 9. **README and manifest provenance now come from one struct.** The design asked for this; the
    build had two hand-written renderings (and the sample generator carried a third, stale copy
    of the README text). `ManifestProvenance` is now the single source, and

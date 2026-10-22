@@ -27,6 +27,7 @@ use std::path::Path;
 
 use camerata_api_types::audit::{DeviationKind, FindingKind};
 use camerata_server::ai_audit::ScanMode;
+use camerata_server::jobs::JobStore;
 use camerata_server::onboard::{
     self, AuditedRef, Finding, LanguageVolume, ScanProvenance, ScanReport, SelectedRule,
 };
@@ -175,6 +176,32 @@ fn exported_pdf_severities(f: &Finding, corpus: &camerata_rules::RuleSet) -> Vec
         .flat_map(|g| g.sites.iter())
         .map(|s| s.severity.clone())
         .collect()
+}
+
+/// Every severity the PDF's action matrix carries for a one-finding report, across all six
+/// buckets. An unlocated row lands in the informational or held appendix, which the curated
+/// group sections do not necessarily render, so the matrix is where it is guaranteed visible.
+fn exported_pdf_matrix_severities(f: &Finding, corpus: &camerata_rules::RuleSet) -> Vec<String> {
+    let report = report_with(vec![f.clone()]).seal();
+    let m = build_report_json(
+        &report,
+        &HashMap::new(),
+        Some(corpus),
+        &ReportOptions::default(),
+    )
+    .matrix;
+    [
+        &m.do_now,
+        &m.do_next,
+        &m.plan,
+        &m.accepted,
+        &m.informational,
+        &m.held,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|r| r.severity.clone())
+    .collect()
 }
 
 fn bounded(f: &Finding, corpus: &camerata_rules::RuleSet) -> Finding {
@@ -346,6 +373,141 @@ async fn live_and_export_severities_agree_for_every_bounded_rule() {
     assert!(compared > 0);
 }
 
+/// An UNLOCATED finding: no path and line 0, the C4-R1 shape. `kind: None` is a legacy/kindless
+/// row, which the floor and the deviation ceiling decline but C4-R1 does not.
+fn unlocated(rule_id: &str, severity: &str, kind: Option<FindingKind>) -> Finding {
+    Finding {
+        path: String::new(),
+        line: 0,
+        kind,
+        ..located(rule_id, severity, FindingKind::Defect)
+    }
+}
+
+/// C4-R1 (an unlocated above-informational finding is `info`) used to run in the PDF only, so
+/// the same unlocated finding was `high` in the live scan and the workbook and `info` in the
+/// PDF. It is now part of the shared bound chain (floor, C4-R1, ceilings), so all four surfaces
+/// agree: the live scan, `findings.json` (the `partition_rows` behind the workbook, CSV and
+/// JSON) and the PDF.
+///
+/// Covers every real-corpus rule that declares any bound plus a rule that declares none, every
+/// proposed severity, and every kind (defect, deviation, kindless), so the order the three
+/// stages run in is exercised against the corpus's real floors and ceilings.
+///
+/// FAILS BEFORE THE FIX: the live scan and `findings.json` kept the producer's severity for an
+/// unlocated row while the PDF said `info`.
+#[tokio::test]
+async fn live_and_export_severities_agree_for_unlocated_findings() {
+    let Some(corpus) = real_corpus().await else {
+        return;
+    };
+    let mut rule_ids: Vec<String> = corpus
+        .iter()
+        .filter(|r| {
+            r.max_severity.is_some() || r.min_severity.is_some() || r.deviation_ceiling.is_some()
+        })
+        .map(|r| r.id.0.clone())
+        .collect();
+    assert!(
+        !rule_ids.is_empty(),
+        "no bounded rule: the agreement is vacuous"
+    );
+    rule_ids.push(
+        corpus
+            .iter()
+            .find(|r| r.max_severity.is_none() && r.min_severity.is_none())
+            .expect("the corpus has rules that declare no bound")
+            .id
+            .0
+            .clone(),
+    );
+    rule_ids.push("NOT-A-RULE-1".to_string());
+
+    let mut compared = 0usize;
+    let mut pdf_rows_checked = 0usize;
+    for rule_id in &rule_ids {
+        for sev in VOCABULARY {
+            for kind in [None, Some(FindingKind::Defect), Some(deviation())] {
+                let tag = kind.as_ref().map_or("kindless", FindingKind::tag);
+                let proposed = unlocated(rule_id, sev, kind);
+                let live = bounded(&proposed, &corpus);
+                assert_eq!(
+                    live.severity, "info",
+                    "{rule_id} ({tag}) proposed {sev:?}: an unlocated finding must be info live"
+                );
+                assert_eq!(
+                    exported_xlsx_severity(&proposed, &corpus),
+                    live.severity,
+                    "{rule_id} ({tag}) proposed {sev:?}: findings.json and the live scan disagree \
+                     on an unlocated finding"
+                );
+                // Fixed point: the export backstop over an already-bounded row changes nothing.
+                assert_eq!(
+                    exported_xlsx_severity(&live, &corpus),
+                    live.severity,
+                    "{rule_id} ({tag}) proposed {sev:?}: the export backstop moved it"
+                );
+                // The PDF shows the finding in whichever section it routes to; wherever it
+                // appears it must carry the live severity.
+                let pdf: Vec<String> = exported_pdf_severities(&proposed, &corpus)
+                    .into_iter()
+                    .chain(exported_pdf_matrix_severities(&proposed, &corpus))
+                    .collect();
+                for shown in &pdf {
+                    assert_eq!(
+                        shown, &live.severity,
+                        "{rule_id} ({tag}) proposed {sev:?}: the PDF and the live scan disagree \
+                         on an unlocated finding"
+                    );
+                }
+                pdf_rows_checked += pdf.len();
+                compared += 1;
+            }
+        }
+    }
+    assert!(compared > 0);
+    assert!(
+        pdf_rows_checked >= compared,
+        "the PDF must actually show each unlocated finding ({pdf_rows_checked} rows over \
+         {compared} findings), or the PDF leg of this agreement is vacuous"
+    );
+}
+
+/// The downgrade is keyed on the missing location alone: either half of a location is a
+/// location, and an unlocated row already at `info` is a fixed point of the chain.
+#[tokio::test]
+async fn the_unlocated_downgrade_is_keyed_on_location_alone() {
+    let Some(corpus) = real_corpus().await else {
+        return;
+    };
+    let rule_id = corpus
+        .iter()
+        .find(|r| r.max_severity.is_none() && r.min_severity.is_none())
+        .expect("the corpus has rules that declare no bound")
+        .id
+        .0
+        .clone();
+    let only_line = Finding {
+        path: String::new(),
+        line: 9,
+        ..located(&rule_id, "high", FindingKind::Defect)
+    };
+    let only_path = Finding {
+        line: 0,
+        ..located(&rule_id, "high", FindingKind::Defect)
+    };
+    assert_eq!(bounded(&only_line, &corpus).severity, "high");
+    assert_eq!(bounded(&only_path, &corpus).severity, "high");
+    assert_eq!(
+        bounded(
+            &unlocated(&rule_id, "info", Some(FindingKind::Defect)),
+            &corpus
+        )
+        .severity,
+        "info"
+    );
+}
+
 // ── The real scan entry point ─────────────────────────────────────────────────────────────
 
 fn stage_git_repo(dest: &Path, files: &[(&str, &str)]) {
@@ -374,6 +536,14 @@ fn stage_git_repo(dest: &Path, files: &[(&str, &str)]) {
 }
 
 async fn scan(repo_dir: &Path, corpus: Option<&camerata_rules::RuleSet>) -> onboard::ScanReport {
+    scan_with_job(repo_dir, corpus, None).await
+}
+
+async fn scan_with_job(
+    repo_dir: &Path,
+    corpus: Option<&camerata_rules::RuleSet>,
+    job: Option<(&JobStore, &str)>,
+) -> onboard::ScanReport {
     let sources = vec![("e2e/split-import-path".to_string(), repo_dir.to_path_buf())];
     let selected = vec![SelectedRule {
         id: "ARCH-ONE-IMPORT-PATH-1".to_string(),
@@ -389,7 +559,7 @@ async fn scan(repo_dir: &Path, corpus: Option<&camerata_rules::RuleSet>) -> onbo
         ScanMode::Sequential,
         false,
         None,
-        None,
+        job,
         None,
         false,
         false,
@@ -461,4 +631,113 @@ async fn audit_repos_applies_the_corpus_ceiling_to_a_live_architectural_finding(
         raw[0].severity, "medium",
         "control: with no corpus there is no authored bound, so the checker's severity stands"
     );
+}
+
+// ── The mid-scan preview ──────────────────────────────────────────────────────────────────
+
+fn stage_split_import_repo(dest: &Path) {
+    stage_git_repo(
+        dest,
+        &[
+            ("lib/x.ts", "export function a() {}\n"),
+            ("lib/index.ts", "export { a } from './x';\n"),
+            ("app/one.ts", "import { a } from '../lib';\n"),
+            ("app/two.ts", "import { a } from '../lib/x';\n"),
+        ],
+    );
+}
+
+/// The live preview (`JobStore::findings`, what the cockpit polls mid-scan) must never carry a
+/// severity above a declared ceiling, even though it streams BEFORE the final bounds. Driven
+/// through the real `audit_repos` with the real corpus: the architectural checker emits
+/// `medium` for `ARCH-ONE-IMPORT-PATH-1`, whose rule declares `max_severity = "low"`.
+///
+/// FAILS BEFORE THE FIX: `add_findings` stored the checker's `medium` verbatim, so the preview
+/// showed `medium` while the final report said `low`. The control proves the clamp comes from
+/// the corpus (with none, the preview keeps the checker's `medium`), and the last assertion
+/// proves the preview and the final report agree.
+#[tokio::test]
+async fn the_mid_scan_preview_never_exceeds_a_declared_ceiling() {
+    let Some(corpus) = real_corpus().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    stage_split_import_repo(dir.path());
+
+    let store = JobStore::new();
+    let id = store.create("audit", None);
+    let report = scan_with_job(dir.path(), Some(&corpus), Some((&store, &id))).await;
+
+    let preview = store.get(&id).unwrap().findings;
+    let streamed: Vec<&Finding> = preview
+        .iter()
+        .filter(|f| f.rule_id == "ARCH-ONE-IMPORT-PATH-1")
+        .collect();
+    assert_eq!(streamed.len(), 1, "the checker must stream: {streamed:?}");
+    assert_eq!(
+        streamed[0].severity, "low",
+        "the PREVIEW must already carry the ceiling"
+    );
+    let finished: Vec<&Finding> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == "ARCH-ONE-IMPORT-PATH-1")
+        .collect();
+    assert_eq!(finished.len(), 1);
+    assert_eq!(
+        streamed[0].severity, finished[0].severity,
+        "the preview and the final report must agree"
+    );
+
+    let control_store = JobStore::new();
+    let control_id = control_store.create("audit", None);
+    let _ = scan_with_job(dir.path(), None, Some((&control_store, &control_id))).await;
+    let control = control_store.get(&control_id).unwrap().findings;
+    let raw = control
+        .iter()
+        .find(|f| f.rule_id == "ARCH-ONE-IMPORT-PATH-1")
+        .expect("the checker streams without a corpus too");
+    assert_eq!(
+        raw.severity, "medium",
+        "control: with no corpus there is no authored bound, so the preview keeps medium"
+    );
+}
+
+/// The same property over the WHOLE real corpus, through the streaming entry point itself:
+/// for every rule that declares a ceiling, a `critical` streamed into a job's preview ranks no
+/// higher than that ceiling. The non-empty assertion turns a corpus with no ceilings into a
+/// failure rather than a vacuous pass.
+#[tokio::test]
+async fn every_real_corpus_ceiling_holds_in_the_streamed_preview() {
+    let Some(corpus) = real_corpus().await else {
+        return;
+    };
+    let declaring: Vec<(String, String)> = corpus
+        .iter()
+        .filter_map(|r| r.max_severity.clone().map(|c| (r.id.0.clone(), c)))
+        .collect();
+    assert!(
+        !declaring.is_empty(),
+        "no corpus rule declares a ceiling, so this property is vacuous"
+    );
+    let store = JobStore::new();
+    let id = store.create("audit", None);
+    store.set_preview_corpus(&id, Some(&corpus));
+    store.add_findings(
+        &id,
+        declaring
+            .iter()
+            .map(|(rule_id, _)| located(rule_id, "critical", FindingKind::Defect))
+            .collect(),
+    );
+    let streamed = store.get(&id).unwrap().findings;
+    assert_eq!(streamed.len(), declaring.len());
+    for (finding, (rule_id, ceiling)) in streamed.iter().zip(&declaring) {
+        assert_eq!(&finding.rule_id, rule_id);
+        assert!(
+            rank(&finding.severity) >= rank(ceiling),
+            "{rule_id} declares max_severity = {ceiling:?} but the streamed preview carries {:?}",
+            finding.severity
+        );
+    }
 }

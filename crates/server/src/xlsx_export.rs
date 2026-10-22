@@ -342,9 +342,9 @@ fn partition_rows(
         // (`report_export::build_report_json` applies the SAME bounds, in the SAME relative
         // order, over the SAME corpus), nor with the live scan, which applies them to the
         // findings themselves (`severity_bounds::apply_corpus_severity_bounds`). All three
-        // share `bounded_severity`; see its doc comment and `raise_to_rule_min_severity`'s for
-        // the kind/location preconditions (the location one is why the floor is safe here even
-        // though this partition does not apply the C4-R1 unlocated downgrade).
+        // share `bounded_severity`, which includes the C4-R1 unlocated downgrade between the
+        // floor and the ceilings; see its doc comment and `raise_to_rule_min_severity`'s for
+        // the kind/location preconditions.
         let severity = crate::severity_bounds::bounded_severity(f, corpus);
         // C4-P2: `category_for_finding`/`title_for_finding` (not the bare rule-id-only
         // `category_for` / a raw corpus-or-rule_id join) — an AI-tier finding with no corpus

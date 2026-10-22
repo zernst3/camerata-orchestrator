@@ -422,7 +422,8 @@ pub async fn build_product_export_bytes(
     let mut extra_files: Vec<(String, Vec<u8>)> = csv_exports;
     extra_files.extend(json_exports);
 
-    let provenance = camerata_server::ManifestProvenance::from_cover(&json.cover);
+    let provenance =
+        camerata_server::client_provenance::export_provenance(report, &json.cover, corpus);
 
     let stem = camerata_server::report_filename_stem(report);
     let readme = camerata_server::product_export_readme(&stem, &provenance);

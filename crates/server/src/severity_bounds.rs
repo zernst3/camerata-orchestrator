@@ -7,6 +7,10 @@
 //! - `max_severity`: a CEILING (E2). Clamps a higher severity down to it.
 //! - `deviation_ceiling`: the A5.2 ceiling for a consistency deviation (default `medium`).
 //!
+//! Between the floor and the ceilings sits one bound that is NOT corpus-authored: the C4-R1
+//! null-location safety net ([`crate::report_export::downgrade_unlocated_above_informational`]),
+//! which sends a finding with no path and line 0 to `info`. See "C4-R1" below.
+//!
 //! # Why this module exists
 //!
 //! These bounds used to be applied ONLY at export time, inside `report_export::build_report_json`
@@ -26,32 +30,42 @@
 //!
 //! # Order
 //!
-//! Floor, then `max_severity`, then the deviation ceiling: exactly the order both exporters
-//! use. The two ceilings only ever LOWER a severity, so their relative order cannot change the
-//! result (the outcome is the lower of the two); the floor must run first so a ceiling always
-//! gets the last word. The corpus-load gate rejects a `min_severity` ranking above the same
-//! rule's `max_severity`, so floor-then-ceilings always lands inside `[min, max]`.
+//! Floor, then C4-R1, then `max_severity`, then the deviation ceiling: the one order every
+//! surface uses. The two ceilings only ever LOWER a severity, so their relative order cannot
+//! change the result (the outcome is the lower of the two); the floor must run first so a
+//! ceiling always gets the last word. The corpus-load gate rejects a `min_severity` ranking
+//! above the same rule's `max_severity`, so floor-then-ceilings always lands inside
+//! `[min, max]`.
 //!
-//! # What this deliberately does not do
+//! # C4-R1 is part of the chain (changed 2026-10-21)
 //!
-//! The PDF additionally applies C4-R1 (an unlocated above-informational finding is shown as
-//! `info`). That is a report-integrity downgrade of how an UNLOCATED row is presented, not a
-//! corpus-authored bound, and the workbook does not apply it either, so it stays export-side.
-//! The floor already declines an unlocated row, so it cannot undo C4-R1 from any position.
+//! C4-R1 says no finding above `info` may ship with BOTH an empty path AND line 0: nothing
+//! concrete was established about where it is, so it cannot be actionable at its stated
+//! severity. Its rationale (see `downgrade_unlocated_above_informational`) is about the FINDING,
+//! not about one artifact's presentation, and it was written as "the single place every
+//! checker's findings funnel through". It had been applied by the PDF alone, which left the
+//! live scan, the workbook, the CSV/JSON exports and `findings.json` showing the producer's
+//! severity for the same row (`high` where the PDF said `info`). Nothing in the design makes
+//! that difference intentional: the docs only recorded it as an acknowledged asymmetry (and, in
+//! `RULES_REFERENCE.md`, as an open issue). So it now runs here, between the floor and the
+//! ceilings, and every surface agrees. It only ever lowers, and `info` ranks with `low`, so no
+//! ceiling can raise it back. The floor still declines an unlocated row at its own
+//! precondition, so the two cannot fight from any position.
+//!
+//! Consequence worth knowing: an unlocated finding is `info` in the live triage view too, so an
+//! operator-forced `violates` pick (which carries no evidence and anchors at `high`) is shown
+//! at `info` from the moment it is emitted, exactly as the PDF always showed it.
 
 use crate::onboard::Finding;
 use crate::report_export::{
-    clamp_deviation_severity, clamp_to_rule_max_severity, normalize_severity,
-    raise_to_rule_min_severity,
+    clamp_deviation_severity, clamp_to_rule_max_severity, downgrade_unlocated_above_informational,
+    normalize_severity, raise_to_rule_min_severity,
 };
 
 /// Apply BOTH ceilings to an already-normalized `severity`: the rule's `max_severity` (E2),
 /// then the A5.2 deviation ceiling. Ceilings only lower, so the order between the two is
 /// immaterial to the result; it is fixed here to match the historical exporter order.
-///
-/// `pub(crate)`: shared by the PDF partition in `report_export::build_report_json`, which must
-/// slot C4-R1 between the floor and these, and by [`bounded_severity`].
-pub(crate) fn apply_severity_ceilings(
+fn apply_severity_ceilings(
     severity: String,
     f: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
@@ -60,17 +74,19 @@ pub(crate) fn apply_severity_ceilings(
     clamp_deviation_severity(severity, f, corpus)
 }
 
-/// `f`'s severity after every corpus-authored bound: normalize, floor, then both ceilings.
-/// The single definition the live scan ([`apply_corpus_severity_bounds`]) and the workbook /
-/// CSV / JSON partition (`xlsx_export::partition_rows`) share, so the two cannot drift.
+/// `f`'s severity after every bound: normalize, the floor, C4-R1, then both ceilings. The
+/// single definition the live scan ([`apply_corpus_severity_bounds`]), the PDF partition
+/// (`report_export::build_report_json`) and the workbook / CSV / JSON partition
+/// (`xlsx_export::partition_rows`) all share, so the surfaces cannot drift.
 pub(crate) fn bounded_severity(f: &Finding, corpus: Option<&camerata_rules::RuleSet>) -> String {
     let severity = raise_to_rule_min_severity(normalize_severity(&f.severity), f, corpus);
+    let severity = downgrade_unlocated_above_informational(severity, f);
     apply_severity_ceilings(severity, f, corpus)
 }
 
-/// Apply the corpus's authored severity bounds (`min_severity` floor, `max_severity` ceiling,
-/// `deviation_ceiling`) to every finding, in place, in the order the exporters use. See the
-/// module docs for why this belongs in the scan pipeline.
+/// Apply every severity bound (`min_severity` floor, the C4-R1 unlocated downgrade,
+/// `max_severity` ceiling, `deviation_ceiling`) to every finding, in place, in the order every
+/// surface uses. See the module docs for why this belongs in the scan pipeline.
 ///
 /// Properties the callers rely on:
 ///
@@ -187,7 +203,38 @@ mod tests {
             ..located("low", Some(FindingKind::Defect))
         }];
         apply_corpus_severity_bounds(&mut fs, &set);
-        assert_eq!(fs[0].severity, "low");
+        // The floor declined (it would have said `high`); C4-R1 then sends the unlocated row to
+        // `info`, so the result is `info` and never the floor's `high`.
+        assert_eq!(fs[0].severity, "info");
+    }
+
+    /// C4-R1 sits between the floor and the ceilings: an unlocated finding is `info` whatever
+    /// the producer said and whatever the rule's bounds are, and a located one is untouched by it.
+    #[test]
+    fn an_unlocated_finding_is_info_before_the_ceilings_and_a_located_one_is_not() {
+        let set = rule_set(|r| {
+            r.min_severity = Some("high".to_string());
+            r.max_severity = Some("critical".to_string());
+        });
+        for sev in ["critical", "high", "medium", "low", "info"] {
+            for kind in [None, Some(FindingKind::Defect), Some(deviation())] {
+                let mut fs = vec![Finding {
+                    path: String::new(),
+                    line: 0,
+                    ..located(sev, kind)
+                }];
+                apply_corpus_severity_bounds(&mut fs, &set);
+                assert_eq!(fs[0].severity, "info", "unlocated {sev}");
+            }
+        }
+        // Either half of a location is a location.
+        let mut half = vec![Finding {
+            path: String::new(),
+            line: 4,
+            ..located("high", Some(FindingKind::Defect))
+        }];
+        apply_corpus_severity_bounds(&mut half, &set);
+        assert_eq!(half[0].severity, "high");
     }
 
     #[test]

@@ -867,7 +867,7 @@ role.
      Consequence: a legacy row with `kind: None` can never be floored.
   2. The finding must have a real location (`path` non-empty or `line != 0`); an unlocated
      row is never raised, which makes the floor order-independent with respect to the C4-R1
-     unlocated downgrade (which the xlsx partition does not apply at all).
+     unlocated downgrade.
 - **Malformed value (gotcha 1, floor direction).** The same `normalize_severity` fall-through
   maps a typo'd floor to `"low"`, and since `severity_rank` ranks `low`/`info` at the bottom
   together (`report_export.rs:2762-2769`), a typo'd floor does not error and does not no-op -
@@ -1400,7 +1400,8 @@ marked points.
 5. The violates-option splice enters here with its anchored `"high"`
    (`ai_audit.rs:6312, 7160-7178`).
 
-**At export, PDF/JSON partition (`report_export.rs:3772-3789`), per finding:**
+**The bound chain, applied identically by the live scan, the PDF/JSON partition and the
+xlsx/`findings.json` partition (`severity_bounds::bounded_severity`), per finding:**
 1. `normalize_severity` (`report_export.rs:468-479`) - casing fixed; UNRECOGNIZED -> `"low"`.
 2. **`min_severity` raise** (`raise_to_rule_min_severity`) - only accusing-kinded, located
    rows.
@@ -1409,9 +1410,9 @@ marked points.
 4. **`max_severity` clamp** (`clamp_to_rule_max_severity`) - last word over everything above.
 5. **`deviation_ceiling` clamp** (`clamp_deviation_severity`) - Deviation-kinded rows only.
 
-**At export, xlsx/`findings.json` partition (`xlsx_export.rs:325-342`):** identical EXCEPT
-step 3 (the unlocated downgrade) is NOT applied - a documented asymmetry
-(`report_export.rs:548-550`). See section 11.
+Until 2026-10-21 step 3 ran in the PDF partition only; it now runs in the shared chain, so
+the live scan, the PDF, the workbook, the CSV/JSON exports and `findings.json` all agree on an
+unlocated row (it is `info` everywhere). See `severity_bounds.rs` and section 11.
 
 Rank order for every comparison: `critical(0) < high(1) < medium(2) < low/info/anything(3)`
 (`report_export.rs:2762-2769`); `info` survives normalization as its own tier below low
@@ -2074,13 +2075,16 @@ block above so an old cross-reference still resolves.
    that is per-level yet overlapping gets a hand-written gate per overlap, and nothing
    enumerates the overlaps. Today `qualifies` is the only one. Gotcha 17.
 
-5. **Cross-artifact severity asymmetry for unlocated rows.** The PDF/JSON partition applies
-   the C4-R1 unlocated downgrade; the xlsx/`findings.json` partition does not
-   (`report_export.rs:3779` vs `xlsx_export.rs:325-342`; acknowledged at
-   `report_export.rs:548-550`). An unlocated above-informational row (e.g. an
-   operator-forced `violates` finding, which carries no evidence and anchors at high,
-   `ai_audit.rs:6271-6278`) can therefore render `info` in the PDF and `high` in the
-   workbook. The floor was made order-independent of this; the base severity was not.
+5. **Unlocated rows are `info` on every surface (fixed 2026-10-21).** This was an open
+   cross-artifact asymmetry: the PDF/JSON partition applied the C4-R1 unlocated downgrade and
+   the live scan and xlsx/`findings.json` partition did not, so an unlocated
+   above-informational row (e.g. an operator-forced `violates` finding, which carries no
+   evidence and anchors at high, `ai_audit.rs:6271-6278`) rendered `info` in the PDF and `high`
+   elsewhere. C4-R1's rationale is about the finding (nothing concrete was established, so it
+   is not actionable at its stated severity), not about one artifact's presentation, so it
+   moved into the shared chain (`severity_bounds::bounded_severity`: floor, C4-R1, ceilings).
+   Consequence to know: such a row is also `info` in the live triage view from the moment it
+   is emitted. `live_and_export_severities_agree_for_unlocated_findings` pins the agreement.
 
 6. **`inspectable`'s exclusion from the integrity gate is an inference, not a tested fact.**
    An emit-only rule has no ledger entry, and `integrity_gate::evaluate`
