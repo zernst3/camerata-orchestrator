@@ -256,8 +256,16 @@ const OTHER_LINTERS: &[&str] = &[
     "deno",
 ];
 
+/// Frameworks that run ESLint with `eslint-config-react-app` themselves when the project has no
+/// configuration of its own (Gatsby), or did in older majors (Create React App 3.x through
+/// `react-scripts`). A project on one of them has lint setup the repository's files do not show.
+const FRAMEWORKS_WITH_BUILT_IN_LINT: &[&str] = &["gatsby", "react-scripts"];
+
 fn dependency_hides_lint_setup(name: &str) -> bool {
-    if name == "eslint-plugin-react-hooks" || OTHER_LINTERS.contains(&name) {
+    if name == "eslint-plugin-react-hooks"
+        || OTHER_LINTERS.contains(&name)
+        || FRAMEWORKS_WITH_BUILT_IN_LINT.contains(&name)
+    {
         return true;
     }
     // `eslint-config-prettier` only turns rules off, so it cannot be the thing enabling them.
@@ -272,11 +280,42 @@ fn dependency_hides_lint_setup(name: &str) -> bool {
     false
 }
 
+/// Whether a command line hands ESLint a configuration (or rules, plugins, a rules folder or a
+/// plugin resolution root) that no file in the repository shows.
+fn command_gives_eslint_its_own_setup(command: &str) -> bool {
+    let s = command.to_ascii_lowercase();
+    s.contains("eslint")
+        && [
+            " -c ",
+            "--config",
+            "--no-eslintrc",
+            "--rule",
+            "--plugin",
+            "--rulesdir",
+            "--resolve-plugins-relative-to",
+        ]
+        .iter()
+        .any(|flag| s.contains(flag))
+}
+
+/// Whether a `scripts` entry replaces ESLint outright with another linter, or gives ESLint its
+/// own setup.
 fn script_hides_lint_setup(script: &str) -> bool {
     let s = script.to_ascii_lowercase();
-    let points_eslint_elsewhere = s.contains("eslint")
-        && (s.contains(" -c ") || s.contains("--config") || s.contains("--no-eslintrc"));
-    points_eslint_elsewhere || s.contains("biome") || s.contains("oxlint") || s.contains("rome ")
+    command_gives_eslint_its_own_setup(&s)
+        || s.contains("biome")
+        || s.contains("oxlint")
+        || s.contains("rome ")
+}
+
+/// Whether `test` holds for any string anywhere in `value` (object keys excluded).
+fn any_string(value: &Value, test: &dyn Fn(&str) -> bool) -> bool {
+    match value {
+        Value::String(s) => test(s),
+        Value::Array(items) => items.iter().any(|v| any_string(v, test)),
+        Value::Object(map) => map.values().any(|v| any_string(v, test)),
+        _ => false,
+    }
 }
 
 pub(super) fn package_facts(package: &Value) -> PackageFacts {
@@ -300,6 +339,12 @@ pub(super) fn package_facts(package: &Value) -> PackageFacts {
         {
             facts.hides_lint_setup = true;
         }
+    }
+    // ESLint is also run from `lint-staged`, husky, `nano-staged`, `simple-git-hooks` and other
+    // tool sections, with the same flags. Any string in the manifest that runs ESLint with a
+    // setup of its own hides the setup.
+    if any_string(package, &command_gives_eslint_its_own_setup) {
+        facts.hides_lint_setup = true;
     }
     facts
 }

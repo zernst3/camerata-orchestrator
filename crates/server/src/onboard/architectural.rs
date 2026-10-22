@@ -591,7 +591,10 @@ mod tests {
         assert_eq!(withhold_on_incomplete_scan(&armed, false), armed);
 
         // The scan sees only the manifest (the config was past the file limit): a false gap.
-        let f = files(vec![("package.json", REACT_APP)]);
+        let f = files(vec![
+            ("package.json", REACT_APP),
+            ("src/App.jsx", "export {};\n"),
+        ]);
         assert_eq!(audit_architectural("acme/web", &f, &armed).len(), 1);
         let withheld = withhold_on_incomplete_scan(&armed, true);
         assert!(audit_architectural("acme/web", &f, &withheld).is_empty());
@@ -608,17 +611,25 @@ mod tests {
             })
             .contains(HOOKS_LINT)
         };
+        let component = ("src/App.jsx", "export {};\n");
         assert!(
-            credited(&files(vec![("package.json", REACT_APP)])),
+            credited(&files(vec![("package.json", REACT_APP), component])),
             "a gap is an answer"
         );
         assert!(credited(&files(vec![
             ("package.json", REACT_APP),
+            component,
             (".eslintrc.json", r#"{ "extends": "next/core-web-vitals" }"#),
         ])));
         assert!(!credited(&files(vec![
             ("package.json", REACT_APP),
+            component,
             ("eslint.config.js", "export default [];\n"),
+        ])));
+        // A `react` dependency with no React code is not assessed, never "verified clean".
+        assert!(!credited(&files(vec![
+            ("package.json", REACT_APP),
+            ("src/index.ts", "export const plugin = 1;\n"),
         ])));
         assert!(!credited(&files(vec![("src/main.rs", "fn main() {}\n")])));
     }

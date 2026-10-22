@@ -541,6 +541,12 @@ mod tests {
             r#"{ "name": "app", "dependencies": { "react": "^18" } }"#,
         )
         .unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(
+            dir.path().join("src").join("App.jsx"),
+            "export const App = () => null;\n",
+        )
+        .unwrap();
         let role = role_armed_with(&["UI-REACT-HOOKS-LINT-1"]);
         let outcome = NativeArchCheckRunner::new()
             .check(&role, dir.path())

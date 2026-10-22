@@ -626,10 +626,12 @@ allowed_in = ["repositories"]
         // A source file too: `DeadCodeChecker` answers only for a repo that has source in a
         // language it reads (`config_unsatisfied_for`), so the config alone is not "satisfied".
         // Likewise `ReactHooksLintChecker` answers only for a React repo whose lint setup it
-        // can read; a React manifest with no ESLint configuration is a (reportable) answer.
+        // can read; a React manifest and a component, with no ESLint configuration, is a
+        // (reportable) answer.
         let files: Vec<(String, String)> = vec![
             (".camerata/architecture.toml".to_string(), cfg.to_string()),
             ("src/app.ts".to_string(), String::new()),
+            ("src/App.jsx".to_string(), String::new()),
             (
                 "package.json".to_string(),
                 r#"{"dependencies":{"react":"18"}}"#.to_string(),

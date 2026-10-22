@@ -205,6 +205,28 @@ async fn a_flat_config_is_silent_and_is_not_credited_as_a_clean_detector_run() {
 }
 
 #[tokio::test]
+async fn a_react_dependency_with_no_react_code_is_silent_and_not_credited_as_clean() {
+    // A plugin that lists react as a peer dependency: no component, no import of React.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "package.json", REACT_APP);
+    write(root, "src/index.ts", "export const plugin = () => 1;\n");
+    commit_all(root);
+
+    let report = scan(root, "e2e/hooks-lint-no-react-code").await;
+    assert!(hooks_findings(&report).is_empty(), "{:?}", report.findings);
+    let credited_clean = report
+        .ledger
+        .rule(RULE)
+        .is_some_and(|e| e.ran && e.findings_emitted == 0 && e.coverage_note.is_none());
+    assert!(
+        !credited_clean,
+        "not assessed is not verified clean: {:?}",
+        report.ledger.rule(RULE)
+    );
+}
+
+#[tokio::test]
 async fn a_repo_that_is_not_a_react_repo_is_silent() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

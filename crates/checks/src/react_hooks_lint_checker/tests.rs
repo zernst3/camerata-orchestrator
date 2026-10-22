@@ -6,11 +6,29 @@
 use super::*;
 use crate::arch_checker::{checker_applies, SEVERITY_MEDIUM};
 
-fn files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
+/// Exactly the files given.
+fn raw_files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
     pairs
         .into_iter()
         .map(|(p, c)| (p.to_string(), c.to_string()))
         .collect()
+}
+
+/// The files given, plus one React component unless the repo already has a `.jsx` / `.tsx`
+/// file: the rule only speaks about a repository that has React CODE (see the tests under
+/// "React code" for the repositories that do not).
+fn files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
+    let has_component = pairs
+        .iter()
+        .any(|(p, _)| p.ends_with(".jsx") || p.ends_with(".tsx"));
+    let mut all = raw_files(pairs);
+    if !has_component {
+        all.push((
+            "src/App.jsx".to_string(),
+            "export const App = () => null;\n".to_string(),
+        ));
+    }
+    all
 }
 
 fn run(f: &[(String, String)]) -> Vec<ArchViolation> {
@@ -566,7 +584,7 @@ fn the_checker_answers_exactly_its_own_rule() {
 fn the_checker_applies_to_a_repo_with_a_manifest_and_not_to_one_without() {
     let with = files(vec![("package.json", "{}")]);
     let nested = files(vec![("apps/web/package.json", "{}")]);
-    let without = files(vec![("README.md", ""), ("src/main.rs", "")]);
+    let without = raw_files(vec![("README.md", ""), ("src/main.rs", "")]);
     assert!(checker_applies(&ReactHooksLintChecker, &with));
     assert!(checker_applies(&ReactHooksLintChecker, &nested));
     assert!(!checker_applies(&ReactHooksLintChecker, &without));
@@ -590,8 +608,17 @@ fn every_config_shape_the_checker_reads_is_in_its_interest_globs() {
         ".oxlintrc.json",
         "oxlint.json",
         "rome.json",
+        // The React-code gate reads component and module files.
+        "src/App.jsx",
+        "src/App.tsx",
+        "src/hooks.js",
+        "src/hooks.ts",
+        "src/main.mjs",
+        "src/main.cjs",
+        "src/main.mts",
+        "src/main.cts",
     ] {
-        let f = files(vec![(path, "")]);
+        let f = raw_files(vec![(path, "")]);
         assert!(
             checker_applies(&ReactHooksLintChecker, &f),
             "{path} must be loaded for the checker (the Layer-2 and CI file walks load only these)"
@@ -680,6 +707,170 @@ fn a_config_under_an_example_folder_neither_enables_nor_hides_the_projects_gap()
     let f = files(vec![
         ("package.json", REACT_PKG),
         ("examples/demo/eslint.config.js", "export default [];\n"),
+    ]);
+    assert_eq!(the_finding(&f).file, "package.json");
+}
+
+// ── review round: frameworks that lint internally ───────────────────────────────────────────
+
+#[test]
+fn a_framework_that_runs_eslint_config_react_app_itself_is_never_a_gap() {
+    // Gatsby runs eslint-config-react-app internally when the project has no config of its own;
+    // Create React App 3.x does the same through react-scripts.
+    for deps in [
+        r#""devDependencies": { "gatsby": "^5.13.0" }"#,
+        r#""devDependencies": { "react-scripts": "3.4.4" }"#,
+        r#""peerDependencies": { "react-scripts": "5.0.1" }"#,
+    ] {
+        let pkg = react_pkg_with(deps);
+        let f = files(vec![("package.json", &pkg)]);
+        assert_silent(&f);
+        assert!(unsatisfied(&f), "{deps}");
+    }
+}
+
+#[test]
+fn a_package_that_only_resembles_a_lint_hiding_framework_does_not_hide_a_gap() {
+    // Exact names only: `gatsby-plugin-image` is a plugin, not the framework.
+    let pkg = react_pkg_with(
+        r#""devDependencies": { "gatsby-plugin-image": "3", "react-scripts-ts-lookalike": "1" }"#,
+    );
+    let f = files(vec![("package.json", &pkg)]);
+    assert_eq!(the_finding(&f).file, "package.json");
+}
+
+// ── review round: ESLint given a config outside `scripts` ───────────────────────────────────
+
+#[test]
+fn eslint_given_its_own_config_or_rules_anywhere_in_the_manifest_is_never_a_gap() {
+    for fragment in [
+        r#""lint-staged": { "*.{js,jsx}": "eslint --config tools/eslintrc.json --fix" }"#,
+        r#""lint-staged": { "*.js": ["eslint -c tools/e.json --fix", "prettier --write"] }"#,
+        r#""husky": { "hooks": { "pre-commit": "eslint --no-eslintrc -c e.json src" } }"#,
+        r#""nano-staged": { "*.js": "eslint --rulesdir tools/rules" }"#,
+        r#""simple-git-hooks": { "pre-commit": "npx eslint --plugin react-hooks --rule 'react-hooks/rules-of-hooks: error' src" }"#,
+        r#""scripts": { "lint": "eslint --resolve-plugins-relative-to ./tools ." }"#,
+        r#""scripts": { "lint": "eslint --rule 'no-console: error' ." }"#,
+        r#""scripts": { "lint": "eslint --plugin react-hooks ." }"#,
+        r#""scripts": { "lint": "eslint --rulesdir rules ." }"#,
+    ] {
+        let pkg = react_pkg_with(fragment);
+        let f = files(vec![("package.json", &pkg)]);
+        assert_silent(&f);
+        assert!(unsatisfied(&f), "{fragment}");
+    }
+}
+
+#[test]
+fn plain_eslint_invocations_anywhere_in_the_manifest_do_not_hide_a_gap() {
+    for fragment in [
+        r#""lint-staged": { "*.{js,jsx}": "eslint --fix" }"#,
+        r#""husky": { "hooks": { "pre-commit": "lint-staged && eslint src" } }"#,
+        r#""simple-git-hooks": { "pre-commit": "npx eslint --max-warnings 0 src" }"#,
+    ] {
+        let pkg = react_pkg_with(fragment);
+        let f = files(vec![("package.json", &pkg)]);
+        assert_eq!(the_finding(&f).file, "package.json", "{fragment}");
+    }
+}
+
+// ── review round: React code ────────────────────────────────────────────────────────────────
+
+fn react_code_gap(extra: Vec<(&str, &str)>) -> Vec<(String, String)> {
+    let mut pairs = vec![("package.json", REACT_PKG)];
+    pairs.extend(extra);
+    raw_files(pairs)
+}
+
+#[test]
+fn a_react_dependency_with_no_react_code_is_not_assessed() {
+    // A plugin that lists react as a peer, a Storybook-only use, a mail-template package, a
+    // build tool: the dependency is there, the React code is not.
+    let f = react_code_gap(vec![
+        ("src/index.ts", "export const plugin = () => 1;\n"),
+        ("src/util.js", "module.exports = {};\n"),
+        ("README.md", "a plugin\n"),
+    ]);
+    assert_silent(&f);
+    assert!(
+        unsatisfied(&f),
+        "the ledger records not assessed, never verified clean"
+    );
+}
+
+#[test]
+fn react_code_is_a_component_file_or_a_file_importing_from_react() {
+    for (path, body) in [
+        ("src/App.jsx", "export const App = () => null;\n"),
+        ("src/App.tsx", "export const App = () => null;\n"),
+        ("src/hooks.js", "import { useState } from 'react';\n"),
+        ("src/hooks.ts", "import { useState } from \"react\";\n"),
+        ("src/legacy.js", "const React = require('react');\n"),
+        ("src/legacy.cjs", "const R = require(\"react\");\n"),
+        ("src/main.mjs", "import ReactDOM from 'react-dom/client';\n"),
+        ("src/jsx.ts", "import { jsx } from 'react/jsx-runtime';\n"),
+        ("src/side.js", "import 'react';\n"),
+    ] {
+        let f = react_code_gap(vec![(path, body)]);
+        assert_eq!(the_finding(&f).file, "package.json", "{path}");
+        assert!(!unsatisfied(&f), "{path}");
+    }
+}
+
+#[test]
+fn files_that_only_mention_react_in_other_words_are_not_react_code() {
+    for (path, body) in [
+        ("src/a.js", "import x from 'react-query';\n"),
+        ("src/b.js", "import x from './react';\n"),
+        ("src/d.ts", "import { z } from 'preact';\n"),
+        ("src/e.js", "import x from 'reactive-streams';\n"),
+    ] {
+        let f = react_code_gap(vec![(path, body)]);
+        assert_silent(&f);
+    }
+}
+
+#[test]
+fn component_files_in_test_story_or_example_folders_are_not_react_code() {
+    for path in [
+        "src/App.test.tsx",
+        "src/Button.stories.tsx",
+        "stories/Button.tsx",
+        "examples/demo/App.jsx",
+        "docs/App.tsx",
+        "__tests__/App.jsx",
+        "test/App.tsx",
+    ] {
+        let f = react_code_gap(vec![(path, "export const A = () => null;\n")]);
+        assert_silent(&f);
+        assert!(unsatisfied(&f), "{path}");
+    }
+}
+
+// ── review round: folder names are case-insensitive ─────────────────────────────────────────
+
+#[test]
+fn auxiliary_folder_names_match_in_any_case() {
+    for path in [
+        "Docs/package.json",
+        "Examples/demo/package.json",
+        "EXAMPLE/package.json",
+        "Templates/react/package.json",
+        "Vendor/app/package.json",
+    ] {
+        let f = files(vec![
+            (
+                "package.json",
+                r#"{ "name": "tool", "dependencies": { "commander": "1" } }"#,
+            ),
+            (path, REACT_PKG),
+        ]);
+        assert_silent(&f);
+    }
+    // And a config under such a folder is skipped just the same.
+    let f = files(vec![
+        ("package.json", REACT_PKG),
+        ("Examples/demo/eslint.config.js", "export default [];\n"),
     ]);
     assert_eq!(the_finding(&f).file, "package.json");
 }

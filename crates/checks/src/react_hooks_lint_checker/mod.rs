@@ -32,8 +32,11 @@
 //! # How it decides
 //!
 //! 1. Collect the manifests and lint configuration files outside auxiliary folders.
-//! 2. No manifest declares `react` (dependencies, dev dependencies or peer dependencies): not a
-//!    React repository, nothing to say.
+//! 2. No manifest declares `react` (dependencies, dev dependencies or peer dependencies), or the
+//!    repository has no React CODE (no `.jsx` / `.tsx` file and no module that imports `react`
+//!    or `react-dom`, outside the folders in step 1): not a React repository to hold to this
+//!    rule, nothing to say, and the ledger records it as not assessed. A plugin that lists React
+//!    as a peer dependency, a Storybook-only use or a bundler alias is not React code.
 //! 3. Evaluate every readable legacy config and every manifest `eslintConfig` field
 //!    ([`config::evaluate_legacy_config`]). Any of them enabling a hooks rule answers the
 //!    question: enabled.
@@ -90,6 +93,16 @@ const INTEREST_GLOBS: &[&str] = &[
     "**/.oxlintrc.json",
     "**/oxlint.json",
     "**/rome.json",
+    // The React-code gate reads component files and the text of JavaScript and TypeScript
+    // modules (to see an import of React).
+    "**/*.jsx",
+    "**/*.tsx",
+    "**/*.js",
+    "**/*.ts",
+    "**/*.mjs",
+    "**/*.cjs",
+    "**/*.mts",
+    "**/*.cts",
 ];
 
 /// Folder names whose manifests and lint configuration describe something other than the
@@ -121,7 +134,54 @@ fn is_auxiliary(path: &str) -> bool {
     }
     let mut segments: Vec<&str> = path.split('/').collect();
     segments.pop();
-    segments.iter().any(|s| AUXILIARY_DIRS.contains(s))
+    segments
+        .iter()
+        .any(|s| AUXILIARY_DIRS.contains(&s.to_ascii_lowercase().as_str()))
+}
+
+/// Whether `path` is a file that is React code by its extension alone: a `.jsx` or `.tsx`
+/// component.
+fn is_component_file(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".jsx") || lower.ends_with(".tsx")
+}
+
+/// Whether `path` is a JavaScript or TypeScript module whose text can import React.
+fn is_module_file(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [".js", ".ts", ".mjs", ".cjs", ".mts", ".cts"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
+/// Whether `content` imports `react` or `react-dom` (or a subpath of either) by an ES import,
+/// a side-effect import or `require`. A plain text scan: a mention in a comment also counts,
+/// which can only add a report on a repository that already depends on React.
+fn imports_react(content: &str) -> bool {
+    ["'", "\""].iter().any(|q| {
+        ["react", "react-dom"].iter().any(|module| {
+            [
+                format!("from {q}{module}{q}"),
+                format!("from {q}{module}/"),
+                format!("require({q}{module}{q})"),
+                format!("require({q}{module}/"),
+                format!("import {q}{module}{q}"),
+                format!("import({q}{module}{q})"),
+            ]
+            .iter()
+            .any(|needle| content.contains(needle.as_str()))
+        })
+    })
+}
+
+/// Whether the repository has React CODE outside auxiliary and test folders: a component file,
+/// or a module that imports React. A `react` dependency alone (a plugin's peer dependency, a
+/// Storybook-only use, a mail-template package, a bundler alias) is not React code.
+fn has_react_code(files: &[(String, String)]) -> bool {
+    files.iter().any(|(path, content)| {
+        !is_auxiliary(path)
+            && (is_component_file(path) || (is_module_file(path) && imports_react(content)))
+    })
 }
 
 fn basename(path: &str) -> &str {
@@ -225,6 +285,10 @@ fn analyze(files: &[(String, String)]) -> Verdict {
     let Some(&(react_manifest, react_line)) = react_manifests.first() else {
         return Verdict::Unanswered;
     };
+    // A `react` dependency without React code is not a React project to hold to this rule.
+    if !has_react_code(files) {
+        return Verdict::Unanswered;
+    }
     if enabled {
         return Verdict::Enabled;
     }
