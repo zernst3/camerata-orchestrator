@@ -237,8 +237,8 @@ pub(crate) fn is_admissible_text(path: &str) -> bool {
 /// `@import`). The dead-code rule needs them to see that a file is still used; nothing else
 /// reads them. See [`ExtractedRepo::reference_files`].
 const REFERENCE_TEXT_EXTS: &[&str] = &[
-    "html", "htm", "vue", "svelte", "astro", "md", "mdx", "css", "scss", "less", "ejs", "hbs",
-    "pug", "njk", "j2", "jinja", "jinja2",
+    "html", "htm", "vue", "svelte", "astro", "md", "mdx", "css", "scss", "less", "ejs", "erb",
+    "hbs", "pug", "njk", "j2", "jinja", "jinja2",
 ];
 
 /// Extensionless build-runner files that name the scripts and sources they run.
@@ -873,6 +873,7 @@ mod tests {
             "styles/a.scss",
             "styles/a.less",
             "views/layout.ejs",
+            "app/views/home/index.html.erb",
             "views/p.hbs",
             "views/p.pug",
             "views/p.njk",
