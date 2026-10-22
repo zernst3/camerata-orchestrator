@@ -457,7 +457,20 @@ impl<'a, 's> StreamWalker<'a, 's> {
                 ..Previous::default()
             };
         } else {
-            self.emit_word(TokenClass::Ident, TEXT_IDENT, TEXT_IDENT, span);
+            // A name directly followed by `(` that does not declare anything is a call (or a
+            // tuple constructor): Exact mode keeps its text, as it does for ECMAScript and
+            // Python callees. `fn name(` declares, and a rename of it is not a disagreement.
+            let called = !previous.declaration_keyword
+                && matches!(
+                    level.trees.get(level.next),
+                    Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Parenthesis
+                );
+            self.emit_word(
+                TokenClass::Ident,
+                TEXT_IDENT,
+                if called { text } else { TEXT_IDENT },
+                span,
+            );
             let upper_first = text.chars().next().is_some_and(char::is_uppercase);
             let all_caps = text.len() > 1
                 && text

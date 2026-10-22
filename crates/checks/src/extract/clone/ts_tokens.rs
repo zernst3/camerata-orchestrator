@@ -668,10 +668,25 @@ impl Walker<'_> {
             self.builder
                 .push_split(TokenClass::Prop, TEXT_PROP, || text.to_string(), line, raw);
         } else {
+            // The name of the function a call invokes (or the class `new` constructs) says what
+            // the code does, so Exact mode keeps it: two copies that call different helpers do
+            // not agree. A rename of a local, a parameter or a declaration still collapses.
+            let callee = kind == "identifier"
+                && matches!(
+                    (parent_kind, field),
+                    ("call_expression" | "call", Some("function"))
+                        | ("new_expression", Some("constructor"))
+                );
             self.builder.push_split(
                 TokenClass::Ident,
                 TEXT_IDENT,
-                || TEXT_IDENT.to_string(),
+                || {
+                    if callee {
+                        text.to_string()
+                    } else {
+                        TEXT_IDENT.to_string()
+                    }
+                },
                 line,
                 raw,
             );

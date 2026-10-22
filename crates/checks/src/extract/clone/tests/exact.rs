@@ -246,3 +246,119 @@ fn span_tokens_returns_the_tokens_of_the_span() {
     };
     assert!(span_tokens(&items[0], &beyond).is_empty());
 }
+
+// ---- callee names (W29 Wave C review, D3) ----
+//
+// A free identifier collapses in Exact mode (a rename of a local is not a disagreement), but the
+// name of the function a call invokes is a fact about WHAT the code does: two copies that call
+// `computeDiscount` and `computeSurcharge` do not agree. The family search runs in Structural
+// mode, which is unchanged, so such copies are still found as one family.
+
+fn discount_with_callee(callee: &str) -> String {
+    format!(
+        "export function quote(order, user) {{
+  const base = order.subtotal * order.quantity;
+  if (user.isPremium) {{
+    const discount = {callee}(base, 0.2);
+    return base - discount;
+  }}
+  if (base > 100 && order.coupon !== null) {{
+    return base - 10;
+  }}
+  return base + order.shipping;
+}}
+"
+    )
+}
+
+#[test]
+fn a_different_callee_is_a_named_disagreement_and_the_family_is_still_found() {
+    let a = discount_with_callee("computeDiscount");
+    let b = discount_with_callee("computeSurcharge");
+    let found = disagreements(SourceLang::TypeScript, "a.ts", &a, "b.ts", &b);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(pair(&found[0]), ("computeDiscount", "computeSurcharge"));
+    assert_eq!((found[0].line_a, found[0].line_b), (4, 4));
+}
+
+#[test]
+fn a_renamed_local_and_a_renamed_declaration_still_agree() {
+    let a = discount_with_callee("computeDiscount");
+    let b = a
+        .replace("function quote", "function priceIt")
+        .replace("order", "cart")
+        .replace("base", "amount")
+        .replace("discount", "cut");
+    // `computeDiscount` contains `Discount` with a capital D, which the lower-case replace
+    // leaves alone, so the callee text is unchanged.
+    assert!(disagreements(SourceLang::TypeScript, "a.ts", &a, "b.ts", &b).is_empty());
+}
+
+#[test]
+fn a_different_constructor_after_new_is_a_named_disagreement() {
+    let make = |class: &str| {
+        format!(
+            "export function build(order, user) {{
+  const base = order.subtotal * order.quantity;
+  if (user.isPremium && base > 100) {{
+    return new {class}(base, 0.2);
+  }}
+  if (order.coupon !== null) {{
+    return new {class}(base, 0.1);
+  }}
+  return base + order.shipping;
+}}
+"
+        )
+    };
+    let found = disagreements(
+        SourceLang::TypeScript,
+        "a.ts",
+        &make("PremiumPrice"),
+        "b.ts",
+        &make("GuestPrice"),
+    );
+    // One per `new` (the producer reports the repeated pair once).
+    assert_eq!(found.len(), 2, "{found:#?}");
+    assert!(found
+        .iter()
+        .all(|d| pair(d) == ("PremiumPrice", "GuestPrice")));
+}
+
+#[test]
+fn a_python_callee_difference_is_a_named_disagreement() {
+    let make = |callee: &str| {
+        format!(
+            "def quote(order, user):
+    base = order.subtotal * order.quantity
+    if user.is_premium and base > 100:
+        return {callee}(base, 0.2)
+    elif order.coupon is not None:
+        return base - 10
+    return base + order.shipping
+"
+        )
+    };
+    let found = disagreements(
+        SourceLang::Python,
+        "a.py",
+        &make("compute_discount"),
+        "b.py",
+        &make("compute_surcharge"),
+    );
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(pair(&found[0]), ("compute_discount", "compute_surcharge"));
+}
+
+#[test]
+fn a_rust_callee_difference_is_a_named_disagreement_but_a_renamed_fn_is_not() {
+    let a = rs_fee("fee", "order").replace("base / 20", "scale(base, 20)");
+    let b = a.replace("scale(", "rescale(");
+    let found = disagreements(SourceLang::Rust, "a.rs", &a, "b.rs", &b);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(pair(&found[0]), ("scale", "rescale"));
+    // The declaration `fn fee(` is followed by `(` too, but it declares: a rename of it is not a
+    // disagreement.
+    let renamed = a.replace("pub fn fee(", "pub fn charge(");
+    assert!(disagreements(SourceLang::Rust, "a.rs", &a, "b.rs", &renamed).is_empty());
+}
