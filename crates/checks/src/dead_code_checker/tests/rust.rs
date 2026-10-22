@@ -424,8 +424,27 @@ fn twin_rust_crate_with_bin_targets_is_skipped() {
 
 #[test]
 fn twin_rust_tests_examples_benches_and_build_rs_are_roots() {
+    // Each file under `src/` below is declared only by a Cargo target root other than
+    // lib.rs, and its name is not spelled by any live file (the declaring files are themselves
+    // dead unless root detection works), so only the crate-root rules keep it alive.
     let f = files(vec![
+        (
+            "Cargo.toml",
+            "[package]\nname = \"x\"\n\n[[test]]\nname = \"suite\"\npath = \"src/suite/entry.rs\"\n",
+        ),
         ("src/lib.rs", "pub fn f() {}\n"),
+        // A Cargo [[test]] path under src/.
+        ("src/suite/entry.rs", "mod harness_support;\n"),
+        ("src/suite/harness_support.rs", "pub fn h() {}\n"),
+        // Auto-discovered binaries: src/bin/*.rs and src/bin/*/main.rs.
+        (
+            "src/bin/tool.rs",
+            "#[path = \"parts/body.rs\"]\nmod aliased;\nfn main() {}\n",
+        ),
+        ("src/bin/parts/body.rs", "pub fn b() {}\n"),
+        ("src/bin/multi/main.rs", "mod multi_part;\nfn main() {}\n"),
+        ("src/bin/multi/multi_part.rs", "pub fn p() {}\n"),
+        // Outside src/: build script, integration tests, examples, benches.
         ("build.rs", "fn main() {}\n"),
         ("tests/it.rs", "mod common;\n"),
         ("tests/common/mod.rs", "pub fn c() {}\n"),
@@ -433,6 +452,24 @@ fn twin_rust_tests_examples_benches_and_build_rs_are_roots() {
         ("benches/b.rs", "fn main() {}\n"),
     ]);
     assert_silent(&f);
+}
+
+#[test]
+fn positive_sibling_a_file_declared_only_by_a_non_root_dead_file_is_still_flagged() {
+    let f = files(vec![
+        ("src/lib.rs", "pub fn f() {}\n"),
+        // Same shapes as above, but not in a root position.
+        ("src/tools/tool.rs", "mod tool_support;\nfn main() {}\n"),
+        ("src/tools/tool/tool_support.rs", "pub fn s() {}\n"),
+    ]);
+    let got = flagged(&f);
+    assert_eq!(got.len(), 1, "one roll-up or per-file set: {got:?}");
+    let vs = run(&f);
+    let text: String = vs.iter().map(|v| v.message.clone()).collect();
+    assert!(
+        text.contains("tool_support") || text.contains("src/tools"),
+        "{text}"
+    );
 }
 
 #[test]
