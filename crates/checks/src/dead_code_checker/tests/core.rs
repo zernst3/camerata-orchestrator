@@ -671,6 +671,16 @@ fn registers_its_rule_id_and_source_plus_context_globs() {
         "**/*.md",
         "**/Dockerfile*",
         "**/Makefile",
+        // Other languages' source can name a TypeScript or Python file (a Rails view naming a
+        // controller, a Go service shelling out to a script): context for the mention guard.
+        "**/*.rb",
+        "**/*.php",
+        "**/*.go",
+        "**/*.java",
+        "**/*.cs",
+        "**/*.kt",
+        "**/*.swift",
+        "**/*.erb",
     ] {
         assert!(globs.contains(&needle), "{needle} missing from {globs:?}");
     }
@@ -864,4 +874,37 @@ fn jasmine_spec_folders_and_helpers_are_tests_so_the_code_they_import_is_live() 
         ("lib/stranded_total.js", "module.exports = {};\n"),
     ]);
     assert_flags_only(&f, "lib/stranded_total.js");
+}
+
+#[test]
+fn the_write_time_feed_reads_other_languages_source_so_their_mentions_count() {
+    let dir = tempfile::tempdir().unwrap();
+    for (rel, body) in [
+        ("package.json", r#"{"private":true}"#),
+        ("src/app.ts", "export {};\n"),
+        ("src/report_exporter.ts", "export const x = 1;\n"),
+        (
+            "app/views/home/index.html.erb",
+            "<%= javascript_include_tag 'report_exporter' %>\n",
+        ),
+        (
+            "services/runner.go",
+            "exec.Command(\"node\", \"src/report_exporter.ts\")\n",
+        ),
+    ] {
+        let path = dir.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+    let loaded = crate::arch_check_runner::collect_interest_files(
+        dir.path(),
+        DeadCodeChecker.interest_globs(),
+    );
+    let paths: Vec<&str> = loaded.iter().map(|(p, _)| p.as_str()).collect();
+    assert!(
+        paths.contains(&"app/views/home/index.html.erb"),
+        "{paths:?}"
+    );
+    assert!(paths.contains(&"services/runner.go"), "{paths:?}");
+    assert_silent(&loaded);
 }

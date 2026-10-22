@@ -135,6 +135,15 @@ const INTEREST_GLOBS: &[&str] = &[
     "**/Makefile",
     "**/Procfile",
     "**/Justfile",
+    // Source in languages the checker does not analyse can still name a file it does.
+    "**/*.rb",
+    "**/*.php",
+    "**/*.go",
+    "**/*.java",
+    "**/*.cs",
+    "**/*.kt",
+    "**/*.swift",
+    "**/*.erb",
 ];
 
 /// The language family of a source file, which decides how liveness is computed: ECMAScript and
