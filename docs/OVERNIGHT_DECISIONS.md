@@ -38,6 +38,15 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-22 (Opus, Wave C review, all false-positive-safe narrowings): (1) the three clone
+  rules (SINGLE-SOURCE-LOGIC, NAMING-ONE-CONCEPT, SHARED-PRIMITIVE) emit NO convention/"clean"
+  row in V1; the detector cannot prove absence. (2) SINGLE-SOURCE escalates to HIGH only on
+  disagreements in decision tokens (operator, number, property inside the decision test); string
+  and template differences are a trailing clause. (3) The composed-variant guard fires only when
+  the helper call dominates the shared sequence (call covers >= 50% of its tokens, or every
+  decision token lies inside the call's arguments). (4) Functions that render JSX are excluded
+  from NAMING when UI-SHARED-PRIMITIVE-1 is armed.
+
 - 2026-10-21 (Zach, V1 scope): **Camerata V1** = the version that runs the first paid client
   inspection. Scope = EVERYTHING already in `docs/plans/2026-10-19_MASTER-SEQUENCE.md` (all W29
   rules, W27, item-21 follow-ups, 19e/19f/20) plus the graded accuracy tests, which are the go
