@@ -1,20 +1,21 @@
 # Overnight autonomous run — decisions needed + progress log
 
-> ## ▶ RESUME HERE (paused 2026-10-21 16:42 EDT for the session limit; resume 18:21)
-> Branch is green and pushed through 0a3f06f. Four agent branches were paused mid-flight, each in
-> `.claude/worktrees/agent-<id>`:
-> - `worktree-agent-a238d64a3cd7bf255`: live severity clamp + export gates 2/6/7. 6 commits, was
->   on its final verification. Verify, merge, gate.
-> - `worktree-agent-acd63885ba5461cd8`: env-var test isolation (19a) + apply-time drift baseline.
->   Uncommitted work in progress. Resume it.
-> - `worktree-agent-a22990345a394e726`: ARCH-DEAD-CODE-1 build (just started). Resume or relaunch.
-> - `worktree-agent-ad424f8e3583d3af6`: ARCH-SHARED-CONSTANT-1 build (just started). Resume or relaunch.
-> Specs: `docs/design/2026-10-21_w29-detector-implementation.md`. Owner rulings: DECISIONS MADE
-> below. After both detectors: Fable 5.1 adversarial review of each, then fix, merge, and
-> regenerate `CORPUS_LOCK.toml` (`camerata corpus lock`) at merge time.
-> Process: Opus directs; Sonnet builds against specs; Haiku does mechanical work; Fable 5.1 for
-> trap-heavy specs and adversarial review. Questions to Zach in plain language with terms defined.
-> Zach's standing directive: keep developing; nothing is ever dropped; fix every defect.
+> ## ▶ RESUME HERE (paused for the night 2026-10-21)
+> Branch `feat/audit-report-export` is green and pushed. No agent worktrees are in flight.
+> **W29 Wave A is done:** ARCH-ONE-IMPORT-PATH-1, ARCH-SHARED-CONSTANT-1 and ARCH-DEAD-CODE-1 are
+> each built, Fable-reviewed, fixed, and merged. **V1 scope** (Zach, DECISIONS MADE below):
+> everything in `docs/plans/2026-10-19_MASTER-SEQUENCE.md` plus the graded accuracy tests (the
+> outreach go-signal); no new scope except defect fixes; rule `stages` is out of V1.
+> **Next, in order:** W29 Wave B (UI-REACT-HOOKS-LINT-1; detector exists), then Wave C (the clone
+> detector, then SINGLE-SOURCE-LOGIC, NAMING, SHARED-PRIMITIVE), then Wave D (STATE-SHAPE,
+> NEEDLESS-COMPLEXITY); then the rest of MASTER-SEQUENCE (W27 PDF rebuild needs Zach's eye, the
+> remaining item-21 follow-ups, 19e/19f, and the graded sweep, item 20).
+> Process: Opus directs; Fable 5.1 writes trap-heavy specs and adversarially reviews every detector
+> before merge; Sonnet builds; Haiku does mechanical work. Remove each agent worktree right after
+> merge (`scripts/remove-merged-worktree.sh <id>`); the 30-minute cargo disk guard must stay
+> installed. Single-purpose shell commands; edits via the Edit tool; questions to Zach only for real
+> product decisions, in plain language. Standing directive: keep developing; nothing dropped; fix
+> every defect.
 
 
 Started 2026-10-20 (Zach logged off; autonomous continuation of the master sequence).

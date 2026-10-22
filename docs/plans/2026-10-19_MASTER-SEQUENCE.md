@@ -406,6 +406,14 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
   never-defer-hardening directive): baseline at apply time and preserve baselines across
   re-apply. Queued.
 
+- **CI gate binary (`camerata-check`) ignores corpus severity bounds** (found 2026-10-21 merging
+  the W29 detectors): it reported ARCH-DEAD-CODE-1 at `medium` though the corpus ceiling is `low`,
+  so the repo-installed gate disagrees with the scan and the client artifacts. Route its findings
+  through the same bounds function (`apply_corpus_severity_bounds`, now in camerata-server) or
+  hoist that function into `camerata-rules` so both crates share it. Also decide, per the
+  `stages` target design, whether low-severity consistency rules should HARD-FAIL a client's CI
+  build or report advisory; today any deterministic finding fails `camerata-check`.
+
 ## 3. Explicitly NOT doing
 
 - `ARCH-OBSERVABILITY-CORRELATION-ID-1` stays `decision` — prior ruling, recorded in the roster.
