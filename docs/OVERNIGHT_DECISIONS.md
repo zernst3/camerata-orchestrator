@@ -1,6 +1,11 @@
 # Overnight autonomous run — decisions needed + progress log
 
 > ## ▶ RESUME HERE (paused for the night 2026-10-21)
+> **FIRST THING next session (Zach asked):** walk him step by step through granting macOS Full
+> Disk Access to `/bin/bash` and `~/.cargo/bin/cargo-sweep`, and through adding the Claude Code
+> `Stop` hook for `scripts/cargo-disk-guard.sh --throttle`. Then verify with
+> `launchctl kickstart -k gui/$(id -u)/dev.zachernst.cargo-disk-guard` and the log at
+> `~/Library/Logs/cargo-disk-guard.log` (expect "start; free=", not "Operation not permitted").
 > Branch `feat/audit-report-export` is green and pushed. No agent worktrees are in flight.
 > **W29 Wave A is done:** ARCH-ONE-IMPORT-PATH-1, ARCH-SHARED-CONSTANT-1 and ARCH-DEAD-CODE-1 are
 > each built, Fable-reviewed, fixed, and merged. **V1 scope** (Zach, DECISIONS MADE below):
