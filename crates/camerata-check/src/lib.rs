@@ -130,6 +130,14 @@ pub struct RunReport {
     /// AI review (see `docs/design/2026-07-27_ast-extractor-layer.md` §4 Group E). Surfaced so
     /// a CI author gets an explicit signal instead of a silent no-op.
     pub unmatched_rule_ids: Vec<String>,
+    /// `--rule-id` values that name a rule this binary CANNOT evaluate: the clone-based rules
+    /// (`ARCH-SINGLE-SOURCE-LOGIC-1`, `ARCH-NAMING-ONE-CONCEPT-1`, `UI-SHARED-PRIMITIVE-1`). They
+    /// find repeated code deterministically but need a reviewed judgment to decide which repeats
+    /// are real, and that judgment is the scan's advisory tier, which a bare CI runner does not
+    /// have. Reported here, never folded into `clean`: an empty result for these ids is not a
+    /// clean result. Absent in older output (`serde(default)`).
+    #[serde(default)]
+    pub unsupported_rule_ids: Vec<String>,
     pub violations: Vec<ViolationJson>,
     /// Violations that are hard deterministic verdicts (neither `advisory_coexisting` nor
     /// `[needs review`-marked). This is what a non-`--strict` run fails the build on.
@@ -147,10 +155,12 @@ impl RunReport {
     /// - `strict = false` (default): non-zero iff `deterministic_count > 0`. Needs-review-grade
     ///   findings alone never fail the build — that's the entire point of keeping the two
     ///   classes separate (see the module doc).
-    /// - `strict = true`: non-zero iff ANY violation exists, deterministic or needs-review.
+    /// - `strict = true`: non-zero iff ANY violation exists, deterministic or needs-review, or a
+    ///   requested rule could not be evaluated at all ([`Self::unsupported_rule_ids`]): a strict
+    ///   gate must not pass on a rule it never checked.
     pub fn exit_code(&self, strict: bool) -> i32 {
         let should_fail = if strict {
-            !self.violations.is_empty()
+            !self.violations.is_empty() || !self.unsupported_rule_ids.is_empty()
         } else {
             self.deterministic_count > 0
         };
@@ -182,6 +192,18 @@ pub fn run(opts: &Options) -> anyhow::Result<RunReport> {
             .collect()
     };
 
+    // The clone-based rules are real rules this binary cannot answer: say so, by name, instead
+    // of letting them fall into "no checker answers" (a typo or a deferred rule) or, worse,
+    // into a clean result.
+    let mut unsupported_rule_ids: Vec<String> = opts
+        .rule_ids
+        .iter()
+        .filter(|id| camerata_checks::clone_rules::RULE_IDS.contains(&id.as_str()))
+        .cloned()
+        .collect();
+    unsupported_rule_ids.sort();
+    unsupported_rule_ids.dedup();
+
     let unmatched_rule_ids: Vec<String> = if opts.rule_ids.is_empty() {
         Vec::new()
     } else {
@@ -191,7 +213,7 @@ pub fn run(opts: &Options) -> anyhow::Result<RunReport> {
             .collect();
         opts.rule_ids
             .iter()
-            .filter(|id| !covered.contains(id.as_str()))
+            .filter(|id| !covered.contains(id.as_str()) && !unsupported_rule_ids.contains(id))
             .cloned()
             .collect()
     };
@@ -239,12 +261,14 @@ pub fn run(opts: &Options) -> anyhow::Result<RunReport> {
 
     let deterministic_count = violations.iter().filter(|v| !v.needs_review).count();
     let needs_review_count = violations.len() - deterministic_count;
-    let clean = violations.is_empty();
+    // A requested rule that could not be evaluated is never "clean".
+    let clean = violations.is_empty() && unsupported_rule_ids.is_empty();
 
     Ok(RunReport {
         repo: repo_label,
         checkers_run: selected.len(),
         unmatched_rule_ids,
+        unsupported_rule_ids,
         violations,
         deterministic_count,
         needs_review_count,
@@ -284,6 +308,15 @@ pub fn render_human(report: &RunReport) -> String {
             "camerata-check: clean — {} checker(s) ran over {}, no violations\n",
             report.checkers_run, report.repo
         ));
+    } else if report.violations.is_empty() {
+        // Nothing found by what ran, but a requested rule was never evaluated: not clean.
+        out.push_str(&format!(
+            "camerata-check: NOT CLEAN — {} checker(s) ran over {} with no violations, but {} \
+             requested rule(s) were not assessed\n",
+            report.checkers_run,
+            report.repo,
+            report.unsupported_rule_ids.len()
+        ));
     } else {
         out.push_str(&format!(
             "camerata-check: {} violation(s) in {} ({} deterministic, {} needs-review)\n\n",
@@ -322,6 +355,14 @@ pub fn render_human(report: &RunReport) -> String {
              it stays AI-advisory only; see docs/design/2026-07-27_ast-extractor-layer.md §4 Group E \
              for the two rules deliberately deferred this way).\n",
             report.unmatched_rule_ids.join(", ")
+        ));
+    }
+    if !report.unsupported_rule_ids.is_empty() {
+        out.push_str(&format!(
+            "\nNot assessed: {} (unsupported here: these rules find repeated code across files and \
+             need the scan's advisory tier, a reviewed judgment of which repeats are real, which a \
+             CI run does not have; an empty result for them is not a clean result).\n",
+            report.unsupported_rule_ids.join(", ")
         ));
     }
     out
@@ -524,6 +565,63 @@ mod tests {
         assert!(report.clean);
     }
 
+    #[test]
+    fn clone_based_rule_ids_are_unsupported_not_unmatched_and_never_clean() {
+        let dir = tmpdir();
+        let mut o = opts(dir.path());
+        o.rule_ids = vec![
+            "ARCH-SINGLE-SOURCE-LOGIC-1".to_string(),
+            "UI-SHARED-PRIMITIVE-1".to_string(),
+            "ARCH-SINGLE-SOURCE-LOGIC-1".to_string(), // repeated: reported once
+            "ARCH-STRUCTURED-ERRORS-1".to_string(),   // a different story: no checker at all
+        ];
+        let report = run(&o).expect("must not err");
+        assert_eq!(
+            report.unsupported_rule_ids,
+            vec![
+                "ARCH-SINGLE-SOURCE-LOGIC-1".to_string(),
+                "UI-SHARED-PRIMITIVE-1".to_string()
+            ]
+        );
+        assert_eq!(
+            report.unmatched_rule_ids,
+            vec!["ARCH-STRUCTURED-ERRORS-1".to_string()]
+        );
+        assert!(report.violations.is_empty());
+        assert!(!report.clean, "an unevaluated rule is never a clean result");
+        assert_eq!(
+            report.exit_code(false),
+            0,
+            "the default gate does not fail on it"
+        );
+        assert_eq!(
+            report.exit_code(true),
+            1,
+            "a strict gate must not pass on it"
+        );
+        let human = render_human(&report);
+        assert!(human.contains("NOT CLEAN"), "{human}");
+        assert!(human.contains("Not assessed: ARCH-SINGLE-SOURCE-LOGIC-1, UI-SHARED-PRIMITIVE-1"));
+        assert!(!human.contains("camerata-check: clean"));
+    }
+
+    #[test]
+    fn a_run_that_does_not_ask_for_a_clone_rule_is_unaffected() {
+        let dir = tmpdir();
+        let report = run(&opts(dir.path())).expect("must not err");
+        assert!(report.unsupported_rule_ids.is_empty());
+        assert!(report.clean);
+        assert_eq!(report.exit_code(true), 0);
+    }
+
+    #[test]
+    fn a_report_without_the_unsupported_field_still_deserializes() {
+        let old = r#"{"repo":"r","checkers_run":1,"unmatched_rule_ids":[],"violations":[],
+            "deterministic_count":0,"needs_review_count":0,"clean":true}"#;
+        let report: RunReport = serde_json::from_str(old).expect("older output must parse");
+        assert!(report.unsupported_rule_ids.is_empty());
+    }
+
     // ── --config override ─────────────────────────────────────────────────────
 
     #[test]
@@ -652,6 +750,7 @@ mod tests {
             repo: "some/repo".into(),
             checkers_run: 8,
             unmatched_rule_ids: vec![],
+            unsupported_rule_ids: vec![],
             violations: vec![],
             deterministic_count: 0,
             needs_review_count: 0,
@@ -668,6 +767,7 @@ mod tests {
             repo: "r".into(),
             checkers_run: 1,
             unmatched_rule_ids: vec![],
+            unsupported_rule_ids: vec![],
             violations: vec![ViolationJson {
                 rule_id: "SUPABASE-RLS-ENABLED-1".into(),
                 file: "supabase/migrations/x.sql".into(),
@@ -696,6 +796,7 @@ mod tests {
             repo: "r".into(),
             checkers_run: 0,
             unmatched_rule_ids: vec!["ARCH-EXACT-DECIMALS-1".into()],
+            unsupported_rule_ids: vec![],
             violations: vec![],
             deterministic_count: 0,
             needs_review_count: 0,
@@ -713,6 +814,7 @@ mod tests {
             repo: "owner/repo".into(),
             checkers_run: 8,
             unmatched_rule_ids: vec!["ARCH-EXACT-DECIMALS-1".into()],
+            unsupported_rule_ids: vec![],
             violations: vec![ViolationJson {
                 rule_id: "SUPABASE-RLS-ENABLED-1".into(),
                 file: "supabase/migrations/x.sql".into(),
@@ -734,6 +836,7 @@ mod tests {
             "repo",
             "checkers_run",
             "unmatched_rule_ids",
+            "unsupported_rule_ids",
             "violations",
             "deterministic_count",
             "needs_review_count",
@@ -787,6 +890,7 @@ mod tests {
             repo: "r".into(),
             checkers_run: 1,
             unmatched_rule_ids: vec![],
+            unsupported_rule_ids: vec![],
             violations: vec![ViolationJson {
                 rule_id: "UI-UTC-DATES-1".into(),
                 file: "src/date_label.ts".into(),

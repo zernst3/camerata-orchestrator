@@ -1707,6 +1707,12 @@ pub async fn audit_repos(
                                     0,
                                 );
                             }
+                            // Wave C: the clone-based rules have a candidate producer, not a
+                            // verdict, so whether they ran is decided by the advisory seam
+                            // (`clone_advisory`), which records them once per repo right after
+                            // this loop. Recording them here too would credit a run that the
+                            // judgment has not made.
+                            Some(crate::mechanical_gate::CLONE_ADVISORY_CHANNEL) => {}
                             // W4: NO channel is no longer recorded here at all — this rule has
                             // no shipped deterministic detector, so its only possible route is
                             // the semantic pass. It is in `semantic` (nothing excludes it
