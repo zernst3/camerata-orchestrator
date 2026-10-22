@@ -1,20 +1,25 @@
 # Overnight autonomous run — decisions needed + progress log
 
-> ## ▶ RESUME HERE (paused for the night 2026-10-21)
-> **FIRST THING next session (Zach asked):** walk him step by step through granting macOS Full
-> Disk Access to `/bin/bash` and `~/.cargo/bin/cargo-sweep`, and through adding the Claude Code
-> `Stop` hook for `scripts/cargo-disk-guard.sh --throttle`. Then verify with
-> `launchctl kickstart -k gui/$(id -u)/dev.zachernst.cargo-disk-guard` and the log at
-> `~/Library/Logs/cargo-disk-guard.log` (expect "start; free=", not "Operation not permitted").
-> Branch `feat/audit-report-export` is green and pushed. No agent worktrees are in flight.
-> **W29 Wave A is done:** ARCH-ONE-IMPORT-PATH-1, ARCH-SHARED-CONSTANT-1 and ARCH-DEAD-CODE-1 are
-> each built, Fable-reviewed, fixed, and merged. **V1 scope** (Zach, DECISIONS MADE below):
+> ## ▶ RESUME HERE (paused 2026-10-22 at Zach's request, after Wave C)
+> Branch `feat/audit-report-export` is pushed. No agent worktrees are in flight.
+> **Disk:** Full Disk Access granted 2026-10-22 to `/bin/bash` and `cargo-sweep`; the 30-minute
+> guard verified running ("start; free=" in `~/Library/Logs/cargo-disk-guard.log`). OPEN: Zach
+> pasted the settings JSON (hook + deny list) into the REPO's `.claude/settings.json` instead of
+> `~/.claude/settings.json`. It is uncommitted and must NOT be committed (personal paths). Once he
+> moves it to `~/.claude/settings.json`, restore the repo file with `git checkout .claude/settings.json`.
+> **W29 done:** Wave A (ONE-IMPORT-PATH, SHARED-CONSTANT, DEAD-CODE), Wave B
+> (UI-REACT-HOOKS-LINT-1 + the eslint baseline-leak fix + exact eslint pins), and Wave C (clone
+> detector + SINGLE-SOURCE-LOGIC, NAMING-ONE-CONCEPT, SHARED-PRIMITIVE + the advisory judge seam).
+> Every detector was Fable-reviewed, fixed, and merged. **V1 scope** (Zach, DECISIONS MADE below):
 > everything in `docs/plans/2026-10-19_MASTER-SEQUENCE.md` plus the graded accuracy tests (the
 > outreach go-signal); no new scope except defect fixes; rule `stages` is out of V1.
-> **Next, in order:** W29 Wave B (UI-REACT-HOOKS-LINT-1; detector exists), then Wave C (the clone
-> detector, then SINGLE-SOURCE-LOGIC, NAMING, SHARED-PRIMITIVE), then Wave D (STATE-SHAPE,
-> NEEDLESS-COMPLEXITY); then the rest of MASTER-SEQUENCE (W27 PDF rebuild needs Zach's eye, the
-> remaining item-21 follow-ups, 19e/19f, and the graded sweep, item 20).
+> **Next, in order (sequential, to conserve tokens):** W29 Wave D (UI-STATE-SHAPE-1,
+> STYLE-NEEDLESS-COMPLEXITY-1: Fable spec, Sonnet build, Fable review); then corpus text work
+> (MASTER-SEQUENCE items 5, 11, 12, 19 corpus sub-items); then the engine follow-ups in item 21
+> (CI-gate severity bounds, stale model registry with prices verified from Anthropic's pricing page,
+> staleness nag at load, W30 residuals); then W27 PDF rebuild (needs Zach's eye); then 19f grader
+> revision; then the graded sweep (item 20). First, a cheap Haiku pass to bring the
+> MASTER-SEQUENCE status table current (several items it shows OPEN are done).
 > Process: Opus directs; Fable 5.1 writes trap-heavy specs and adversarially reviews every detector
 > before merge; Sonnet builds; Haiku does mechanical work. Remove each agent worktree right after
 > merge (`scripts/remove-merged-worktree.sh <id>`); the 30-minute cargo disk guard must stay
