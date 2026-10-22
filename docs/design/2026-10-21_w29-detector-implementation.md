@@ -754,16 +754,91 @@ positive + safe-twin tests above.
 - Cross-repository consumers of a private package (another repo importing by git URL or a
   published tarball) are invisible; a private package is treated as consumed only inside the repo.
 
-### 7. Open questions for the owner
+### 7. Owner questions
 
-1. **Scope: file-level now, symbol-level later?** The work order asks for "N symbols in this
-   file are never used". This spec narrows v1 to whole files (a module nothing reaches), because
-   that is the only unit the current extractors can state as a one-grep fact. Symbol-level
-   ("exported function `computeFee` is used by nothing") would need member-access analysis for
-   namespace imports, a framework-export allowlist, decorator awareness and an identifier-absence
-   guard before it meets the law. Recommendation: ship file-level as ARCH-DEAD-CODE-1 and give
-   symbol-level its own id (ARCH-DEAD-EXPORT-1 or similar) when built, so each finding's fact stays
-   one sentence. The alternative is to hold the rule until both halves exist.
+1. **Scope: file-level now, symbol-level later? ANSWERED 2026-10-21.** Owner ruling (recorded in
+   `docs/OVERNIGHT_DECISIONS.md`, DECISIONS MADE): ARCH-DEAD-CODE-1 ships FILE-level in v1. Unused
+   individual exports are a separate future rule with its own id (the working name was
+   ARCH-DEAD-EXPORT-1), built when the member-access analysis, framework-export allowlist,
+   decorator awareness and identifier-absence guard listed above exist. The checker's module doc
+   and the corpus TOML say so.
+
+### 8. Built version: where it completes or departs from this spec (2026-10-21)
+
+Implemented in `crates/checks/src/dead_code_checker/` (one module per concern) plus the scan
+wiring in `crates/server/src/onboard/{files,architectural}.rs`. Every guard `G1` to `G30` has a
+safe-twin test; the places the build chose something the text above left open or got wrong:
+
+- **The mention guard counts only LIVE files, run to a fixed point.** As written, G8 makes the
+  spec's own `file_reachable_only_through_dead_files_is_listed_with_its_importer` impossible: the
+  dead importer's `import './legacy-helper'` mentions the helper, so the helper would be live. A
+  mention inside a file that is itself unreachable proves nothing. A dead file whose name appears
+  only in dead files is reported with a third message form ("its name appears only in `X`, which
+  is itself unreachable"), so the message never claims "nowhere else" when a grep would find it.
+- **Short-key rule versus the spec's test fixtures.** Keys under three characters are always
+  mentioned, so fixtures named `a.ts`, `b.ts`, `c.rs` or `en.ts` can never be reported. The tests
+  use longer names (`alpha.ts`, `cold.rs`, `german.ts`). The same applies to the stoplist
+  (`user`, `api`, `app`): `twin_python_ambiguous_absolute_import_is_a_mention` uses `orders`.
+- **Package manifests in the framework tests.** A package with no `"private": true` and no
+  `exports` is public surface (R4) and roots every file, so the spec's Next, Remix, SvelteKit,
+  Expo and similar fixtures (public manifests) pass for the wrong reason. The built tests mark
+  them private. Framework dependencies that bring single-file components (G19) also root the
+  package when no `.vue`/`.svelte`/`.astro`/`.mdx` file is in the scan, so those fixtures include
+  one. `twin_computed_require_without_prefix_keeps_the_package_live` needs a `package.json` per
+  package to scope the load; without one the nearest manifest is the repository root.
+- **`twin_empty_and_malformed_inputs_never_panic`**: a `.ts` of binary noise that nothing imports is
+  a genuine candidate, so it is the entry file (`src/app.ts`) in the built test.
+- **R4 and G19 are scoped by NEAREST `package.json`**, so a nested private package is not made
+  public by an outer public one. R7 and exports patterns root the manifest's whole subtree.
+  Python `pyproject.toml` entries resolve through `resolver::resolve_python_module` (the import
+  graph's suffix match, ambiguity dropped).
+- **Extra test-file conventions (G1)**: `test_*.py`, `*.e2e.*`, `*.e2e-spec.*`, `__snapshots__/`
+  and `tests.py` count as tests. Without them an unimported `test_x.py` is reported.
+- **Roll-up** takes the OUTERMOST fully dead folder (shallowest first), never the repository
+  root, and requires every SOURCE file under the folder (tests and exempt files included) to be a
+  dead candidate, so "every source file under it is unreachable" is literally true.
+- **Computed loads (G9)**: the directory a load can reach is its literal prefix cut at the last
+  `/`. A prefix that is not relative (`@/plugins/`, `plugin-`), a missing prefix, and every Python
+  load root the whole nearest-manifest package; a prefix naming a folder the scan lacks roots
+  nothing. `require.context(dir)` and `include_dir!(dir)` get a trailing `/`. G10 reads a literal
+  as written from the caller's folder, the nearest manifest folder and the repository root, and
+  never roots a folder from a `.`/`./` cut.
+- **Rust**: `src/bin/*.rs` and `src/bin/*/main.rs` are crate roots (the `bin` prune fix makes them
+  visible), as is `[package] build`. The spec both skips a crate with `[[bin]]` and lists
+  `[[bin]]` `path =` as roots; the skip wins (its twin test), so `[lib]`, `[[test]]`, `[[example]]`
+  and `[[bench]]` paths are the Cargo roots read. An inline `mod a { }` carrying `#[path]` is not
+  modelled (rare); the mention guard backstops. A file declared only by an uncompiled file is dead
+  too, with a message naming the declarer.
+- **Scan feeds**: `bin` is pruned only as .NET build output (`bin/Debug`, `bin/Release`) in both
+  `NOISE_DIRS` and `PRUNED_DIRS`; this also fixed the secrets floor not reading `bin/` scripts.
+  `reachable_from` is left unchanged (a new `reachable_from_all` sits beside it). A scan whose
+  REFERENCE list hit its own cap is treated like a truncated one.
+- **Layer 2: decided, not armed (orchestrator, 2026-10-21).** `ArchChecker::runs_at_write_time`
+  (default `true`) is `false` for the dead-code checker, and `NativeArchCheckRunner` skips such
+  checkers, so the write-time gate never reports ARCH-DEAD-CODE-1. A story may legitimately end
+  with scaffolding that nothing imports yet, and the bounce would teach agents to paste
+  `keep-file:` markers to make the rule go away. The scan and the CI binary still run it.
+- **Review fixes (2026-10-21).** Tool folders `migrations`, `seeders`, `seeds` and `deploy` are
+  never candidates at any depth; Rails importmap `pin_all_from` and an Ember `app/` folder are
+  loaded by convention; `.mjs/.cjs/.mts/.cts` are audited code and generated code
+  (`.gen.*`, `.generated.*`, `generated/`, `__generated__/`) is handed to the checker as reference
+  text instead of dropped, since codegen is often the only importer; a folder holding a non-source
+  file that live code still names is never rolled up; `instrumentation-client.*` and
+  `mdx-components.*` are config-shaped; `spec/`, `__fixtures__/` and `*_spec` are test paths;
+  ERB and other-language sources are in the interest globs; `bin/x64/Debug` and
+  `bin/Any CPU/Release` are pruned as .NET output; liveness is one linear worklist; a main-guard
+  window no longer splits a multibyte character; a rule withheld on a truncated scan carries
+  its own ledger note ("the scan stopped at its file limit"), not the config-gated one.
+- **Glob strings with a literal part (added 2026-10-21).** A quoted glob whose basename has a
+  literal beyond the extension list (`'src/**/*.entity.ts'`, `'**/*.module.ts'`,
+  `'**/handlers/*.ts'`) roots every file matching the whole pattern, resolved from the repository
+  root and the nearest manifest folder; `tsconfig*.json`/`jsconfig*.json` are not read. Pure
+  extension lists (Tailwind `content`, `include`) still root nothing.
+- **Coverage note (recorded, not changed).** R7 roots a whole package when a manifest entry
+  (`main`, `bin`, `exports`, `types`) names a file the scan cannot see, which includes any
+  `main: "dist/index.js"` whose output is not committed. That makes the rule silent on many
+  `npm init` style repositories. This is the safe direction (false negative) and is accepted for
+  v1; a later version could resolve a missing `dist/` entry to its `src/` source.
 
 ## ARCH-SHARED-CONSTANT-1: the algorithm and its traps
 

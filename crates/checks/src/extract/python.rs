@@ -21,8 +21,8 @@ use tree_sitter::{Node, Tree};
 use super::ancestry::{walk_with_ancestors, Home, Pos};
 
 use super::{
-    canonical_number, FunctionSpan, Import, ImportKind, Literal, LiteralCtx, LiteralKind,
-    MethodCall, ModuleConst,
+    canonical_number, ComputedLoad, FunctionSpan, Import, ImportKind, Literal, LiteralCtx,
+    LiteralKind, MethodCall, ModuleConst,
 };
 
 fn parse(source: &str) -> Option<Tree> {
@@ -226,6 +226,82 @@ fn collect_import_module_call(node: Node, source: &str, out: &mut Vec<Import>) {
         line: start_line(node),
         type_only: false,
     });
+}
+
+// ─── computed loads ──────────────────────────────────────────────────────────────────────
+
+/// Every load the import graph cannot follow: `importlib.import_module(<non-string>)`,
+/// `import_module(<non-string>)`, `__import__(<non-string>)`, and the discovery helpers
+/// `pkgutil.iter_modules(..)`, `pkgutil.walk_packages(..)`,
+/// `importlib.util.spec_from_file_location(..)` and `entry_points(..)`. A Python load names a
+/// dotted module, not a path, so `prefix` is always `None`: the load could reach any module of
+/// its package. See [`ComputedLoad`].
+pub fn computed_loads(source: &str) -> Vec<ComputedLoad> {
+    let Some(tree) = parse(source) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    walk_computed_loads(tree.root_node(), source, &mut out);
+    out
+}
+
+/// Callee names whose call is a computed load only when the module argument is not a plain
+/// string literal.
+const SPECIFIER_LOADERS: &[&str] = &["import_module", "__import__"];
+/// Callee names that discover modules or entry points at runtime, whatever their arguments.
+const DISCOVERY_LOADERS: &[&str] = &[
+    "iter_modules",
+    "walk_packages",
+    "spec_from_file_location",
+    "entry_points",
+];
+
+fn walk_computed_loads(node: Node, source: &str, out: &mut Vec<ComputedLoad>) {
+    if node.kind() == "call" {
+        if let Some(name) = callee_name(node, source) {
+            let discovery = DISCOVERY_LOADERS.contains(&name);
+            let computed_specifier = SPECIFIER_LOADERS.contains(&name)
+                && !node
+                    .child_by_field_name("arguments")
+                    .and_then(|args| args.named_child(0))
+                    .is_some_and(|first| is_plain_string(first));
+            if discovery || computed_specifier {
+                out.push(ComputedLoad {
+                    prefix: None,
+                    line: start_line(node),
+                });
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_computed_loads(child, source, out);
+    }
+}
+
+/// The last name of a call's callee: `import_module` for both `import_module(..)` and
+/// `importlib.import_module(..)`.
+fn callee_name<'s>(call: Node, source: &'s str) -> Option<&'s str> {
+    let func = call.child_by_field_name("function")?;
+    match func.kind() {
+        "identifier" => Some(text(func, source)),
+        "attribute" => func
+            .child_by_field_name("attribute")
+            .map(|a| text(a, source)),
+        _ => None,
+    }
+}
+
+/// A string literal with no `{..}` interpolation (an f-string with substitutions is computed).
+fn is_plain_string(node: Node) -> bool {
+    if node.kind() != "string" {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let interpolated = node
+        .children(&mut cursor)
+        .any(|c| c.kind() == "interpolation");
+    !interpolated
 }
 
 // ─── functions ───────────────────────────────────────────────────────────────────────────
@@ -1491,5 +1567,48 @@ mod tests {
         // Other keyword arguments and dicts are not HTML attributes.
         assert_eq!(ctx("w = make(opts={'k': 'a-b'})\n", "a-b").jsx_attr, None);
         assert_eq!(ctx("w = {'k': 'a-b'}\n", "a-b").jsx_attr, None);
+    }
+
+    // ── computed loads ────────────────────────────────────────────────────────
+
+    fn load_lines(src: &str) -> Vec<usize> {
+        computed_loads(src).iter().map(|l| l.line).collect()
+    }
+
+    #[test]
+    fn import_module_of_a_non_literal_is_a_load() {
+        assert_eq!(load_lines("importlib.import_module(name)\n"), [1]);
+        assert_eq!(load_lines("\nimport_module(name)\n"), [2]);
+        assert_eq!(load_lines("__import__(name)\n"), [1]);
+        assert_eq!(load_lines("importlib.import_module(f\"app.{x}\")\n"), [1]);
+        assert!(computed_loads("importlib.import_module(name)\n")
+            .iter()
+            .all(|l| l.prefix.is_none()));
+    }
+
+    #[test]
+    fn import_module_of_a_literal_is_an_edge_not_a_computed_load() {
+        assert!(load_lines("importlib.import_module('x.y')\n__import__('os')\n").is_empty());
+    }
+
+    #[test]
+    fn discovery_helpers_are_loads_whatever_their_arguments() {
+        let src = "pkgutil.iter_modules(__path__)\n\
+                   pkgutil.walk_packages(path)\n\
+                   importlib.util.spec_from_file_location(n, p)\n\
+                   entry_points(group='x')\n\
+                   metadata.entry_points()\n";
+        assert_eq!(load_lines(src), [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn unrelated_python_calls_are_not_loads() {
+        assert!(load_lines("print(name)\nobj.iter_modules_extra(x)\nimport os\n").is_empty());
+    }
+
+    #[test]
+    fn python_computed_loads_never_panic() {
+        assert!(computed_loads("").is_empty());
+        let _ = computed_loads("importlib.import_module(\n\u{0}\u{FFFD}");
     }
 }

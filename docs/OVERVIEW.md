@@ -31,9 +31,10 @@ CONTRACTS / CORE
 THE CORPUS + ITS ENFORCEMENT
   rules         the ~417-rule corpus loader + schema + corpus gates + the CORPUS_FRESHNESS watermark
                 + per-rule `version` and the content-hash lock (CORPUS_LOCK.toml)
-  checks        the deterministic CHECKERS: arch/import/layering/RLS/weak-rand/… + the AST
-                extractors (extract::ecma|python|rust_syn, resolver, and the literal index
-                behind the cross-file ARCH-SHARED-CONSTANT-1 check) + integration gate
+  checks        the deterministic CHECKERS: arch/import/layering/RLS/weak-rand/one-import-path/
+                dead-code/… + the AST extractors (extract::ecma|python|rust_syn incl. `mod_decls`
+                and `computed_loads`, resolver, shared `paths`, and the literal index behind the
+                cross-file ARCH-SHARED-CONSTANT-1 check) + integration gate
   linter-registry  stack→linter mapping
   camerata-check   thin check CLI
 
@@ -61,6 +62,8 @@ THE UI + CLI
 repo ─▶ ONBOARD/DETECT        stack detection (languages, frameworks) → which corpus domains apply
      ─▶ SCAN TIERS (parallel, each disclosed if it fails)
           • deterministic floor   content-rule + architectural checkers (checks/)      no model
+                                  (the architectural tier also gets a separate reference-text
+                                  list: HTML, components, docs; never the AI digest or the floor)
           • external-tool preview  eslint / ruff / semgrep / clippy (SARIF/JSON)        no model
           • dependency audit       osv-scanner over lockfiles → CVEs (+ fixed version)  no model
           • semantic AI audit      the LLM pass over the repo, grounded in the corpus    model

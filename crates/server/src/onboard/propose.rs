@@ -1458,6 +1458,35 @@ mod tests {
         }
     }
 
+    /// `ARCH-DEAD-CODE-1` lives in the `universal` domain, which is pipeline-selected and bound
+    /// to every repo, so no stack wiring is needed; this proves it for the three languages the
+    /// detector reads rather than assuming it. A `policy` rule is still auto-recommended.
+    #[tokio::test]
+    async fn arch_dead_code_is_proposed_for_typescript_python_and_rust_stacks() {
+        const ID: &str = "ARCH-DEAD-CODE-1";
+        for (repo, path, content) in [
+            ("acme/ts-app", "src/app.ts", "export const a = 1;"),
+            ("acme/py-app", "app/main.py", "print('hi')"),
+            ("acme/rs-app", "src/lib.rs", "pub fn f() {}"),
+        ] {
+            let repo_files = files(&[(path, content)]);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            let rule = proposed
+                .iter()
+                .find(|r| r.id == ID)
+                .unwrap_or_else(|| panic!("{ID} must be proposed for {repo}"));
+            assert_eq!(rule.domain, "universal");
+            assert!(rule.recommended, "{repo}: suggested, not merely available");
+            assert!(
+                rule.is_auto_recommended,
+                "{repo}: a policy rule is still auto-recommended (pre-checked)"
+            );
+            assert_eq!(rule.repos, vec![repo.to_string()]);
+        }
+    }
+
     /// req_a6: a plain Rust + Axum + Tokio + sqlx service must arm `rust:axum`, `rust:tokio`
     /// and `rust:sqlx` — the three Rust families the audit named, 15 rules between them.
     #[test]

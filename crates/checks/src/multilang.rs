@@ -86,8 +86,30 @@ pub(crate) const PRUNED_DIRS: &[&str] = &[
     ".venv",
     ".gradle",
     "obj",
-    "bin",
 ];
+
+/// The build-configuration folders .NET writes under `bin/`. `bin` itself is NOT in
+/// [`PRUNED_DIRS`]: it is also where Rust keeps `src/bin/*.rs` and Node keeps `bin/cli.js`, which
+/// are source. A directory named one of these anywhere below a `bin` directory (`bin/Debug`,
+/// `bin/x64/Debug`, `bin/Any CPU/Release`) is build output.
+const DOTNET_BUILD_CONFIGS: &[&str] = &["Debug", "Release"];
+
+/// Whether a walk should skip the directory `name` found inside `parent`: a [`PRUNED_DIRS`]
+/// name, or .NET build output (`bin/Debug`, `bin/Release`). `pub(crate)` for the same reason
+/// as [`PRUNED_DIRS`]: [`crate::arch_check_runner`]'s walk must prune exactly what the
+/// language detector prunes.
+pub(crate) fn is_pruned_dir(parent: &Path, name: &str) -> bool {
+    PRUNED_DIRS.contains(&name)
+        || (DOTNET_BUILD_CONFIGS.contains(&name)
+            && parent.components().any(|c| c.as_os_str() == "bin"))
+}
+
+/// [`is_pruned_dir`] for a walk rooted at `root`: `parent` is judged RELATIVE to `root`, so a
+/// repository that happens to live under a directory named `bin` (`/srv/bin/myrepo`) does not
+/// have its own `Debug` and `Release` folders pruned.
+pub(crate) fn is_pruned_dir_in(root: &Path, parent: &Path, name: &str) -> bool {
+    is_pruned_dir(parent.strip_prefix(root).unwrap_or(parent), name)
+}
 
 // ─── coarse per-language layer-2 rule ids ────────────────────────────────────
 
@@ -1283,7 +1305,7 @@ fn language_for_manifest(file_name: &str) -> Option<WorktreeLanguage> {
 /// stable sequence regardless of filesystem iteration order.
 pub fn detect_languages(worktree: &Path) -> Vec<(WorktreeLanguage, PathBuf)> {
     let mut found: Vec<(WorktreeLanguage, PathBuf)> = Vec::new();
-    walk_for_manifests(worktree, &mut found);
+    walk_for_manifests(worktree, worktree, &mut found);
 
     // Dedup on (language, dir). Sort first so dedup collapses adjacents and the
     // output order is stable.
@@ -1318,7 +1340,7 @@ fn lang_ord(lang: WorktreeLanguage) -> u8 {
 /// of the worktree. (The fail-closed honesty stance lives in the runners: if a
 /// detected project cannot be VERIFIED, its runner returns `Err`. Detection
 /// itself is best-effort breadth.)
-fn walk_for_manifests(dir: &Path, out: &mut Vec<(WorktreeLanguage, PathBuf)>) {
+fn walk_for_manifests(root: &Path, dir: &Path, out: &mut Vec<(WorktreeLanguage, PathBuf)>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -1336,7 +1358,7 @@ fn walk_for_manifests(dir: &Path, out: &mut Vec<(WorktreeLanguage, PathBuf)>) {
         if file_type.is_dir() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if PRUNED_DIRS.contains(&name.as_ref()) {
+            if is_pruned_dir_in(root, dir, name.as_ref()) {
                 continue;
             }
             subdirs.push(path);
@@ -1349,7 +1371,7 @@ fn walk_for_manifests(dir: &Path, out: &mut Vec<(WorktreeLanguage, PathBuf)>) {
     }
 
     for sub in subdirs {
-        walk_for_manifests(&sub, out);
+        walk_for_manifests(root, &sub, out);
     }
 }
 
@@ -2653,6 +2675,49 @@ mod tests {
     }
 
     #[test]
+    fn is_pruned_dir_prunes_dotnet_build_output_but_not_a_source_bin() {
+        let p = Path::new;
+        assert!(is_pruned_dir(p("proj/bin"), "Debug"));
+        assert!(
+            is_pruned_dir(p("proj/bin/x64"), "Debug"),
+            "platform folder in between"
+        );
+        assert!(is_pruned_dir(p("proj/bin/Any CPU"), "Release"));
+        assert!(!is_pruned_dir(p("proj/binary"), "Debug"));
+        assert!(is_pruned_dir(p("bin"), "Release"));
+        assert!(is_pruned_dir(p("x"), "node_modules"));
+        assert!(is_pruned_dir(p("x"), "obj"));
+        assert!(!is_pruned_dir(p("x"), "bin"), "a bare bin is source");
+        assert!(!is_pruned_dir(p("src"), "bin"));
+        assert!(
+            !is_pruned_dir(p("proj"), "Debug"),
+            "Debug only counts under bin"
+        );
+        assert!(
+            !is_pruned_dir(p("proj/bin"), "debug"),
+            "the .NET names are exact"
+        );
+        assert!(!is_pruned_dir(p("proj/bin"), "Debugger"));
+    }
+
+    #[test]
+    fn detect_languages_prunes_dotnet_bin_output_but_walks_a_source_bin() {
+        let dir = tmp();
+        // A manifest in a hand-written `bin/` folder is a real project...
+        fs::create_dir_all(dir.join("tools/bin")).unwrap();
+        fs::write(dir.join("tools/bin/package.json"), "{}").unwrap();
+        // ...and one inside .NET compiler output is not.
+        fs::create_dir_all(dir.join("svc/bin/Debug/net8.0")).unwrap();
+        fs::write(dir.join("svc/bin/Debug/net8.0/package.json"), "{}").unwrap();
+        fs::create_dir_all(dir.join("svc/bin/Release")).unwrap();
+        fs::write(dir.join("svc/bin/Release/package.json"), "{}").unwrap();
+
+        let detected = detect_languages(&dir);
+        let dirs: Vec<_> = detected.iter().map(|(_, d)| d.clone()).collect();
+        assert_eq!(dirs, vec![dir.join("tools/bin")], "{detected:?}");
+    }
+
+    #[test]
     fn detect_languages_single_language_repo_one_entry() {
         let dir = tmp();
         fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
@@ -3049,5 +3114,35 @@ mod tests {
             violations.is_empty(),
             "no-heartbeat polyglot should run clean: {violations:?}"
         );
+    }
+
+    #[test]
+    fn detect_languages_judges_bin_ancestry_relative_to_the_walk_root() {
+        let outer = tmp();
+        let root = outer.join("bin").join("myrepo");
+        fs::create_dir_all(root.join("Debug")).unwrap();
+        fs::write(root.join("Debug/package.json"), "{}").unwrap();
+        fs::create_dir_all(root.join("bin/Debug")).unwrap();
+        fs::write(root.join("bin/Debug/package.json"), "{}").unwrap();
+        let dirs: Vec<_> = detect_languages(&root)
+            .into_iter()
+            .map(|(_, d)| d)
+            .collect();
+        assert_eq!(dirs, vec![root.join("Debug")]);
+    }
+
+    #[test]
+    fn is_pruned_dir_in_strips_the_walk_root_before_looking_for_bin() {
+        let root = Path::new("/tmp/x/bin/myrepo");
+        assert!(!is_pruned_dir_in(root, root, "Debug"));
+        assert!(!is_pruned_dir_in(root, &root.join("src"), "Release"));
+        assert!(is_pruned_dir_in(root, &root.join("svc/bin"), "Debug"));
+        assert!(is_pruned_dir_in(root, root, "node_modules"));
+        // A parent outside the root is judged as given.
+        assert!(is_pruned_dir_in(
+            root,
+            Path::new("elsewhere/bin"),
+            "Release"
+        ));
     }
 }

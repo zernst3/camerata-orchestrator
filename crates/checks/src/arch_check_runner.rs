@@ -71,6 +71,7 @@ impl CheckRunner for NativeArchCheckRunner {
         // architectural rule's checker never even sees its interest files.
         let armed_checkers: Vec<_> = checkers
             .iter()
+            .filter(|c| c.runs_at_write_time())
             .filter(|c| c.rule_ids().iter().any(|id| armed.contains(id)))
             .collect();
 
@@ -176,7 +177,7 @@ fn walk_collect(root: &Path, dir: &Path, globs: &[&str], out: &mut Vec<(String, 
         };
         if file_type.is_dir() {
             let name = entry.file_name();
-            if crate::multilang::PRUNED_DIRS.contains(&name.to_string_lossy().as_ref()) {
+            if crate::multilang::is_pruned_dir_in(root, dir, name.to_string_lossy().as_ref()) {
                 continue;
             }
             walk_collect(root, &path, globs, out);
@@ -427,5 +428,125 @@ mod tests {
             "the stray root-level notes.sql must never be treated as a migration: {:?}",
             outcome
         );
+    }
+
+    #[test]
+    fn collect_interest_files_reads_a_source_bin_and_skips_dotnet_build_output() {
+        let dir = tmpdir();
+        for (rel, body) in [
+            ("src/bin/tool.rs", "fn main() {}\n"),
+            ("bin/cli.js", "console.log(1);\n"),
+            ("bin/Debug/net8.0/gen.js", "built\n"),
+            ("bin/x64/Debug/gen.js", "built\n"),
+            ("bin/Any CPU/Release/gen.js", "built\n"),
+            ("bin/Release/gen.js", "built\n"),
+            ("node_modules/x/y.js", "vendored\n"),
+        ] {
+            let path = dir.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+        let mut got: Vec<String> = collect_interest_files(dir.path(), &["**/*.rs", "**/*.js"])
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        got.sort();
+        assert_eq!(got, ["bin/cli.js", "src/bin/tool.rs"]);
+    }
+
+    // ── write-time opt-out: ARCH-DEAD-CODE-1 is a scan and CI rule only ───────
+
+    fn write_dead_code_tree(dir: &Path) {
+        for (rel, body) in [
+            ("package.json", r#"{"private":true}"#),
+            ("src/app.ts", "export {};\n"),
+            ("src/scaffold_unwired.ts", "export const s = 1;\n"),
+        ] {
+            let path = dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn the_write_time_runner_never_reports_the_dead_code_rule_but_the_scan_tier_does() {
+        let dir = tmpdir();
+        write_dead_code_tree(dir.path());
+        let role = role_armed_with(&["ARCH-DEAD-CODE-1"]);
+
+        // Layer 2: a story may legitimately end with scaffolding nothing imports yet.
+        let outcome = NativeArchCheckRunner::new()
+            .check(&role, dir.path())
+            .await
+            .expect("must not err");
+        assert!(outcome.violated.is_empty(), "{outcome:?}");
+        assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
+
+        // The same tree through the registry the scan and the CI binary use: still reported.
+        let checker = all_checkers()
+            .into_iter()
+            .find(|c| c.rule_ids().contains(&"ARCH-DEAD-CODE-1"))
+            .expect("registered");
+        assert!(!checker.runs_at_write_time());
+        let files = collect_interest_files(dir.path(), checker.interest_globs());
+        let view = RepoView {
+            spec: "t/r",
+            files: &files,
+        };
+        let vs = checker.check(&view);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].file, "src/scaffold_unwired.ts");
+    }
+
+    #[tokio::test]
+    async fn a_write_time_checker_armed_beside_the_opted_out_one_still_runs() {
+        let dir = tmpdir();
+        write_dead_code_tree(dir.path());
+        write_migration(
+            dir.path(),
+            "20240101000000_init.sql",
+            "create table public.profiles (id uuid primary key);\n",
+        );
+        let role = role_armed_with(&["ARCH-DEAD-CODE-1", RLS_ENABLED]);
+        let outcome = NativeArchCheckRunner::new()
+            .check(&role, dir.path())
+            .await
+            .expect("must not err");
+        assert_eq!(outcome.violated, vec![RuleId(RLS_ENABLED.to_string())]);
+    }
+
+    #[test]
+    fn every_other_registered_checker_still_runs_at_write_time() {
+        for checker in all_checkers() {
+            let is_dead_code = checker.rule_ids().contains(&"ARCH-DEAD-CODE-1");
+            assert_eq!(
+                checker.runs_at_write_time(),
+                !is_dead_code,
+                "{:?}",
+                checker.rule_ids()
+            );
+        }
+    }
+
+    #[test]
+    fn a_repo_living_under_a_directory_named_bin_keeps_its_debug_and_release_folders() {
+        // Pruning judges the path RELATIVE to the walk root, not the absolute path.
+        let outer = tmpdir();
+        let root = outer.path().join("bin").join("myrepo");
+        for (rel, body) in [
+            ("src/Debug/real_module.js", "console.log(1);\n"),
+            ("Release/real_script.js", "console.log(1);\n"),
+            ("bin/Debug/built.js", "built\n"),
+        ] {
+            let path = root.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+        let mut got: Vec<String> = collect_interest_files(&root, &["**/*.js"])
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        got.sort();
+        assert_eq!(got, ["Release/real_script.js", "src/Debug/real_module.js"]);
     }
 }

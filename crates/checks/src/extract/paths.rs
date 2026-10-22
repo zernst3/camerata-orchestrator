@@ -28,6 +28,8 @@ pub fn is_test_path(path: &str) -> bool {
                 | "e2e"
                 | "cypress"
                 | "stories"
+                | "spec"
+                | "__fixtures__"
         )
     }) {
         return true;
@@ -39,7 +41,7 @@ pub fn is_test_path(path: &str) -> bool {
         stem == "tests"
             || stem == "test"
             || stem.starts_with("test_")
-            || [".test", ".spec", "_test", ".cy", ".stories"]
+            || [".test", ".spec", "_test", "_spec", ".cy", ".stories"]
                 .iter()
                 .any(|suffix| stem.ends_with(suffix))
     })
@@ -82,6 +84,23 @@ mod tests {
     }
 
     #[test]
+    fn jasmine_rspec_and_fixture_conventions_are_test_paths() {
+        for path in [
+            "spec/models/invoice_spec.js",
+            "spec/support/jasmine.json",
+            "spec/helpers/customMatchers.js",
+            "packages/x/spec/a.js",
+            "src/__fixtures__/data.ts",
+            "app/models/user_spec.rb",
+            "src/invoice_spec.js",
+            "tests/a.ts",
+            "src/a.test.ts",
+        ] {
+            assert!(is_test_path(path), "{path}");
+        }
+    }
+
+    #[test]
     fn names_that_only_contain_test_are_not_test_paths() {
         for p in [
             "app/testing.py",
@@ -94,6 +113,20 @@ mod tests {
         ] {
             // `x_test_data` and the others end in neither `_test` nor start with `test_`.
             assert!(!is_test_path(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn near_misses_are_not_test_paths() {
+        for path in [
+            "src/specs_helper.ts",
+            "src/inspector.ts",
+            "src/spectrum/colors.ts",
+            "src/fixtures_loader.ts",
+            "src/aspec.ts",
+            "src/lib/invoice.js",
+        ] {
+            assert!(!is_test_path(path), "{path}");
         }
     }
 }

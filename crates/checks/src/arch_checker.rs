@@ -107,6 +107,16 @@ pub trait ArchChecker: Send + Sync {
         false
     }
 
+    /// Whether the Layer-2 write-time gate ([`crate::arch_check_runner::NativeArchCheckRunner`])
+    /// may run this checker against an agent's worktree. The default is `true`. A checker that
+    /// returns `false` is a SCAN and CI rule only: a violation there would bounce work that is
+    /// legitimately unfinished or that ends in scaffolding, and a bounce teaches an agent to
+    /// silence the rule rather than satisfy it. The scan ([`all_checkers`] via the server's
+    /// architectural tier) and the standalone CI binary ignore this flag.
+    fn runs_at_write_time(&self) -> bool {
+        true
+    }
+
     /// D3 (config-aware degradation, `docs/design/2026-07-27_ast-extractor-layer.md` §0):
     /// whether THIS checker needs `.camerata/architecture.toml` config it does NOT find in
     /// `repo` to answer its rule ids deterministically. Returns `true` only for a
@@ -243,6 +253,7 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
         Box::new(crate::query_grammar_injection_checker::QueryGrammarInjectionChecker),
         Box::new(crate::one_import_path_checker::OneImportPathChecker),
         Box::new(crate::shared_constant_checker::SharedConstantChecker),
+        Box::new(crate::dead_code_checker::DeadCodeChecker),
     ]
 }
 
@@ -425,6 +436,7 @@ mod tests {
             "SEC-NO-QUERY-GRAMMAR-INJECTION-1",
             "ARCH-ONE-IMPORT-PATH-1",
             "ARCH-SHARED-CONSTANT-1",
+            "ARCH-DEAD-CODE-1",
         ] {
             assert!(
                 ids.contains(expected),
@@ -609,8 +621,12 @@ repositories = []
 handles = ["db"]
 allowed_in = ["repositories"]
 "#;
-        let files: Vec<(String, String)> =
-            vec![(".camerata/architecture.toml".to_string(), cfg.to_string())];
+        // A source file too: `DeadCodeChecker` answers only for a repo that has source in a
+        // language it reads (`config_unsatisfied_for`), so the config alone is not "satisfied".
+        let files: Vec<(String, String)> = vec![
+            (".camerata/architecture.toml".to_string(), cfg.to_string()),
+            ("src/app.ts".to_string(), String::new()),
+        ];
         let repo = RepoView {
             spec: "test/repo",
             files: &files,
@@ -734,5 +750,40 @@ allowed_in = ["repositories"]
                  every config-gated checker: {ledger_ids:?}"
             );
         }
+    }
+
+    // ── ARCH-DEAD-CODE-1: per-repo applicability ─────────────────────────────
+
+    #[test]
+    fn dead_code_rule_is_answered_deterministically_only_for_a_repo_with_source_in_a_language_it_reads(
+    ) {
+        let id = "ARCH-DEAD-CODE-1";
+        let files_of = |paths: &[&str]| -> Vec<(String, String)> {
+            paths
+                .iter()
+                .map(|p| (p.to_string(), String::new()))
+                .collect()
+        };
+        for source in ["src/a.ts", "app/a.py", "src/lib.rs", "web/a.jsx"] {
+            let f = files_of(&[source]);
+            let repo = RepoView {
+                spec: "t/r",
+                files: &f,
+            };
+            assert!(
+                checker_rule_ids_for_repo(&repo).contains(id),
+                "{source}: the id is subtracted from the advisory prompt"
+            );
+        }
+        // A Java service with YAML config matches the checker's context globs, but a clean
+        // result there would read as "no dead code". It stays advisory instead.
+        let java = files_of(&["src/Main.java", "config/app.yml"]);
+        let repo = RepoView {
+            spec: "t/r",
+            files: &java,
+        };
+        assert!(!checker_rule_ids_for_repo(&repo).contains(id));
+        assert!(!ledger_detector_rule_ids_for_repo(&repo).contains(id));
+        assert!(any_registered_checker_answers(id));
     }
 }

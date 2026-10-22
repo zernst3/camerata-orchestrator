@@ -1084,6 +1084,21 @@ pub(crate) fn semantic_rule_ids_for_repo(
         .collect()
 }
 
+/// Queue the honest disclosure for a rule that has a registered checker but got no credited
+/// deterministic verdict for this repo: "the scan was incomplete" when the checker was withheld
+/// for that reason, "config-gated" otherwise (the architecture config it needs is absent).
+fn note_unanswered_checker_rule(
+    ledger: &mut crate::scan_ledger::ScanLedger,
+    rule_id: &str,
+    scan_incomplete: bool,
+) {
+    if scan_incomplete && architectural::is_withheld_on_incomplete_scan(rule_id) {
+        ledger.note_incomplete_scan_rule(rule_id);
+    } else {
+        ledger.note_config_gated_rule(rule_id);
+    }
+}
+
 // ── Orchestration functions ───────────────────────────────────────────────────────
 pub async fn suppression_registry(
     sources: &[(String, std::path::PathBuf)],
@@ -1152,6 +1167,7 @@ pub async fn scan_repos(
                     files,
                     truncated,
                     excluded_noise,
+                    ..
                 } = extracted;
                 files_total += files.len();
                 files_excluded += excluded_noise;
@@ -1470,7 +1486,9 @@ pub async fn audit_repos(
         {
             Ok(ExtractedRepo {
                 files,
+                reference_files,
                 truncated,
+                reference_truncated,
                 excluded_noise,
             }) => {
                 files_total += files.len();
@@ -1518,8 +1536,15 @@ pub async fn audit_repos(
                     spec,
                     files: &files,
                 };
-                let ledger_checker_rule_ids =
-                    camerata_checks::arch_checker::ledger_detector_rule_ids_for_repo(&repo_view);
+                // A scan that stopped at a file limit (code or reference text) cannot prove a
+                // file is unreferenced, so rules that reason from absence are withheld: not run
+                // below, and not credited here, which sends them to the config-gated
+                // disclosure instead of "verified clean".
+                let scan_incomplete = truncated || reference_truncated;
+                let ledger_checker_rule_ids = architectural::withhold_on_incomplete_scan(
+                    &camerata_checks::arch_checker::ledger_detector_rule_ids_for_repo(&repo_view),
+                    scan_incomplete,
+                );
                 let semantic: Vec<(String, String)> = semantic_rule_ids_for_repo(selected, spec);
                 // Multi-option semantic rules in THIS repo's `semantic` set (audit-integrated
                 // alternative recommendation — see `build_rule_alternatives`'s doc comment).
@@ -1605,7 +1630,16 @@ pub async fn audit_repos(
                     if let Some((jstore, jid)) = job {
                         jstore.det_tool_running(jid, "architectural");
                     }
-                    let arch = audit_architectural(spec, &files, &repo_selected_ids);
+                    // Reference text (HTML, components, docs) is handed to the architectural
+                    // tier ONLY, and only when an armed rule needs it: the AI digest and the
+                    // secrets floor above and below keep reading `files` alone.
+                    let arch_armed = architectural::withhold_on_incomplete_scan(
+                        &repo_selected_ids,
+                        scan_incomplete,
+                    );
+                    let arch_input =
+                        architectural::architectural_input(&files, &reference_files, &arch_armed);
+                    let arch = audit_architectural(spec, &arch_input, &arch_armed);
                     if let Some((jstore, jid)) = job {
                         jstore.det_tool_done(jid, "architectural", arch.len());
                         jstore.add_findings(jid, arch.clone());
@@ -1698,7 +1732,11 @@ pub async fn audit_repos(
                                 if camerata_checks::arch_checker::any_registered_checker_answers(
                                     rid,
                                 ) {
-                                    pipeline_ledger.note_config_gated_rule(*rid);
+                                    note_unanswered_checker_rule(
+                                        &mut pipeline_ledger,
+                                        rid,
+                                        scan_incomplete,
+                                    );
                                 }
                             }
                         }
@@ -1754,7 +1792,11 @@ pub async fn audit_repos(
                             // branch above — this id has a real, registered, config-gated
                             // checker that still would not have answered it even if the toggle
                             // were on, since the config it needs is absent for this repo.
-                            pipeline_ledger.note_config_gated_rule(*rid);
+                            note_unanswered_checker_rule(
+                                &mut pipeline_ledger,
+                                rid,
+                                scan_incomplete,
+                            );
                         }
                     }
                 }

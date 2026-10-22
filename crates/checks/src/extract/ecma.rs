@@ -24,8 +24,8 @@ use tree_sitter::{Node, Tree};
 use super::ancestry::{walk_with_ancestors, Home, Pos};
 
 use super::{
-    canonical_number, ExportSurface, FunctionSpan, Import, ImportKind, Literal, LiteralCtx,
-    LiteralKind, MethodCall, ModuleConst, NamedReExport, StarReExport,
+    canonical_number, ComputedLoad, ExportSurface, FunctionSpan, Import, ImportKind, Literal,
+    LiteralCtx, LiteralKind, MethodCall, ModuleConst, NamedReExport, StarReExport,
 };
 
 /// Which of the three v1 ECMAScript-family grammars to parse `source` with.
@@ -322,6 +322,139 @@ fn collect_dynamic_import_or_require(node: Node, source: &str, out: &mut Vec<Imp
         line: start_line(node),
         type_only: false,
     });
+}
+
+// ─── computed loads ──────────────────────────────────────────────────────────────────────
+
+/// Every load the import graph cannot follow: `import(<non-string>)`, `require(<non-string>)`,
+/// `require.resolve(<non-string>)`, `require.context('<dir>', ..)`, `import.meta.glob(..)` and
+/// `import.meta.globEager(..)`. See [`ComputedLoad`]. A string-literal `import('./x')` /
+/// `require('./x')` is an ordinary edge ([`imports`]) and is not reported here.
+pub fn computed_loads(dialect: EcmaDialect, source: &str) -> Vec<ComputedLoad> {
+    let Some(tree) = parse(dialect, source) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    walk_computed_loads(tree.root_node(), source, &mut out);
+    out
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoadCall {
+    /// `import(x)`, `require(x)`, `require.resolve(x)`: a module specifier.
+    Specifier,
+    /// `require.context(dir, ..)`: the first argument is a directory.
+    Directory,
+    /// `import.meta.glob(pattern | [patterns])`.
+    Glob,
+}
+
+fn load_call_kind(func: Node, source: &str) -> Option<LoadCall> {
+    if func.kind() == "import" {
+        return Some(LoadCall::Specifier);
+    }
+    let compact: String = text(func, source)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    match compact.as_str() {
+        "require" | "require.resolve" => Some(LoadCall::Specifier),
+        "require.context" => Some(LoadCall::Directory),
+        "import.meta.glob" | "import.meta.globEager" => Some(LoadCall::Glob),
+        _ => None,
+    }
+}
+
+fn walk_computed_loads(node: Node, source: &str, out: &mut Vec<ComputedLoad>) {
+    if node.kind() == "call_expression" {
+        collect_computed_load(node, source, out);
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_computed_loads(child, source, out);
+    }
+}
+
+fn collect_computed_load(node: Node, source: &str, out: &mut Vec<ComputedLoad>) {
+    let Some(func) = node.child_by_field_name("function") else {
+        return;
+    };
+    let Some(kind) = load_call_kind(func, source) else {
+        return;
+    };
+    let Some(first) = node
+        .child_by_field_name("arguments")
+        .and_then(|args| args.named_child(0))
+    else {
+        return;
+    };
+    let line = start_line(node);
+    let mut push = |prefix: Option<String>| out.push(ComputedLoad { prefix, line });
+    match kind {
+        LoadCall::Specifier => {
+            // A plain string literal is an ordinary edge (`imports`), not a computed load.
+            if first.kind() != "string" {
+                push(leading_literal(first, source));
+            }
+        }
+        LoadCall::Directory => push(match string_literal_text(first, source) {
+            Some(dir) if dir.ends_with('/') => Some(dir.to_string()),
+            Some(dir) => Some(format!("{dir}/")),
+            None => None,
+        }),
+        LoadCall::Glob => {
+            if first.kind() == "array" {
+                let mut cursor = first.walk();
+                for element in first.named_children(&mut cursor) {
+                    match string_literal_text(element, source) {
+                        // A negated pattern removes files from the load, never adds.
+                        Some(pattern) if pattern.starts_with('!') => {}
+                        _ => push(leading_literal(element, source).map(glob_head)),
+                    }
+                }
+            } else {
+                push(leading_literal(first, source).map(glob_head));
+            }
+        }
+    }
+}
+
+/// The literal text a path expression starts with: a string's content, a template literal's
+/// first quasi (the text before its first `${`), or the leftmost operand of a `+` chain
+/// resolved the same way. `None` when the expression does not start with literal text.
+fn leading_literal(node: Node, source: &str) -> Option<String> {
+    match node.kind() {
+        "string" => string_literal_text(node, source).map(str::to_string),
+        "template_string" => {
+            let start = node.start_byte() + 1; // past the opening backtick
+            let mut end = node.end_byte().saturating_sub(1).max(start);
+            let mut cursor = node.walk();
+            if let Some(sub) = node
+                .children(&mut cursor)
+                .find(|c| c.kind() == "template_substitution")
+            {
+                end = sub.start_byte().max(start);
+            }
+            source.get(start..end).map(str::to_string)
+        }
+        "parenthesized_expression" => leading_literal(node.named_child(0)?, source),
+        "binary_expression" => {
+            let op = node.child_by_field_name("operator")?;
+            if text(op, source) != "+" {
+                return None;
+            }
+            leading_literal(node.child_by_field_name("left")?, source)
+        }
+        _ => None,
+    }
+}
+
+/// A glob pattern's literal head: the text before its first wildcard character.
+fn glob_head(pattern: String) -> String {
+    match pattern.find(['*', '{', '[', '?']) {
+        Some(i) => pattern[..i].to_string(),
+        None => pattern,
+    }
 }
 
 // ─── exports ─────────────────────────────────────────────────────────────────────────────
@@ -2765,5 +2898,122 @@ mod tests {
             broken.iter().all(|l| l.value != "orders-high"),
             "{broken:#?}"
         );
+    }
+
+    // ── computed loads ────────────────────────────────────────────────────────
+
+    fn loads(src: &str) -> Vec<(Option<String>, usize)> {
+        computed_loads(EcmaDialect::JavaScript, src)
+            .into_iter()
+            .map(|l| (l.prefix, l.line))
+            .collect()
+    }
+
+    fn some(prefix: &str, line: usize) -> (Option<String>, usize) {
+        (Some(prefix.to_string()), line)
+    }
+
+    #[test]
+    fn dynamic_import_of_a_variable_is_a_load_with_no_prefix() {
+        assert_eq!(loads("import(name);\n"), vec![(None, 1)]);
+    }
+
+    #[test]
+    fn dynamic_import_of_a_template_keeps_the_first_quasi() {
+        assert_eq!(
+            loads("const m = await import(`./locales/${lang}`);\n"),
+            vec![some("./locales/", 1)]
+        );
+    }
+
+    #[test]
+    fn require_of_a_variable_is_a_load_with_no_prefix() {
+        assert_eq!(loads("\nrequire(name);\n"), vec![(None, 2)]);
+    }
+
+    #[test]
+    fn require_of_a_concatenation_keeps_the_leftmost_literal() {
+        assert_eq!(loads("require('./a' + name);\n"), vec![some("./a", 1)]);
+        assert_eq!(
+            loads("require('./plugins/' + a + '.js');\n"),
+            vec![some("./plugins/", 1)]
+        );
+    }
+
+    #[test]
+    fn concatenation_that_starts_with_a_variable_has_no_prefix() {
+        assert_eq!(loads("require(base + '/x');\n"), vec![(None, 1)]);
+    }
+
+    #[test]
+    fn require_resolve_of_a_variable_is_a_load() {
+        assert_eq!(loads("require.resolve(name);\n"), vec![(None, 1)]);
+    }
+
+    #[test]
+    fn require_context_names_a_directory() {
+        assert_eq!(
+            loads("const r = require.context('./icons', true, /\\.svg$/);\n"),
+            vec![some("./icons/", 1)]
+        );
+        assert_eq!(
+            loads("require.context('./icons/', false);\n"),
+            vec![some("./icons/", 1)]
+        );
+    }
+
+    #[test]
+    fn import_meta_glob_keeps_the_literal_head_of_the_pattern() {
+        assert_eq!(
+            loads("const m = import.meta.glob('./plugins/*.ts');\n"),
+            vec![some("./plugins/", 1)]
+        );
+        assert_eq!(
+            loads("import.meta.globEager('./p/**/*.ts');\n"),
+            vec![some("./p/", 1)]
+        );
+        assert_eq!(
+            loads("import.meta.glob('./x/{a,b}.ts');\n"),
+            vec![some("./x/", 1)]
+        );
+    }
+
+    #[test]
+    fn import_meta_glob_array_reports_each_positive_pattern() {
+        assert_eq!(
+            loads("import.meta.glob(['./a/*.ts', '!./a/skip.ts', './b/*.ts']);\n"),
+            vec![some("./a/", 1), some("./b/", 1)]
+        );
+    }
+
+    #[test]
+    fn literal_import_and_require_are_edges_not_computed_loads() {
+        assert!(loads("import('./x');\nrequire('./y');\n").is_empty());
+    }
+
+    #[test]
+    fn unrelated_calls_are_not_loads() {
+        assert!(
+            loads("foo(name);\nobj.require(name);\nglob(name);\nimport.meta.url;\n").is_empty()
+        );
+    }
+
+    #[test]
+    fn computed_loads_work_in_the_typescript_dialects() {
+        let ts = computed_loads(
+            EcmaDialect::TypeScript,
+            "const m = await import(`./l/${x}`) as Mod;\n",
+        );
+        assert_eq!(ts.len(), 1, "{ts:#?}");
+        assert_eq!(ts[0].prefix.as_deref(), Some("./l/"));
+        let tsx = computed_loads(EcmaDialect::Tsx, "const C = lazy(() => import(name));\n");
+        assert_eq!(tsx.len(), 1, "{tsx:#?}");
+    }
+
+    #[test]
+    fn computed_loads_never_panic_on_bad_input() {
+        assert!(loads("").is_empty());
+        assert!(loads("require(").len() <= 1);
+        let _ = loads("\u{0}\u{1}\u{FFFD} import( ``${");
     }
 }

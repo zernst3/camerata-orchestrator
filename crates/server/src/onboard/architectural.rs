@@ -11,6 +11,7 @@
 //! rides the EXISTING pipeline (suppression classification, test-scope down-ranking,
 //! report/CSV/UI) completely unchanged, exactly like the floor's own findings do.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use camerata_checks::arch_checker::{all_checkers, checker_applies, ArchViolation, RepoView};
@@ -56,6 +57,57 @@ pub fn audit_architectural(
         }
     }
     findings
+}
+
+/// Armed rules that reason from the ABSENCE of a reference and so must see reference text
+/// (HTML, single-file components, Markdown, stylesheets, templates, build-runner files) as well
+/// as code: a `<script src>` or a component import is the only evidence a file is still used.
+const RULES_NEEDING_REFERENCE_TEXT: &[&str] = &[camerata_checks::dead_code_checker::RULE_DEAD_CODE];
+
+/// The file list the architectural tier is handed: the audited `files`, plus the scan's
+/// `reference_files` when (and only when) an armed rule needs them. Every other consumer of the
+/// scan (the AI digest, the secrets floor, stack detection) keeps reading `files` alone, so
+/// adding reference text costs them nothing, and a scan that arms no such rule borrows `files`
+/// without copying.
+pub fn architectural_input<'a>(
+    files: &'a [(String, String)],
+    reference_files: &[(String, String)],
+    armed_rule_ids: &HashSet<&str>,
+) -> Cow<'a, [(String, String)]> {
+    let needed = RULES_NEEDING_REFERENCE_TEXT
+        .iter()
+        .any(|id| armed_rule_ids.contains(id));
+    if !needed || reference_files.is_empty() {
+        return Cow::Borrowed(files);
+    }
+    let mut all = Vec::with_capacity(files.len() + reference_files.len());
+    all.extend_from_slice(files);
+    all.extend_from_slice(reference_files);
+    Cow::Owned(all)
+}
+
+/// Armed rules that reason from the ABSENCE of a reference and so are unsound on a scan that
+/// stopped at its file limit: an importer may be among the files that were dropped, and a file
+/// that is in fact used then looks unreachable.
+const RULES_NEEDING_COMPLETE_SCAN: &[&str] = &[camerata_checks::dead_code_checker::RULE_DEAD_CODE];
+
+/// Whether `rule_id` is one of the rules an incomplete scan withholds.
+pub fn is_withheld_on_incomplete_scan(rule_id: &str) -> bool {
+    RULES_NEEDING_COMPLETE_SCAN.contains(&rule_id)
+}
+
+/// `ids` without the rules that cannot be answered on an incomplete scan. Apply it to the armed
+/// set handed to [`audit_architectural`] AND to the set the ledger credits as a detector run, so
+/// a withheld rule is neither run nor reported as "verified clean": with no detector channel for
+/// the repo it falls to the config-gated disclosure instead.
+pub fn withhold_on_incomplete_scan<'a>(
+    ids: &HashSet<&'a str>,
+    incomplete: bool,
+) -> HashSet<&'a str> {
+    ids.iter()
+        .copied()
+        .filter(|id| !(incomplete && RULES_NEEDING_COMPLETE_SCAN.contains(id)))
+        .collect()
 }
 
 /// Which placeholder TOKEN NAME (no angle brackets — matches a rule's own
@@ -322,5 +374,141 @@ mod tests {
             findings.is_empty(),
             "no supabase/ files present -> no checker applies"
         );
+    }
+
+    // ── architectural_input: the reference-text tier reaches only the architectural tier ──
+
+    fn dead_code_armed() -> HashSet<&'static str> {
+        [camerata_checks::dead_code_checker::RULE_DEAD_CODE]
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn architectural_input_appends_reference_text_when_the_dead_code_rule_is_armed() {
+        let code = files(vec![("src/a.ts", "export {};\n")]);
+        let reference = files(vec![
+            ("index.html", "<script src=\"/src/a.ts\">"),
+            ("README.md", "hi"),
+        ]);
+        let input = architectural_input(&code, &reference, &dead_code_armed());
+        let paths: Vec<&str> = input.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, ["src/a.ts", "index.html", "README.md"]);
+        assert!(matches!(input, Cow::Owned(_)));
+    }
+
+    #[test]
+    fn architectural_input_borrows_the_audited_files_when_no_rule_needs_reference_text() {
+        let code = files(vec![("src/a.ts", "export {};\n")]);
+        let reference = files(vec![("index.html", "x")]);
+        let other: HashSet<&str> = ["UI-UTC-DATES-1"].into_iter().collect();
+        for armed in [HashSet::new(), other] {
+            let input = architectural_input(&code, &reference, &armed);
+            assert!(matches!(input, Cow::Borrowed(_)), "no copy without a need");
+            assert_eq!(&*input, code.as_slice());
+        }
+    }
+
+    #[test]
+    fn architectural_input_borrows_when_there_is_no_reference_text() {
+        let code = files(vec![("src/a.ts", "export {};\n")]);
+        let input = architectural_input(&code, &[], &dead_code_armed());
+        assert!(matches!(input, Cow::Borrowed(_)));
+    }
+
+    // ── withhold_on_incomplete_scan: a truncated scan cannot prove absence ────────
+
+    fn ids(list: &[&'static str]) -> HashSet<&'static str> {
+        list.iter().copied().collect()
+    }
+
+    #[test]
+    fn a_truncated_scan_withholds_the_dead_code_rule_and_keeps_every_other_rule() {
+        let armed = ids(&[
+            camerata_checks::dead_code_checker::RULE_DEAD_CODE,
+            "ARCH-ONE-IMPORT-PATH-1",
+            "SUPABASE-RLS-ENABLED-1",
+        ]);
+        let kept = withhold_on_incomplete_scan(&armed, true);
+        assert_eq!(
+            kept,
+            ids(&["ARCH-ONE-IMPORT-PATH-1", "SUPABASE-RLS-ENABLED-1"])
+        );
+    }
+
+    #[test]
+    fn a_complete_scan_withholds_nothing() {
+        let armed = ids(&[
+            camerata_checks::dead_code_checker::RULE_DEAD_CODE,
+            "ARCH-ONE-IMPORT-PATH-1",
+        ]);
+        assert_eq!(withhold_on_incomplete_scan(&armed, false), armed);
+    }
+
+    /// The reason for the withholding: with an importer missing from the scan, a file that is
+    /// in fact used looks unreachable. Same files, one armed set with the rule and one without.
+    #[test]
+    fn a_withheld_dead_code_rule_does_not_run_and_so_cannot_report_a_used_file_as_dead() {
+        let f = files(vec![
+            ("src/app.ts", "export {};\n"),
+            ("src/used_elsewhere.ts", "export const u = 1;\n"),
+        ]);
+        let armed = dead_code_armed();
+        let ran = audit_architectural("acme/app", &f, &armed);
+        assert_eq!(
+            ran.len(),
+            1,
+            "the checker reports the file it cannot see used: {ran:#?}"
+        );
+        let withheld = withhold_on_incomplete_scan(&armed, true);
+        assert!(audit_architectural("acme/app", &f, &withheld).is_empty());
+    }
+
+    /// The ledger must not credit a run that did not happen: with the rule withheld from the
+    /// credited detector set, the rule has no detector channel for this repo and falls to the
+    /// config-gated disclosure instead of reading as "verified clean".
+    #[test]
+    fn a_withheld_rule_is_not_credited_as_a_detector_run_in_the_ledger() {
+        let id = camerata_checks::dead_code_checker::RULE_DEAD_CODE;
+        let code = files(vec![("src/app.ts", "export {};\n")]);
+        let view = RepoView {
+            spec: "acme/app",
+            files: &code,
+        };
+        let credited = camerata_checks::arch_checker::ledger_detector_rule_ids_for_repo(&view);
+        let none = HashSet::new();
+        assert_eq!(
+            crate::mechanical_gate::detector_channel(id, &credited, &none, None),
+            Some("arch_checker"),
+            "a complete scan credits the checker"
+        );
+        let withheld = withhold_on_incomplete_scan(&credited, true);
+        assert_eq!(
+            crate::mechanical_gate::detector_channel(id, &withheld, &none, None),
+            None,
+            "a truncated scan does not"
+        );
+        assert!(camerata_checks::arch_checker::any_registered_checker_answers(id));
+    }
+
+    #[test]
+    fn the_reference_text_tier_changes_what_the_dead_code_rule_can_prove() {
+        let code = files(vec![
+            ("src/app.ts", "export {};\n"),
+            (
+                "src/composables/useThing.ts",
+                "export const useThing = 1;\n",
+            ),
+        ]);
+        let reference = files(vec![(
+            "src/App.vue",
+            "<script setup>\nimport { useThing } from './composables/useThing'\n</script>\n",
+        )]);
+        let armed = dead_code_armed();
+        // Without reference text the component's import is invisible: a false "dead".
+        assert_eq!(audit_architectural("acme/app", &code, &armed).len(), 1);
+        // With it, the file is mentioned by a live file and stays silent.
+        let input = architectural_input(&code, &reference, &armed);
+        assert!(audit_architectural("acme/app", &input, &armed).is_empty());
     }
 }

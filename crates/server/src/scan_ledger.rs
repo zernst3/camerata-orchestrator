@@ -329,6 +329,11 @@ pub struct ScanLedger {
     /// meaningful to persist across a (de)serialize round-trip.
     #[serde(skip)]
     config_gated_pending: BTreeSet<String>,
+    /// Rule ids queued for [`INCOMPLETE_SCAN_NOTE`] via [`Self::note_incomplete_scan_rule`],
+    /// consumed exactly like `config_gated_pending`; the incomplete-scan note wins when both
+    /// are queued. Transient scan-time plumbing only.
+    #[serde(skip)]
+    incomplete_scan_pending: BTreeSet<String>,
     /// Rule ids queued for [`RuleLedgerEntry::not_applicable`] via [`Self::
     /// note_not_applicable_rule`], consumed by every subsequent [`Self::record_rule`] call for
     /// the same id — same queue-then-settle shape as `config_gated_pending`, for the same
@@ -569,6 +574,24 @@ impl ScanLedger {
         self.config_gated_pending.insert(rule_id.into());
     }
 
+    /// Queue the [`INCOMPLETE_SCAN_NOTE`] disclosure for a rule the scan WITHHELD because it
+    /// reasons from the absence of a reference and the scan stopped at its file limit. Same
+    /// queue-then-settle shape as [`Self::note_config_gated_rule`].
+    pub fn note_incomplete_scan_rule(&mut self, rule_id: impl Into<String>) {
+        self.incomplete_scan_pending.insert(rule_id.into());
+    }
+
+    /// The coverage note queued for `rule_id`: the incomplete-scan one wins over config-gated.
+    fn pending_coverage_note(&self, rule_id: &str) -> Option<String> {
+        if self.incomplete_scan_pending.contains(rule_id) {
+            Some(INCOMPLETE_SCAN_NOTE.to_string())
+        } else {
+            self.config_gated_pending
+                .contains(rule_id)
+                .then(|| CONFIG_GATED_NOTE.to_string())
+        }
+    }
+
     /// Pass-1 W2 (A5.4): queue the "judged not applicable" disclosure for `rule_id`, consumed
     /// by [`Self::record_rule`] on every call (past or future) for the same id — same
     /// queue-then-settle shape as [`Self::note_config_gated_rule`]. Called from `onboard::
@@ -604,10 +627,7 @@ impl ScanLedger {
         findings_emitted: usize,
     ) -> &RuleLedgerEntry {
         let rule_id = rule_id.into();
-        let coverage_note = self
-            .config_gated_pending
-            .contains(&rule_id)
-            .then(|| CONFIG_GATED_NOTE.to_string());
+        let coverage_note = self.pending_coverage_note(&rule_id);
         let not_applicable = self.not_applicable_pending.contains(&rule_id);
         self.rules
             .entry(rule_id.clone())
@@ -818,11 +838,7 @@ impl ScanLedger {
                 )
             })
             .unwrap_or((RuleTier::ExternalTool, 0, None, false));
-        let coverage_note = existing_note.or_else(|| {
-            self.config_gated_pending
-                .contains(&rule_id)
-                .then(|| CONFIG_GATED_NOTE.to_string())
-        });
+        let coverage_note = existing_note.or_else(|| self.pending_coverage_note(&rule_id));
         let not_applicable =
             existing_not_applicable || self.not_applicable_pending.contains(&rule_id);
         self.rules.insert(
@@ -1029,6 +1045,15 @@ pub const CONFIG_GATED_NOTE: &str =
     "config-gated: no architecture config present (.camerata/architecture.toml); the \
      registered architectural checker produced no deterministic verdict for this repo — \
      reviewed semantically instead of mechanically";
+
+/// The honest [`RuleLedgerEntry::coverage_note`] text for a rule whose deterministic check was
+/// WITHHELD because the scan stopped at its file limit: a check that reports a file as unused
+/// cannot be trusted when an importer may be among the files that were dropped. Not a
+/// configuration problem, so it must not read as [`CONFIG_GATED_NOTE`].
+pub const INCOMPLETE_SCAN_NOTE: &str =
+    "withheld: the scan stopped at its file limit, so the deterministic check, which reports \
+     what nothing references, was not run for this repo (an importer may be among the files \
+     that were not read) — reviewed semantically instead of mechanically";
 
 /// A runtime disclosure for a rule that declared mechanical/architectural enforcement but has
 /// no wired detector (the W1-item-4 defect, closed at build time by `crate::mechanical_gate`
@@ -2029,6 +2054,30 @@ mod tests {
             "Rule files that failed to load",
             "pinned: this label is rendered into `camerata inspect`'s coverage summary and the \
              integrity gate's report"
+        );
+    }
+
+    #[test]
+    fn an_incomplete_scan_note_is_distinct_from_the_config_gated_note_and_wins_over_it() {
+        let mut ledger = ScanLedger::new();
+        ledger.note_config_gated_rule("ARCH-DEAD-CODE-1");
+        ledger.note_incomplete_scan_rule("ARCH-DEAD-CODE-1");
+        ledger.record_rule("ARCH-DEAD-CODE-1", RuleTier::Semantic, true, None, 5, 0);
+        let entry = ledger.rule("ARCH-DEAD-CODE-1").expect("recorded");
+        assert_eq!(entry.coverage_note.as_deref(), Some(INCOMPLETE_SCAN_NOTE));
+        assert!(INCOMPLETE_SCAN_NOTE.contains("stopped at its file limit"));
+        assert!(!INCOMPLETE_SCAN_NOTE.contains("config-gated"));
+        assert!(!INCOMPLETE_SCAN_NOTE.contains("architecture.toml"));
+
+        // A rule that only had the config-gated note keeps it.
+        let mut other = ScanLedger::new();
+        other.note_config_gated_rule("ARCH-HANDLER-NO-DB-1");
+        other.record_rule("ARCH-HANDLER-NO-DB-1", RuleTier::Semantic, true, None, 5, 0);
+        assert_eq!(
+            other
+                .rule("ARCH-HANDLER-NO-DB-1")
+                .and_then(|e| e.coverage_note.as_deref()),
+            Some(CONFIG_GATED_NOTE)
         );
     }
 }
