@@ -27,16 +27,27 @@
 //! # How it decides
 //!
 //! 1. Candidates: TypeScript, JavaScript and Python source files that no exclusion covers
-//!    (tests, declaration files, root-level and config-shaped files, generated files, files
-//!    carrying a `keep-file:` marker, committed build output). Everything else is context:
-//!    it carries edges and mentions, and is alive by definition.
-//! 2. Roots: every context file, plus each candidate that is alive by itself (short or
-//!    generic name, shebang or `__main__` guard).
-//! 3. The mention guard: a candidate whose name appears as a whole word in a live file is
-//!    alive. Run to a fixed point, so a mention inside an unreachable file proves nothing.
-//! 4. Reachability over the import graph from the roots; the rest of the candidates are dead.
-//! 5. Emission: one finding per dead file, rolled up to one finding per folder when every
-//!    source file in the folder is dead.
+//!    ([`exclusions`]: tests, declaration files, root-level and config-shaped files, generated
+//!    files, files carrying a `keep-file:` marker, committed build output), and Rust files in a
+//!    crate the Rust pass can see. Everything else is context: it carries edges and mentions, and
+//!    is alive by definition.
+//! 2. Roots: every context file, plus each candidate that is alive by itself: a short or generic
+//!    name, a shebang or Python `__main__` guard, a package manifest entry or public package
+//!    surface ([`manifests`]), a framework route, tool folder or Python autodiscovery convention
+//!    ([`conventions`]), or a folder reached by a computed load or a loader call with a literal
+//!    path ([`dynamic`]).
+//! 3. The mention guard ([`mentions`]): a candidate whose name appears as a whole word in a LIVE
+//!    file is alive. Run to a fixed point, so a mention inside an unreachable file proves nothing.
+//! 4. Reachability over the import graph from the roots; for Rust, the `mod`-declaration closure
+//!    from the crate roots ([`rust_pass`]) in place of the import graph. The rest of the
+//!    candidates are dead.
+//! 5. Emission ([`emit`]): one finding per dead file, rolled up to one finding per folder when
+//!    every source file in the folder is dead.
+//!
+//! The caller owns two preconditions the checker cannot see in a [`RepoView`]: the scan must be
+//! complete (a missing importer is a falsely dead file; the scan withholds the rule when it is
+//! truncated), and reference text (HTML, components, docs) must be in `files` for the mention
+//! guard to see `<script src>` tags and component imports.
 //!
 //! # Documented limits (all false-negative, by design)
 //!
@@ -44,6 +55,12 @@
 //! - A file imported only by tests, stories or fixtures counts as live.
 //! - A file whose name is short (under three characters) or generic, or whose stem coincides
 //!   with any word in a live file, is never reported.
+//! - Every file of a public package (no `private` flag, no `exports` map) is public surface.
+//! - A computed `require`/`import()` with no usable literal prefix roots its whole package.
+//! - Rust crates with `[[bin]]` targets, no `lib.rs`/`main.rs` in the scan, or macro-generated
+//!   modules are skipped; `mod` declarations inside macro bodies are only seen as mentions.
+//! - A framework the convention list does not know is covered by the mention guard alone, and a
+//!   convention-loaded file there is the one residual true false positive; `keep-file:` bounds it.
 //!
 //! # Severity
 //!

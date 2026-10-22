@@ -1668,7 +1668,9 @@ repo — rule changes go through the Rules view, not a re-scan).
 
 Onboarding reads code from the repo's **local working tree on disk**, never from GitHub.
 `read_local_repo_files(dir)` (`onboard.rs`) walks the directory and returns the same
-`ExtractedRepo { files, truncated, excluded_noise }` shape the whole pipeline consumes.
+`ExtractedRepo { files, reference_files, truncated, reference_truncated, excluded_noise }` shape
+the whole pipeline consumes (`files` is the audited list; `reference_files` is the separate
+reference-text tier described below).
 (The old GitHub-tarball reader was removed.) The HTTP handlers resolve each repo's local
 dir with `resolve_local_sources(state, repos)` → `workspace::resolve_repo_dir` (per-repo path
 override, else `<workspace_root>/<owner>/<repo>`); a repo with no local clone surfaces a
@@ -1711,6 +1713,37 @@ Implementation note: `is_governance_or_corpus_artifact`, `is_self_referential_sn
 `corpus_texts_from_ruleset`, and `suppress_self_referential` are also new public functions in
 `crates/server/src/onboard.rs`; the gitignore walker is `read_local_repo_files_gitignore`. The
 `ignore = "0.4"` crate is a workspace dependency; `crates/server/Cargo.toml` depends on it.
+
+**`bin/` is source, not noise.** `NOISE_DIRS` (this scan feed) and `PRUNED_DIRS`
+(`multilang.rs`, the Layer-2 and `detect_languages` feed, shared with `arch_check_runner`) used to
+prune any directory named `bin`. That hid Rust `src/bin/*.rs` targets and Node or shell scripts, and
+it meant the secrets floor never read a credential committed in a `bin/` deploy script. Now only
+.NET build output is pruned: a `bin` segment directly followed by `Debug` or `Release`
+(`DOTNET_BUILD_CONFIGS`; `files::is_noise_path` and `multilang::is_pruned_dir`). An explicit
+`CAMERATA_SCAN_EXCLUDE_DIRS=bin` still prunes every `bin/`.
+
+### The reference-text tier
+
+Some rules reason from the ABSENCE of a reference (`ARCH-DEAD-CODE-1`: nothing imports this file, and
+its name appears in no live file), so they must see the files that mention source files without being
+source: HTML, single-file components (`.vue`, `.svelte`, `.astro`), Markdown/MDX, stylesheets,
+template languages and build-runner files (`Makefile`, `Procfile`, `Justfile`). `files.rs` admits
+them (`is_reference_text`, `REFERENCE_TEXT_EXTS`) under the same noise, size and UTF-8 rules into
+`ExtractedRepo.reference_files`, a list kept SEPARATE from `files` on purpose:
+
+- the AI digest (`ai_audit::build_digest`) and the secrets floor (`audit_files`) keep reading
+  `files` alone, so no model cost, prompt space or floor input changes (tested at the reader and
+  end to end);
+- `onboard::architectural::architectural_input` hands the architectural tier `files ++
+  reference_files`, and only when an armed rule needs it (`RULES_NEEDING_REFERENCE_TEXT`); otherwise
+  it borrows `files` without copying;
+- the list has its own cap (`HARD_CAP_REFERENCE_FILES`); hitting it sets `reference_truncated`.
+
+A scan that stopped at `HARD_CAP_FILES` (`truncated`) or at the reference cap cannot prove absence,
+so `architectural::withhold_on_incomplete_scan` removes `ARCH-DEAD-CODE-1` from both the armed set
+handed to `audit_architectural` and the set the ledger credits as a detector run. With no detector
+channel for that repo the rule falls to the existing config-gated disclosure instead of reading as
+"verified clean".
 
 ### `onboard.rs` — deterministic scan
 
@@ -1971,6 +2004,20 @@ exclusively; architectural rules are skipped — no ungrouped entry, no coverage
 note. Architectural rules remain covered by the AI review (advisory). This is the
 correct split: architectural rules need a bespoke checker; the preview pass can
 only drive off-the-shelf linters.
+
+**`ARCH-DEAD-CODE-1`** (`crates/checks/src/dead_code_checker/`, corpus rule
+`universal/arch-dead-code-1.toml`) reports whole SOURCE FILES (TypeScript, JavaScript, Python, Rust)
+that nothing reaches; unused individual exports are a separate future rule (owner ruling,
+2026-10-21). The design and every false-positive guard (`G1` to `G30`) are in
+`docs/design/2026-10-21_w29-detector-implementation.md`. Because it flags on UN-reachability it
+inverts the resolver's usual benefit of dropping unresolved edges, so it never decides on the import
+graph alone: a candidate is alive when it is a root (context file, manifest entry, public package
+surface, framework or tool convention path, computed-load folder, executable script) or when its name
+appears as a whole word in a live file, run to a fixed point. Rust is decided separately by the
+`mod`-declaration closure from the crate roots (`extract::rust_syn::mod_decls`). It declares
+`config_unsatisfied_for` for a repo with no source in these languages so a Java repo never reads
+"dead code: clean". It needs the reference-text tier and a complete scan (above), and it runs at the
+Layer-2 gate too, where a newly written file that nothing imports yet would be reported.
 
 **`opt_in_only` rules** (`CICD-CODEQL-SECURITY-SCAN-1`,
 `CICD-SEMGREP-SECURITY-SCAN-1`) are NEVER auto-recommended or pre-checked in the
