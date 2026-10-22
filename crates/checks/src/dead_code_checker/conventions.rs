@@ -93,6 +93,12 @@ const TOOL_DIRS: &[&str] = &[
     "assets",
 ];
 
+/// Folders whose files a CLI or migrator loads by glob, in any language and at ANY depth
+/// (`src/migrations/`, `database/seeders/`, `contracts/deploy/`): TypeORM, Knex, Adonis,
+/// Sequelize, hardhat-deploy and their kin. The corpus rule promises migrations are never
+/// reported, so this is not limited to the first folder under the package like [`TOOL_DIRS`].
+const ANY_DEPTH_TOOL_DIRS: &[&str] = &["migrations", "seeders", "seeds", "deploy"];
+
 /// `G6`: Python modules loaded by name by their framework or tool.
 const PYTHON_BASENAMES: &[&str] = &[
     "__init__.py",
@@ -221,7 +227,7 @@ impl<'a> Conventions<'a> {
             Family::Python if python_loads(path) => return true,
             _ => {}
         }
-        self.in_tool_directory(path)
+        in_any_depth_tool_dir(path) || self.in_tool_directory(path)
     }
 
     fn framework_loads(&self, path: &str) -> bool {
@@ -313,6 +319,13 @@ impl<'a> Conventions<'a> {
                 .is_some_and(|(first, _)| TOOL_DIRS.contains(&first))
         })
     }
+}
+
+fn in_any_depth_tool_dir(path: &str) -> bool {
+    path.split('/')
+        .rev()
+        .skip(1)
+        .any(|seg| ANY_DEPTH_TOOL_DIRS.contains(&seg))
 }
 
 fn python_loads(path: &str) -> bool {

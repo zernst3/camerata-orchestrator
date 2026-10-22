@@ -377,3 +377,43 @@ fn python_conventions_do_not_apply_to_other_languages() {
     // `models` is a stoplisted name; the `commands` folder is only a Python convention.
     assert_flags_only(&f, "src/commands/stranded.ts");
 }
+
+// ── tool folders at any depth ──────────────────────────────────────────────────
+
+#[test]
+fn migration_seed_and_deploy_folders_are_never_candidates_at_any_depth_in_any_language() {
+    let f = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        ("src/app.ts", "export {};\n"),
+        // TypeORM, Adonis, Knex, Hardhat-deploy layouts: loaded by a CLI by glob.
+        (
+            "src/migrations/1700000000001-AddOrders.ts",
+            "export class A {}\n",
+        ),
+        (
+            "database/migrations/1700000000002_create_posts_table.ts",
+            "export {};\n",
+        ),
+        ("src/database/seeders/userSeeder.ts", "export {};\n"),
+        ("apps/api/src/db/seeds/initial_rows.ts", "export {};\n"),
+        ("deploy/001_deploy_token.ts", "export {};\n"),
+        ("contracts/deploy/002_deploy_vault.ts", "export {};\n"),
+        (
+            "services/billing/migrations/0001_initial_schema.js",
+            "exports.up = () => {};\n",
+        ),
+    ]);
+    assert_silent(&f);
+}
+
+#[test]
+fn positive_sibling_a_folder_that_merely_contains_the_word_is_still_checked() {
+    let f = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        ("src/app.ts", "export {};\n"),
+        ("src/migrations_helpers/stranded_helper.ts", "export {};\n"),
+        ("src/deployment/stranded_deployer.ts", "export {};\n"),
+    ]);
+    let got = flagged(&f);
+    assert_eq!(got.len(), 2, "{got:?}");
+}
