@@ -104,6 +104,13 @@ pub(crate) fn is_pruned_dir(parent: &Path, name: &str) -> bool {
             && parent.components().any(|c| c.as_os_str() == "bin"))
 }
 
+/// [`is_pruned_dir`] for a walk rooted at `root`: `parent` is judged RELATIVE to `root`, so a
+/// repository that happens to live under a directory named `bin` (`/srv/bin/myrepo`) does not
+/// have its own `Debug` and `Release` folders pruned.
+pub(crate) fn is_pruned_dir_in(root: &Path, parent: &Path, name: &str) -> bool {
+    is_pruned_dir(parent.strip_prefix(root).unwrap_or(parent), name)
+}
+
 // ─── coarse per-language layer-2 rule ids ────────────────────────────────────
 
 /// Coarse layer-2 rule id for a JavaScript / TypeScript worktree.
@@ -1298,7 +1305,7 @@ fn language_for_manifest(file_name: &str) -> Option<WorktreeLanguage> {
 /// stable sequence regardless of filesystem iteration order.
 pub fn detect_languages(worktree: &Path) -> Vec<(WorktreeLanguage, PathBuf)> {
     let mut found: Vec<(WorktreeLanguage, PathBuf)> = Vec::new();
-    walk_for_manifests(worktree, &mut found);
+    walk_for_manifests(worktree, worktree, &mut found);
 
     // Dedup on (language, dir). Sort first so dedup collapses adjacents and the
     // output order is stable.
@@ -1333,7 +1340,7 @@ fn lang_ord(lang: WorktreeLanguage) -> u8 {
 /// of the worktree. (The fail-closed honesty stance lives in the runners: if a
 /// detected project cannot be VERIFIED, its runner returns `Err`. Detection
 /// itself is best-effort breadth.)
-fn walk_for_manifests(dir: &Path, out: &mut Vec<(WorktreeLanguage, PathBuf)>) {
+fn walk_for_manifests(root: &Path, dir: &Path, out: &mut Vec<(WorktreeLanguage, PathBuf)>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -1351,7 +1358,7 @@ fn walk_for_manifests(dir: &Path, out: &mut Vec<(WorktreeLanguage, PathBuf)>) {
         if file_type.is_dir() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if is_pruned_dir(dir, name.as_ref()) {
+            if is_pruned_dir_in(root, dir, name.as_ref()) {
                 continue;
             }
             subdirs.push(path);
@@ -1364,7 +1371,7 @@ fn walk_for_manifests(dir: &Path, out: &mut Vec<(WorktreeLanguage, PathBuf)>) {
     }
 
     for sub in subdirs {
-        walk_for_manifests(&sub, out);
+        walk_for_manifests(root, &sub, out);
     }
 }
 
@@ -3107,5 +3114,35 @@ mod tests {
             violations.is_empty(),
             "no-heartbeat polyglot should run clean: {violations:?}"
         );
+    }
+
+    #[test]
+    fn detect_languages_judges_bin_ancestry_relative_to_the_walk_root() {
+        let outer = tmp();
+        let root = outer.join("bin").join("myrepo");
+        fs::create_dir_all(root.join("Debug")).unwrap();
+        fs::write(root.join("Debug/package.json"), "{}").unwrap();
+        fs::create_dir_all(root.join("bin/Debug")).unwrap();
+        fs::write(root.join("bin/Debug/package.json"), "{}").unwrap();
+        let dirs: Vec<_> = detect_languages(&root)
+            .into_iter()
+            .map(|(_, d)| d)
+            .collect();
+        assert_eq!(dirs, vec![root.join("Debug")]);
+    }
+
+    #[test]
+    fn is_pruned_dir_in_strips_the_walk_root_before_looking_for_bin() {
+        let root = Path::new("/tmp/x/bin/myrepo");
+        assert!(!is_pruned_dir_in(root, root, "Debug"));
+        assert!(!is_pruned_dir_in(root, &root.join("src"), "Release"));
+        assert!(is_pruned_dir_in(root, &root.join("svc/bin"), "Debug"));
+        assert!(is_pruned_dir_in(root, root, "node_modules"));
+        // A parent outside the root is judged as given.
+        assert!(is_pruned_dir_in(
+            root,
+            Path::new("elsewhere/bin"),
+            "Release"
+        ));
     }
 }

@@ -177,7 +177,7 @@ fn walk_collect(root: &Path, dir: &Path, globs: &[&str], out: &mut Vec<(String, 
         };
         if file_type.is_dir() {
             let name = entry.file_name();
-            if crate::multilang::is_pruned_dir(dir, name.to_string_lossy().as_ref()) {
+            if crate::multilang::is_pruned_dir_in(root, dir, name.to_string_lossy().as_ref()) {
                 continue;
             }
             walk_collect(root, &path, globs, out);
@@ -526,5 +526,27 @@ mod tests {
                 checker.rule_ids()
             );
         }
+    }
+
+    #[test]
+    fn a_repo_living_under_a_directory_named_bin_keeps_its_debug_and_release_folders() {
+        // Pruning judges the path RELATIVE to the walk root, not the absolute path.
+        let outer = tmpdir();
+        let root = outer.path().join("bin").join("myrepo");
+        for (rel, body) in [
+            ("src/Debug/real_module.js", "console.log(1);\n"),
+            ("Release/real_script.js", "console.log(1);\n"),
+            ("bin/Debug/built.js", "built\n"),
+        ] {
+            let path = root.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+        let mut got: Vec<String> = collect_interest_files(&root, &["**/*.js"])
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        got.sort();
+        assert_eq!(got, ["Release/real_script.js", "src/Debug/real_module.js"]);
     }
 }
