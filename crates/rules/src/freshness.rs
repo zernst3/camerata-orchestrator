@@ -11,7 +11,7 @@
 //! over its inputs - no clock read, no `chrono`, so the whole module is trivially testable and
 //! never flaky.
 
-use crate::Rule;
+use crate::{Rule, RuleSet};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -380,6 +380,38 @@ pub fn effective_review_date(rule: &Rule, freshness: &CorpusFreshness) -> Option
         .map(|(_, d)| d.trim().to_string())
 }
 
+/// The ONE sanctioned bridge from the operator-only freshness data to a client artifact: the
+/// date a client may be told "the rules this scan used were last reviewed on".
+///
+/// `used` is the set of rules the scan actually applied. The result is the OLDEST
+/// [`effective_review_date`] among them, so the client is never told the rules are fresher than
+/// the least-recently reviewed one that produced their findings (a weakest-link date, never a
+/// flattering newest). It is `None`, and the artifacts then omit the line, when:
+///
+/// - `used` is empty (the scan applied nothing this date could vouch for), or
+/// - ANY used rule has never been reviewed, individually or through a confirmed domain sweep.
+///   One unreviewed rule means no honest date exists; printing the oldest of the OTHERS would be
+///   exactly the flattering lie this function exists to prevent. Today no domain has been
+///   confirmed, so every real scan lands here.
+///
+/// Everything else in this module is operator-only maintenance text (the nag, the banner, the
+/// overdue and never-confirmed lists) and must never reach a client artifact. This function
+/// returns a bare `YYYY-MM-DD` and nothing else: no domain names, no counts, no wording. It is
+/// the single freshness entry point the client-artifact gate in `camerata-server` permits, and
+/// only from the export caller, never from inside an artifact builder. Pure.
+pub fn client_rules_last_reviewed(freshness: &CorpusFreshness, used: &RuleSet) -> Option<String> {
+    let mut oldest: Option<((i64, u32, u32), String)> = None;
+    for rule in used.iter() {
+        let date = effective_review_date(rule, freshness)?;
+        // `effective_review_date` only returns a date that parses.
+        let ymd = parse_ymd(&date)?;
+        if oldest.as_ref().is_none_or(|(best, _)| ymd < *best) {
+            oldest = Some((ymd, date));
+        }
+    }
+    oldest.map(|(_, date)| date)
+}
+
 /// Advance (or insert) one domain's confirmation date inside the TEXT of a
 /// `CORPUS_FRESHNESS.toml`, returning the new text. A pure text transform, not a
 /// re-serialization, so every comment (the swept-vs-confirmed contract header, the override
@@ -738,6 +770,133 @@ mod tests {
             effective_review_date(&rule_in("go", Some("2026-02-30")), &f),
             None
         );
+    }
+
+    // ── the client-visible date (client_rules_last_reviewed) ────────────────
+
+    fn used_set(rules: Vec<Rule>) -> RuleSet {
+        let mut set = RuleSet::default();
+        for rule in rules {
+            set.push(rule);
+        }
+        set
+    }
+
+    fn rule_with_id(id: &str, domain: &str, last_reviewed: Option<&str>) -> Rule {
+        let mut r = crate::bare_rule(id, domain);
+        r.last_reviewed = last_reviewed.map(str::to_string);
+        r
+    }
+
+    /// The honest value today: nothing has ever been confirmed, so there is no date to tell a
+    /// client. Anti-vacuity for the `Some` cases below: the same function, same rules, with a
+    /// watermark, does return a date.
+    #[test]
+    fn client_date_is_none_when_no_used_domain_has_ever_been_confirmed() {
+        let never = CorpusFreshness::parse("").unwrap();
+        let used = used_set(vec![
+            rule_with_id("A-1", "rust", None),
+            rule_with_id("B-1", "universal", None),
+        ]);
+        assert_eq!(client_rules_last_reviewed(&never, &used), None);
+
+        let confirmed = CorpusFreshness::parse(
+            "[confirmed]\nrust = \"2026-08-15\"\nuniversal = \"2026-09-01\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            client_rules_last_reviewed(&confirmed, &used).as_deref(),
+            Some("2026-08-15")
+        );
+    }
+
+    /// The weakest link wins: the client is told the OLDEST date among the used rules, never the
+    /// newest.
+    #[test]
+    fn client_date_is_the_oldest_effective_date_across_used_rules() {
+        let f = CorpusFreshness::parse(
+            "[confirmed]\nrust = \"2026-10-18\"\ngo = \"2026-03-02\"\nuniversal = \"2026-07-30\"\n",
+        )
+        .unwrap();
+        let used = used_set(vec![
+            rule_with_id("A-1", "rust", None),
+            rule_with_id("B-1", "go", None),
+            rule_with_id("C-1", "universal", None),
+        ]);
+        assert_eq!(
+            client_rules_last_reviewed(&f, &used).as_deref(),
+            Some("2026-03-02")
+        );
+        // A domain the scan did NOT use does not drag the date down.
+        let rust_only = used_set(vec![rule_with_id("A-1", "rust", None)]);
+        assert_eq!(
+            client_rules_last_reviewed(&f, &rust_only).as_deref(),
+            Some("2026-10-18")
+        );
+    }
+
+    /// One never-reviewed rule means there is no honest date: the oldest of the OTHERS would
+    /// tell the client the rules are fresher than they are.
+    #[test]
+    fn client_date_is_none_when_any_single_used_rule_is_unreviewed() {
+        let f = CorpusFreshness::parse("[confirmed]\nrust = \"2026-10-18\"\n").unwrap();
+        let used = used_set(vec![
+            rule_with_id("A-1", "rust", None),
+            rule_with_id("B-1", "go", None), // `go` was never confirmed
+        ]);
+        assert_eq!(client_rules_last_reviewed(&f, &used), None);
+    }
+
+    /// A rule's own review counts, through the same effective-date rule the rest of the module
+    /// uses (the later of the rule's date and its domain's), and a sub-domain resolves to its
+    /// pack.
+    #[test]
+    fn client_date_uses_each_rules_effective_date() {
+        let f = CorpusFreshness::parse("[confirmed]\nrust = \"2026-08-15\"\n").unwrap();
+        let used = used_set(vec![
+            rule_with_id("A-1", "rust:seaorm", None), // pack date 2026-08-15
+            rule_with_id("B-1", "rust", Some("2026-10-01")), // own review is newer
+        ]);
+        assert_eq!(
+            client_rules_last_reviewed(&f, &used).as_deref(),
+            Some("2026-08-15")
+        );
+        // An unconfirmed domain, but every used rule individually reviewed: still honest.
+        let own = used_set(vec![rule_with_id("C-1", "go", Some("2026-09-09"))]);
+        assert_eq!(
+            client_rules_last_reviewed(&f, &own).as_deref(),
+            Some("2026-09-09")
+        );
+    }
+
+    /// A scan that applied no rules has nothing for a review date to vouch for.
+    #[test]
+    fn client_date_is_none_for_an_empty_used_set() {
+        let f = CorpusFreshness::parse("[confirmed]\nrust = \"2026-10-18\"\n").unwrap();
+        assert_eq!(client_rules_last_reviewed(&f, &RuleSet::default()), None);
+    }
+
+    /// A malformed watermark can only make the date look OLDER or absent, never newer.
+    #[test]
+    fn client_date_ignores_a_malformed_watermark() {
+        let f = CorpusFreshness::parse("[confirmed]\nrust = \"soon\"\n").unwrap();
+        let used = used_set(vec![rule_with_id("A-1", "rust", None)]);
+        assert_eq!(client_rules_last_reviewed(&f, &used), None);
+    }
+
+    /// The sanctioned function returns a bare date and carries none of the operator vocabulary,
+    /// even when the watermark has overdue domains (the case the nag is for).
+    #[test]
+    fn client_date_never_carries_operator_text() {
+        let f = CorpusFreshness::parse("warn_after_days = 1\n[confirmed]\nrust = \"2020-01-01\"\n")
+            .unwrap();
+        let used = used_set(vec![rule_with_id("A-1", "rust", None)]);
+        let date = client_rules_last_reviewed(&f, &used).expect("a date");
+        assert_eq!(parse_ymd(&date), Some((2020, 1, 1)));
+        assert_eq!(date.len(), "2020-01-01".len());
+        for marker in OPERATOR_ONLY_MARKERS {
+            assert!(!date.contains(marker), "{date:?} contains {marker:?}");
+        }
     }
 
     // ── due soon (design amendment 2026-10-21, part 4) ──────────────────────

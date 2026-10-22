@@ -384,6 +384,59 @@ impl Rule {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// The corpus digest
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Domain-separation tag and format version for [`corpus_version`], hashed ahead of the entries.
+/// Distinct from [`PREIMAGE_TAG`] so a corpus digest can never collide with a rule hash.
+const CORPUS_DIGEST_TAG: &str = "camerata-corpus-digest/v1\n";
+
+/// Render a version for the digest preimage: the number, or `-` for a rule that declares none
+/// (so an unversioned rule still contributes, and cannot be confused with version 0).
+fn version_token(version: Option<u32>) -> String {
+    version.map_or_else(|| "-".to_string(), |v| v.to_string())
+}
+
+/// The digest over `(id, version, hash)` entries. Entries are sorted before hashing, so the
+/// result does not depend on the order they are supplied in. Each entry is one
+/// `id TAB version TAB hash LF` line after [`CORPUS_DIGEST_TAG`]; none of the three fields can
+/// contain a tab or newline (ids are `[A-Z0-9-]`, a hash is `sha256:<hex>`), so the framing is
+/// unambiguous.
+fn corpus_digest(mut entries: Vec<(String, Option<u32>, String)>) -> String {
+    entries.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(CORPUS_DIGEST_TAG.as_bytes());
+    for (id, version, hash) in &entries {
+        hasher.update(format!("{id}\t{}\t{hash}\n", version_token(*version)).as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(RULE_HASH_PREFIX.len() + digest.len() * 2);
+    hex.push_str(RULE_HASH_PREFIX);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
+}
+
+/// A deterministic fingerprint of the rule corpus: `sha256:<hex>` over the sorted
+/// `(id, version, content hash)` of every rule, which is exactly the content of
+/// `CORPUS_LOCK.toml`. Two builds of the same corpus produce the same string on any machine, in
+/// any load order; a changed rule (its [`Rule::content_hash`] moves) or a bumped `version`
+/// produces a different one, and a recorded review date (`Rule::last_reviewed`) does not.
+///
+/// This is the client-visible "corpus version" of a product export: not a hand-maintained
+/// version string that can rot, but the corpus's own content. A rule that declares no `version`
+/// still contributes (as `-`), so the digest is total over any corpus the loader accepts; the
+/// lock gate, not this function, is what rejects an unversioned rule.
+pub fn corpus_version(set: &RuleSet) -> String {
+    corpus_digest(
+        set.iter()
+            .map(|rule| (rule.id.0.clone(), rule.version, rule.content_hash()))
+            .collect(),
+    )
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // The lock file
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -737,4 +790,39 @@ pub fn check_lock(set: &RuleSet, lock: &CorpusLock) -> Vec<LockProblem> {
 
     problems.sort_by(|a, b| a.id().cmp(b.id()));
     problems
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the digest framing byte for byte against an independent oracle (Python `hashlib`
+    /// over `"camerata-corpus-digest/v1\n"` plus one `id<TAB>version<TAB>hash<LF>` line per
+    /// entry, sorted by id, `-` for no version). If this fails, every corpus version a client
+    /// has been shown has changed meaning: a deliberate format migration (a new `/vN` tag),
+    /// never an incidental edit.
+    #[test]
+    fn corpus_digest_matches_the_independent_oracle() {
+        let entry = |id: &str, version: Option<u32>, fill: char| {
+            (
+                id.to_string(),
+                version,
+                format!("sha256:{}", fill.to_string().repeat(64)),
+            )
+        };
+        // Supplied out of order on purpose.
+        let digest = corpus_digest(vec![
+            entry("B-2", Some(3), 'b'),
+            entry("A-1", Some(1), 'a'),
+            entry("C-3", None, 'c'),
+        ]);
+        assert_eq!(
+            digest,
+            "sha256:278bb359b6bc0805123daf3293e10429bb8618555423e29216d2212e92b2013f"
+        );
+        assert_eq!(
+            corpus_digest(Vec::new()),
+            "sha256:433a69d36196f6a190713bd27aeca970794d772708d158c9c82ba5c1c169f1fd"
+        );
+    }
 }

@@ -15,9 +15,9 @@
 //! 3. **The real lock** matches the real corpus, and is in the exact form the CLI writes.
 
 use camerata_rules::{
-    bare_rule, check_lock, corpus_lock_path, load_corpus, CorpusLock, EnforcementKind,
-    EscalationSeverity, EscalationSpec, LockEntry, LockError, LockProblem, Rule, RuleKind,
-    RuleOption, RuleSet, RuleSource, StackException, Verification, VerifiedProvenance,
+    bare_rule, check_lock, corpus_lock_path, corpus_version, load_corpus, CorpusLock,
+    EnforcementKind, EscalationSeverity, EscalationSpec, LockEntry, LockError, LockProblem, Rule,
+    RuleKind, RuleOption, RuleSet, RuleSource, StackException, Verification, VerifiedProvenance,
     DEFAULT_CORPUS_PATH, RULE_HASH_PREFIX,
 };
 
@@ -800,4 +800,136 @@ async fn req_the_bundled_lock_covers_every_corpus_rule() {
     let lock = CorpusLock::load(&corpus_lock_path()).expect("CORPUS_LOCK.toml parses");
     assert_eq!(lock.rules.len(), set.iter().count());
     assert!(lock.rules.len() > 400, "{} entries", lock.rules.len());
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 6. The corpus digest (`corpus_version`)
+// ────────────────────────────────────────────────────────────────────────────
+
+fn is_corpus_digest(s: &str) -> bool {
+    s.strip_prefix(RULE_HASH_PREFIX).is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    })
+}
+
+#[test]
+fn corpus_version_is_a_sha256_digest() {
+    let v = corpus_version(&set_of(vec![versioned("A-1", 1)]));
+    assert!(is_corpus_digest(&v), "{v}");
+    // Even an empty corpus has a well-formed (and stable) digest.
+    let empty = corpus_version(&RuleSet::default());
+    assert!(is_corpus_digest(&empty), "{empty}");
+    assert_eq!(empty, corpus_version(&RuleSet::default()));
+}
+
+/// Two machines that load the same rules in a different order must print the same corpus id.
+#[test]
+fn corpus_version_does_not_depend_on_load_order() {
+    let forward = set_of(vec![
+        versioned("A-1", 1),
+        versioned("B-1", 2),
+        versioned("C-1", 3),
+    ]);
+    let reversed = set_of(vec![
+        versioned("C-1", 3),
+        versioned("B-1", 2),
+        versioned("A-1", 1),
+    ]);
+    assert_eq!(corpus_version(&forward), corpus_version(&reversed));
+}
+
+/// A rule's content change, a version bump, an added rule and a removed rule each move the id.
+#[test]
+fn corpus_version_moves_when_the_corpus_content_moves() {
+    let base = set_of(vec![versioned("A-1", 1), versioned("B-1", 1)]);
+    let before = corpus_version(&base);
+
+    let mut edited = versioned("B-1", 1);
+    edited.summary = "A different summary.".to_string();
+    assert_ne!(
+        before,
+        corpus_version(&set_of(vec![versioned("A-1", 1), edited])),
+        "a content change must move the corpus version"
+    );
+    assert_ne!(
+        before,
+        corpus_version(&set_of(vec![versioned("A-1", 1), versioned("B-1", 2)])),
+        "a version bump must move the corpus version"
+    );
+    assert_ne!(
+        before,
+        corpus_version(&set_of(vec![
+            versioned("A-1", 1),
+            versioned("B-1", 1),
+            versioned("C-1", 1)
+        ])),
+        "an added rule must move the corpus version"
+    );
+    assert_ne!(
+        before,
+        corpus_version(&set_of(vec![versioned("A-1", 1)])),
+        "a removed rule must move the corpus version"
+    );
+}
+
+/// Recording a review is not a content change: the corpus id a client sees must not churn every
+/// time someone confirms a rule is still current.
+#[test]
+fn corpus_version_ignores_review_dates() {
+    let plain = set_of(vec![versioned("A-1", 1)]);
+    let mut reviewed = versioned("A-1", 1);
+    reviewed.last_reviewed = Some("2026-10-01".to_string());
+    assert_eq!(
+        corpus_version(&plain),
+        corpus_version(&set_of(vec![reviewed]))
+    );
+}
+
+/// An unversioned rule still contributes (the digest is total), and is distinguishable from the
+/// same rule at any real version.
+#[test]
+fn corpus_version_counts_an_unversioned_rule_and_tells_it_from_a_versioned_one() {
+    let unversioned = corpus_version(&set_of(vec![bare_rule("A-1", "universal")]));
+    assert!(is_corpus_digest(&unversioned));
+    assert_ne!(unversioned, corpus_version(&RuleSet::default()));
+    assert_ne!(
+        unversioned,
+        corpus_version(&set_of(vec![versioned("A-1", 1)]))
+    );
+}
+
+/// The digest IS the lock's content: recomputed independently here from the bundled
+/// `CORPUS_LOCK.toml` (the sorted `(id, version, hash)` lines, framed with the tag), it equals
+/// `corpus_version` of the corpus the lock describes. This is the property the export relies on
+/// ("two packages built from the same rules carry the same corpus id"), and it ties the digest
+/// to the gated file rather than to a second source of truth.
+#[tokio::test]
+async fn req_the_corpus_version_is_the_digest_of_the_bundled_lock_content() {
+    use sha2::{Digest, Sha256};
+    let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+    if !path.exists() {
+        return;
+    }
+    let set = load_corpus(path).await.expect("corpus loads");
+    let lock = CorpusLock::load(&corpus_lock_path()).expect("CORPUS_LOCK.toml parses");
+    assert!(!lock.rules.is_empty(), "anti-vacuity: the lock has rules");
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"camerata-corpus-digest/v1\n");
+    // BTreeMap iteration is sorted by id.
+    for (id, entry) in &lock.rules {
+        hasher.update(format!("{id}\t{}\t{}\n", entry.version, entry.hash).as_bytes());
+    }
+    let expected = format!(
+        "{RULE_HASH_PREFIX}{}",
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    assert_eq!(corpus_version(&set), expected);
 }

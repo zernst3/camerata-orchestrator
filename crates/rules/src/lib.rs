@@ -22,14 +22,15 @@ use thiserror::Error;
 
 mod lock;
 pub use lock::{
-    check_lock, corpus_lock_path, CorpusLock, LockEntry, LockError, LockProblem, RULE_HASH_PREFIX,
+    check_lock, corpus_lock_path, corpus_version, CorpusLock, LockEntry, LockError, LockProblem,
+    RULE_HASH_PREFIX,
 };
 
 mod freshness;
 pub use freshness::{
-    confirm_domain, confirm_in_text, corpus_freshness_path, days_from_civil, effective_review_date,
-    format_staleness_nag, parse_ymd, CorpusFreshness, DueSoonDomain, FreshnessEditError,
-    FreshnessReport, OverdueDomain, OPERATOR_ONLY_MARKERS,
+    client_rules_last_reviewed, confirm_domain, confirm_in_text, corpus_freshness_path,
+    days_from_civil, effective_review_date, format_staleness_nag, parse_ymd, CorpusFreshness,
+    DueSoonDomain, FreshnessEditError, FreshnessReport, OverdueDomain, OPERATOR_ONLY_MARKERS,
 };
 
 // ────────────────────────────────────────────────────────────────────────────
