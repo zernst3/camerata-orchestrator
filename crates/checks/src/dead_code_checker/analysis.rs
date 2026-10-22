@@ -217,5 +217,56 @@ pub(super) fn analyze(files: &[(String, String)]) -> Vec<crate::arch_checker::Ar
         .filter(|p| family_of(p).is_some() && !emitted.contains(p.as_str()))
         .cloned()
         .collect();
-    emit::findings(&dead, &sources)
+    let live_assets = live_assets_under_dead_files(files, &emitted, &dead_paths, &live);
+    emit::findings(&dead, &sources, &live_assets)
+}
+
+/// Non-source files (stylesheets, data, images, templates) in a folder that holds a dead file
+/// and that something live still names. The name test is the mention guard's, applied to the
+/// asset: a generic or very short name counts as named, a name found in a live file counts, a
+/// name found only in unreachable files (or nowhere) does not.
+fn live_assets_under_dead_files(
+    files: &[(String, String)],
+    emitted: &HashSet<&str>,
+    dead_paths: &BTreeSet<&str>,
+    live: &HashSet<String>,
+) -> BTreeSet<String> {
+    let mut dead_dirs: HashSet<&str> = HashSet::new();
+    for path in dead_paths {
+        let mut dir = *path;
+        while let Some(i) = dir.rfind('/') {
+            dir = &dir[..i];
+            dead_dirs.insert(dir);
+        }
+    }
+    let assets: Vec<usize> = files
+        .iter()
+        .enumerate()
+        .filter(|(_, (p, _))| family_of(p).is_none() && !emitted.contains(p.as_str()))
+        .filter(|(_, (p, _))| {
+            let mut dir = p.as_str();
+            while let Some(i) = dir.rfind('/') {
+                dir = &dir[..i];
+                if dead_dirs.contains(dir) {
+                    return true;
+                }
+            }
+            false
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let keys: Vec<String> = assets.iter().map(|&i| key_of(&files[i].0)).collect();
+    let index = MentionIndex::build(files, &keys);
+    assets
+        .iter()
+        .zip(&keys)
+        .filter(|(&i, key)| {
+            is_always_mentioned(key)
+                || index
+                    .mentioners(key)
+                    .iter()
+                    .any(|&m| m != i && live.contains(&files[m].0))
+        })
+        .map(|(&i, _)| files[i].0.clone())
+        .collect()
 }

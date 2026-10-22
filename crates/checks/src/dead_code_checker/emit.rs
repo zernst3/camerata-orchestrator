@@ -28,8 +28,14 @@ pub(super) struct DeadFile {
 /// Findings for `dead`, rolled up by directory where a whole folder is dead. `sources` is every
 /// source-language file in the scan (emitted twins excluded): a folder is rolled up only when
 /// ALL of its source files are in `dead`, so "every source file under it is unreachable" is
-/// literally true.
-pub(super) fn findings(dead: &[DeadFile], sources: &BTreeSet<String>) -> Vec<ArchViolation> {
+/// literally true, and `live_assets` (non-source files, such as a stylesheet or a data file, that
+/// a live file names) are all outside it, so "delete the folder" is never said about a folder
+/// holding something in use.
+pub(super) fn findings(
+    dead: &[DeadFile],
+    sources: &BTreeSet<String>,
+    live_assets: &BTreeSet<String>,
+) -> Vec<ArchViolation> {
     let by_path: BTreeMap<&str, &DeadFile> = dead.iter().map(|d| (d.path.as_str(), d)).collect();
     let mut out = Vec::new();
     let mut rolled: BTreeSet<&str> = BTreeSet::new();
@@ -56,6 +62,7 @@ pub(super) fn findings(dead: &[DeadFile], sources: &BTreeSet<String>) -> Vec<Arc
         if under.len() < 2
             || under.iter().any(|p| rolled.contains(p))
             || !under.iter().all(|p| by_path.contains_key(p))
+            || live_assets.iter().any(|a| a.starts_with(&prefix))
         {
             continue;
         }

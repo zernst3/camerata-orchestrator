@@ -784,3 +784,66 @@ fn generated_code_by_name_or_folder_keeps_the_files_it_imports_alive() {
     ]);
     assert_flags_only(&f, "src/stranded_screen.tsx");
 }
+
+// ── the roll-up never says "delete the folder" about a folder holding a live asset ──
+
+#[test]
+fn a_folder_holding_a_live_asset_is_not_rolled_up() {
+    let f = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        (
+            "src/app.ts",
+            "import './legacy/theme.css'; import data from './legacy/menu.json';\n",
+        ),
+        ("src/legacy/theme.css", "body{}\n"),
+        ("src/legacy/menu.json", "[]\n"),
+        ("src/legacy/oldHelperFn.ts", "export const y = 1;\n"),
+        ("src/legacy/oldWidget.ts", "export const x = 1;\n"),
+    ]);
+    let vs = run(&f);
+    let got: Vec<&str> = vs.iter().map(|v| v.file.as_str()).collect();
+    assert_eq!(
+        got,
+        ["src/legacy/oldHelperFn.ts", "src/legacy/oldWidget.ts"],
+        "{vs:#?}"
+    );
+    assert!(vs.iter().all(|v| v.line == 1), "per-file findings: {vs:#?}");
+    assert!(
+        vs.iter().all(|v| !v.message.contains("Delete the folder")),
+        "{vs:#?}"
+    );
+}
+
+#[test]
+fn a_folder_whose_other_files_are_unreferenced_or_only_referenced_by_dead_code_still_rolls_up() {
+    let f = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        ("src/app.ts", "export {};\n"),
+        // A stylesheet and a data file that only the dead code names, plus a README nobody names.
+        (
+            "src/legacy/oldWidget.ts",
+            "import './skin_legacy.css'; import data from './menu_old.json';\n",
+        ),
+        ("src/legacy/oldHelperFn.ts", "export const y = 1;\n"),
+        ("src/legacy/skin_legacy.css", "body{}\n"),
+        ("src/legacy/menu_old.json", "[]\n"),
+        ("src/legacy/NOTES.md", "old notes\n"),
+    ]);
+    let vs = run(&f);
+    assert_eq!(vs.len(), 1, "{vs:#?}");
+    assert_eq!(vs[0].object.as_deref(), Some("src/legacy/"));
+}
+
+#[test]
+fn an_asset_with_a_generic_name_counts_as_referenced_and_blocks_the_roll_up() {
+    // `index.html`'s key is on the stoplist, so it is never claimed unreferenced.
+    let f = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        ("src/app.ts", "export {};\n"),
+        ("src/legacy/index.html", "<html></html>\n"),
+        ("src/legacy/oldHelperFn.ts", "export const y = 1;\n"),
+        ("src/legacy/oldWidget.ts", "export const x = 1;\n"),
+    ]);
+    let vs = run(&f);
+    assert!(vs.iter().all(|v| v.line == 1), "{vs:#?}");
+}
