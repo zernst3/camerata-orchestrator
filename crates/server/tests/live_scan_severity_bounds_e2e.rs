@@ -177,6 +177,32 @@ fn exported_pdf_severities(f: &Finding, corpus: &camerata_rules::RuleSet) -> Vec
         .collect()
 }
 
+/// Every severity the PDF's action matrix carries for a one-finding report, across all six
+/// buckets. An unlocated row lands in the informational or held appendix, which the curated
+/// group sections do not necessarily render, so the matrix is where it is guaranteed visible.
+fn exported_pdf_matrix_severities(f: &Finding, corpus: &camerata_rules::RuleSet) -> Vec<String> {
+    let report = report_with(vec![f.clone()]).seal();
+    let m = build_report_json(
+        &report,
+        &HashMap::new(),
+        Some(corpus),
+        &ReportOptions::default(),
+    )
+    .matrix;
+    [
+        &m.do_now,
+        &m.do_next,
+        &m.plan,
+        &m.accepted,
+        &m.informational,
+        &m.held,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|r| r.severity.clone())
+    .collect()
+}
+
 fn bounded(f: &Finding, corpus: &camerata_rules::RuleSet) -> Finding {
     let mut fs = vec![f.clone()];
     apply_corpus_severity_bounds(&mut fs, corpus);
@@ -344,6 +370,141 @@ async fn live_and_export_severities_agree_for_every_bounded_rule() {
         }
     }
     assert!(compared > 0);
+}
+
+/// An UNLOCATED finding: no path and line 0, the C4-R1 shape. `kind: None` is a legacy/kindless
+/// row, which the floor and the deviation ceiling decline but C4-R1 does not.
+fn unlocated(rule_id: &str, severity: &str, kind: Option<FindingKind>) -> Finding {
+    Finding {
+        path: String::new(),
+        line: 0,
+        kind,
+        ..located(rule_id, severity, FindingKind::Defect)
+    }
+}
+
+/// C4-R1 (an unlocated above-informational finding is `info`) used to run in the PDF only, so
+/// the same unlocated finding was `high` in the live scan and the workbook and `info` in the
+/// PDF. It is now part of the shared bound chain (floor, C4-R1, ceilings), so all four surfaces
+/// agree: the live scan, `findings.json` (the `partition_rows` behind the workbook, CSV and
+/// JSON) and the PDF.
+///
+/// Covers every real-corpus rule that declares any bound plus a rule that declares none, every
+/// proposed severity, and every kind (defect, deviation, kindless), so the order the three
+/// stages run in is exercised against the corpus's real floors and ceilings.
+///
+/// FAILS BEFORE THE FIX: the live scan and `findings.json` kept the producer's severity for an
+/// unlocated row while the PDF said `info`.
+#[tokio::test]
+async fn live_and_export_severities_agree_for_unlocated_findings() {
+    let Some(corpus) = real_corpus().await else {
+        return;
+    };
+    let mut rule_ids: Vec<String> = corpus
+        .iter()
+        .filter(|r| {
+            r.max_severity.is_some() || r.min_severity.is_some() || r.deviation_ceiling.is_some()
+        })
+        .map(|r| r.id.0.clone())
+        .collect();
+    assert!(
+        !rule_ids.is_empty(),
+        "no bounded rule: the agreement is vacuous"
+    );
+    rule_ids.push(
+        corpus
+            .iter()
+            .find(|r| r.max_severity.is_none() && r.min_severity.is_none())
+            .expect("the corpus has rules that declare no bound")
+            .id
+            .0
+            .clone(),
+    );
+    rule_ids.push("NOT-A-RULE-1".to_string());
+
+    let mut compared = 0usize;
+    let mut pdf_rows_checked = 0usize;
+    for rule_id in &rule_ids {
+        for sev in VOCABULARY {
+            for kind in [None, Some(FindingKind::Defect), Some(deviation())] {
+                let tag = kind.as_ref().map_or("kindless", FindingKind::tag);
+                let proposed = unlocated(rule_id, sev, kind);
+                let live = bounded(&proposed, &corpus);
+                assert_eq!(
+                    live.severity, "info",
+                    "{rule_id} ({tag}) proposed {sev:?}: an unlocated finding must be info live"
+                );
+                assert_eq!(
+                    exported_xlsx_severity(&proposed, &corpus),
+                    live.severity,
+                    "{rule_id} ({tag}) proposed {sev:?}: findings.json and the live scan disagree \
+                     on an unlocated finding"
+                );
+                // Fixed point: the export backstop over an already-bounded row changes nothing.
+                assert_eq!(
+                    exported_xlsx_severity(&live, &corpus),
+                    live.severity,
+                    "{rule_id} ({tag}) proposed {sev:?}: the export backstop moved it"
+                );
+                // The PDF shows the finding in whichever section it routes to; wherever it
+                // appears it must carry the live severity.
+                let pdf: Vec<String> = exported_pdf_severities(&proposed, &corpus)
+                    .into_iter()
+                    .chain(exported_pdf_matrix_severities(&proposed, &corpus))
+                    .collect();
+                for shown in &pdf {
+                    assert_eq!(
+                        shown, &live.severity,
+                        "{rule_id} ({tag}) proposed {sev:?}: the PDF and the live scan disagree \
+                         on an unlocated finding"
+                    );
+                }
+                pdf_rows_checked += pdf.len();
+                compared += 1;
+            }
+        }
+    }
+    assert!(compared > 0);
+    assert!(
+        pdf_rows_checked >= compared,
+        "the PDF must actually show each unlocated finding ({pdf_rows_checked} rows over \
+         {compared} findings), or the PDF leg of this agreement is vacuous"
+    );
+}
+
+/// The downgrade is keyed on the missing location alone: either half of a location is a
+/// location, and an unlocated row already at `info` is a fixed point of the chain.
+#[tokio::test]
+async fn the_unlocated_downgrade_is_keyed_on_location_alone() {
+    let Some(corpus) = real_corpus().await else {
+        return;
+    };
+    let rule_id = corpus
+        .iter()
+        .find(|r| r.max_severity.is_none() && r.min_severity.is_none())
+        .expect("the corpus has rules that declare no bound")
+        .id
+        .0
+        .clone();
+    let only_line = Finding {
+        path: String::new(),
+        line: 9,
+        ..located(&rule_id, "high", FindingKind::Defect)
+    };
+    let only_path = Finding {
+        line: 0,
+        ..located(&rule_id, "high", FindingKind::Defect)
+    };
+    assert_eq!(bounded(&only_line, &corpus).severity, "high");
+    assert_eq!(bounded(&only_path, &corpus).severity, "high");
+    assert_eq!(
+        bounded(
+            &unlocated(&rule_id, "info", Some(FindingKind::Defect)),
+            &corpus
+        )
+        .severity,
+        "info"
+    );
 }
 
 // ── The real scan entry point ─────────────────────────────────────────────────────────────
