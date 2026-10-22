@@ -69,7 +69,7 @@ substantial pass; rules 4/5/6 reuse it.
 | 6 | UI-SHARED-PRIMITIVE-1 | H | clone detector (JSX/hook bodies) | repeated UI wiring; advisory judges "same mechanism?" | already-composed variants |
 | 4 | UI-STATE-SHAPE-1 | J+D edge | tree-sitter query | `useState<bool>` pairs set in one handler; `useEffect` calling only a setter from props/state | independent booleans |
 | 7 | STYLE-NEEDLESS-COMPLEXITY-1 | D | tree-sitter query (+ import graph for the call-site check) | negated ternaries; needless optional props | a ternary genuinely clearer un-negated |
-| 8 | UI-REACT-HOOKS-LINT-1 | D (tool) | the eslint tier (exists) | corpus rule + the two tests; detector already green | — |
+| 8 | UI-REACT-HOOKS-LINT-1 | D (tool) | the eslint tier (exists) for the violations, which the two `JAVASCRIPT-REACT-*` rules already own; a new config reader for the gap | amended 2026-10-22: the new rule owns only the lint-configuration gap (see "UI-REACT-HOOKS-LINT-1: the algorithm and its traps") | effects with complete deps, hooks at the top level; a config that enables the rules |
 
 Determinism legend (source): **D** a pass decides, no model; **H** a deterministic pass proposes
 candidates and the advisory tier re-ranks (the candidate list is never dropped); **J** judgment
@@ -1400,6 +1400,184 @@ Residual risk, left as is (all would be reported):
   stay candidates, so a bare use elsewhere is reported against the tuple as its home.
 - Python tuple-unpacking and `self.x = ...` assignments are not homes (59, 87).
 - An ECMA decorator argument such as Nest's `@Processor('orders-high')` is counted (67).
+
+## UI-REACT-HOOKS-LINT-1: the algorithm and its traps
+
+Built 2026-10-22 on top of `feat/audit-report-export` at `d8afd50`, after tracing the eslint path
+end to end (`scan_tools.rs`, `tool_provisioning.rs`, `lib.rs::eslint_floor_category`,
+`report_export::corpus_rule_for`), reading `multilang.rs` (Layer 2) and running the live eslint
+tier on this machine. This section replaces the one-line "corpus rule + the two tests; detector
+already green" in the nine-checker table above, because the premise behind that line was wrong in
+one important way.
+
+### 1. What already existed, and the split that follows
+
+The table's "detector already exists" is true of the VIOLATIONS and untrue of the rule id. Two
+corpus rules already own them:
+
+- `JAVASCRIPT-REACT-RULES-OF-HOOKS-1` and `JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1`
+  (`javascript/react/`, `enforcement = "mechanical"`, `verification = "grounded"`, one
+  `linter = "react-hooks: ..."` source each). `tool_for_linter` routes them to
+  `ScanTool::Eslint`, `selector_for_linter` yields `react-hooks/<rule>`, the provisioned eslint
+  (pinned `eslint@^9`, `eslint-plugin-react-hooks@^5`) runs with the BUNDLED flat config plus one
+  `--rule {"react-hooks/...": "error"}` per selector, `parse_eslint_json` turns each message into
+  a preview `Finding` (rule id is the raw eslint id, line from eslint, severity capped at medium,
+  `kind = Defect`, `preview_tool = "eslint"`, detail = the lint message verbatim), and
+  `eslint_floor_category` grounds the raw id back to the owning corpus rule for citation,
+  remediation and effort. The live test `live_eslint_detects_a_real_exhaustive_deps_violation`
+  runs for real on a machine with a cached workspace and passes.
+- So "every reported missing dependency or conditional hook is a finding at its line, fix = the
+  lint message, instantiated" (work order section 8, first clause) is ALREADY TRUE, and ships
+  under the two existing ids. Rule ids are forever (referenced by saved projects), so they cannot
+  be retired into a new id, and a third rule that also claimed the eslint selectors would be run
+  twice and report every violation under two ids.
+
+Decision: `UI-REACT-HOOKS-LINT-1` owns only the second clause of the work order, the CONFIGURATION
+gap ("a repo that does not enable the rules gets one finding for the gap"), and carries NO
+`linter` source. `enforcement = "architectural"`, so `group_by_tool` skips it (no ungrouped note,
+no second eslint selector). Two pinned tests hold the split: the new rule has no `linter` sources
+and `tool_for_rule` is `None`; exactly the two owners claim a `react-hooks/*` selector against the
+real corpus; and all three selected together hand eslint each owner once with nothing unrouted. A
+live test over the real corpus rules and real eslint shows one finding per violation, none under
+the new id.
+
+### 2. Why the configuration gap is a separate fact worth a finding
+
+The scan's eslint run deliberately ignores the repo's own lint setup (bundled config, `--rule`
+overrides). That makes it a good audit oracle and a poor statement about the repo: it finds the
+hook bugs whether or not the repo's own lint would ever have caught them. The gap finding is the
+other half of the picture, "your own lint would not have caught these, and will not catch the next
+one". It also names the precondition for write-time enforcement (section 6).
+
+### 3. The algorithm
+
+`crates/checks/src/react_hooks_lint_checker/` (`mod.rs` verdict and message, `config.rs` the
+configuration reader, `tests.rs`). One finding per repository at most.
+
+1. Skip every path in an auxiliary folder: test and fixture folders (`is_test_path`), `examples`,
+   `example`, `docs`, `doc`, `demo(s)`, `sample(s)`, `playground(s)`, `template(s)`, `sandbox`,
+   `vendor`, `third_party`, `node_modules`, `dist`. Their manifests and configs describe something
+   other than the project.
+2. Parse each remaining `package.json` (BOM tolerated). An unparseable one makes the repository
+   unanswered. A manifest declares React when `react` is a key of `dependencies`,
+   `devDependencies` or `peerDependencies`. No such manifest: not a React repository, nothing to
+   say.
+3. Read lint configuration: `.eslintrc`, `.eslintrc.json`, `.eslintrc.jsonc` and a manifest's
+   `eslintConfig` field are parsed leniently (comments and trailing commas, as ESLint allows) and
+   evaluated; everything else that is lint configuration is "unreadable" (section 4).
+4. Evaluate a parsed legacy config as a tree of `Part`s: `Enables`, `DoesNot`, `Unknown`.
+   `extends` entries `plugin:react-hooks/*`, `react-app`, `react-app/*`, `next`, `next/*` and
+   `airbnb/hooks` enable; `eslint:recommended`, `eslint:all`, `prettier`, `prettier/*`,
+   `plugin:prettier/recommended`, `plugin:react/*`, `plugin:@typescript-eslint/*`,
+   `plugin:jsx-a11y/*` and `plugin:import/*` are known to contain no hooks rule; any other entry is
+   `Unknown`. A `rules` entry for either hooks rule enables unless its level is off (`"off"`, `0`;
+   the array form is read by its first element; an unknown shape is `Unknown`). `overrides` are
+   evaluated recursively. A key outside `extends`/`rules`/`overrides` and a short inert list
+   (`root`, `env`, `parser`, `plugins`, `settings`, ...) is `Unknown`. Combination: any `Enables`
+   wins, else any `Unknown` wins, else `DoesNot`.
+5. Verdict: some part enables, answer enabled (silent, credited). Else anything unreadable anywhere
+   in the repository, answer unanswered (silent, not credited). Else a gap: one finding, medium
+   (the corpus ceiling brings it to low), on the first configuration read (named in the message
+   with every other one), or, when there is no ESLint configuration at all, on the line of the
+   manifest that declares `react`.
+
+### 4. Every trap found, and its guard
+
+- **Double reporting** (section 1). The new rule has no linter source and the split is pinned.
+- **Flat config is JavaScript.** `eslint.config.*` is the current ESLint default and computes its
+  configuration (imports, spreads, helper calls, `FlatCompat`). Textual search cannot say a rule
+  is NOT enabled. Guard: any flat config, `.eslintrc.js`/`.cjs`, or YAML config anywhere makes the
+  repository unanswered. Cost, stated plainly: a modern Vite or Next 15 repo with a flat config is
+  never reported. That is the largest false-negative surface of this rule. A later tree-sitter
+  reader that proves a flat config's `rules` and plugin imports statically would shrink it; it
+  needs its own safe twins and is not built.
+- **Bundled presets.** `next`, `react-app`, Expo, React Native, Remix, many team configs and
+  `eslint-config-airbnb/hooks` include the hooks rules without naming them. Guard: an `extends`
+  entry is only "without hooks" if it is on the short known list; every other preset, and every
+  relative path, is `Unknown`.
+- **Config hidden in the manifest.** A dependency on `eslint-config-*` (except
+  `eslint-config-prettier`, which only switches rules off), `@scope/eslint-config[-*]`,
+  `eslint-plugin-react-hooks` itself, or another linter (Biome, oxlint, xo, rome, standard,
+  neostandard, deno), and a script that gives ESLint a config path (`-c`, `--config`,
+  `--no-eslintrc`) or runs Biome/oxlint, each make the repository unanswered.
+- **Another linter's config file** (`biome.json(c)`, `.oxlintrc.json`, `oxlint.json`,
+  `rome.json`): unanswered. These tools have their own hooks rules.
+- **Auxiliary folders** (section 3, step 1): an example app's config neither enables nor hides the
+  project's gap.
+- **Absence needs a complete scan.** "No configuration enables the rules" is false if the
+  configuration is among the files a truncated scan dropped. `RULES_NEEDING_COMPLETE_SCAN` now
+  holds both this rule and dead code; the rule is withheld and falls to the incomplete-scan
+  disclosure. Pinned end to end with a 20,000-file repo.
+- **Ledger honesty.** `config_unsatisfied_for` is true exactly for "unanswered", so the scan ledger
+  does not credit a clean detector run for a repository the checker could not read (a flat-config
+  repo), while an enabled configuration and a gap are both real, creditable answers. Pinned in the
+  checks crate and end to end through `audit_repos`.
+- **File feed.** The checker reads dotfiles (`.eslintrc.json`) and `package.json`. The scan feed
+  admits dotfiles; the Layer-2 runner and the CI binary load only files matching a checker's
+  interest globs, so every shape the checker reads is in `INTEREST_GLOBS` (pinned, plus a
+  `camerata-check` CLI test that exercises the dotfile through the real file walk).
+- **Partial enablement.** One rule on, the other missing or off: not reported. Reporting it needs a
+  judgment about what the team meant to turn off. False negative by design.
+- **Version drift.** `eslint-plugin-react-hooks` 6 and 7 add many React Compiler rules to the
+  `recommended` preset and 7 cannot be registered by the bundled flat config (the W30 failure).
+  The message therefore tells the client to enable the two named rules, not "the recommended
+  preset", and Camerata's own tier stays pinned to `^5`.
+
+### 5. Tests, by name
+
+Checker (`react_hooks_lint_checker/tests.rs`, 48): positives for no configuration at all (anchored
+on the `react` line), a legacy JSON config without the rules (named, line 1), an `eslintConfig`
+field (anchored on the field), JSON with comments and trailing commas, an extensionless
+`.eslintrc`, a registered plugin with no rules enabled, both rules off, overrides that do not
+enable, `react` in dev and peer dependencies, a monorepo package, several non-enabling configs
+(one finding naming each), a BOM, `eslint-config-prettier` alone, and an example-folder config.
+Safe twins: enabled by `plugin:react-hooks/recommended` (string and array), by either rule in
+`rules` in every severity spelling, by `react-app`, `next`, `next/core-web-vitals`,
+`airbnb/hooks`, in an override, and in `eslintConfig`; one enabled outweighs one not; flat configs
+in six extensions, `.eslintrc.js/.cjs/.yml/.yaml`, JSON that does not parse, unseen presets,
+unknown keys, an unreadable severity, an invalid manifest, ten manifest dependencies and four
+scripts that hide the setup, another linter's config files, a Node API, no manifest, React only in
+example/fixture/docs/template/node_modules folders, a manifest that only names `react` in a value;
+plus the lenient JSON reader, interest globs, determinism, no dashes or internal vocabulary, and
+`runs_at_write_time` / `config_unsatisfied_for`.
+Wiring: registry (`arch_checker`), write-time runner never reports it while the scan tier does
+(`arch_check_runner`), `audit_architectural` seam and complete-scan withholding and ledger credit
+(`onboard/architectural.rs`), proposed for React on JS, TS and Next and not for a Node API, Vue
+or Python repo, always beside the two owner rules (`onboard/propose.rs`), six end-to-end scans
+through `audit_repos` (`tests/react_hooks_lint_scan_e2e.rs`), the CI binary
+(`camerata-check/tests/cli_integration.rs`).
+Lint violations (`scan_tools.rs`): the no-second-route pin, `parse_eslint_json` on the real
+message shapes (line, message, medium, Defect, grounds to an owner), and a LIVE test over the
+real corpus rules and real eslint: a conditional hook and a missing dependency each reported once
+at their line, a correct file silent, nothing under the new id. It skips (never fails, never
+provisions) on a machine without a cached eslint workspace with the hooks plugin; this machine has
+one, so it ran.
+
+### 6. The Layer-2 decision
+
+Two different things, two answers.
+
+- The VIOLATIONS are caught at write time already, by the repo's own tooling: the Layer-2
+  `JsCheckRunner` runs `npm run lint` in the worktree, which uses the repo's own configuration. It
+  catches a conditional hook or a missing dependency if, and only if, the repo's lint enables the
+  rules. Camerata's provisioned eslint stays a scan-time preview: it is a network `npm install`
+  into the data directory, it ignores the repo's config, and adding it to the per-write loop would
+  bounce an agent on code (and noise rules from the bundled baseline) it did not write.
+- The GAP checker is a scan and CI rule (`runs_at_write_time = false`). A bounce cannot be
+  satisfied by the agent: closing the gap installs a dependency and chooses its version, which
+  `ORCH-TRAINING-CUTOFF-1` routes to a human, and a bounce on every React task is about something
+  the task did not touch. The gap finding is exactly the check that the `npm run lint`
+  precondition holds.
+
+### 7. Known false-negative limits (stated plainly)
+
+Flat configs and every other JavaScript or YAML configuration are never reported; partial
+enablement is not reported; severity (`warn` versus `error`) and whether CI runs lint are not
+inspected, although the work order lists CI; a rule enabled in an override for a narrow file set
+counts as enabled; a monorepo is judged as one repository (one enabling or unreadable config
+anywhere silences the whole); a manifest whose lint setup lives in a parent directory of the
+scanned root is invisible; a repository linting only through Biome or oxlint is silent, not
+checked for their equivalent rules.
 
 ## Scope note
 Dead-code, one-import-path, shared-constant, state-shape, needless-complexity are **deterministic**

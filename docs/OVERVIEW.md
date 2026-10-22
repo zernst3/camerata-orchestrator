@@ -32,7 +32,8 @@ THE CORPUS + ITS ENFORCEMENT
   rules         the ~417-rule corpus loader + schema + corpus gates + the CORPUS_FRESHNESS watermark
                 + per-rule `version` and the content-hash lock (CORPUS_LOCK.toml)
   checks        the deterministic CHECKERS: arch/import/layering/RLS/weak-rand/one-import-path/
-                dead-code/… + the AST extractors (extract::ecma|python|rust_syn incl. `mod_decls`
+                dead-code/react-hooks-lint (does the project's OWN eslint config enable the hooks
+                rules; reads config, runs no eslint)/… + the AST extractors (extract::ecma|python|rust_syn incl. `mod_decls`
                 and `computed_loads`, resolver, shared `paths`, and the literal index behind the
                 cross-file ARCH-SHARED-CONSTANT-1 check) + integration gate
   linter-registry  stack→linter mapping
@@ -65,6 +66,9 @@ repo ─▶ ONBOARD/DETECT        stack detection (languages, frameworks) → wh
                                   (the architectural tier also gets a separate reference-text
                                   list: HTML, components, docs; never the AI digest or the floor)
           • external-tool preview  eslint / ruff / semgrep / clippy (SARIF/JSON)        no model
+                                  (React Hooks: the violations come from here, under the two
+                                  JAVASCRIPT-REACT-* rules; whether the repo's own lint config
+                                  turns the rules on is the checker UI-REACT-HOOKS-LINT-1)
           • dependency audit       osv-scanner over lockfiles → CVEs (+ fixed version)  no model
           • semantic AI audit      the LLM pass over the repo, grounded in the corpus    model
           • integration gate       cross-component seam reconciliation (assembled tree)  no model
