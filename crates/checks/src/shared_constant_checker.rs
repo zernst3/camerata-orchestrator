@@ -374,6 +374,17 @@ const SQL_CALLEES: &[&str] = &[
     "orderBy", "groupBy",
 ];
 
+/// DOM lookups whose string argument is an element id, a class name or a selector.
+const DOM_QUERY_CALLEES: &[&str] = &[
+    "getElementById",
+    "querySelector",
+    "querySelectorAll",
+    "closest",
+    "matches",
+    "getElementsByClassName",
+    "getElementsByName",
+];
+
 /// V11: calls that subscribe to, or emit, an event.
 const EVENT_CALLEES: &[&str] = &[
     "addEventListener",
@@ -467,6 +478,12 @@ fn context_disqualifies(shape: Shape, value: &str, ctx: &LiteralCtx) -> bool {
     }
     // Scope decision B: a Django URL name. A route passed to `redirect('/login')` is a route.
     if shape != Shape::Route && in_callees(URL_NAME_CALLEES) {
+        return true;
+    }
+    // DOM protocol: an element id or selector, and a jQuery selector (`#id`, `.class`, `[attr]`).
+    if in_callees(DOM_QUERY_CALLEES)
+        || (matches!(callee, "$" | "jQuery") && value.starts_with(['#', '.', '[']))
+    {
         return true;
     }
     // V9 logger and span names, V10 query fragments.
@@ -3829,6 +3846,75 @@ mod tests {
             ("src/b.ts", "cache.set('idempotency-key', v);\n"),
         ]);
         assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
+    // ── DOM lookups ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn dom_element_ids_and_selectors_are_not_domain_values_case_09() {
+        let v = run_pairs(vec![
+            (
+                "src/a.ts",
+                "export const a = document.getElementById('main-nav');\n",
+            ),
+            (
+                "src/b.ts",
+                "export const b = document.getElementById('main-nav');\n",
+            ),
+        ]);
+        assert!(v.is_empty(), "09: {v:#?}");
+        for call in [
+            "document.getElementById('main-nav')",
+            "document.querySelector('main-nav')",
+            "document.querySelectorAll('main-nav')",
+            "el.closest('main-nav')",
+            "el.matches('main-nav')",
+            "document.getElementsByClassName('main-nav')",
+            "document.getElementsByName('main-nav')",
+            "$('main-nav')",
+            "jQuery('main-nav')",
+        ] {
+            let first = format!("{call};\n");
+            let other = "pick('main-nav');\n";
+            let v = run_pairs(vec![
+                ("src/a.ts", &first),
+                ("src/b.ts", other),
+                ("src/c.ts", other),
+            ]);
+            // `$(..)` / `jQuery(..)` guard only selector-shaped first arguments (`#id`, `.class`,
+            // `[attr]`), which cannot have a domain shape anyway; a bare name is an ordinary call.
+            let jquery = call.starts_with('$') || call.starts_with("jQuery");
+            assert_eq!(v.is_empty(), !jquery, "{call}: {v:#?}");
+        }
+        // The control: the same text through an ordinary call is a domain value.
+        let v = run_pairs(vec![
+            ("src/a.ts", "pick('main-nav');\n"),
+            ("src/b.ts", "pick('main-nav');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
+    #[test]
+    fn jquery_selector_arguments_are_dom_lookups() {
+        for (value, selector_like) in [
+            ("#main-nav", true),
+            (".main-nav", true),
+            ("[main-nav]", true),
+            ("main-nav", false),
+        ] {
+            for callee in ["$", "jQuery"] {
+                let ctx = LiteralCtx {
+                    callee: Some(callee.to_string()),
+                    callee_chain: Some(callee.to_string()),
+                    ..LiteralCtx::default()
+                };
+                assert_eq!(
+                    context_disqualifies(Shape::Token, value, &ctx),
+                    selector_like,
+                    "{callee}({value})"
+                );
+            }
+        }
     }
 
     // ── contract ───────────────────────────────────────────────────────────────

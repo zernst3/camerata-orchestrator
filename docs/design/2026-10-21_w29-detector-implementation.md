@@ -1300,6 +1300,11 @@ Scope decisions:
   join the checker's interest globs.
 - **D. No change.** A router definition repeated in a `<Link to>` / `href` stays flagged (06, 82).
 
+DOM lookups (09): string arguments of `getElementById`, `querySelector`, `querySelectorAll`,
+`closest`, `matches`, `getElementsByClassName` and `getElementsByName` are not domain values, and
+a `$()` / `jQuery()` first argument starting with `#`, `.` or `[` is a selector (such a string has
+no domain shape, so that half is a backstop).
+
 Cheap protocol tokens added from the review's plausible list: cipher and digest names (`aes-`,
 `sha-`, `rsa-`, `hmac-`, ...), model identifiers of the common hosted families (`gpt-`, `claude-`,
 `gemini-`, ...), Node `ERR_*` codes, date-format tokens (`hh:mm:ss`, `yyyy-mm-dd`), cloud regions
@@ -1314,7 +1319,7 @@ Residual risk, left as is (all would be reported):
   shared between a slice and a middleware (38), react-query keys (39), Kubernetes label keys (40),
   Celery task names (41), clap argument names (42), Rust match-arm strings against a variant name
   (43), GraphQL documents (45), vendor analytics events (47), Django `choices` tuples against a
-  filter (48), `getElementById` ids (09), Sentry tags beyond `setTag` (61), and `ab-1`-shaped
+  filter (48), Sentry tags beyond `setTag` (61), and `ab-1`-shaped
   values with a digit segment (95).
 - A `typeof NAME` type derived in another file from an `as const` tuple (53): the tuple's members
   stay candidates, so a bare use elsewhere is reported against the tuple as its home.
