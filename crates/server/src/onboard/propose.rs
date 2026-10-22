@@ -1487,6 +1487,76 @@ mod tests {
         }
     }
 
+    /// `ARCH-SINGLE-SOURCE-LOGIC-1` and `ARCH-NAMING-ONE-CONCEPT-1` (Wave C) live in the
+    /// `universal` domain, bound to every repo by id with no stack match. The clone detector
+    /// reads TypeScript, JavaScript, Python and Rust, so each of those stacks must be handed
+    /// both rules, pre-checked (a policy rule is auto-recommended).
+    #[tokio::test]
+    async fn clone_logic_and_naming_rules_are_proposed_for_typescript_python_and_rust_stacks() {
+        for id in ["ARCH-SINGLE-SOURCE-LOGIC-1", "ARCH-NAMING-ONE-CONCEPT-1"] {
+            for (repo, path) in [
+                ("acme/ts-app", "src/app.ts"),
+                ("acme/js-app", "src/app.js"),
+                ("acme/py-app", "app/main.py"),
+                ("acme/rs-app", "src/main.rs"),
+            ] {
+                let repo_files = files(&[(path, "x")]);
+                let stack = detect_stack(repo, &repo_files);
+                let domains = domains_for_stack(&stack);
+                let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+                let rule = proposed
+                    .iter()
+                    .find(|r| r.id == id)
+                    .unwrap_or_else(|| panic!("{id} must be proposed for {repo}"));
+                assert_eq!(rule.domain, "universal");
+                assert!(
+                    rule.recommended,
+                    "{id} {repo}: suggested, not merely available"
+                );
+                assert!(
+                    rule.is_auto_recommended,
+                    "{id} {repo}: a policy rule is still auto-recommended (pre-checked)"
+                );
+                assert_eq!(rule.repos, vec![repo.to_string()]);
+            }
+        }
+    }
+
+    /// `UI-SHARED-PRIMITIVE-1` (Wave C) lives in the `ui` domain, which a React stack arms. The
+    /// fixture is the `src/app.jsx` + React manifest every `ui` witness uses: a `.jsx` file in a
+    /// React package must be handed the rule, pre-checked. A Python-only repo must not be.
+    #[tokio::test]
+    async fn ui_shared_primitive_is_proposed_for_a_react_jsx_stack_and_not_for_python() {
+        const ID: &str = "UI-SHARED-PRIMITIVE-1";
+        let repo = "acme/web";
+        let repo_files = files(&[
+            ("src/app.jsx", ""),
+            ("package.json", r#"{"dependencies":{"react":"18.2.0"}}"#),
+        ]);
+        let stack = detect_stack(repo, &repo_files);
+        let domains = domains_for_stack(&stack);
+        assert!(domains.contains(&"ui".to_string()), "{domains:?}");
+        let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+        let rule = proposed
+            .iter()
+            .find(|r| r.id == ID)
+            .unwrap_or_else(|| panic!("{ID} must be proposed for a React stack"));
+        assert_eq!(rule.domain, "ui");
+        assert!(rule.recommended, "suggested, not merely available");
+        assert!(rule.is_auto_recommended, "a policy rule is pre-checked");
+        assert_eq!(rule.repos, vec![repo.to_string()]);
+
+        let py_files = files(&[("app/main.py", "print('hi')")]);
+        let stack = detect_stack("acme/py-app", &py_files);
+        let domains = domains_for_stack(&stack);
+        let proposed = propose_corpus_rules(&[("acme/py-app".to_string(), domains)]).await;
+        let rule = proposed.iter().find(|r| r.id == ID);
+        assert!(
+            rule.is_none_or(|r| !r.recommended),
+            "a Python-only repo must not have {ID} suggested: {rule:?}"
+        );
+    }
+
     /// req_a6: a plain Rust + Axum + Tokio + sqlx service must arm `rust:axum`, `rust:tokio`
     /// and `rust:sqlx` — the three Rust families the audit named, 15 rules between them.
     #[test]

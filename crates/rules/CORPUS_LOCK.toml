@@ -28,6 +28,7 @@
 "ARCH-IDEMPOTENCY-KEYS-1" = { version = 1, hash = "sha256:bccde395230f6e470af422bcf3dbef7eb503f2e0064efbf2b05c12f5dab8f312" }
 "ARCH-MIDDLEWARE-FIRST-1" = { version = 1, hash = "sha256:534121d7f0a55a47a6f6010cb9e09afc7a49035253878fa3d29656992e1978d4" }
 "ARCH-MONOLITH-FIRST-1" = { version = 1, hash = "sha256:49174c7269263c9437fcfc426319bbdd3fccfe67854bc4ed4dd587a6abe87c8d" }
+"ARCH-NAMING-ONE-CONCEPT-1" = { version = 1, hash = "sha256:9c4d6c3ff04b922afa6bd7b0ac96a49466c29c2dd20d7dafca29918ff16b8124" }
 "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1" = { version = 1, hash = "sha256:8272b3f165822e94006551a79bbfb85e384c198a939c7e5b4040c115e992c772" }
 "ARCH-NO-LEAKY-ERROR-DETAILS-1" = { version = 1, hash = "sha256:635f28288b8e4c4f144738b8633de1a3b6001e55b30c9139ff7baffb517bb6bf" }
 "ARCH-NO-PAN-STORAGE-1" = { version = 1, hash = "sha256:94f6daaad69c462ef3e1308784d90bf59af8c79e5ffaa81b8d8ccc8297d55ceb" }
@@ -49,6 +50,7 @@
 "ARCH-SERVER-COMPUTED-AMOUNT-1" = { version = 1, hash = "sha256:affaf83430be55a72a73f0dc0e29043d499c85d606aa5834526f771827fe887f" }
 "ARCH-SERVICE-DI-1" = { version = 1, hash = "sha256:2a8873c6866fc35559b790a1e101e9d3b17cfa2a8b12d6508ac7353ee80be547" }
 "ARCH-SHARED-CONSTANT-1" = { version = 3, hash = "sha256:be89f7318ed14f7b90ff744f51ffeaf29b77d5baf210621574b8e25977de3640" }
+"ARCH-SINGLE-SOURCE-LOGIC-1" = { version = 1, hash = "sha256:7da5e17b693cb75fbaaa1c69cfe944527d38969448aabb5dc0acaf59303c3fb9" }
 "ARCH-STRICT-LAYERING-1" = { version = 1, hash = "sha256:4681dc846dc350c4b92cc0f6e6ef3335fc7b3aca4d34e4e2e4172b184d9b7457" }
 "ARCH-STRUCTURED-ERRORS-1" = { version = 1, hash = "sha256:3f1e4cde6939391a14f5a265d2b9c75c0a2ea53dde018206fff7b0253fd0f956" }
 "ARCH-TOKEN-REFRESH-ROTATION-1" = { version = 1, hash = "sha256:5d7ab95aebda6b9d12a62198d5525f7c474f0553f37436b76a72cdce02de315d" }
@@ -430,4 +432,5 @@
 "UI-CONSENT-GATED-1" = { version = 1, hash = "sha256:e6c3f5d7b6515134c550f1a6e56e1eb17cb2639e521e882fa7c9a85ad52ca2f4" }
 "UI-IMAGE-COMPONENT-1" = { version = 1, hash = "sha256:374657d6779df5537116b0c280b32408e27c20129442aaff9f0cc8013445a157" }
 "UI-QUERY-LIBRARY-1" = { version = 1, hash = "sha256:5ab942c313ed9523997f1ca14a68129b7564b0f4d59173f7edd11bf6277102f7" }
+"UI-SHARED-PRIMITIVE-1" = { version = 1, hash = "sha256:49299df554363a30fa8d0699fb5b8edbf503a6f89fdcac6e47bc9fd012872296" }
 "UI-UTC-DATES-1" = { version = 1, hash = "sha256:4732b95885a63d6de9c2fe542cdd92aedd4532b1849e7a319a4ecf670efa43e4" }

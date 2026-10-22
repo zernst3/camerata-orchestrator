@@ -1,0 +1,56 @@
+id = "ARCH-NAMING-ONE-CONCEPT-1"
+version = 1
+title = "A helper that does one thing exists once under one name that says what it does, and two modules do not each carry their own copy of it under different names"
+domain = "universal"
+layer = "universal"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+# Severity ceiling, transcribed from the rule's own framing: the same helper under two names is a
+# naming and maintenance problem, not a live fault. The finding states whether the bodies agree
+# or already differ, but the subject of the rule is the name, so `low` is both the usual and the
+# top severity.
+max_severity = "low"
+default = true
+# `policy`, not `grounded`: the convention that one concept has one name is deliberate project
+# policy, and no external authority states the cross-module, reviewed form specified here.
+# Related controls (not citations, and deliberately not in `[[sources]]`): ESLint's `no-dupe-*`
+# rules and similar duplicate-declaration checks are intra-file and compare names, not bodies;
+# token clone detectors such as jscpd report repeated code without asking whether the names say
+# the same thing. None of them states this rule. Only the owner sets `verified`.
+verification = "policy"
+qualifies = "A deterministic search followed by a reviewed assessment of the listed code, so the result is a judgment on top of a mechanical search and not a purely mechanical check. The search looks for a stretch of at least 60 tokens shared by two or more files of the same language family, with local names, property names, literal values and operator spellings set aside, in which every copy is at least 90% of one whole top-level function. The functions must be declared under names that carry different concepts: each name is split into words (on underscores, hyphens and capital letters), a leading verb such as get, fetch, format, build or to and a trailing word such as helper or util are set aside, and two names differ only when the remaining words differ, so getUser and fetchUser count as one name and formatPrice and formatMoney count as two. Default exports and anonymous functions carry no declared name and are not counted. A function that calls another copy through an import is a wrapper and not a copy, and is not reported. When two files share two or more such functions, the finding is one module-level finding that lists every overlapping pair, so a duplicated utility module is reported once with the functions that overlap and not with a guess at purpose from folder names. Each candidate is then assessed on the listed code alone: do the differently named functions implement the same concept (one helper that should have one name), as opposed to two concepts that happen to share a body or an adapter that renames at a boundary? Only a candidate assessed as the same concept is reported, and one the assessment is unsure about is not. The bodies are also compared token for token, and the finding says whether they currently agree and names where they differ. Misleading names (a function whose name says something it does not do) are not detected, and neither are two helpers for one concept whose bodies differ in structure. Not reported: names that differ only by verb, test code, generated code, vendored code, minified code, migrations and seeds, translation catalogs and data tables, repetition inside a single file, and functions shorter than 60 tokens. Candidates beyond the 160 most significant in one scan are counted and disclosed but not assessed. When the assessment cannot run (no model available), candidates are reported as not assessed, never as clean."
+
+[[sources]]
+url = "docs/design/2026-10-21_w29-detector-implementation.md"
+title = "Design: the W29 detector layer, ARCH-NAMING-ONE-CONCEPT-1: the algorithm and its traps"
+
+[[sources]]
+url = "CORPUS_WORK_ORDER_CONSISTENCY_RULES.md"
+title = "Corpus work order: consistency rules, section 5: one concept has one name"
+
+[[sources]]
+url = "docs/OVERNIGHT_DECISIONS.md"
+title = "Decisions log, DECISIONS MADE, 2026-10-21: the clone detector and the three rules built on it are in V1 scope"
+
+[decision]
+question = "How does the project name a helper that several modules need?"
+default = "one-concept-has-one-name"
+why = "A helper that exists under two names, in one module or in two, leaves every reader asking whether the two do the same thing, and every change has to be made twice or risks making them differ. A single implementation under the name that says what it does means a search for the name finds the one definition, new code reuses it instead of writing a third copy, and a fix lands everywhere at once."
+
+[[option]]
+id = "one-concept-has-one-name"
+label = "Each helper exists once, under one name that says what it does, and modules do not carry their own copies of it"
+directive = "Give a helper that does one thing a single implementation under a single name that says what it does, and import it wherever it is needed. Do not write a second helper with the same body under a different name, and do not keep two utility modules that each hold their own copy of the same functions. When duplicates already exist, keep one, re-export it from the old location while callers move, and delete the other."
+remediation = """
+Keep one implementation, under the name that says what it does. Re-export it from the old location while callers move to it, then delete the other copy. Where the listed bodies already differ, decide which version is correct before merging them. Verify by searching the repository for both names: only one definition should remain, and the project should still build and its tests pass.
+"""
+effort = "low"
+why = "Keeping one implementation and re-exporting it during the move is a small, mechanical edit. Afterwards a search for the helper finds one definition, and a fix cannot be applied to one copy and forgotten in the other."
+
+[[option]]
+id = "the-same-helper-exists-under-several-names"
+violates = true
+label = "The same helper exists under several names, in one module or in different ones"
+directive = "Write a new helper for each module that needs the behaviour, naming it as that module sees fit."
+why = "When one helper exists under two names, a reader cannot tell whether the two behave the same, so people copy a third version or fix one and miss the other. The bodies drift apart without any error to show for it, and code that should behave identically starts to differ because it happens to call a different name."
