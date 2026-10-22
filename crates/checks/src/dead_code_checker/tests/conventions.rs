@@ -464,3 +464,26 @@ fn next_src_layout_special_files_are_never_candidates() {
     ]);
     assert_silent(&f);
 }
+
+#[test]
+fn tanstack_router_route_files_are_loaded_by_the_file_based_router() {
+    // The generated route tree is often gitignored, so the routes cannot rely on it.
+    for dep in ["@tanstack/react-router", "@tanstack/router-plugin"] {
+        let manifest = format!(r#"{{"private":true,"dependencies":{{"{dep}":"1"}}}}"#);
+        let f = files(vec![
+            ("package.json", manifest.as_str()),
+            ("src/routes/__root.tsx", "export const Route = 1;\n"),
+            ("src/routes/about.tsx", "export const Route = 1;\n"),
+            (
+                "src/routes/_authenticated/dashboard.settings.tsx",
+                "export const Route = 1;\n",
+            ),
+        ]);
+        assert_silent(&f);
+    }
+    let without = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        ("src/routes/about_screen.tsx", "export const Route = 1;\n"),
+    ]);
+    assert_flags_only(&without, "src/routes/about_screen.tsx");
+}

@@ -27,6 +27,7 @@ struct Frameworks {
     gatsby: bool,
     docusaurus: bool,
     ember: bool,
+    tanstack_router: bool,
     vercel: bool,
     /// `wrangler.toml` or `firebase.json`: `functions/` is loaded by the platform.
     cloud_functions: bool,
@@ -210,6 +211,12 @@ impl<'a> Conventions<'a> {
                 gatsby: dep(&|k| k == "gatsby"),
                 docusaurus: dep(&|k| k == "@docusaurus/core"),
                 ember: dep(&|k| k == "ember-source" || k == "ember-cli"),
+                tanstack_router: dep(&|k| {
+                    k == "@tanstack/react-router"
+                        || k == "@tanstack/router-plugin"
+                        || k == "@tanstack/router-cli"
+                        || k == "@tanstack/start"
+                }),
                 vercel: has(&dir, &|n| n == "vercel.json"),
                 cloud_functions: has(&dir, &|n| n == "wrangler.toml" || n == "firebase.json"),
             };
@@ -304,6 +311,10 @@ impl<'a> Conventions<'a> {
         }
         // Ember's resolver loads routes, controllers, services and components under `app/` by
         // name from the template or the router, never by import.
+        // TanStack Router's file-based routes: every file under the routes folder.
+        if fw.tanstack_router && (under("src/routes/") || under("app/routes/")) {
+            return true;
+        }
         if fw.ember && under("app/") {
             return true;
         }
