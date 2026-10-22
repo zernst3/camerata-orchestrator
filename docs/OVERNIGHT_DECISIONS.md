@@ -32,11 +32,27 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-21 (Zach, V1 scope): **Camerata V1** = the version that runs the first paid client
+  inspection. Scope = EVERYTHING already in `docs/plans/2026-10-19_MASTER-SEQUENCE.md` (all W29
+  rules, W27, item-21 follow-ups, 19e/19f/20) plus the graded accuracy tests, which are the go
+  signal for outreach. NO new scope except fixes for bugs or real product defects. The rule
+  `stages` field is explicitly out of V1. Development is not the outreach blocker (website and
+  marketing materials are), so finishing the phased work is fine.
+
 - 2026-10-21 (Opus, on the Fable review's evidence): ARCH-DEAD-CODE-1 does NOT run at the Layer-2
   write-time gate in v1 (new `ArchChecker::runs_at_write_time`, false for dead-code). A story may
   legitimately end with scaffolding or an externally consumed file, and a bounce would teach agents
   to paste `keep-file:` markers. Scan tier and CI only. Re-evaluate once scan-tier false-positive
-  data exists.
+  data exists. Zach agreed (2026-10-21): dead-code belongs in the inspection, not during
+  development; a future home is Layer 4 or a per-file override comment (the `keep-file:` marker,
+  guard G12, already exists). Not needed now.
+  Design debt noted (Zach asked how "inspection-only" is decided): the switch is a code-level
+  `ArchChecker::runs_at_write_time()`, invisible in the corpus and UI, while the opposite control
+  ("leave out of inspection") lives elsewhere. When a second rule needs stage control, promote both
+  to one corpus field (e.g. `stages = ["inspection", "ci", "write-time"]`) read by every runner,
+  covered by CORPUS_LOCK like any other rule field. Zach (2026-10-21): this is the target design
+  for Camerata, documented in `docs/design/2026-10-21_rule-stages-target-design.md`; future
+  phase, NOT V1.
 
 - 2026-10-21 (Opus, within Zach's "narrow" ruling, false-positive-safe narrowings after the
   Fable review of ARCH-SHARED-CONSTANT-1): N1 rates require >= 2 significant digits (keeps 0.12,
