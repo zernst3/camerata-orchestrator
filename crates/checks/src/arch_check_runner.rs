@@ -71,6 +71,7 @@ impl CheckRunner for NativeArchCheckRunner {
         // architectural rule's checker never even sees its interest files.
         let armed_checkers: Vec<_> = checkers
             .iter()
+            .filter(|c| c.runs_at_write_time())
             .filter(|c| c.rule_ids().iter().any(|id| armed.contains(id)))
             .collect();
 
@@ -451,5 +452,79 @@ mod tests {
             .collect();
         got.sort();
         assert_eq!(got, ["bin/cli.js", "src/bin/tool.rs"]);
+    }
+
+    // ── write-time opt-out: ARCH-DEAD-CODE-1 is a scan and CI rule only ───────
+
+    fn write_dead_code_tree(dir: &Path) {
+        for (rel, body) in [
+            ("package.json", r#"{"private":true}"#),
+            ("src/app.ts", "export {};\n"),
+            ("src/scaffold_unwired.ts", "export const s = 1;\n"),
+        ] {
+            let path = dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn the_write_time_runner_never_reports_the_dead_code_rule_but_the_scan_tier_does() {
+        let dir = tmpdir();
+        write_dead_code_tree(dir.path());
+        let role = role_armed_with(&["ARCH-DEAD-CODE-1"]);
+
+        // Layer 2: a story may legitimately end with scaffolding nothing imports yet.
+        let outcome = NativeArchCheckRunner::new()
+            .check(&role, dir.path())
+            .await
+            .expect("must not err");
+        assert!(outcome.violated.is_empty(), "{outcome:?}");
+        assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
+
+        // The same tree through the registry the scan and the CI binary use: still reported.
+        let checker = all_checkers()
+            .into_iter()
+            .find(|c| c.rule_ids().contains(&"ARCH-DEAD-CODE-1"))
+            .expect("registered");
+        assert!(!checker.runs_at_write_time());
+        let files = collect_interest_files(dir.path(), checker.interest_globs());
+        let view = RepoView {
+            spec: "t/r",
+            files: &files,
+        };
+        let vs = checker.check(&view);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].file, "src/scaffold_unwired.ts");
+    }
+
+    #[tokio::test]
+    async fn a_write_time_checker_armed_beside_the_opted_out_one_still_runs() {
+        let dir = tmpdir();
+        write_dead_code_tree(dir.path());
+        write_migration(
+            dir.path(),
+            "20240101000000_init.sql",
+            "create table public.profiles (id uuid primary key);\n",
+        );
+        let role = role_armed_with(&["ARCH-DEAD-CODE-1", RLS_ENABLED]);
+        let outcome = NativeArchCheckRunner::new()
+            .check(&role, dir.path())
+            .await
+            .expect("must not err");
+        assert_eq!(outcome.violated, vec![RuleId(RLS_ENABLED.to_string())]);
+    }
+
+    #[test]
+    fn every_other_registered_checker_still_runs_at_write_time() {
+        for checker in all_checkers() {
+            let is_dead_code = checker.rule_ids().contains(&"ARCH-DEAD-CODE-1");
+            assert_eq!(
+                checker.runs_at_write_time(),
+                !is_dead_code,
+                "{:?}",
+                checker.rule_ids()
+            );
+        }
     }
 }

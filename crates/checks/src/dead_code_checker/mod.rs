@@ -62,6 +62,13 @@
 //! - A framework the convention list does not know is covered by the mention guard alone, and a
 //!   convention-loaded file there is the one residual true false positive; `keep-file:` bounds it.
 //!
+//! # Not a write-time rule
+//!
+//! [`ArchChecker::runs_at_write_time`] is `false`: the Layer-2 gate never runs this checker, so
+//! an agent is never bounced for a file it has not wired in yet. The scan and the standalone CI
+//! binary run it. Decision (orchestrator, 2026-10-21): a story may legitimately end with
+//! scaffolding, and a bounce would teach agents to paste `keep-file:` markers.
+//!
 //! # Severity
 //!
 //! Always [`SEVERITY_MEDIUM`]: the checker contract forbids emitting `low`. The corpus rule
@@ -184,6 +191,13 @@ impl ArchChecker for DeadCodeChecker {
 
     fn check(&self, repo: &RepoView<'_>) -> Vec<ArchViolation> {
         analysis::analyze(repo.files)
+    }
+
+    /// A scan and CI rule only. A story may legitimately end with scaffolding that nothing
+    /// imports yet, and a write-time bounce would teach agents to paste `keep-file:` markers
+    /// to make the rule go away instead of wiring or deleting the file.
+    fn runs_at_write_time(&self) -> bool {
+        false
     }
 
     /// The context globs make [`crate::arch_checker::checker_applies`] true for a repository

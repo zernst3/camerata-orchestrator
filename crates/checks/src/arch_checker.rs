@@ -107,6 +107,16 @@ pub trait ArchChecker: Send + Sync {
         false
     }
 
+    /// Whether the Layer-2 write-time gate ([`crate::arch_check_runner::NativeArchCheckRunner`])
+    /// may run this checker against an agent's worktree. The default is `true`. A checker that
+    /// returns `false` is a SCAN and CI rule only: a violation there would bounce work that is
+    /// legitimately unfinished or that ends in scaffolding, and a bounce teaches an agent to
+    /// silence the rule rather than satisfy it. The scan ([`all_checkers`] via the server's
+    /// architectural tier) and the standalone CI binary ignore this flag.
+    fn runs_at_write_time(&self) -> bool {
+        true
+    }
+
     /// D3 (config-aware degradation, `docs/design/2026-07-27_ast-extractor-layer.md` §0):
     /// whether THIS checker needs `.camerata/architecture.toml` config it does NOT find in
     /// `repo` to answer its rule ids deterministically. Returns `true` only for a
