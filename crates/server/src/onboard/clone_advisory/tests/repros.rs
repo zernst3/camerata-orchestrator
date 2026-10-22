@@ -65,7 +65,7 @@ fn with_callee(func: &str, callee: &str) -> String {
     )
 }
 
-fn finding_for<'a>(outcome: &'a JudgeOutcome, rule: CloneRule) -> &'a Finding {
+fn finding_for(outcome: &JudgeOutcome, rule: CloneRule) -> &Finding {
     outcome
         .findings
         .iter()

@@ -149,8 +149,8 @@ fn logic_detail(c: &Candidate, concept: &str) -> String {
         // itself is the same, and what differs is named after it.
         format!(
             "The same decision is written in {n} places. {block}. The operators, numbers and \
-             tested properties are the same in every copy, and the copies differ only where \
-             {}. Implement it once and import it, so the copies cannot drift. Verify by diffing \
+             tested properties are the same in every copy, and the copies differ only in these \
+             places: {}. Implement it once and import it, so the copies cannot drift. Verify by diffing \
              the listed lines: the only differences are variable names and the differences \
              described here.",
             disagreement_clause(&c.facts.disagreements)

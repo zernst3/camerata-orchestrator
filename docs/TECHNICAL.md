@@ -2110,20 +2110,21 @@ shape is three layers, and the first two are deterministic and token-free:
 Cost controls: batches of 16 (`ceil(judged / 16)` calls, at most 10 per rule), at most 160 judged
 candidates per rule per scan with the overflow counted and disclosed in one `not_assessed` row, a
 content-keyed verdict cache (`VerdictCache`, keyed on the rule, the judge model, the prompt schema
-version, the candidate's content id, the exact-mode differences and the rule-specific facts, so a moved
+version, the candidate's content id, the exact-mode differences and the rule-specific facts (for a
+single-source candidate, every copy's decision tokens), so a moved
 file hits and a judge model change misses), the stable prompt prefix as the single cache breakpoint, and
 the project's fast tier (`resolve_clone_judge_model`: explicit pick, then `CAMERATA_CLONE_JUDGE_MODEL`,
 then `fleet::tier::default_fast_model()`; stamped in `ScanProvenance.clone_judge_model` when the judge
 made a call). The cache rides in the scan manifest (`ScanManifest.clone_verdicts`, `serde(default)`,
 `MANIFEST_VERSION` unchanged) in the app data directory, never in the client's repository. Usage is
 folded into the same `UsageMeter` as every other pass; the full ranked candidate list and every verdict
-are written to the scan transcript under the agent `clone-judge:<rule id>`.
+are written to the scan transcript under the agent `clone-judge:<rule id>:<repo>`.
 
-Severity is deterministic: `high` when the copies of a single-source candidate disagree, `medium` when
-they agree, `low` for the other two rules. The informational convention row ("No application decision
-was found written in more than one file ...") is decided after the semantic pass, because "no trace
-under the rule's id from any tier" needs its findings, and only when the rule was fully assessed, nothing
-was confirmed, the index was not truncated and the scan was complete. `audit_repos` is a thin wrapper over
+Severity is deterministic: `high` when the copies of a single-source candidate disagree on a decision
+token (an operator, a number, or a property name inside a decision test), `medium` otherwise (copies that
+agree, or that differ only in a string, a callee or an action type), `low` for the other two rules. The
+three rules emit no convention or "clean" row: a search that finds nothing proves nothing, so the only
+statement a scan makes about a rule with no candidates is the ledger's credit that it ran. `audit_repos` is a thin wrapper over
 `audit_repos_with_llm(llm: &dyn LlmPort, ...)`, which exists so a test can run the whole pipeline with a
 scripted model. The full design, every trap and the Wave C build notes are in
 `docs/design/2026-10-21_w29-detector-implementation.md`.
