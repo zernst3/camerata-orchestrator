@@ -1721,6 +1721,152 @@ every registered checker and would report an empty `check()` as clean. Instead:
   `mechanical` for a missing channel; `is_ci_tier_rule` routes them to the ledger loop, which
   now knows the channel).
 
+### 8. Clone detector: build notes (2026-10-22)
+
+Built as `crates/checks/src/extract/clone.rs` plus `extract/clone/{builder,cache,families,index,
+rust_tokens,skip,ts_tokens,verify}.rs` and tests under `extract/clone/tests/`. The API of
+section 1 is as written except for the additions in 8.1. Every place the spec was silent or
+wrong, and what was decided:
+
+**8.1 API additions and one signature note.** `detect` takes `opts: &CloneOptions` (as section 1
+writes it). Additions: `CloneFamily.house_pattern: bool` (section 6 B1 names the flag, section 1
+omits the field; set when the family spans at least 5 files and more than 25% of the indexed
+files of its language family); `ItemTokens.texts: Vec<String>` (the Exact text of each token,
+parallel to `tokens`, empty in Structural mode: `exact_diff` receives no source and no interner,
+so a `Disagreement` can only name a token if the item carries its text); `pub const K`;
+`pub fn token_id(TokenClass, &str) -> u32` and the `TEXT_*` constants (a rule asks whether a
+sequence holds a `$CMP` by comparing ids, it has no other way to read a Structural token);
+`pub fn span_tokens(&ItemTokens, &CodeSpan) -> &[Token]`; `impl Default for CloneOptions`.
+`Token.id` is not an interner index: it is the 32-bit FNV-1a of the class and the normalized
+text, because the family `key` must be stable across runs and files without a shared interner.
+Equality always compares id AND class, which makes a 32-bit collision need a collision inside
+one class and a 20-token window; Exact-mode ids are compared the same way.
+
+**8.2 Item numbering.** `ItemTokens.item` and `CodeSpan.item` are the index in the `Vec` that
+`tokens()` returns. An item with no tokens (an import block, a comment) takes no number. Both
+modes tokenize the same stream, so item numbers, token counts, lines and byte ranges are
+identical, and a `CodeSpan` from the Structural index addresses the same tokens in an Exact
+tokenization (tested: `both_modes_tokenize_the_same_stream_shape`). `ItemTokens.kind` is one of
+`function class variable statement namespace data impl impl-empty trait const static macro other`;
+`data` marks a lookup-table item (D5), and a file made only of `data` items is skipped.
+
+**8.3 Tokenizers.**
+- *tree-sitter dialects.* One cursor loop (no recursion; a 20,000-term `a + a + ...` chain is
+  thousands of levels deep). An item holding a parse-error node is dropped, the rest of the file
+  is kept (the spec says "ParseFailed" for the whole file; a file with one broken item is still
+  evidence). A JavaScript file with errors is re-parsed with the TSX grammar, as the literal
+  extractor does. Method and class-field NAMES are `$ID` (they declare, they are not read through
+  `.`); an object-literal key is `$PROP`. TS type annotations stay in the stream (only top-level
+  type items are excluded). Python docstrings are dropped like comments; Python keyword-argument
+  names and attribute names are `$PROP`; `self`/`cls` are kept. `not in` and `is not` are one
+  comparison token. A JSX text node is a string token (whitespace-only text is dropped).
+- *Rust.* The file is lexed by `proc_macro2` and parsed by `syn::parse2`; `syn` supplies item
+  boundaries and kinds, the tokens come from each item's token stream, so macro bodies are
+  tokenized. Inline `mod x { .. }` is flattened (each function inside is an item; a window must
+  not run across a module). Items marked `#[cfg(test)]` (and not `not(test)`), `#[test]` or
+  `#[tokio::test]` are excluded as test code. `pub`/`pub(..)` is dropped wherever it appears, not
+  only at top level (a `pub fn` inside an `impl` would otherwise split a family). Rust has no
+  token-level unary/binary or generic/comparison distinction, so both are decided by the previous
+  token (a name or literal before `-`/`*`/`&` makes it binary; a type-like name, `::`, `impl`, or a
+  non-operand before `<` makes it a generic bracket). A wrong guess moves a token between classes
+  consistently in every copy; it can make two sequences differ, never invent a match. Group
+  nesting deeper than 200 is refused as `ParseFailed` (`syn`'s token buffer is recursive and a
+  stack overflow aborts the process, so `foo!((((...` would kill a scan). `proc_macro2` keeps a
+  per-thread source map of everything it lexed; each Rust tokenization ends by calling
+  `proc_macro2::extra::invalidate_current_thread_spans`, so 20,000 files do not accumulate (and
+  its 32-bit offsets do not wrap). Any `Span` another piece of code holds on the same thread is
+  invalidated by that call, so nothing in this crate may keep a span across a `tokens()` call.
+- *Numbers and strings (Exact).* Numbers go through `canonical_number` (Rust: after dropping a
+  type suffix); strings are their content with delimiters and prefix removed and `\'`, `\"`, `\\`
+  resolved, so a quote-style change is not a disagreement. A template or f-string substitution
+  appears as `${}` / `{}` inside the string text and its tokens follow the string token.
+
+**8.4 Skips.** Order: not a source language, test path (`dead_code_checker::exclusions::
+is_test_file`, a superset of `paths::is_test_path`), generated (`is_generated_path`, the marker
+list of DEAD-CODE G11, `.pb.`/`_pb2.`/`_pb2_grpc.` names, `.d.ts`/`.pyi`, a committed `.js` beside
+its `.ts` via `paths::emitted_js_paths`), migrations and seeds, vendored segments (D2 plus
+`site-packages`, `venv`, `.venv`), minified (`.min.`/`.bundle.`, a line over 1,000 bytes, over 60
+tokens per line), i18n segments, then the token-level guards (over 20,000 tokens, data module).
+`SkipReason` has no variant for D6, so migrations and seeds report `Generated`, and a data module
+reports `I18nCatalog`; the enum is exactly the spec's. The three predicates in `exclusions.rs`
+became `pub(crate)` rather than copied.
+
+**8.5 Hashing and the index.**
+- *The fingerprint is really 16 bytes.* The spec's `(hash u64, file u32, item u32, token_index
+  u32)` is 20 bytes of fields and 24 as a Rust struct. The build stores `(hash u64, file u32,
+  position u32)`, `position` being the K-gram's token offset across all of the file's items; phase 3
+  recovers `(item, index)` from the re-tokenized file (a test pins `size_of == 16`, so
+  `max_index_bytes` is the true memory).
+- *D10 is per window and per match.* A K-gram whose tokens are 60% or more data (`$STR $NUM $LIT`
+  and `, : [ ] { }`) hashes to "never select" (winnowing skips it, the guarantee holds for every
+  window that has a usable K-gram), and a verified match that is itself 60% data is dropped.
+- *Boilerplate.* A bucket is dropped (and counted) when it spans more than `max_members` files
+  OR holds more than `4 * max_members` fingerprints: one bucket of hundreds of fingerprints in a
+  few files would otherwise spend the whole verification budget on one pattern.
+- *Overlap.* Two spans of one item that overlap are trimmed to one period (a block repeated three
+  times in a function yields two non-overlapping copies), not discarded as the spec says; the
+  claim stays true and a repeated block is not lost. Family members that still overlap each other
+  are reduced to the earliest.
+- *Language families.* TypeScript, TSX and JavaScript are one family; Python and Rust are their
+  own. A per-family salt is mixed into every fingerprint, and verification would reject a mismatch
+  anyway, so a TS and a Python sequence of identical tokens never meet.
+- *Determinism.* Inputs are sorted by `(path, content)` and exact duplicates dropped; fingerprints
+  are totally ordered; phases 1 and 3 run on up to `available_parallelism` threads but write
+  per-file or per-group results that are merged and sorted, so the thread count never shows (a
+  property test shuffles the files; another compares repeated runs). A panic inside a parser is
+  caught and becomes a `ParseFailed` skip (or an empty group), so `detect` cannot take a scan down.
+
+**8.6 The pair cap counts extensions, in rounds.** The spec bounds "candidate pairs" at 200,000
+and says each is an extension. Measured on this repository's `crates/` plus `agora-mono`
+(1,400 indexed files), a clone region of 100 tokens has about seven fingerprints, so the same
+two files produce seven candidates and one extension (41,511 of 130,130 candidates were inside a
+region an earlier extension had matched), and about three quarters of the extensions that remain
+(67,133 of 88,614) are 20 to 39 token coincidences that die after the extension. Counting
+generated candidates would truncate a 3,000-file repository. The build therefore produces candidates a round at a time
+(at most 100,000, and no more than `max_pairs`), skips any candidate inside a region an earlier
+extension already matched (no tokenizing, not counted), and counts only extensions attempted.
+`truncated` is set when the cap is spent and a not-yet-matched candidate remains; a spent cap
+with only matched candidates left is not a truncation. The consequence is that candidates are
+never all in memory and a larger cap costs only time.
+
+**8.7 Cache.** Spec section 4 says an LRU of 256 files and section 5 says 64 MiB. A tokenized
+150-line file is 25 to 50 KB (20 bytes a token), so 256 files is at most a fifth of the byte
+budget. The cache is bounded by
+the 64 MiB budget (split across the workers) with an entry guard of 16,384, evicting least
+recently used in O(log n). A file larger than the whole budget is used once and not kept.
+
+**8.8 Measured (release, 8 cores, 2026-10-22).**
+- Tokenizing one core: TypeScript 6.5 MB/s, Python 5.9, Rust 7.1 (the tree-sitter parse alone is
+  7.4 MB/s on the same TypeScript: the walk adds under 15%).
+- Real code (`camerata-orchestrator/crates` plus `agora-mono`, 2,540 files, 26.6 MB, 1,400
+  indexed): 3.7 s, 90,425 fingerprints, 88,614 extensions, 4,082 families, not truncated.
+- Synthetic 20,000 files, 131 MB, 1.77M lines (`tests/perf.rs`, `--ignored`): phase 1 and 2
+  5.0 to 5.5 s, 2.31M fingerprints (37 MB of index); the default 200,000-extension cap is spent by
+  20 to 39 token coincidences (526 families found), the run takes 96 s and reports
+  `truncated = true`. Peak resident memory 379 MB against 217 MB for the generated corpus alone
+  (about 160 MB for the detector: index, token caches, rounds). With the cap lifted
+  (`CLONE_PERF_MAX_PAIRS=100000000`) the same corpus completes untruncated in 659 s
+  (3,902 CPU-seconds, so the extensions are tokenization-bound: each one re-parses two files that
+  the 64 MiB cache cannot hold), finds 4,445 families, drops 1,111 boilerplate buckets, and peaks at
+  630 MB resident. The default cap therefore buys a bounded scan (about 100 s here) at the price of
+  `truncated`; it is the knob a caller with a time budget turns.
+- Finding for the owner: the K = 20 / T = 40 pair produces candidate noise that grows faster than
+  the file count, so the default cap holds roughly 3,000 to 4,000 indexable files of real code and
+  a 20,000-file repository will usually report `truncated`. Rules treat that as "not fully
+  indexed" (found families still ship; no clean statement). Ways to move it, none taken here
+  because they change section 3's constants: `K = 30` (still `T = 40`, `W = 11`) halves the
+  extensions on the real corpus (41,834 against 88,614) for 1.8x the fingerprints; a per-
+  fingerprint 10-token left/right context signature in the spare index bits rejects matches under
+  30 tokens without tokenizing; a compact id-only token cache holds five times the files. Raising
+  `max_pairs` is safe memory-wise (8.6) and costs about 0.3 ms of CPU per extension.
+
+**8.9 Tests.** `extract/clone/tests/`: `tokenize` (the normalization table row by row, exclusions,
+positions, malformed and hostile input), `detect` (families, sorting, keys, subsumption, house
+pattern, ubiquity, floors), `skips` (every D1 to D7 guard with the same body indexed in an
+ordinary path), `exact` (named disagreements with both lines), `caps` (index and pair caps, cache
+eviction, winnowing and verification internals), `props` (seeded property tests; the workspace
+has no property-testing crate), `perf` (`#[ignore]` harness, see its header for the commands).
+
 ## ARCH-SINGLE-SOURCE-LOGIC-1: the algorithm and its traps
 
 ### 1. What a CANDIDATE is (deterministic)
