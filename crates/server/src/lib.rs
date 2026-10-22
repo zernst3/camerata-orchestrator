@@ -3828,12 +3828,17 @@ async fn import_project_ruleset(
     Path(id): Path<String>,
     Json(incoming): Json<crate::project::ProjectRuleset>,
 ) -> Json<serde_json::Value> {
+    let corpus = load_corpus_for_baseline().await;
     let updated = state.projects.update(&id, |p| {
+        let known_before = selected_rule_ids(&p.ruleset);
         p.upsert_base_rules(
             incoming.selections.clone(),
             incoming.cross_repo.clone(),
             incoming.process.clone(),
         );
+        // Rules new to this project are baselined from the corpus; ones it already had keep
+        // their baseline (inherited by the upsert) or their absence of one.
+        baseline_new_to_project(&mut p.ruleset, &known_before, corpus.as_ref());
         // Merge imported custom rules by name (imported wins), never dropping
         // existing ones that aren't in the import.
         p.merge_custom(&incoming.custom);
@@ -7277,8 +7282,10 @@ async fn onboard_arm(
     };
 
     // Save the armed ruleset to the active project (create one if none) so the
-    // project is the source of truth and re-emit works.
-    save_armed_to_project(&state, &req.rules, &req.custom);
+    // project is the source of truth and re-emit works. Baselines the rules against the
+    // corpus they are about to be emitted from, so drift detection starts at apply time.
+    let corpus = load_corpus_for_baseline().await;
+    save_armed_to_project(&state, &req.rules, &req.custom, corpus.as_ref());
 
     // Only repo-local rules emit into repo files; cross-repo + process rules are
     // project-level (the gates read them from the project store). Defensively normalize the
@@ -7337,8 +7344,10 @@ async fn onboard_apply(
     // whose repos all have explicit local folders can apply without one.
     let workspace_root = state.settings.workspace_root();
 
-    // Source of truth: save the armed ruleset to the active project (create one if none).
-    save_armed_to_project(&state, &req.rules, &req.custom);
+    // Source of truth: save the armed ruleset to the active project (create one if none),
+    // baselining each rule against the corpus it is emitted from (apply-time drift baseline).
+    let corpus = load_corpus_for_baseline().await;
+    save_armed_to_project(&state, &req.rules, &req.custom, corpus.as_ref());
 
     // Defensively normalize the leaked single-repo sentinel out of the INCOMING rules'
     // repos (the UI can POST it directly) BEFORE any clone loop, mapping it to the active
@@ -8015,12 +8024,20 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
     };
 
     let has_rules = !selections.is_empty() || !cross_repo.is_empty() || !process.is_empty();
+    let corpus = if has_rules {
+        load_corpus_for_baseline().await
+    } else {
+        None
+    };
     state.projects.update(&pid, |p| {
         if has_rules {
-            // Replace the base rules from onboarding; custom rules are preserved.
-            p.ruleset.selections = selections.clone();
-            p.ruleset.cross_repo = cross_repo.clone();
-            p.ruleset.process = process.clone();
+            // Replace the base rules from onboarding; custom rules are preserved. Goes
+            // through `upsert_base_rules` so a baseline written by an earlier Apply is
+            // carried across this rebuild-from-draft instead of erased; rules new to the
+            // project are baselined from the corpus.
+            let known_before = selected_rule_ids(&p.ruleset);
+            p.upsert_base_rules(selections.clone(), cross_repo.clone(), process.clone());
+            baseline_new_to_project(&mut p.ruleset, &known_before, corpus.as_ref());
         }
         // Upsert the draft's custom rules (#49) by name (preserve any pre-existing).
         for c in &custom {
@@ -8843,10 +8860,16 @@ async fn onboard_greenfield(
 /// one from the rules' repos if none exists). This is the upsert: it replaces the
 /// project's BASE rules (selections / cross-repo / process) and leaves custom rules
 /// untouched.
+///
+/// This is an APPLY: the rules are about to be emitted at their current corpus text, so each
+/// selection is (re)baselined against `corpus` ([`rebaseline_selections`]) and drift detection
+/// covers it from this moment. Without a corpus (or for a rule it lacks) nothing is invented,
+/// and `upsert_base_rules` carries the project's existing baseline across the replace.
 fn save_armed_to_project(
     state: &AppState,
     rules: &[crate::arm::ArmRule],
     custom: &[crate::project::CustomRule],
+    corpus: Option<&camerata_rules::RuleSet>,
 ) {
     use crate::project::RuleSelection;
     // First pass: gather the REAL repos this arm touches, skipping the UI-internal
@@ -8888,6 +8911,9 @@ fn save_armed_to_project(
             _ => selections.push(s),
         }
     }
+    rebaseline_selections(&mut selections, corpus);
+    rebaseline_selections(&mut cross, corpus);
+    rebaseline_selections(&mut process, corpus);
     let pid = match state.projects.active() {
         Some(p) => p.id,
         None => match state
@@ -15778,6 +15804,90 @@ fn baseline_selection(sel: &mut crate::project::RuleSelection, rule: &camerata_r
     sel.applied_version = rule.version;
 }
 
+/// Load the on-disk corpus so a save can baseline the rules it writes. `None` when the corpus
+/// directory is missing: the caller then writes no new baselines (it never invents one) and
+/// existing baselines survive via `Project::upsert_base_rules`. Parse failures of individual
+/// rule files are tolerated (lenient load), so a rule that failed to parse is simply "not in
+/// the corpus" here and stays unbaselined.
+async fn load_corpus_for_baseline() -> Option<camerata_rules::RuleSet> {
+    let corpus_path = camerata_rules::corpus_path();
+    if !corpus_path.exists() {
+        return None;
+    }
+    let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    Some(corpus)
+}
+
+/// APPLY semantics: (re)baseline every selection whose rule is in `corpus`, overwriting any
+/// existing baseline. Applying a rule emits the CURRENT corpus directive into the repos, so
+/// the baseline must be "the corpus as it stands now" (the same acceptance
+/// [`accept_rule_drift`] records); keeping an older baseline would report drift against a
+/// directive that was just applied. Rules the corpus does not carry (or no corpus at all)
+/// are left untouched.
+fn rebaseline_selections(
+    selections: &mut [crate::project::RuleSelection],
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    let Some(corpus) = corpus else { return };
+    for sel in selections {
+        if let Some(rule) = corpus.get_by_id(&sel.rule_id) {
+            baseline_selection(sel, rule);
+        }
+    }
+}
+
+/// SAVE (non-apply) semantics: baseline only the selections that have none, from `corpus`.
+/// An existing baseline, legacy hash included, is never overwritten: a save that is not an
+/// apply has not re-emitted anything, so it accepts nothing new.
+fn baseline_missing(
+    selections: &mut [crate::project::RuleSelection],
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    let Some(corpus) = corpus else { return };
+    for sel in selections.iter_mut().filter(|s| !s.is_baselined()) {
+        if let Some(rule) = corpus.get_by_id(&sel.rule_id) {
+            baseline_selection(sel, rule);
+        }
+    }
+}
+
+/// Every rule id the ruleset currently selects, across all three lists.
+fn selected_rule_ids(
+    ruleset: &crate::project::ProjectRuleset,
+) -> std::collections::BTreeSet<String> {
+    ruleset
+        .selections
+        .iter()
+        .chain(&ruleset.cross_repo)
+        .chain(&ruleset.process)
+        .map(|s| s.rule_id.clone())
+        .collect()
+}
+
+/// After a non-apply replace of the base rules (an import, the onboarding "complete"):
+/// baseline the selections of rules that are NEW to the project (not in `known_before`),
+/// from `corpus`. A rule the project already selected keeps exactly what it had (its baseline
+/// via `upsert_base_rules`, or none if it was never baselined, as before), so saving an
+/// unrelated change never rewrites or invents a baseline for an existing selection.
+fn baseline_new_to_project(
+    ruleset: &mut crate::project::ProjectRuleset,
+    known_before: &std::collections::BTreeSet<String>,
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    let Some(corpus) = corpus else { return };
+    for sel in ruleset
+        .selections
+        .iter_mut()
+        .chain(ruleset.cross_repo.iter_mut())
+        .chain(ruleset.process.iter_mut())
+        .filter(|s| !s.is_baselined() && !known_before.contains(&s.rule_id))
+    {
+        if let Some(rule) = corpus.get_by_id(&sel.rule_id) {
+            baseline_selection(sel, rule);
+        }
+    }
+}
+
 /// `POST /api/projects/:id/rule-drift/:rule_id/accept` — accept the corpus update
 /// for a drifted rule.
 ///
@@ -15885,6 +15995,7 @@ async fn set_rule_override(
     Path((id, rule_id)): Path<(String, String)>,
     Json(req): Json<SetRuleOverrideReq>,
 ) -> Json<serde_json::Value> {
+    let corpus = load_corpus_for_baseline().await;
     let updated = state.projects.update(&id, |p| {
         // Find or create the selection for this rule.
         if let Some(sel) = p
@@ -15909,6 +16020,10 @@ async fn set_rule_override(
                 repos: Vec::new(),
                 ..Default::default()
             });
+            // A rule newly selected into the project is baselined at the corpus as it stands.
+            if let Some(created) = p.ruleset.selections.last_mut() {
+                baseline_missing(std::slice::from_mut(created), corpus.as_ref());
+            }
         }
     });
     match updated {
@@ -15959,6 +16074,7 @@ async fn set_repo_rule_override(
     Path((id, repo, rule_id)): Path<(String, String, String)>,
     Json(req): Json<SetRepoRuleOverrideReq>,
 ) -> Json<serde_json::Value> {
+    let corpus = load_corpus_for_baseline().await;
     let updated = state.projects.update(&id, |p| {
         // Find or create a REPO-SCOPED selection for this rule.
         if let Some(sel) = p
@@ -15979,6 +16095,10 @@ async fn set_repo_rule_override(
                 repos: vec![repo.clone()],
                 ..Default::default()
             });
+            // A rule newly selected into the project is baselined at the corpus as it stands.
+            if let Some(created) = p.ruleset.selections.last_mut() {
+                baseline_missing(std::slice::from_mut(created), corpus.as_ref());
+            }
         }
     });
     match updated {
@@ -17819,6 +17939,7 @@ mod tests {
                 arm_rule("PROC-1", "process", &["me/api"]),
             ],
             &[],
+            None,
         );
         let p = state.projects.active().expect("a project was created");
         assert_eq!(p.ruleset.selections.len(), 1, "repo-local -> selections");
@@ -17844,6 +17965,7 @@ mod tests {
                 arm_rule("XREPO-1", "cross-repo", &[&sentinel]),
             ],
             &[],
+            None,
         );
         let p = state.projects.active().expect("a project was created");
         assert!(
@@ -17895,6 +18017,7 @@ mod tests {
             &state,
             &[arm_rule("REPO-1", "repo-local", &["me/api"])],
             &[],
+            None,
         );
         let after = state.projects.get(&p.id).unwrap();
         assert_eq!(after.ruleset.selections.len(), 1);
@@ -28949,6 +29072,284 @@ mod tests {
             2,
             "no filter scans every project"
         );
+    }
+
+    // ── Drift baseline at APPLY time ──────────────────────────────────────────────
+    //
+    // Defect: the baseline (`applied_hash` / `applied_version` / `applied_directive`) was only
+    // ever written by `accept_rule_drift`, so a freshly applied rule had NONE and could never
+    // report drift; and `upsert_base_rules` replaced the lists wholesale, erasing any baseline
+    // on re-apply. Semantics fixed here: APPLYING a rule means accepting the corpus as it
+    // stands (the apply emits the current directive into the repos), so every apply
+    // (re)baselines against the current corpus; any save that is NOT an apply (an import, an
+    // override edit, the onboarding "complete") keeps an existing baseline and only fills a
+    // missing one.
+
+    /// The active project of `state`, after a `save_armed_to_project` call.
+    fn applied_project(state: &AppState) -> crate::project::Project {
+        state.projects.active().expect("a project exists")
+    }
+
+    #[test]
+    fn a_freshly_applied_rule_shows_drift_after_an_upstream_change() {
+        let before = drift_corpus("Do the thing the old way.", Some(1));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        save_armed_to_project(
+            &state,
+            &[arm_rule("DRIFT-FIX-1", "repo-local", &["me/api"])],
+            &[],
+            Some(&before),
+        );
+
+        let sel = &applied_project(&state).ruleset.selections[0];
+        let rule = corpus_rule(&before);
+        assert_eq!(
+            sel.applied_hash.as_deref(),
+            Some(rule.content_hash().as_str())
+        );
+        assert_eq!(sel.applied_version, Some(1));
+        assert_eq!(
+            sel.applied_directive.as_deref(),
+            Some("Do the thing the old way.")
+        );
+
+        // Nothing changed upstream yet: in sync.
+        let projects = state.projects.list();
+        assert!(drift_for_projects(&projects, None, &before).is_empty());
+
+        // The corpus moves: the applied rule now reports drift (this was silently empty).
+        let after = drift_corpus("Do the thing the new way.", Some(2));
+        let drift = drift_for_projects(&projects, None, &after);
+        assert_eq!(drift.len(), 1, "{drift:?}");
+        assert_eq!(drift[0]["changed"], true);
+        assert_eq!(drift[0]["applied_version"], 1);
+        assert_eq!(drift[0]["current_version"], 2);
+    }
+
+    #[test]
+    fn apply_baselines_cross_repo_and_process_selections_too() {
+        let set = drift_corpus("Do the thing.", Some(4));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        save_armed_to_project(
+            &state,
+            &[
+                arm_rule("DRIFT-FIX-1", "cross-repo", &["me/api", "me/web"]),
+                arm_rule("DRIFT-FIX-1", "process", &["me/api"]),
+            ],
+            &[],
+            Some(&set),
+        );
+        let p = applied_project(&state);
+        let hash = corpus_rule(&set).content_hash();
+        assert_eq!(
+            p.ruleset.cross_repo[0].applied_hash.as_deref(),
+            Some(hash.as_str())
+        );
+        assert_eq!(
+            p.ruleset.process[0].applied_hash.as_deref(),
+            Some(hash.as_str())
+        );
+        assert_eq!(p.ruleset.process[0].applied_version, Some(4));
+    }
+
+    #[test]
+    fn a_rule_the_corpus_does_not_know_is_left_unbaselined() {
+        let set = drift_corpus("Do the thing.", Some(1));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        save_armed_to_project(
+            &state,
+            &[arm_rule("GATE-ONLY-1", "repo-local", &["me/api"])],
+            &[],
+            Some(&set),
+        );
+        let sel = &applied_project(&state).ruleset.selections[0];
+        assert!(sel.applied_hash.is_none() && sel.applied_version.is_none());
+    }
+
+    #[test]
+    fn re_applying_re_baselines_to_the_current_corpus() {
+        let before = drift_corpus("Old.", Some(1));
+        let after = drift_corpus("New.", Some(2));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let rules = [arm_rule("DRIFT-FIX-1", "repo-local", &["me/api"])];
+
+        save_armed_to_project(&state, &rules, &[], Some(&before));
+        assert_eq!(
+            drift_for_projects(&state.projects.list(), None, &after).len(),
+            1,
+            "drifted after the upstream change"
+        );
+
+        // Re-apply against the new corpus: the emitted directive is now v2, so the baseline
+        // follows it and the drift is cleared (exactly what accept_rule_drift would do).
+        save_armed_to_project(&state, &rules, &[], Some(&after));
+        let sel = &applied_project(&state).ruleset.selections[0];
+        assert_eq!(sel.applied_version, Some(2));
+        assert_eq!(sel.applied_directive.as_deref(), Some("New."));
+        assert!(drift_for_projects(&state.projects.list(), None, &after).is_empty());
+    }
+
+    #[test]
+    fn re_applying_without_a_corpus_keeps_the_existing_baseline() {
+        let before = drift_corpus("Old.", Some(1));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let rules = [arm_rule("DRIFT-FIX-1", "repo-local", &["me/api"])];
+        save_armed_to_project(&state, &rules, &[], Some(&before));
+        let baselined = applied_project(&state).ruleset.selections[0].clone();
+
+        // Corpus unavailable at re-apply time: the baseline must survive, not be erased.
+        save_armed_to_project(&state, &rules, &[], None);
+        assert_eq!(applied_project(&state).ruleset.selections[0], baselined);
+    }
+
+    #[test]
+    fn saving_other_selections_keeps_an_untouched_selections_baseline() {
+        let before = drift_corpus("Old.", Some(1));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        save_armed_to_project(
+            &state,
+            &[arm_rule("DRIFT-FIX-1", "repo-local", &["me/api"])],
+            &[],
+            Some(&before),
+        );
+        let baselined = applied_project(&state).ruleset.selections[0].clone();
+        let pid = applied_project(&state).id;
+
+        // An unrelated edit that resends the selections WITHOUT their baseline fields (an
+        // import / a client that does not round-trip them) plus a brand-new rule.
+        state.projects.update(&pid, |p| {
+            p.upsert_base_rules(
+                vec![
+                    crate::project::RuleSelection {
+                        rule_id: "DRIFT-FIX-1".to_string(),
+                        chosen_option: None,
+                        repos: vec!["me/api".to_string()],
+                        ..Default::default()
+                    },
+                    crate::project::RuleSelection {
+                        rule_id: "OTHER-1".to_string(),
+                        repos: vec!["me/api".to_string()],
+                        ..Default::default()
+                    },
+                ],
+                Vec::new(),
+                Vec::new(),
+            );
+        });
+        let p = applied_project(&state);
+        assert_eq!(p.ruleset.selections[0], baselined, "baseline carried over");
+        assert!(
+            p.ruleset.selections[1].applied_hash.is_none(),
+            "the new, never-applied rule is not given a baseline by an upsert"
+        );
+
+        // ...and the preserved baseline still detects upstream drift.
+        let after = drift_corpus("New.", Some(2));
+        assert_eq!(drift_for_projects(&[p], None, &after).len(), 1);
+    }
+
+    #[test]
+    fn a_changed_chosen_option_is_a_new_decision_and_does_not_inherit_the_old_baseline() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("P", vec!["me/api".to_string()])
+            .unwrap();
+        state.projects.update(&p.id, |proj| {
+            proj.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: "DRIFT-FIX-1".to_string(),
+                chosen_option: Some("a".to_string()),
+                repos: vec!["me/api".to_string()],
+                applied_hash: Some("sha256:abc".to_string()),
+                applied_directive: Some("A".to_string()),
+                applied_version: Some(1),
+            });
+            proj.upsert_base_rules(
+                vec![crate::project::RuleSelection {
+                    rule_id: "DRIFT-FIX-1".to_string(),
+                    chosen_option: Some("b".to_string()),
+                    repos: vec!["me/api".to_string()],
+                    ..Default::default()
+                }],
+                Vec::new(),
+                Vec::new(),
+            );
+        });
+        let sel = &state.projects.get(&p.id).unwrap().ruleset.selections[0];
+        assert!(sel.applied_hash.is_none() && sel.applied_directive.is_none());
+    }
+
+    #[test]
+    fn legacy_and_unbaselined_selections_still_report_as_before() {
+        let set = drift_corpus("Do the thing.", Some(3));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("P", vec!["me/api".to_string()])
+            .unwrap();
+        // One legacy-hash selection, one never-baselined selection.
+        state.projects.update(&p.id, |proj| {
+            proj.ruleset.selections = vec![
+                crate::project::RuleSelection {
+                    rule_id: "DRIFT-FIX-1".to_string(),
+                    repos: vec!["me/api".to_string()],
+                    applied_hash: Some("00ff00ff00ff00ff".to_string()),
+                    ..Default::default()
+                },
+                crate::project::RuleSelection {
+                    rule_id: "UNBASELINED-1".to_string(),
+                    repos: vec!["me/api".to_string()],
+                    ..Default::default()
+                },
+            ];
+        });
+        let before_save = drift_for_projects(&state.projects.list(), None, &set);
+        assert_eq!(before_save.len(), 1, "legacy surfaced, unbaselined silent");
+        assert_eq!(before_save[0]["legacy_baseline"], true);
+
+        // A non-apply save (resending the same selections) must not rewrite the legacy
+        // baseline or conjure one for the unbaselined rule that the corpus does not know.
+        state.projects.update(&p.id, |proj| {
+            let same = proj.ruleset.selections.clone();
+            proj.upsert_base_rules(same, Vec::new(), Vec::new());
+        });
+        let after_save = drift_for_projects(&state.projects.list(), None, &set);
+        assert_eq!(after_save, before_save);
+        let sels = state.projects.get(&p.id).unwrap().ruleset.selections;
+        assert_eq!(sels[0].applied_hash.as_deref(), Some("00ff00ff00ff00ff"));
+        assert!(sels[1].applied_hash.is_none());
+    }
+
+    #[test]
+    fn baseline_missing_fills_only_unbaselined_selections_from_the_corpus() {
+        let set = drift_corpus("Do the thing.", Some(2));
+        let mut sels = vec![
+            crate::project::RuleSelection {
+                rule_id: "DRIFT-FIX-1".to_string(),
+                ..Default::default()
+            },
+            crate::project::RuleSelection {
+                rule_id: "DRIFT-FIX-1".to_string(),
+                applied_hash: Some("00ff00ff00ff00ff".to_string()),
+                ..Default::default()
+            },
+            crate::project::RuleSelection {
+                rule_id: "NOT-IN-CORPUS-1".to_string(),
+                ..Default::default()
+            },
+        ];
+        baseline_missing(&mut sels, Some(&set));
+        assert_eq!(
+            sels[0].applied_hash.as_deref(),
+            Some(corpus_rule(&set).content_hash().as_str())
+        );
+        assert_eq!(
+            sels[1].applied_hash.as_deref(),
+            Some("00ff00ff00ff00ff"),
+            "an existing (even legacy) baseline is never overwritten by a non-apply save"
+        );
+        assert!(sels[2].applied_hash.is_none());
+        baseline_missing(&mut sels, None); // no corpus: a no-op, never a panic
     }
 
     #[test]

@@ -122,11 +122,14 @@ pub struct RuleSelection {
     #[serde(default)]
     pub repos: Vec<String>,
     /// The corpus content-hash baselined for this selection — the fingerprint of the
-    /// corpus rule as it stood when the architect last ACCEPTED it (via onboarding or
-    /// the rule-drift "Update this rule" action). Drift detection compares this against
-    /// the current corpus hash: when it is `Some(h)` and `h` differs from the current
-    /// hash, the rule has drifted upstream. `None` means "never baselined" and is treated
-    /// as in-sync (a freshly selected rule does not report drift until it is baselined).
+    /// corpus rule as it stood when the architect last ACCEPTED it: by applying the rule
+    /// (every apply writes it against the then-current corpus), by saving it into a
+    /// project, or by the rule-drift "Update this rule" action. Drift detection compares
+    /// this against the current corpus hash: when it is `Some(h)` and `h` differs from the
+    /// current hash, the rule has drifted upstream. `None` means "never baselined" (a
+    /// selection that predates apply-time baselining, or a rule the corpus does not
+    /// carry) and is treated as in-sync. Replacing the ruleset keeps an existing baseline
+    /// (see `Project::upsert_base_rules`).
     /// Serde default keeps projects persisted before this field existed loading cleanly.
     #[serde(default)]
     pub applied_hash: Option<String>,
@@ -142,6 +145,50 @@ pub struct RuleSelection {
     /// before rules carried a version. Serde default for back-compat.
     #[serde(default)]
     pub applied_version: Option<u32>,
+}
+
+impl RuleSelection {
+    /// Whether this selection carries a rule-drift baseline.
+    pub fn is_baselined(&self) -> bool {
+        self.applied_hash.is_some()
+    }
+
+    /// Copy `prior`'s baseline onto this selection when this one has none and `prior` is the
+    /// same decision: same rule and same chosen option. A different chosen option is a new
+    /// decision the architect has not accepted yet, and the old directive/hash describe a
+    /// different option, so it must not inherit. Returns whether a baseline was inherited.
+    pub fn inherit_baseline_from(&mut self, prior: &RuleSelection) -> bool {
+        if self.is_baselined()
+            || !prior.is_baselined()
+            || self.rule_id != prior.rule_id
+            || self.chosen_option != prior.chosen_option
+        {
+            return false;
+        }
+        self.applied_hash = prior.applied_hash.clone();
+        self.applied_directive = prior.applied_directive.clone();
+        self.applied_version = prior.applied_version;
+        true
+    }
+}
+
+/// Carry the baselines of `existing` onto the unbaselined selections in `incoming`. When a
+/// rule has several prior placements (repo-scoped selections), the one with the same repos
+/// wins; otherwise the first same-decision prior does.
+fn inherit_baselines(incoming: &mut [RuleSelection], existing: &[RuleSelection]) {
+    for sel in incoming.iter_mut().filter(|s| !s.is_baselined()) {
+        let same_placement = existing.iter().find(|e| e.repos == sel.repos);
+        if let Some(prior) = same_placement {
+            if sel.inherit_baseline_from(prior) {
+                continue;
+            }
+        }
+        for prior in existing {
+            if sel.inherit_baseline_from(prior) {
+                break;
+            }
+        }
+    }
 }
 
 /// The project's full ruleset — the single source of truth that emit upserts.
@@ -539,12 +586,23 @@ impl Project {
     /// Replace the BASE rules (selections / cross-repo / process) from an edit or
     /// import, while PRESERVING the architect's custom rules. This is the upsert
     /// the ADR calls out: changing/deleting/adding base rules never clobbers custom.
+    ///
+    /// The rule-drift BASELINE (`applied_hash` / `applied_directive` / `applied_version`) is
+    /// not part of an edit's intent, so a replacement must not erase it: an incoming selection
+    /// that carries no baseline INHERITS the baseline of the selection it replaces (same rule,
+    /// same chosen option; see [`RuleSelection::inherit_baseline_from`]). An incoming
+    /// selection that carries its own baseline keeps it, and a selection with no prior
+    /// counterpart (or a changed chosen option, a new decision) stays unbaselined. Writing a
+    /// fresh baseline is the apply path's job, not this method's.
     pub fn upsert_base_rules(
         &mut self,
-        selections: Vec<RuleSelection>,
-        cross_repo: Vec<RuleSelection>,
-        process: Vec<RuleSelection>,
+        mut selections: Vec<RuleSelection>,
+        mut cross_repo: Vec<RuleSelection>,
+        mut process: Vec<RuleSelection>,
     ) {
+        inherit_baselines(&mut selections, &self.ruleset.selections);
+        inherit_baselines(&mut cross_repo, &self.ruleset.cross_repo);
+        inherit_baselines(&mut process, &self.ruleset.process);
         self.ruleset.selections = selections;
         self.ruleset.cross_repo = cross_repo;
         self.ruleset.process = process;
@@ -1468,5 +1526,74 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let back: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tier_map, original.tier_map);
+    }
+
+    // ── baseline inheritance on replace ─────────────────────────────────────────
+
+    fn baselined(rule: &str, option: Option<&str>, repos: &[&str]) -> RuleSelection {
+        RuleSelection {
+            rule_id: rule.into(),
+            chosen_option: option.map(str::to_string),
+            repos: repos.iter().map(|r| r.to_string()).collect(),
+            applied_hash: Some(format!("sha256:{rule}")),
+            applied_directive: Some(format!("directive of {rule}")),
+            applied_version: Some(3),
+        }
+    }
+
+    fn bare(rule: &str, option: Option<&str>, repos: &[&str]) -> RuleSelection {
+        RuleSelection {
+            applied_hash: None,
+            applied_directive: None,
+            applied_version: None,
+            ..baselined(rule, option, repos)
+        }
+    }
+
+    #[test]
+    fn an_unbaselined_replacement_inherits_the_same_decisions_baseline() {
+        let prior = [baselined("R-1", Some("a"), &["me/api"])];
+        let mut incoming = [bare("R-1", Some("a"), &["me/api"])];
+        inherit_baselines(&mut incoming, &prior);
+        assert_eq!(incoming[0], prior[0]);
+    }
+
+    #[test]
+    fn a_replacement_that_carries_its_own_baseline_keeps_it() {
+        let prior = [baselined("R-1", None, &["me/api"])];
+        let mut own = baselined("R-1", None, &["me/api"]);
+        own.applied_hash = Some("sha256:newer".into());
+        let mut incoming = [own.clone()];
+        inherit_baselines(&mut incoming, &prior);
+        assert_eq!(incoming[0], own);
+    }
+
+    #[test]
+    fn a_changed_option_or_a_different_rule_does_not_inherit() {
+        let prior = [baselined("R-1", Some("a"), &["me/api"])];
+        let mut incoming = [
+            bare("R-1", Some("b"), &["me/api"]),
+            bare("R-2", Some("a"), &["me/api"]),
+        ];
+        inherit_baselines(&mut incoming, &prior);
+        assert!(!incoming[0].is_baselined(), "new option = new decision");
+        assert!(!incoming[1].is_baselined(), "a different rule");
+    }
+
+    #[test]
+    fn repo_scoped_placements_each_inherit_their_own_baseline() {
+        let mut api = baselined("R-1", None, &["me/api"]);
+        api.applied_version = Some(1);
+        let mut web = baselined("R-1", None, &["me/web"]);
+        web.applied_version = Some(2);
+        let prior = [api.clone(), web.clone()];
+        // Incoming order differs from the prior order.
+        let mut incoming = [
+            bare("R-1", None, &["me/web"]),
+            bare("R-1", None, &["me/api"]),
+        ];
+        inherit_baselines(&mut incoming, &prior);
+        assert_eq!(incoming[0].applied_version, Some(2));
+        assert_eq!(incoming[1].applied_version, Some(1));
     }
 }
