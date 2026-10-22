@@ -37,7 +37,8 @@ fn is_executable(content: &str, family: Family) -> bool {
 fn has_main_guard(content: &str) -> bool {
     content.match_indices("__name__").any(|(i, _)| {
         let tail = &content[i + "__name__".len()..];
-        let window = &tail[..tail.len().min(40)];
+        // `tail` may hold multibyte text: floor the window end to a character boundary.
+        let window = &tail[..tail.floor_char_boundary(40)];
         window.contains("\"__main__\"") || window.contains("'__main__'")
     })
 }

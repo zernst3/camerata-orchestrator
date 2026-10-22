@@ -598,7 +598,33 @@ fn twin_empty_and_malformed_inputs_never_panic() {
             "src/app.ts",
             "\u{0}\u{1}\u{FFFD} not code at all {{{ import(",
         ),
+        // Non-ASCII text right after `__name__`: the 40-byte main-guard window must not be
+        // cut inside a character.
+        ("svc/main.py", "from . import worker\n"),
+        (
+            "svc/worker.py",
+            "logger = logging.getLogger(__name__)# \u{41b}\u{43e}\u{433}\u{433}\u{435}\u{440} \u{43f}\u{440}\u{438}\u{43b}\u{43e}\u{436}\u{435}\u{43d}\u{438}\u{44f}\n",
+        ),
     ]);
+    assert_silent(&f);
+}
+
+#[test]
+fn a_main_guard_window_is_never_cut_inside_a_multibyte_character() {
+    // Every byte offset of a multibyte run after `__name__` gets tried as the window end.
+    for pad in 0..8 {
+        let body = format!(
+            "x = __name__{}\u{41b}\u{43e}\u{433}\u{433}\u{435}\u{440}\u{41b}\u{43e}\u{433}\u{433}\u{435}\u{440}\u{41b}\u{43e}\u{433}\u{433}\u{435}\u{440}\n",
+            " ".repeat(pad)
+        );
+        let f = files(vec![("jobs/uni_job.py", body.as_str())]);
+        assert_eq!(flagged(&f), ["jobs/uni_job.py"], "pad {pad}");
+    }
+    // The guard itself still works with non-ASCII text before and after it.
+    let f = files(vec![(
+        "jobs/guarded.py",
+        "# \u{41b}\u{43e}\u{433}\nif __name__ == \"__main__\":  # \u{43f}\u{443}\u{441}\u{43a}\n    pass\n",
+    )]);
     assert_silent(&f);
 }
 
