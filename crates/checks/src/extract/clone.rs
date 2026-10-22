@@ -46,7 +46,7 @@ mod tests;
 pub use index::detect;
 
 /// Hash unit: the number of consecutive tokens one fingerprint covers (spec section 3).
-pub const K: usize = 20;
+pub const K: usize = 30;
 
 /// Text of the class tokens a Structural stream collapses to. A rule asking "does the shared
 /// sequence contain a comparison" compares each token's `id` with
@@ -230,10 +230,10 @@ pub struct CloneOptions {
     pub max_members: u32,
     /// The most candidate pairs whose match is extended and verified; spending it with an
     /// unverified candidate left sets `truncated`. A candidate inside a region an earlier
-    /// extension already matched costs nothing and does not count. Spec: 200_000.
+    /// extension already matched costs nothing and does not count. Spec: 200_000; the build uses 400_000 (extensions, not candidates), which an untruncated 20,000-file synthetic repo needs 340,622 of in about 105 s.
     pub max_pairs: u32,
     /// The most bytes the fingerprint index may hold (16 per fingerprint); hitting it stops
-    /// indexing and sets `truncated`. Spec: 64 MiB.
+    /// indexing and sets `truncated`. Spec: 64 MiB; the build uses 96 MiB because K = 30 keeps about 1.8x as many fingerprints as the spec's K = 20.
     pub max_index_bytes: usize,
 }
 
@@ -242,8 +242,8 @@ impl Default for CloneOptions {
         Self {
             min_tokens: 40,
             max_members: 50,
-            max_pairs: 200_000,
-            max_index_bytes: 64 * 1024 * 1024,
+            max_pairs: 400_000,
+            max_index_bytes: 96 * 1024 * 1024,
         }
     }
 }

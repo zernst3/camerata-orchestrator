@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use super::super::cache::{Source, TokenCache};
-use super::super::index::{is_data_heavy, item_fingerprints, winnow, DataIds};
+use super::super::index::{is_data_heavy, item_fingerprints, winnow, DataIds, HashParams};
 use super::super::verify::extend;
 use super::*;
 
@@ -505,17 +505,17 @@ fn data_heavy_windows_are_not_fingerprinted() {
 
 #[test]
 fn a_hash_collision_is_rejected_by_comparing_tokens() {
-    let a: Vec<u32> = (0..60).collect();
+    let a: Vec<u32> = (0..100).collect();
     let mut b = a.clone();
-    b[30] = 9999;
+    b[50] = 9999;
     let (a, b) = (fabricated(&a), fabricated(&b));
-    // The K-grams at 20 differ at position 30, so the fingerprints "collided".
-    assert!(extend(&a, &b, 20, 20, false).is_none());
+    // The K-grams at 30 cover position 50, where the streams differ: the fingerprints "collided".
+    assert!(extend(&a, &b, 30, 30, false).is_none());
     // A K-gram that really is equal extends to the first difference on each side.
     let found = extend(&a, &b, 5, 5, false).expect("equal K-gram");
-    assert_eq!((found.a_start, found.b_start, found.len), (0, 0, 30));
-    let right = extend(&a, &b, 35, 35, false).expect("equal K-gram");
-    assert_eq!((right.a_start, right.len), (31, 29));
+    assert_eq!((found.a_start, found.b_start, found.len), (0, 0, 50));
+    let right = extend(&a, &b, 55, 55, false).expect("equal K-gram");
+    assert_eq!((right.a_start, right.len), (51, 49));
 }
 
 #[test]
@@ -542,6 +542,38 @@ fn a_periodic_match_inside_one_item_is_trimmed_to_one_period() {
         "one period, not the 50 the overlap would allow"
     );
     assert_eq!(found.a_start + found.len, found.b_start);
+}
+
+#[test]
+fn the_winnowing_parameters_guarantee_a_floor_no_rule_threshold_undercuts() {
+    // The detection floor T is the longest shared run winnowing is guaranteed to find:
+    // T = W + K - 1. The smallest threshold any consumer rule applies is 40 tokens
+    // (UI-SHARED-PRIMITIVE-1; the two logic rules use 60), so T must not exceed it, or a run a
+    // rule would act on could be missed.
+    const SMALLEST_RULE_THRESHOLD: usize = 40;
+    let options = CloneOptions::default();
+    let params = HashParams::new(&options);
+    assert_eq!(K, 30);
+    assert_eq!(params.window, 11);
+    assert_eq!(params.min_tokens, params.window + K - 1);
+    assert_eq!(params.min_tokens, options.min_tokens as usize);
+    assert!(params.min_tokens <= SMALLEST_RULE_THRESHOLD);
+    assert!(K <= params.min_tokens, "a K-gram must fit inside the floor");
+    // A smaller requested floor is clamped up to K, keeping T = W + K - 1 with W = 1.
+    let low = HashParams::new(&CloneOptions {
+        min_tokens: 5,
+        ..CloneOptions::default()
+    });
+    assert_eq!((low.min_tokens, low.window), (K, 1));
+}
+
+#[test]
+fn the_default_caps_hold_the_twenty_thousand_file_profile() {
+    // The synthetic 20,000-file repository of `perf.rs` needs 340,622 extensions and indexes
+    // without truncating under 96 MiB; the defaults must keep covering it.
+    let options = CloneOptions::default();
+    assert!(options.max_pairs >= 340_622);
+    assert!(options.max_index_bytes >= 96 * 1024 * 1024);
 }
 
 #[test]

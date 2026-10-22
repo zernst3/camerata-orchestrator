@@ -1740,7 +1740,7 @@ sequence holds a `$CMP` by comparing ids, it has no other way to read a Structur
 `Token.id` is not an interner index: it is the 32-bit FNV-1a of the class and the normalized
 text, because the family `key` must be stable across runs and files without a shared interner.
 Equality always compares id AND class, which makes a 32-bit collision need a collision inside
-one class and a 20-token window; Exact-mode ids are compared the same way.
+one class and a 30-token window; Exact-mode ids are compared the same way.
 
 **8.2 Item numbering.** `ItemTokens.item` and `CodeSpan.item` are the index in the `Vec` that
 `tokens()` returns. An item with no tokens (an import block, a comment) takes no number. Both
@@ -1817,7 +1817,7 @@ became `pub(crate)` rather than copied.
   caught and becomes a `ParseFailed` skip (or an empty group), so `detect` cannot take a scan down.
 
 **8.6 The pair cap counts extensions, in rounds.** The spec bounds "candidate pairs" at 200,000
-and says each is an extension. Measured on this repository's `crates/` plus `agora-mono`
+and says each is an extension. Measured at K = 20 on this repository's `crates/` plus `agora-mono`
 (1,400 indexed files), a clone region of 100 tokens has about seven fingerprints, so the same
 two files produce seven candidates and one extension (41,511 of 130,130 candidates were inside a
 region an earlier extension had matched), and about three quarters of the extensions that remain
@@ -1839,26 +1839,49 @@ recently used in O(log n). A file larger than the whole budget is used once and 
 - Tokenizing one core: TypeScript 6.5 MB/s, Python 5.9, Rust 7.1 (the tree-sitter parse alone is
   7.4 MB/s on the same TypeScript: the walk adds under 15%).
 - Real code (`camerata-orchestrator/crates` plus `agora-mono`, 2,540 files, 26.6 MB, 1,400
-  indexed): 3.7 s, 90,425 fingerprints, 88,614 extensions, 4,082 families, not truncated.
-- Synthetic 20,000 files, 131 MB, 1.77M lines (`tests/perf.rs`, `--ignored`): phase 1 and 2
-  5.0 to 5.5 s, 2.31M fingerprints (37 MB of index); the default 200,000-extension cap is spent by
-  20 to 39 token coincidences (526 families found), the run takes 96 s and reports
-  `truncated = true`. Peak resident memory 379 MB against 217 MB for the generated corpus alone
-  (about 160 MB for the detector: index, token caches, rounds). With the cap lifted
-  (`CLONE_PERF_MAX_PAIRS=100000000`) the same corpus completes untruncated in 659 s
-  (3,902 CPU-seconds, so the extensions are tokenization-bound: each one re-parses two files that
-  the 64 MiB cache cannot hold), finds 4,445 families, drops 1,111 boilerplate buckets, and peaks at
-  630 MB resident. The default cap therefore buys a bounded scan (about 100 s here) at the price of
-  `truncated`; it is the knob a caller with a time budget turns.
-- Finding for the owner: the K = 20 / T = 40 pair produces candidate noise that grows faster than
-  the file count, so the default cap holds roughly 3,000 to 4,000 indexable files of real code and
-  a 20,000-file repository will usually report `truncated`. Rules treat that as "not fully
-  indexed" (found families still ship; no clean statement). Ways to move it, none taken here
-  because they change section 3's constants: `K = 30` (still `T = 40`, `W = 11`) halves the
-  extensions on the real corpus (41,834 against 88,614) for 1.8x the fingerprints; a per-
-  fingerprint 10-token left/right context signature in the spare index bits rejects matches under
-  30 tokens without tokenizing; a compact id-only token cache holds five times the files. Raising
-  `max_pairs` is safe memory-wise (8.6) and costs about 0.3 ms of CPU per extension.
+  indexed), at the spec's K = 20: 3.7 s, 90,425 fingerprints, 88,614 extensions, 4,082 families, not truncated (K = 30: table in 8.10).
+- Synthetic 20,000 files, 131 MB, 1.77M lines (`tests/perf.rs`, `--ignored`), K = 30 defaults
+  (8.10): 95.7 s, 19,990 files indexed, 9,968 families, 87 boilerplate buckets, NOT truncated;
+  peak resident memory 416 MB against 217 MB for the generated corpus alone. With the pair cap
+  lifted the run needs 340,622 extensions and takes 104 to 114 s (about 690 CPU-seconds; each
+  extension is tokenization-bound). At the spec's K = 20 the same corpus needed far more: with
+  the cap at 200,000 it was spent on 20 to 39 token coincidences (526 families, 96 s,
+  `truncated = true`), and lifted it took 659 s (3,902 CPU-seconds) and 630 MB.
+- Raising `max_pairs` is safe memory-wise (8.6); it costs about 0.3 ms of CPU per extension when
+  the files are cached and about 2 ms when they are not.
+
+**8.10 K = 30, W = 11 (orchestrator decision, 2026-10-22).** The consumer rules only use families
+of 40 tokens or more (40 for UI-SHARED-PRIMITIVE-1, 60 for the two logic rules), so a K-gram below
+the 40-token floor buys nothing. `K = 30`, `W = T - K + 1 = 11`, `T = 40`: the detection floor is
+unchanged and a test pins it (`the_winnowing_parameters_guarantee_a_floor_no_rule_threshold_
+undercuts`: `T = W + K - 1`, `T <= 40`). Defaults moved with it: `max_index_bytes` 64 MiB to
+96 MiB (K = 30 keeps 1.8x the fingerprints), `max_pairs` 200,000 to 400,000 (the 20,000-file
+synthetic repository needs 340,622 extensions and finishes in about 96 s with the default).
+
+Measured on the real corpus (`camerata-orchestrator/crates` plus `agora-mono`, 1,400 indexed
+files), families dumped from both builds and diffed by (key, length, members):
+
+| | K = 20, W = 21 | K = 30, W = 11 |
+|---|---|---|
+| Fingerprints | 90,425 | 160,417 |
+| Index bytes (16 each) | 1.38 MiB | 2.45 MiB |
+| Extensions attempted | 88,614 | 41,834 (0.47x) |
+| Wall time | 3.77 s | 1.86 s |
+| Families | 4,082 | 4,275 |
+
+Recall of the 4,082 K = 20 families (all of length >= 40): 4,059 are identical under K = 30; 22
+are strict supersets (same key and length, K = 30 lists copies K = 20 missed); 1 is lost; K = 30
+also finds 216 families K = 20 did not. The lost family is key `5dca05b5d8be9cd2`, 53 tokens,
+`QuoteService.ts:69-78` against `auth/mePayload.ts:27-36`: a `key: row.field,` object-literal
+mapping. It is not a winnowing failure: the only fingerprint the two copies share under K = 30
+falls in a bucket spanning more than 50 files, which B1 drops as boilerplate (K = 20 found the pair
+only because it happened to select a different, non-ubiquitous fingerprint; with `max_members`
+lifted K = 30 finds it again). Decision: accept it. Dropping a ubiquitous pattern is the B1 guard
+working as specified and errs toward a false negative; neither K covers that pattern reliably;
+and no consumer rule would act on it (a pure field mapping has no decision token for
+SINGLE-SOURCE-LOGIC, and NAMING needs different names for one body, which the advisory judge
+decides anyway).
+
 
 **8.9 Tests.** `extract/clone/tests/`: `tokenize` (the normalization table row by row, exclusions,
 positions, malformed and hostile input), `detect` (families, sorting, keys, subsumption, house

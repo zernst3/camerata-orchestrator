@@ -84,15 +84,15 @@ enum Scan {
 
 /// The hash parameters derived from [`CloneOptions`].
 #[derive(Debug, Clone, Copy)]
-struct HashParams {
+pub(super) struct HashParams {
     /// The winnowing guarantee length `T`, at least `K`.
-    min_tokens: usize,
+    pub(super) min_tokens: usize,
     /// `W = T - K + 1`.
-    window: usize,
+    pub(super) window: usize,
 }
 
 impl HashParams {
-    fn new(opts: &CloneOptions) -> Self {
+    pub(super) fn new(opts: &CloneOptions) -> Self {
         let min_tokens = (opts.min_tokens as usize).max(K);
         Self {
             min_tokens,
