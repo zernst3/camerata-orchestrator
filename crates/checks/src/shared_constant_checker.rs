@@ -80,6 +80,10 @@ const INTEREST_GLOBS: &[&str] = &[
     "**/*.cjs",
     "**/*.py",
     "**/*.rs",
+    // Package manifests: they mark where one package ends and the next begins.
+    "**/package.json",
+    "**/pyproject.toml",
+    "**/Cargo.toml",
     "**/locales/**/*.json",
     "**/locales/**/*.yaml",
     "**/locales/**/*.yml",
@@ -116,28 +120,38 @@ impl ArchChecker for SharedConstantChecker {
 
     fn check(&self, repo: &RepoView<'_>) -> Vec<ArchViolation> {
         let emitted = extract::paths::emitted_js_paths(repo.files);
+        let roots = PackageRoots::new(repo.files);
         let mut index: HashMap<Key, Group<'_>> = HashMap::new();
         for (path, content) in repo.files {
             let Some(lang) = extract::lang_for_path(path) else {
                 continue;
             };
-            if is_excluded_file(path, content, &emitted) {
+            let usage = classify_file(path, content, &emitted);
+            if usage == FileUse::Skipped {
                 continue;
             }
             let family = family_of(lang);
+            let root = roots.of(path);
             for literal in extract::literals(lang, content) {
+                // A class body the walker cannot name is neither a home nor a copy, and a
+                // configuration file contributes the constants it defines but never a copy.
+                if literal.ctx.unattributed
+                    || (usage == FileUse::HomesOnly && literal.ctx.module_const.is_none())
+                {
+                    continue;
+                }
                 let Some(shape) = shape_of(literal.kind, &literal.value) else {
                     continue;
                 };
                 let kind = literal.kind;
-                let group = match index.entry((family, kind, literal.value)) {
+                let group = match index.entry((family, root.clone(), kind, literal.value)) {
                     Entry::Occupied(e) => e.into_mut(),
                     Entry::Vacant(e) => {
                         // A protocol or style token is protocol or style text wherever it
                         // appears, so it is decided once per distinct value and the value
                         // collects nothing.
                         let protocol =
-                            kind == LiteralKind::Str && is_protocol_or_style_value(&e.key().2);
+                            kind == LiteralKind::Str && is_protocol_or_style_value(&e.key().3);
                         e.insert(Group {
                             shape,
                             protocol,
@@ -158,7 +172,7 @@ impl ArchChecker for SharedConstantChecker {
         let mut out: Vec<ArchViolation> = index
             .into_iter()
             .filter(|(_, group)| !group.protocol)
-            .filter_map(|((_, kind, value), group)| judge(&value, kind, &group, &locale_keys))
+            .filter_map(|((_, _, kind, value), group)| judge(&value, kind, &group, &locale_keys))
             .collect();
         out.sort_by(|a, b| {
             (a.file.as_str(), a.line, a.message.as_str()).cmp(&(
@@ -168,6 +182,56 @@ impl ArchChecker for SharedConstantChecker {
             ))
         });
         out
+    }
+}
+
+// ─── packages ───────────────────────────────────────────────────────────────────────────
+
+/// Top-level directories that conventionally hold one package per child directory.
+const PACKAGE_CONTAINERS: &[&str] = &[
+    "apps", "packages", "services", "libs", "crates", "modules", "projects",
+];
+
+/// Where one package ends and the next begins. A value is compared only within one package: two
+/// apps of a monorepo cannot share a constant unless a shared package exists, so a route or a
+/// queue name they both write is two decisions, not one repeated literal. A package is the
+/// nearest directory holding a `package.json`, `pyproject.toml` or `Cargo.toml` (below the
+/// repository root), else the child directory of a conventional monorepo container
+/// (`apps/web`), else the whole repository.
+struct PackageRoots {
+    manifest_dirs: HashSet<String>,
+}
+
+impl PackageRoots {
+    fn new(files: &[(String, String)]) -> Self {
+        let manifest_dirs = files
+            .iter()
+            .filter_map(|(path, _)| {
+                let (dir, base) = path.rsplit_once('/')?;
+                matches!(base, "package.json" | "pyproject.toml" | "Cargo.toml")
+                    .then(|| dir.to_string())
+            })
+            .collect();
+        Self { manifest_dirs }
+    }
+
+    fn of(&self, path: &str) -> String {
+        let mut dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
+        while !dir.is_empty() {
+            if self.manifest_dirs.contains(dir) {
+                return dir.to_string();
+            }
+            dir = dir.rsplit_once('/').map_or("", |(parent, _)| parent);
+        }
+        let mut segments = path.split('/');
+        match (segments.next(), segments.next(), segments.next()) {
+            (Some(container), Some(package), Some(_))
+                if PACKAGE_CONTAINERS.contains(&container) =>
+            {
+                format!("{container}/{package}")
+            }
+            _ => String::new(),
+        }
     }
 }
 
@@ -191,7 +255,8 @@ fn family_of(lang: SourceLang) -> Family {
     }
 }
 
-type Key = (Family, LiteralKind, String);
+/// `(language family, package root, kind, value)`.
+type Key = (Family, String, LiteralKind, String);
 
 /// One place a value is written.
 struct Occurrence<'a> {
@@ -250,7 +315,30 @@ const CLASS_CALLEES: &[&str] = &[
 ];
 
 /// V3: calls that read an environment variable by name.
-const ENV_CALLEES: &[&str] = &["getenv", "env", "var", "var_os", "environ", "option_env"];
+const ENV_CALLEES: &[&str] = &[
+    "getenv",
+    "env",
+    "var",
+    "var_os",
+    "environ",
+    "option_env",
+    "set_var",
+    "remove_var",
+    "setdefault",
+    "putenv",
+    "unsetenv",
+    // python-decouple's `config('NAME')`.
+    "config",
+];
+
+/// V3: receivers that are the process environment or Django's request metadata.
+const ENV_RECEIVER_SUFFIXES: &[&str] = &["env", "environ", "META"];
+
+/// V6: request and response objects whose `get`/`set` verbs take a header name.
+const HEADER_RECEIVERS: &[&str] = &["req", "res", "request", "response", "headers"];
+
+/// Scope decision B: calls whose string argument is a Django URL name (`orders:detail`).
+const URL_NAME_CALLEES: &[&str] = &["reverse", "reverse_lazy", "redirect", "resolve_url"];
 
 /// V6: calls that take a header name directly.
 const HEADER_CALLEES: &[&str] = &["setHeader", "getHeader", "header", "headers"];
@@ -269,6 +357,15 @@ const LOGGER_CALLEES: &[&str] = &[
     "trace_span",
     "info_span",
     "debug_span",
+    // OpenTelemetry and Sentry span and tag names.
+    "start_as_current_span",
+    "start_span",
+    "startSpan",
+    "startActiveSpan",
+    "setTag",
+    "set_tag",
+    "setAttribute",
+    "set_attribute",
 ];
 
 /// V10: calls whose argument is a query fragment or a column path.
@@ -332,18 +429,21 @@ fn context_disqualifies(shape: Shape, value: &str, ctx: &LiteralCtx) -> bool {
         .as_deref()
         .is_some_and(|a| CLASS_ATTRS.contains(&a))
         || in_callees(CLASS_CALLEES)
+        || chain.contains("classList")
     {
         return true;
     }
-    // V3 environment variable names (the SCREAMING_SNAKE shape).
+    // V3 environment variable names (the SCREAMING_SNAKE shape): read by name through a call
+    // (`getenv`, `config`, `set_var`), through a receiver that is the environment (any verb:
+    // `Deno.env.get`, `os.environ.setdefault`, `request.META.get`), or by subscript.
     if shape == Shape::ScreamingSnake
         && (in_callees(ENV_CALLEES)
-            || chain.ends_with("environ.get")
+            || ends_with_any(call_receiver(chain), ENV_RECEIVER_SUFFIXES)
             || (ctx.subscript
                 && ctx
                     .subscript_receiver
                     .as_deref()
-                    .is_some_and(|r| r.ends_with("env") || r.ends_with("environ")))
+                    .is_some_and(|r| ends_with_any(r, ENV_RECEIVER_SUFFIXES)))
             || ctx.value_of_key.as_deref() == Some("env"))
     {
         return true;
@@ -358,8 +458,15 @@ fn context_disqualifies(shape: Shape, value: &str, ctx: &LiteralCtx) -> bool {
     }
     // V6 header names, by the call that takes them.
     if in_callees(HEADER_CALLEES)
-        || (in_callees(HEADER_VERBS) && chain.to_ascii_lowercase().contains("header"))
+        || (in_callees(HEADER_VERBS)
+            && (chain.to_ascii_lowercase().contains("header")
+                || last_segment(call_receiver(chain))
+                    .is_some_and(|r| HEADER_RECEIVERS.contains(&r))))
     {
+        return true;
+    }
+    // Scope decision B: a Django URL name. A route passed to `redirect('/login')` is a route.
+    if shape != Shape::Route && in_callees(URL_NAME_CALLEES) {
         return true;
     }
     // V9 logger and span names, V10 query fragments.
@@ -370,6 +477,30 @@ fn context_disqualifies(shape: Shape, value: &str, ctx: &LiteralCtx) -> bool {
     in_callees(EVENT_CALLEES) && DOM_EVENTS.contains(&value)
 }
 
+/// The receiver part of a callee chain: `Deno.env` for `Deno.env.get`, `std::env` for
+/// `std::env::set_var`, empty for a bare call.
+fn call_receiver(chain: &str) -> &str {
+    let dot = chain.rfind('.');
+    let path = chain.rfind("::");
+    match (dot, path) {
+        (Some(d), Some(p)) if p > d => &chain[..p],
+        (Some(d), _) => &chain[..d],
+        (None, Some(p)) => &chain[..p],
+        (None, None) => "",
+    }
+}
+
+fn last_segment(receiver: &str) -> Option<&str> {
+    receiver
+        .rsplit(['.', ':'])
+        .next()
+        .filter(|segment| !segment.is_empty())
+}
+
+fn ends_with_any(text: &str, suffixes: &[&str]) -> bool {
+    suffixes.iter().any(|suffix| text.ends_with(suffix))
+}
+
 /// Occurrence-level exclusions O1 to O4: this occurrence is not counted; the value survives.
 fn occurrence_excluded(shape: Shape, _value: &str, ctx: &LiteralCtx) -> bool {
     // O1 a module specifier; O2 a wire-format or build-feature name in an attribute (a route in
@@ -377,6 +508,12 @@ fn occurrence_excluded(shape: Shape, _value: &str, ctx: &LiteralCtx) -> bool {
     // value of a CSS property.
     ctx.import_specifier
         || (ctx.attribute && shape != Shape::Route)
+        // An HTML attribute value (`autoComplete`, `type`, `name`, `data-testid`) is markup,
+        // except a route in `href` or `to`.
+        || (ctx.jsx_attr.is_some() && shape != Shape::Route)
+        // A member of a type is the type's, not a copy (a constant that IS the type, such as an
+        // enum member, stays a home).
+        || (ctx.type_position && ctx.module_const.is_none())
         || ctx.object_key
         || ctx.subscript
         || ctx.value_of_key.as_deref().is_some_and(is_css_property)
@@ -713,12 +850,19 @@ fn is_screaming_snake(v: &str) -> bool {
         && words[0].as_bytes()[0].is_ascii_uppercase()
 }
 
-/// N1: a canonical number strictly between 0 and 1 that is not one of the round fractions
-/// (`0.5`, `0.25`, `0.75`), which are thresholds and midpoints far more often than rates.
+/// N1: a canonical number strictly between 0 and 1 with at least two significant digits that is
+/// not one of the round fractions (`0.5`, `0.25`, `0.75`), which are thresholds and midpoints far
+/// more often than rates.
 fn is_decimal_rate(canonical: &str) -> bool {
-    canonical.parse::<f64>().is_ok_and(|n| {
+    let in_range = canonical.parse::<f64>().is_ok_and(|n| {
         n > 0.0 && n < 1.0 && ![0.5, 0.25, 0.75].contains(&n) && canonical.contains('.')
-    })
+    });
+    // At least two significant digits (scope decision A): `0.12` and `0.075` are rates; `0.9`,
+    // `0.001` and `1e-9` are scales, units and epsilons.
+    in_range
+        && canonical
+            .split_once('.')
+            .is_some_and(|(_, fraction)| fraction.trim_start_matches('0').len() >= 2)
 }
 
 /// The shape of a literal, or `None` when it has none of the four (the overwhelming case).
@@ -1257,7 +1401,11 @@ const PATH_PREFIXES: &[&str] = &[
 /// token (V2's Tailwind and CSS part, V6, V7, V8). Such a value is removed everywhere. Only
 /// ever asked of STRING values: a number is never one of these tokens.
 fn is_protocol_or_style_value(v: &str) -> bool {
-    is_style_value(v) || is_http_protocol_value(v) || is_platform_value(v) || is_path_like_value(v)
+    is_style_value(v)
+        || is_http_protocol_value(v)
+        || is_platform_value(v)
+        || is_runtime_identifier(v)
+        || is_path_like_value(v)
 }
 
 /// A lazily built hash set over one of the static name lists above, so a membership test is a
@@ -1298,6 +1446,85 @@ fn is_css_property(name: &str) -> bool {
         }
     }
     css_property_set().contains(kebab.as_str())
+}
+
+/// Cipher and digest algorithm names, which are standardised identifiers (Node `crypto`,
+/// WebCrypto): `aes-256-gcm`, `sha-256`, `rsa-oaep`.
+const CRYPTO_PREFIXES: &[&str] = &[
+    "aes-",
+    "des-",
+    "rsa-",
+    "sha-",
+    "hmac-",
+    "ecdsa-",
+    "chacha20-",
+    "camellia-",
+    "blowfish-",
+];
+
+/// Model identifiers of the common hosted model families: `gpt-4o-mini`, `claude-3-5-sonnet`.
+const MODEL_PREFIXES: &[&str] = &[
+    "gpt-",
+    "claude-",
+    "gemini-",
+    "gemma-",
+    "llama-",
+    "mistral-",
+    "mixtral-",
+    "deepseek-",
+    "qwen-",
+    "command-",
+    "whisper-",
+    "dall-e-",
+    "text-embedding-",
+    "o1-",
+    "o3-",
+    "o4-",
+];
+
+/// Date and time format tokens: `hh:mm:ss`, `yyyy-mm-dd`, `dd/mm/yyyy`.
+const DATE_FORMAT_PARTS: &[&str] = &[
+    "y", "yy", "yyy", "yyyy", "m", "mm", "mmm", "mmmm", "d", "dd", "ddd", "dddd", "h", "hh", "s",
+    "ss", "a", "z", "zz",
+];
+
+/// Runtime and platform identifiers that are standardised text, not an application's own names:
+/// cipher and model names, Node `ERR_*` codes, date-format tokens and cloud regions.
+fn is_runtime_identifier(v: &str) -> bool {
+    CRYPTO_PREFIXES.iter().any(|p| v.starts_with(p))
+        || MODEL_PREFIXES.iter().any(|p| v.starts_with(p))
+        || v.starts_with("ERR_")
+        || is_date_format(v)
+        || is_cloud_region(v)
+}
+
+fn is_date_format(v: &str) -> bool {
+    let parts: Vec<&str> = v.split([':', '-', '/', '.']).collect();
+    parts.len() >= 2 && parts.iter().all(|p| DATE_FORMAT_PARTS.contains(p))
+}
+
+/// `us-east-1`, `eu-central-1`, `ap-southeast-2`, `us-gov-west-1`: a two-letter geography, an
+/// optional `gov`, a direction word and a number.
+fn is_cloud_region(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('-').collect();
+    let (geo, rest) = match parts.as_slice() {
+        [geo, rest @ ..] if rest.len() >= 2 => (*geo, rest),
+        _ => return false,
+    };
+    let (direction, number) = (rest[rest.len() - 2], rest[rest.len() - 1]);
+    let middle_ok = match rest.len() {
+        2 => true,
+        3 => rest[0] == "gov",
+        _ => false,
+    };
+    matches!(
+        geo,
+        "us" | "eu" | "ap" | "sa" | "ca" | "me" | "af" | "cn" | "il"
+    ) && middle_ok
+        && !direction.is_empty()
+        && direction.bytes().all(|b| b.is_ascii_lowercase())
+        && !number.is_empty()
+        && number.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn is_http_protocol_value(v: &str) -> bool {
@@ -1447,33 +1674,56 @@ const GENERATED_MARKERS: &[&str] = &[
     "AUTOGENERATED",
 ];
 
-/// Whether `path` (with its `content`) is excluded from counting altogether: tests, fixtures,
-/// config, migrations, scripts, docs, generated code, declaration files and committed build
-/// output. `emitted` is [`crate::extract::paths::emitted_js_paths`] over the whole repo.
+/// How a file takes part in the count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileUse {
+    /// Read in full: its constants are homes and its other copies are bare.
+    Counted,
+    /// A configuration file: the constants it defines are homes, but a copy in it is never
+    /// counted (per-environment config is SUPPOSED to repeat values).
+    HomesOnly,
+    /// Tests, fixtures, migrations, scripts, docs, generated code, declaration files and
+    /// committed build output: contributes nothing.
+    Skipped,
+}
+
+/// Whether `path` (with its `content`) is excluded from counting altogether. `emitted` is
+/// [`crate::extract::paths::emitted_js_paths`] over the whole repo.
 fn is_excluded_file(path: &str, content: &str, emitted: &HashSet<&str>) -> bool {
+    classify_file(path, content, emitted) != FileUse::Counted
+}
+
+fn classify_file(path: &str, content: &str, emitted: &HashSet<&str>) -> FileUse {
     if emitted.contains(path) || extract::paths::is_test_path(path) {
-        return true;
+        return FileUse::Skipped;
     }
     let lower = path.to_ascii_lowercase();
     let mut segments: Vec<&str> = lower.split('/').collect();
     let Some(base) = segments.pop() else {
-        return true;
+        return FileUse::Skipped;
     };
-    // F2: root-level files and anything inside a dot directory or named like a dotfile.
-    if segments.is_empty() || segments.iter().any(|s| s.starts_with('.')) || base.starts_with('.') {
-        return true;
-    }
-    if segments.iter().any(|s| {
-        CONFIG_DIRS.contains(s) || GENERATED_DIRS.contains(s) || STANDALONE_DIRS.contains(s)
-    }) {
-        return true;
-    }
-    is_config_shaped_basename(base)
+    if segments
+        .iter()
+        .any(|s| GENERATED_DIRS.contains(s) || STANDALONE_DIRS.contains(s))
         || is_declaration_file(base)
         || content
             .lines()
             .take(GENERATED_MARKER_LINES)
             .any(|line| GENERATED_MARKERS.iter().any(|m| line.contains(m)))
+    {
+        return FileUse::Skipped;
+    }
+    // F2: root-level files, anything inside a dot directory or named like a dotfile, and
+    // configuration directories and file names.
+    if segments.is_empty()
+        || segments.iter().any(|s| s.starts_with('.'))
+        || base.starts_with('.')
+        || segments.iter().any(|s| CONFIG_DIRS.contains(s))
+        || is_config_shaped_basename(base)
+    {
+        return FileUse::HomesOnly;
+    }
+    FileUse::Counted
 }
 
 /// F2 basenames: `*.config.*`, `*.conf.*`, `*.setup.*`, `*.workspace.*`, `*rc.{js,cjs,mjs,ts}`,
@@ -1805,7 +2055,7 @@ mod tests {
     #[test]
     fn twin_config_and_settings_files_are_not_counted() {
         let py = "CACHES = make({'default': {'LOCATION': 'orders-cache'}})\n";
-        let ts = "export default { queue: 'orders-high' };\n";
+        let ts = "export default defineConfig({ queue: 'orders-high' });\n";
         // The spec's own pair, with the spec's own value (a header-shaped prefix, so doubly out).
         let v = run_pairs(vec![
             ("config/settings/dev.py", "X = {'L': 'cache-orders'}\n"),
@@ -2088,10 +2338,7 @@ mod tests {
             assert_guarded(
                 vec![("src/a.tsx", &a), ("src/b.ts", "label('card-header');\n")],
                 vec![
-                    (
-                        "src/a.tsx",
-                        "export const A = () => <div title=\"card-header\" />;\n",
-                    ),
+                    ("src/a.tsx", "export const A = pick('card-header');\n"),
                     ("src/b.ts", "label('card-header');\n"),
                 ],
             );
@@ -2942,6 +3189,646 @@ mod tests {
         assert_eq!(v.len(), 1, "{v:#?}");
     }
 
+    // ── review fixes: homes ────────────────────────────────────────────────────
+
+    /// Every shape of module-level home the extractors model, as (path, source) in one language
+    /// family, for the value `orders-high` (or a route for an enum, whose S1 members the type
+    /// itself owns).
+    fn home_shapes() -> Vec<(&'static str, &'static str, &'static str)> {
+        // (path a, path b, source)
+        vec![
+            ("src/a.ts", "src/b.ts", "export const Q = 'orders-high';\n"),
+            ("src/a.js", "src/b.js", "export const QUEUES = Object.freeze({ ORDERS: 'orders-high' });\n"),
+            ("src/a.ts", "src/b.ts", "export default { ORDERS: 'orders-high' };\n"),
+            ("src/a.js", "src/b.js", "module.exports = { ORDERS: 'orders-high' };\n"),
+            ("src/a.js", "src/b.js", "exports.ORDERS = 'orders-high';\n"),
+            ("src/a.ts", "src/b.ts", "export namespace Q { export const ORDERS = 'orders-high'; }\n"),
+            ("src/a.ts", "src/b.ts", "export class Q { static ORDERS = 'orders-high'; }\n"),
+            ("app/a.py", "app/b.py", "ORDERS_QUEUE = 'orders-high'\n"),
+            ("app/a.py", "app/b.py", "class Queues:\n    ORDERS = 'orders-high'\n"),
+            ("src/a.rs", "src/b.rs", "pub const Q: &str = \"orders-high\";\n"),
+            (
+                "src/a.rs",
+                "src/b.rs",
+                "pub static Q: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| \"orders-high\".to_string());\n",
+            ),
+            (
+                "src/a.rs",
+                "src/b.rs",
+                "lazy_static! { pub static ref Q: String = \"orders-high\".to_string(); }\n",
+            ),
+            ("src/a.rs", "src/b.rs", "pub fn queue() -> &'static str { \"orders-high\" }\n"),
+        ]
+    }
+
+    #[test]
+    fn twin_two_homes_and_no_bare_copies_is_silent_for_every_home_shape() {
+        for (a, b, src) in home_shapes() {
+            let v = run_pairs(vec![(a, src), (b, src)]);
+            assert!(v.is_empty(), "{src}: {v:#?}");
+            // A bare copy in a third file is reported against the homes, never as "give it one home".
+            let ext = a.rsplit('.').next().unwrap();
+            let bare = match ext {
+                "py" => "subscribe('orders-high')\n",
+                "rs" => "fn w() { subscribe(\"orders-high\"); }\n",
+                _ => "subscribe('orders-high');\n",
+            };
+            let third = format!("src/c.{ext}");
+            let third = if ext == "py" {
+                "app/c.py".to_string()
+            } else {
+                third
+            };
+            let v = run_pairs(vec![(a, src), (b, src), (&third, bare)]);
+            assert_eq!(v.len(), 1, "{src}: {v:#?}");
+            assert!(
+                v[0].message.contains("is defined as the constants"),
+                "{src}: {}",
+                v[0].message
+            );
+            assert!(
+                !v[0].message.contains("Give it one home"),
+                "{}",
+                v[0].message
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_home_of_every_shape_is_named_in_the_finding_cases_23_75_84_92() {
+        // 84: a class attribute, then a bare use.
+        let v = run_pairs(vec![
+            (
+                "app/queues.py",
+                "class Queues:\n    ORDERS = 'orders-high'\n",
+            ),
+            ("app/worker.py", "def w():\n    subscribe('orders-high')\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert!(v[0].message.contains("`Queues.ORDERS`"), "{}", v[0].message);
+        // 92: Object.freeze.
+        let v = run_pairs(vec![
+            (
+                "src/queues.js",
+                "export const QUEUES = Object.freeze({ ORDERS: 'orders-high' });\n",
+            ),
+            ("src/worker.js", "subscribe('orders-high');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert!(v[0].message.contains("`QUEUES`"), "{}", v[0].message);
+        // 23: an enum member that holds a route.
+        let v = run_pairs(vec![
+            (
+                "src/routes.ts",
+                "export enum Routes { Orders = '/api/orders' }\n",
+            ),
+            ("src/a.ts", "fetch('/api/orders');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert!(v[0].message.contains("`Routes.Orders`"), "{}", v[0].message);
+        // 24: two enums with the same route, no bare copy.
+        let e = "export enum Routes { Orders = '/api/orders' }\n";
+        let v = run_pairs(vec![("src/a.ts", e), ("src/b.ts", e)]);
+        assert!(v.is_empty(), "{v:#?}");
+        // 85: a namespace member.
+        let v = run_pairs(vec![
+            (
+                "src/q.ts",
+                "export namespace Q { export const ORDERS = 'orders-high'; }\n",
+            ),
+            ("src/w.ts", "subscribe('orders-high');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert!(v[0].message.contains("`Q.ORDERS`"), "{}", v[0].message);
+    }
+
+    #[test]
+    fn django_choices_and_typed_enum_members_are_still_owned_by_their_type_cases_74_75_79() {
+        let choices =
+            "class Status(models.TextChoices):\n    IN_PROGRESS = 'in-progress', 'In progress'\n";
+        let v = run_pairs(vec![
+            ("billing/models.py", choices),
+            ("orders/models.py", choices),
+        ]);
+        assert!(v.is_empty(), "74: {v:#?}");
+        let v = run_pairs(vec![
+            ("orders/models.py", choices),
+            (
+                "orders/views.py",
+                "def v():\n    return Order.objects.filter(status='in-progress')\n",
+            ),
+        ]);
+        assert!(v.is_empty(), "75: {v:#?}");
+        let e = "export const enum K { A = 'ORDERS_HIGH' }\n";
+        let v = run_pairs(vec![("src/a.ts", e), ("src/b.ts", e)]);
+        assert!(v.is_empty(), "79: {v:#?}");
+    }
+
+    #[test]
+    fn unattributed_class_bodies_are_neither_home_nor_bare() {
+        // A class the walker cannot name: not a home, and not a copy either.
+        let nested = "def f():\n    class C:\n        Q = 'orders-high'\n";
+        let v = run_pairs(vec![
+            ("app/a.py", nested),
+            ("app/b.py", "subscribe('orders-high')\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        let v = run_pairs(vec![
+            (
+                "src/a.ts",
+                "function f() { class C { static Q = 'orders-high'; } }\n",
+            ),
+            ("src/b.ts", "subscribe('orders-high');\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn config_files_contribute_homes_but_never_bare_copies_case_58() {
+        let v = run_pairs(vec![
+            ("src/api.ts", "publish('orders-high');\n"),
+            (
+                "src/config/queues.ts",
+                "export const ORDERS_QUEUE = 'orders-high';\n",
+            ),
+            ("src/worker.ts", "subscribe('orders-high');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        let m = &v[0].message;
+        assert!(
+            m.contains("defined once as the constant `ORDERS_QUEUE`"),
+            "{m}"
+        );
+        assert!(m.contains("src/config/queues.ts:1"), "{m}");
+        assert!(!m.contains("Give it one home"), "{m}");
+        // A bare copy in a config file is still not counted.
+        let v = run_pairs(vec![
+            ("src/config/a.ts", "publish('orders-high');\n"),
+            ("src/b.ts", "publish('orders-high');\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        // A root-level file's constant is a home too; its bare copies are not counted.
+        let v = run_pairs(vec![
+            ("constants.ts", "export const Q = 'orders-high';\n"),
+            ("src/b.ts", "publish('orders-high');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
+    #[test]
+    fn a_constant_in_a_test_file_is_not_a_home_case_97() {
+        let v = run_pairs(vec![
+            ("src/a.test.ts", "export const Q = 'orders-high';\n"),
+            ("src/a.ts", "publish('orders-high');\n"),
+            ("src/b.ts", "subscribe('orders-high');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        assert!(
+            v[0].message.contains("bare literal in 2 files"),
+            "{}",
+            v[0].message
+        );
+        assert!(!v[0].message.contains("a.test.ts"), "{}", v[0].message);
+    }
+
+    // ── review fixes: environment variable names ───────────────────────────────
+
+    #[test]
+    fn env_var_names_read_through_any_environment_receiver_cases_11_12_13_14_15_73() {
+        let two = |a: (&str, &str), b: (&str, &str)| run_pairs(vec![a, b]);
+        // 11: os.environ.setdefault.
+        let line = "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'proj.settings')\n";
+        let v = run_pairs(vec![
+            ("proj/asgi.py", line),
+            ("proj/wsgi.py", line),
+            ("proj/celery.py", line),
+        ]);
+        assert!(v.is_empty(), "11: {v:#?}");
+        // 12 and 73: Django's request.META, by subscript and by .get.
+        let v = two(
+            (
+                "app/utils.py",
+                "def f(r):\n    return r.META['HTTP_X_FORWARDED_FOR']\n",
+            ),
+            (
+                "app/views.py",
+                "def g(r):\n    return r.META.get('HTTP_X_FORWARDED_FOR')\n",
+            ),
+        );
+        assert!(v.is_empty(), "12: {v:#?}");
+        let g = "def g(r):\n    return r.META.get('HTTP_X_FORWARDED_FOR')\n";
+        let v = two(("app/utils.py", g), ("app/views.py", g));
+        assert!(v.is_empty(), "73: {v:#?}");
+        // 13: Deno.env.get.
+        let d = "export const u = Deno.env.get('DATABASE_URL_RO');\n";
+        let v = two(("src/db.ts", d), ("src/jobs.ts", d));
+        assert!(v.is_empty(), "13: {v:#?}");
+        // 14: std::env::set_var, and remove_var.
+        let v = two(
+            (
+                "src/bin/worker.rs",
+                "fn main() { std::env::set_var(\"RUST_LOG\", \"debug\"); }\n",
+            ),
+            (
+                "src/main.rs",
+                "fn main() { std::env::set_var(\"RUST_LOG\", \"info\"); }\n",
+            ),
+        );
+        assert!(v.is_empty(), "14: {v:#?}");
+        let r = "fn main() { std::env::remove_var(\"RUST_LOG\"); }\n";
+        let v = two(("src/a.rs", r), ("src/b.rs", r));
+        assert!(v.is_empty(), "remove_var: {v:#?}");
+        // 15: python-decouple config().
+        let c = "url = config('DATABASE_URL_RO')\n";
+        let v = two(("app/cache.py", c), ("app/db.py", c));
+        assert!(v.is_empty(), "15: {v:#?}");
+        // putenv / unsetenv.
+        for call in [
+            "os.putenv('ORDERS_QUEUE', 'x')",
+            "os.unsetenv('ORDERS_QUEUE')",
+        ] {
+            let src = format!("{call}\n");
+            let v = two(("app/a.py", &src), ("app/b.py", &src));
+            assert!(v.is_empty(), "{call}: {v:#?}");
+        }
+        // The control: the same name through an ordinary call is a domain value.
+        let v = two(
+            ("app/a.py", "register('ORDERS_QUEUE')\n"),
+            ("app/b.py", "register('ORDERS_QUEUE')\n"),
+        );
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
+    // ── review fixes: HTML attribute values ────────────────────────────────────
+
+    #[test]
+    fn jsx_attribute_values_are_not_counted_cases_01_02_03_10_65_72_88() {
+        let cases: [(&str, &str, &str); 7] = [
+            (
+                "01",
+                "export const A = () => <input autoComplete=\"current-password\" />;\n",
+                "export const B = () => <input autoComplete=\"current-password\" />;\n",
+            ),
+            (
+                "02",
+                "export const A = () => <input type=\"datetime-local\" />;\n",
+                "export const B = () => <input type=\"datetime-local\" />;\n",
+            ),
+            (
+                "03",
+                "export const A = () => <Icon name=\"chevron-down\" />;\n",
+                "export const B = () => <Icon name=\"chevron-down\" />;\n",
+            ),
+            (
+                "10",
+                "export const A = () => <Trans i18nKey=\"checkout-title\" />;\n",
+                "export const B = () => <Trans i18nKey=\"checkout-title\" />;\n",
+            ),
+            (
+                "65",
+                "export const A = () => <iframe sandbox=\"allow-scripts\" />;\n",
+                "export const B = () => <iframe sandbox=\"allow-scripts\" />;\n",
+            ),
+            (
+                "72",
+                "export const A = () => <button data-testid=\"submit-button\" />;\n",
+                "export const B = () => <button data-testid=\"submit-button\" />;\n",
+            ),
+            (
+                "88",
+                "export const A = () => <input autoComplete={'current-password'} />;\n",
+                "export const B = () => <input {...p} autoComplete={cond ? 'current-password' : 'off'} />;\n",
+            ),
+        ];
+        for (id, a, b) in cases {
+            let v = run_pairs(vec![("src/A.tsx", a), ("src/B.tsx", b)]);
+            assert!(v.is_empty(), "{id}: {v:#?}");
+            // The control: the same text as a plain call argument is flagged.
+            let plain = a
+                .split('"')
+                .nth(1)
+                .or_else(|| a.split('\'').nth(1))
+                .unwrap()
+                .to_string();
+            let call = format!("pick('{plain}');\n");
+            let v = run_pairs(vec![("src/a.ts", &call), ("src/b.ts", &call)]);
+            assert_eq!(v.len(), 1, "{id} control: {v:#?}");
+        }
+    }
+
+    #[test]
+    fn a_route_in_href_or_to_is_still_counted_cases_06_82() {
+        let v = run_pairs(vec![
+            ("src/Nav.tsx", "export const Nav = () => <Link to=\"/orders/new\">New</Link>;\n"),
+            (
+                "src/router.tsx",
+                "export const routes = createBrowserRouter([{ path: '/orders/new', element: <New/> }]);\n",
+            ),
+        ]);
+        assert_eq!(v.len(), 1, "06: {v:#?}");
+        let v = run_pairs(vec![
+            (
+                "src/components/Empty.tsx",
+                "export const E = () => <Link href=\"/orders/new\">Create</Link>;\n",
+            ),
+            (
+                "src/components/Nav.tsx",
+                "export const Nav = () => <Link href=\"/orders/new\">New</Link>;\n",
+            ),
+        ]);
+        assert_eq!(v.len(), 1, "82: {v:#?}");
+    }
+
+    #[test]
+    fn django_widget_attrs_are_html_attributes_case_60() {
+        let w = "class F(forms.Form):\n    pw = forms.CharField(widget=forms.PasswordInput(attrs={'autocomplete': 'current-password'}))\n";
+        let v = run_pairs(vec![("app/forms.py", w), ("app/forms2.py", w)]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn preact_class_attribute_in_a_jsx_file_is_read_cleanly_case_07() {
+        let a = "export const A = () => <div class=\"is-active\">a</div>;\n";
+        let b = "export const B = () => <div class=\"is-active\">b</div>;\n";
+        let v = run_pairs(vec![("src/a.jsx", a), ("src/b.jsx", b)]);
+        assert!(v.is_empty(), "{v:#?}");
+        let v = run_pairs(vec![("src/a.tsx", a), ("src/b.tsx", b)]);
+        assert!(v.is_empty(), "90: {v:#?}");
+    }
+
+    // ── review fixes: positions ────────────────────────────────────────────────
+
+    #[test]
+    fn a_union_type_member_is_not_a_copy_case_54() {
+        let v = run_pairs(vec![
+            ("src/a.ts", "fetch('/api/orders');\n"),
+            ("src/b.ts", "fetch('/api/orders');\n"),
+            (
+                "src/types.ts",
+                "export type R = '/api/orders' | '/api/users';\n",
+            ),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        let m = &v[0].message;
+        assert!(m.contains("bare literal in 2 files"), "{m}");
+        assert!(!m.contains("types.ts"), "{m}");
+    }
+
+    #[test]
+    fn class_list_calls_are_class_names_cases_08_71() {
+        let a = "export function open(el: HTMLElement) { el.classList.add('is-open'); }\n";
+        let b = "export function show(el: HTMLElement) { el.classList.toggle('is-open'); }\n";
+        let v = run_pairs(vec![("src/menu.ts", a), ("src/modal.ts", b)]);
+        assert!(v.is_empty(), "{v:#?}");
+        let v = run_pairs(vec![
+            ("src/menu.ts", "el.classList.add('is-active');\n"),
+            ("src/modal.ts", "el.classList.toggle('is-active');\n"),
+        ]);
+        assert!(v.is_empty(), "71: {v:#?}");
+    }
+
+    #[test]
+    fn string_concatenation_is_not_arithmetic_cases_83_31() {
+        let v = run_pairs(vec![
+            ("src/a.ts", "export const m = 'rate ' + 0.12;\n"),
+            ("src/b.ts", "export const n = 'fee ' + 0.12;\n"),
+        ]);
+        assert!(v.is_empty(), "83: {v:#?}");
+        let v = run_pairs(vec![
+            ("src/a.ts", "export const msg = 'rate ' + 0.12;\n"),
+            (
+                "src/b.ts",
+                "export const t = (total: number) => total * 0.12;\n",
+            ),
+        ]);
+        assert!(v.is_empty(), "31: {v:#?}");
+        let v = run_pairs(vec![
+            ("app/a.py", "m = 'rate ' + 0.12\n"),
+            ("app/b.py", "t = total * 0.12\n"),
+        ]);
+        assert!(v.is_empty(), "python: {v:#?}");
+    }
+
+    #[test]
+    fn a_comment_before_the_specifier_does_not_hide_it_cases_76_94_57() {
+        let v = run_pairs(vec![
+            (
+                "src/a.js",
+                "const m = import(/* webpackChunkName: \"x\" */ 'lodash-es');\n",
+            ),
+            ("src/b.js", "use('lodash-es');\n"),
+            ("src/c.js", "use2('lodash-es');\n"),
+        ]);
+        assert!(v.is_empty(), "76: {v:#?}");
+        let v = run_pairs(vec![
+            (
+                "app/a.py",
+                "import importlib\nm = importlib.import_module(\n    # plugin\n    'plugins-core')\n",
+            ),
+            ("app/b.py", "use('plugins-core')\n"),
+            ("app/c.py", "use2('plugins-core')\n"),
+        ]);
+        assert!(v.is_empty(), "94: {v:#?}");
+    }
+
+    // ── scope decisions ────────────────────────────────────────────────────────
+
+    #[test]
+    fn rates_need_two_significant_digits_cases_28_29_30() {
+        for (id, a, b) in [
+            (
+                "28",
+                "export const s = (ms: number) => ms * 0.001;\n",
+                "export const t = (ms: number) => ms * 0.001;\n",
+            ),
+            (
+                "29",
+                "export const w = (x: number) => x * 0.9;\n",
+                "export const v = (x: number) => x * 0.9;\n",
+            ),
+        ] {
+            let v = run_pairs(vec![("src/a.ts", a), ("src/b.ts", b)]);
+            assert!(v.is_empty(), "{id}: {v:#?}");
+        }
+        let v = run_pairs(vec![
+            ("src/a.py", "def f(x):\n    return x + 1e-9\n"),
+            ("src/b.py", "def g(y):\n    return y + 1e-9\n"),
+        ]);
+        assert!(v.is_empty(), "30: {v:#?}");
+        // Two significant digits stay in scope, with any number of leading zeros.
+        for rate in ["0.12", "0.075", "0.0825"] {
+            let src = format!("export const t = (x: number) => x * {rate};\n");
+            let v = run_pairs(vec![("src/a.ts", &src), ("src/b.ts", &src)]);
+            assert_eq!(v.len(), 1, "{rate}: {v:#?}");
+        }
+    }
+
+    #[test]
+    fn django_url_names_are_not_domain_values_case_16() {
+        let v = run_pairs(vec![
+            (
+                "orders/views.py",
+                "from django.shortcuts import redirect\ndef done(request):\n    return redirect('orders:detail', pk=1)\n",
+            ),
+            (
+                "payments/views.py",
+                "from django.urls import reverse\ndef back(request):\n    return reverse('orders:detail', args=[1])\n",
+            ),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        for call in ["reverse", "reverse_lazy", "redirect", "resolve_url"] {
+            let src = format!("x = {call}('orders:detail')\n");
+            let other = "y = pick('orders:detail')\n";
+            let v = run_pairs(vec![
+                ("app/a.py", &src),
+                ("app/b.py", other),
+                ("app/c.py", other),
+            ]);
+            assert!(v.is_empty(), "{call}: {v:#?}");
+        }
+        // A route passed to redirect() is a route, not a URL name.
+        let v = run_pairs(vec![
+            ("src/a.ts", "res.redirect('/orders/new');\n"),
+            ("src/b.ts", "res.redirect('/orders/new');\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
+    #[test]
+    fn values_group_within_the_nearest_package_root_case_46() {
+        let src = "fetch('/api/v1/orders');\n";
+        // Conventional monorepo containers.
+        let v = run_pairs(vec![
+            ("apps/web/src/api.ts", src),
+            ("apps/mobile/src/api.ts", src),
+        ]);
+        assert!(v.is_empty(), "46: {v:#?}");
+        // Declared packages.
+        let v = run_pairs(vec![
+            ("web/package.json", "{}"),
+            ("mobile/package.json", "{}"),
+            ("web/src/api.ts", src),
+            ("mobile/src/api.ts", src),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        let v = run_pairs(vec![
+            ("svc/pyproject.toml", ""),
+            ("lib/pyproject.toml", ""),
+            ("svc/app/a.py", "c.get('/api/v1/orders')\n"),
+            ("lib/app/b.py", "c.get('/api/v1/orders')\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        let v = run_pairs(vec![
+            ("crates/a/Cargo.toml", ""),
+            ("crates/b/Cargo.toml", ""),
+            (
+                "crates/a/src/lib.rs",
+                "fn f() { c.get(\"/api/v1/orders\"); }\n",
+            ),
+            (
+                "crates/b/src/lib.rs",
+                "fn g() { c.get(\"/api/v1/orders\"); }\n",
+            ),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        // Two files inside one package still group.
+        let v = run_pairs(vec![
+            ("web/package.json", "{}"),
+            ("web/src/api.ts", src),
+            ("web/src/other/api.ts", src),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+        // And a home in one package does not make another package's copy a bare copy of it.
+        let v = run_pairs(vec![
+            ("apps/web/src/q.ts", "export const Q = 'orders-high';\n"),
+            ("apps/mobile/src/w.ts", "subscribe('orders-high');\n"),
+        ]);
+        assert!(v.is_empty(), "{v:#?}");
+        // No manifest and no container: one package, the repo root.
+        let v = run_pairs(vec![("src/a/api.ts", src), ("src/b/api.ts", src)]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
+    // ── cheap protocol tokens from the review ──────────────────────────────────
+
+    #[test]
+    fn cipher_error_code_date_format_region_and_model_tokens_are_protocol_cases_32_34_35_95() {
+        for v in [
+            "aes-256-gcm",
+            "sha-256",
+            "rsa-oaep",
+            "chacha20-poly1305",
+            "hmac-sha256",
+            "ERR_MODULE_NOT_FOUND",
+            "ERR_INVALID_ARG_TYPE",
+            "hh:mm:ss",
+            "yyyy-mm-dd",
+            "dd/mm/yyyy",
+            "us-east-1",
+            "eu-central-1",
+            "ap-southeast-2",
+            "us-gov-west-1",
+            "gpt-4o-mini",
+            "claude-3-5-sonnet",
+            "gemini-1.5-pro",
+            "text-embedding-3-small",
+        ] {
+            let kind = if v.starts_with("ERR_") {
+                Shape::ScreamingSnake
+            } else {
+                Shape::Token
+            };
+            assert!(
+                shape_of(LiteralKind::Str, v).is_some(),
+                "{v} must pass the shape first"
+            );
+            assert!(is_protocol_or_style_value(v), "{v} ({kind:?})");
+        }
+        for v in [
+            "orders-high",
+            "retry-queue-2",
+            "order:created",
+            "us-orders",
+            "regions-east-1",
+        ] {
+            assert!(!is_protocol_or_style_value(v), "{v}");
+        }
+        let body = "c.createCipheriv('aes-256-gcm', k, iv);\nd.format('hh:mm:ss');\nregion('us-east-1');\nmodel('gpt-4o-mini');\nif (e.code === 'ERR_MODULE_NOT_FOUND') {}\n";
+        let v = run_pairs(vec![("src/a.ts", body), ("src/b.ts", body)]);
+        assert!(v.is_empty(), "{v:#?}");
+    }
+
+    #[test]
+    fn request_and_response_verbs_and_span_callees_take_protocol_names_cases_44_49_61() {
+        for call in [
+            "req.get('idempotency-key')",
+            "res.set('idempotency-key', v)",
+            "request.get('idempotency-key')",
+            "response.set('idempotency-key', v)",
+            "tracer.start_as_current_span('idempotency-key')",
+            "tracer.startSpan('idempotency-key')",
+            "tracer.startActiveSpan('idempotency-key', f)",
+            "Sentry.setTag('idempotency-key', s)",
+            "scope.set_tag('idempotency-key', s)",
+            "span.setAttribute('idempotency-key', s)",
+        ] {
+            let src = format!("{call};\n");
+            let other = "pick('idempotency-key');\n";
+            let v = run_pairs(vec![
+                ("src/a.ts", &src),
+                ("src/b.ts", other),
+                ("src/c.ts", other),
+            ]);
+            assert!(v.is_empty(), "{call}: {v:#?}");
+        }
+        // The same verbs on a receiver that is neither a request, a response nor headers.
+        let v = run_pairs(vec![
+            ("src/a.ts", "store.get('idempotency-key');\n"),
+            ("src/b.ts", "cache.set('idempotency-key', v);\n"),
+        ]);
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+
     // ── contract ───────────────────────────────────────────────────────────────
 
     #[test]
@@ -3109,13 +3996,34 @@ mod tests {
 
     #[test]
     fn n1_matches_decimals_strictly_between_zero_and_one_except_the_round_fractions() {
-        for v in ["0.12", "0.15", "0.01", "0.999", "0.2", "0.1"] {
+        for v in ["0.12", "0.15", "0.999", "0.075", "0.0825", "0.15"] {
             assert!(is_decimal_rate(v), "{v}");
             assert_eq!(shape_of(LiteralKind::Number, v), Some(Shape::Rate), "{v}");
         }
         for v in [
-            "0.5", "0.25", "0.75", "0", "1", "1.5", "12", "86400", "60", "1000", "404", "100",
-            "-0.12", "NaN", "abc", "",
+            "0.5",
+            "0.25",
+            "0.75",
+            "0",
+            "1",
+            "1.5",
+            "12",
+            "86400",
+            "60",
+            "1000",
+            "404",
+            "100",
+            "-0.12",
+            "NaN",
+            "abc",
+            "",
+            // One significant digit: a scale or an epsilon, not a rate (scope decision A).
+            "0.1",
+            "0.2",
+            "0.9",
+            "0.01",
+            "0.001",
+            "0.000000001",
         ] {
             assert!(!is_decimal_rate(v), "{v}");
         }
