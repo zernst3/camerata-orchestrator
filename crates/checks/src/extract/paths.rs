@@ -28,13 +28,15 @@ pub fn is_test_path(path: &str) -> bool {
                 | "e2e"
                 | "cypress"
                 | "stories"
+                | "spec"
+                | "__fixtures__"
         )
     }) {
         return true;
     }
     file.rfind('.').is_some_and(|dot| {
         let stem = &file[..dot];
-        [".test", ".spec", "_test", ".cy", ".stories"]
+        [".test", ".spec", "_test", "_spec", ".cy", ".stories"]
             .iter()
             .any(|suffix| stem.ends_with(suffix))
     })
@@ -55,4 +57,40 @@ pub fn emitted_js_paths(files: &[(String, String)]) -> HashSet<&str> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jasmine_rspec_and_fixture_conventions_are_test_paths() {
+        for path in [
+            "spec/models/invoice_spec.js",
+            "spec/support/jasmine.json",
+            "spec/helpers/customMatchers.js",
+            "packages/x/spec/a.js",
+            "src/__fixtures__/data.ts",
+            "app/models/user_spec.rb",
+            "src/invoice_spec.js",
+            "tests/a.ts",
+            "src/a.test.ts",
+        ] {
+            assert!(is_test_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn near_misses_are_not_test_paths() {
+        for path in [
+            "src/specs_helper.ts",
+            "src/inspector.ts",
+            "src/spectrum/colors.ts",
+            "src/fixtures_loader.ts",
+            "src/aspec.ts",
+            "src/lib/invoice.js",
+        ] {
+            assert!(!is_test_path(path), "{path}");
+        }
+    }
 }

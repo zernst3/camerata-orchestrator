@@ -847,3 +847,21 @@ fn an_asset_with_a_generic_name_counts_as_referenced_and_blocks_the_roll_up() {
     let vs = run(&f);
     assert!(vs.iter().all(|v| v.line == 1), "{vs:#?}");
 }
+
+#[test]
+fn jasmine_spec_folders_and_helpers_are_tests_so_the_code_they_import_is_live() {
+    let f = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        ("index.js", "require('./lib/invoice');\n"),
+        ("lib/invoice.js", "module.exports = {};\n"),
+        (
+            "spec/models/invoice_spec.js",
+            "require('../../lib/ledger_totals');\n",
+        ),
+        ("spec/support/jasmine.json", "{}\n"),
+        ("spec/helpers/customMatchers.js", "module.exports = {};\n"),
+        ("lib/ledger_totals.js", "module.exports = {};\n"),
+        ("lib/stranded_total.js", "module.exports = {};\n"),
+    ]);
+    assert_flags_only(&f, "lib/stranded_total.js");
+}

@@ -455,7 +455,10 @@ fn next_src_layout_special_files_are_never_candidates() {
         ("src/proxy.ts", "export {};\n"),
         ("src/instrumentation.ts", "export {};\n"),
         ("src/instrumentation-client.ts", "export {};\n"),
-        ("src/mdx-components.tsx", "export const useMDXComponents = () => ({});\n"),
+        (
+            "src/mdx-components.tsx",
+            "export const useMDXComponents = () => ({});\n",
+        ),
         ("src/app/layout.tsx", "export default 1;\n"),
         ("src/app/page.tsx", "export default 1;\n"),
     ]);
