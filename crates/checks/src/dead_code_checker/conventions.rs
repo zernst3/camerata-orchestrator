@@ -26,6 +26,7 @@ struct Frameworks {
     expo_router: bool,
     gatsby: bool,
     docusaurus: bool,
+    ember: bool,
     vercel: bool,
     /// `wrangler.toml` or `firebase.json`: `functions/` is loaded by the platform.
     cloud_functions: bool,
@@ -208,6 +209,7 @@ impl<'a> Conventions<'a> {
                 expo_router: dep(&|k| k == "expo-router"),
                 gatsby: dep(&|k| k == "gatsby"),
                 docusaurus: dep(&|k| k == "@docusaurus/core"),
+                ember: dep(&|k| k == "ember-source" || k == "ember-cli"),
                 vercel: has(&dir, &|n| n == "vercel.json"),
                 cloud_functions: has(&dir, &|n| n == "wrangler.toml" || n == "firebase.json"),
             };
@@ -298,6 +300,11 @@ impl<'a> Conventions<'a> {
             return true;
         }
         if fw.docusaurus && (under("src/pages/") || under("src/theme/")) {
+            return true;
+        }
+        // Ember's resolver loads routes, controllers, services and components under `app/` by
+        // name from the template or the router, never by import.
+        if fw.ember && under("app/") {
             return true;
         }
         if fw.vercel && under("api/") {

@@ -417,3 +417,30 @@ fn positive_sibling_a_folder_that_merely_contains_the_word_is_still_checked() {
     let got = flagged(&f);
     assert_eq!(got.len(), 2, "{got:?}");
 }
+
+#[test]
+fn ember_app_directory_is_loaded_by_the_resolver() {
+    for dep in ["ember-source", "ember-cli"] {
+        let manifest = format!(r#"{{"private":true,"devDependencies":{{"{dep}":"5"}}}}"#);
+        let f = files(vec![
+            ("package.json", manifest.as_str()),
+            ("app/routes/billing-history.js", "export default class {}\n"),
+            (
+                "app/services/session-tracker.js",
+                "export default class {}\n",
+            ),
+            ("app/components/user-card.js", "export default class {}\n"),
+            ("app/components/user-card.hbs", "<div/>\n"),
+        ]);
+        assert_silent(&f);
+    }
+}
+
+#[test]
+fn positive_sibling_an_app_directory_without_ember_is_still_checked() {
+    let f = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        ("app/routes/billing-history.js", "export default class {}\n"),
+    ]);
+    assert_flags_only(&f, "app/routes/billing-history.js");
+}

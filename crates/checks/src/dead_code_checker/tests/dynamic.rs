@@ -309,3 +309,46 @@ fn a_prefix_naming_a_folder_the_scan_lacks_roots_nothing() {
     ]);
     assert_flags_only(&f, "src/elsewhere/stranded.ts");
 }
+
+#[test]
+fn rails_importmap_pin_all_from_roots_the_pinned_folder() {
+    let f = files(vec![
+        ("Gemfile", "gem 'importmap-rails'\n"),
+        (
+            "config/importmap.rb",
+            "pin \"application\"\npin_all_from \"app/javascript/controllers\", under: \"controllers\"\n",
+        ),
+        ("app/javascript/application.js", "import \"controllers\"\n"),
+        ("app/javascript/controllers/hello_controller.js", "export default class {}\n"),
+        ("app/javascript/controllers/clipboard_copy_controller.js", "export default class {}\n"),
+        ("app/javascript/stranded/stranded_widget.js", "export default class {}\n"),
+    ]);
+    assert_flags_only(&f, "app/javascript/stranded/stranded_widget.js");
+}
+
+#[test]
+fn pin_all_from_with_parentheses_and_other_commands_without_them_are_distinguished() {
+    let f = files(vec![
+        (
+            "config/importmap.rb",
+            "pin_all_from(\"app/javascript/widgets\")\n",
+        ),
+        (
+            "app/javascript/widgets/gauge_widget.js",
+            "export default 1;\n",
+        ),
+    ]);
+    assert_silent(&f);
+    // Only `pin_all_from` is a loader without parentheses; a bare `glob "..."` in prose is not.
+    let prose = files(vec![
+        (
+            "notes.txt",
+            "We should glob \"app/javascript/widgets\" someday.\n",
+        ),
+        (
+            "app/javascript/widgets/gauge_widget.js",
+            "export default 1;\n",
+        ),
+    ]);
+    assert_flags_only(&prose, "app/javascript/widgets/gauge_widget.js");
+}

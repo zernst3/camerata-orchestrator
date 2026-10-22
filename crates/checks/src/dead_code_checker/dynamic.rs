@@ -32,6 +32,7 @@ const LOADER_NAMES: &[&str] = &[
     "walk_packages",
     "listdir",
     "include_dir",
+    "pin_all_from",
     "read_dir",
     "iterdir",
     "rglob",
@@ -41,6 +42,10 @@ const LOADER_NAMES: &[&str] = &[
     "fg",
     "dir",
 ];
+
+/// Loader names that take their path as a bare command argument, with no parentheses
+/// (`pin_all_from "app/javascript/controllers"` in a Rails importmap).
+const PARENLESS_LOADERS: &[&str] = &["pin_all_from"];
 
 const CARGO_MANIFEST_DIR: &str = "$CARGO_MANIFEST_DIR/";
 
@@ -137,15 +142,16 @@ fn literal_directory_roots(
         return;
     }
     for literal in loader_literals(content) {
-        // A directory is either the whole head (`./handlers`) or the head cut at its last `/`
-        // (`./plugins/index`).
+        // A directory is the whole head (`./handlers`); only when the whole head is not a
+        // folder is it a file prefix (`./plugins/index`) and its parent the folder. Cutting a
+        // head that already names a folder would root the folder's parent as well.
         let whole = literal.trim_end_matches('/');
         let cut = whole.rfind('/').map_or("", |i| &whole[..i]);
         for base in [directory_of(caller), manifests.nearest(caller), ""] {
-            for rel in [whole, cut] {
-                if let Some(dir) = existing_dir(base, rel, false, dirs) {
-                    roots.insert_dir(dir);
-                }
+            if let Some(dir) = existing_dir(base, whole, false, dirs) {
+                roots.insert_dir(dir);
+            } else if let Some(dir) = existing_dir(base, cut, false, dirs) {
+                roots.insert_dir(dir);
             }
         }
     }
@@ -176,10 +182,11 @@ fn loader_literals(content: &str) -> Vec<String> {
             while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
                 i += 1;
             }
-            if bytes.get(i) != Some(&b'(') {
+            if bytes.get(i) == Some(&b'(') {
+                i += 1;
+            } else if !PARENLESS_LOADERS.contains(name) {
                 continue;
             }
-            i += 1;
             while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
                 i += 1;
             }
