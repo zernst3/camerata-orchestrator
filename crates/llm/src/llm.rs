@@ -2494,23 +2494,17 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(process_env)]
     fn from_env_with_backend_never_reads_camerata_llm_backend() {
         // The old env-driven axis is gone: setting CAMERATA_LLM_BACKEND=api must NOT change
         // the explicitly-requested backend on the built `Llm`.
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior = std::env::var("CAMERATA_LLM_BACKEND").ok();
-        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LLM_BACKEND", "api");
         let llm = Llm::from_env_with_backend(Backend::Cli);
         assert_eq!(
             llm.backend,
             Backend::Cli,
             "explicit Cli must win over any env var"
         );
-        match prior {
-            Some(v) => std::env::set_var("CAMERATA_LLM_BACKEND", v),
-            None => std::env::remove_var("CAMERATA_LLM_BACKEND"),
-        }
     }
 
     #[test]
@@ -3439,19 +3433,17 @@ malformed line, not json
     }
 
     #[test]
+    #[serial_test::serial(process_env)]
     fn env_secs_falls_back_on_missing_invalid_or_zero() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let var = "CAMERATA_TEST_ENV_SECS_FALLBACK";
-        std::env::remove_var(var);
+        let _unset = camerata_test_env::EnvGuard::remove(var);
         assert_eq!(env_secs(var, 42), std::time::Duration::from_secs(42));
-        std::env::set_var(var, "not-a-number");
+        let _invalid = camerata_test_env::EnvGuard::set(var, "not-a-number");
         assert_eq!(env_secs(var, 42), std::time::Duration::from_secs(42));
-        std::env::set_var(var, "0");
+        let _zero = camerata_test_env::EnvGuard::set(var, "0");
         assert_eq!(env_secs(var, 42), std::time::Duration::from_secs(42));
-        std::env::set_var(var, "17");
+        let _valid = camerata_test_env::EnvGuard::set(var, "17");
         assert_eq!(env_secs(var, 42), std::time::Duration::from_secs(17));
-        std::env::remove_var(var);
     }
 
     // ── `read_cli_stream` — THE single CLI reader, driven by a scripted process ──────
@@ -3828,46 +3820,23 @@ exit 1
         }
     }
 
-    /// Serializes the two PATH/env-mutating end-to-end tests against each other (process-
-    /// global state). Only these tests touch `PATH` / `CAMERATA_CLI_TIMEOUT_SECS`. An ASYNC
-    /// mutex because the guard is deliberately held across the `complete()` await — the env
-    /// must stay patched for the whole call — which a `std::sync::Mutex` must never be.
-    static FAKE_CLI_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    /// Prepend `dir` to `PATH` and pin `CAMERATA_CLI_TIMEOUT_SECS`; restore both on drop.
-    struct FakeCliEnv {
-        prior_path: Option<String>,
-        prior_timeout: Option<String>,
-    }
-
-    impl FakeCliEnv {
-        fn new(dir: &std::path::Path, overall_secs: u64) -> Self {
-            let prior_path = std::env::var("PATH").ok();
-            let prior_timeout = std::env::var("CAMERATA_CLI_TIMEOUT_SECS").ok();
-            let joined = match &prior_path {
-                Some(p) => format!("{}:{p}", dir.display()),
-                None => dir.display().to_string(),
-            };
-            std::env::set_var("PATH", joined);
-            std::env::set_var("CAMERATA_CLI_TIMEOUT_SECS", overall_secs.to_string());
-            Self {
-                prior_path,
-                prior_timeout,
-            }
-        }
-    }
-
-    impl Drop for FakeCliEnv {
-        fn drop(&mut self) {
-            match &self.prior_path {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-            match &self.prior_timeout {
-                Some(v) => std::env::set_var("CAMERATA_CLI_TIMEOUT_SECS", v),
-                None => std::env::remove_var("CAMERATA_CLI_TIMEOUT_SECS"),
-            }
-        }
+    /// Prepend `dir` to `PATH` and pin `CAMERATA_CLI_TIMEOUT_SECS`; both are restored when
+    /// the returned guards drop. The two end-to-end tests below that use it hold the guards
+    /// across the `complete()` await (the env must stay patched for the whole call), and carry
+    /// the shared `#[serial_test::serial(process_env)]` key, which serializes them against
+    /// every other env-mutating test in this binary.
+    fn fake_cli_env(
+        dir: &std::path::Path,
+        overall_secs: u64,
+    ) -> (camerata_test_env::EnvGuard, camerata_test_env::EnvGuard) {
+        let joined = match std::env::var("PATH") {
+            Ok(p) => format!("{}:{p}", dir.display()),
+            Err(_) => dir.display().to_string(),
+        };
+        (
+            camerata_test_env::EnvGuard::set("PATH", joined),
+            camerata_test_env::EnvGuard::set("CAMERATA_CLI_TIMEOUT_SECS", overall_secs.to_string()),
+        )
     }
 
     /// An `Llm` pinned to Anthropic + the CLI backend, independent of any ambient env.
@@ -3891,8 +3860,8 @@ exit 1
     /// 120-rule scan recorded. After the fix, every streamed line refreshes the silence
     /// backstop, so the call completes and returns its text.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn complete_cli_backend_survives_a_live_call_that_outlasts_the_overall_window() {
-        let _g = FAKE_CLI_ENV_LOCK.lock().await;
         let fake = FakeClaude::new(
             "live",
             r#"#!/bin/sh
@@ -3905,7 +3874,7 @@ done
 printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cost_usd":0.25,"usage":{"input_tokens":11,"output_tokens":7}}'
 "#,
         );
-        let _env = FakeCliEnv::new(&fake.dir, 1);
+        let _env = fake_cli_env(&fake.dir, 1);
 
         let started = std::time::Instant::now();
         let resp = cli_llm()
@@ -3937,10 +3906,10 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
     /// for 30s; with the overall window at 1s the call must fail fast with the actionable
     /// "(no output)" message, and the subprocess must actually be killed, not leaked.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn complete_cli_backend_still_kills_a_genuinely_wedged_process() {
-        let _g = FAKE_CLI_ENV_LOCK.lock().await;
         let fake = FakeClaude::new("wedged", "#!/bin/sh\nexec sleep 30\n");
-        let _env = FakeCliEnv::new(&fake.dir, 1);
+        let _env = fake_cli_env(&fake.dir, 1);
 
         let started = std::time::Instant::now();
         let err = cli_llm()

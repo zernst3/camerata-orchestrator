@@ -211,7 +211,7 @@ mod tests {
     // (The env override is process-global; these env-setting tests must not run concurrently with
     // another helper that reads bff_base(), so they're kept narrow.)
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_agents_gets_the_run_agents_path_and_parses_the_transcripts() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -239,9 +239,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::fetch_agents("run-42").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let agents = result.expect("a 200 with a JSON array parses into Some(Vec)");
         assert_eq!(agents.len(), 2, "both transcripts are parsed");
@@ -261,7 +260,7 @@ mod tests {
     // fetch_agents returns None when the body is not the expected shape (a transcript field missing),
     // so the caller never overwrites the live list with garbage.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_agents_returns_none_on_malformed_body() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -276,9 +275,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::fetch_agents("run-9").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(
             result.is_none(),

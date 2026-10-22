@@ -23,5 +23,7 @@ serde = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 # Env-var mutation in the dx_bin() resolver tests races under cargo's parallel test threads;
-# serialize them the same way crates/ui/src/server_process.rs does for CAMERATA_SERVER_BIN.
+# serialize them with the workspace-wide `#[serial_test::serial(process_env)]` key, and restore
+# the variable on drop via EnvGuard (see crates/test-env).
 serial_test = "3"
+camerata-test-env = { path = "../test-env" }

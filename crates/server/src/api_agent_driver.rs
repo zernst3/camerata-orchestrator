@@ -3464,6 +3464,7 @@ mod tests {
     /// (the ClaudeCliDriver path never reads credentials). For an "openrouter"
     /// model WITH a valid key it must also succeed (ApiAgentDriver path).
     #[test]
+    #[serial_test::serial(process_env)]
     fn driver_selection_claude_provider_succeeds_without_openrouter_key() {
         // Registry with only the static Claude entries (no OpenRouter entries).
         let registry = crate::model_registry::ModelRegistry::new();
@@ -3958,6 +3959,7 @@ mod tests {
     /// OpenRouter credential — proving the factory routed it to the CLI provider (the CLI
     /// path never reads creds). The build is the gated, non-orchestrator worker path.
     #[test]
+    #[serial_test::serial(process_env)]
     fn factory_routes_claude_model_to_cli_child_no_creds_needed() {
         let registry = crate::model_registry::ModelRegistry::new();
         let creds: Arc<dyn crate::credentials::CredentialStore> =
@@ -4523,6 +4525,7 @@ mod tests {
     // claude+api path.
 
     #[test]
+    #[serial_test::serial(process_env)]
     fn build_claude_driver_builds_on_api_and_cli_paths_without_spawn() {
         use crate::credentials::CredentialStore as _;
 
@@ -4567,6 +4570,7 @@ mod tests {
     /// `ProjectBackend::Api` + no key -> `build_claude_driver` must refuse to build
     /// ANYTHING, returning `Err` with the block message. No driver, no fallback to the CLI.
     #[test]
+    #[serial_test::serial(process_env)]
     fn build_claude_driver_blocks_on_api_backend_with_no_key() {
         let creds = empty_creds();
 
@@ -4628,6 +4632,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(process_env)]
     fn build_agent_driver_claude_cli_default_succeeds() {
         let registry = crate::model_registry::ModelRegistry::new();
         let creds = crate::credentials::MemoryCredentialStore::new();

@@ -2748,8 +2748,9 @@ mod tests {
     /// Additionally the live-mode-off path proves the gate never skips: with no token
     /// and live mode off, the run errors rather than faking an implementation.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn gate_unchanged_live_mode_off_fails_honestly_without_fake_implementation() {
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
 
         let dir =
             std::env::temp_dir().join(format!("cam-devimpl-gate-test-{}", std::process::id()));

@@ -820,7 +820,7 @@ mod tests {
     // GET /api/credentials — asserts the path and that the JSON list is parsed into
     // the expected CredentialListItem vec.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_credentials_gets_list_and_parses_items() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -836,9 +836,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::fetch_credentials().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let items = result.expect("the GET succeeds and the body parses");
         assert_eq!(items.len(), 2);
@@ -853,7 +852,7 @@ mod tests {
     // POST /api/credentials/{name} — asserts the path includes the credential name
     // and the body is exactly {"value": "..."}; on 200 it returns the masked value.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn post_credential_posts_value_body_and_returns_masked_on_success() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -870,16 +869,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::post_credential("openrouter_api_key", "sk-secret-123").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(result, Ok("sk-s••••".to_string()));
     }
 
     // POST with a non-success status — returns Err carrying the server's `message` field.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn post_credential_returns_error_message_on_failure_status() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -895,9 +893,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::post_credential("github_token", "bad").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(result, Err("invalid token format".to_string()));
     }
@@ -905,7 +902,7 @@ mod tests {
     // POST /api/settings/chat-backend — asserts the body is exactly {"backend":"api"} and
     // that the echoed (backend, api_key_present) parse back.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_chat_backend_posts_backend_and_parses_response() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -923,9 +920,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::set_chat_backend(ProjectBackend::Api).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let (backend, key) = out.expect("backend echo parsed");
         assert_eq!(backend, ProjectBackend::Api);
@@ -934,7 +930,7 @@ mod tests {
 
     // A non-2xx from the endpoint collapses to None (the UI toasts an error).
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_chat_backend_returns_none_on_error_status() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -950,16 +946,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::set_chat_backend(ProjectBackend::Api).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(out.is_none(), "a 400 collapses to None");
     }
 
     // GET /api/settings — the backend view parses the global chat backend + api_key_present.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_backend_settings_parses_chat_backend_and_key_flag() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -974,9 +969,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::fetch_backend_settings().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let view = out.expect("backend settings parsed");
         assert_eq!(view.chat_backend.as_deref(), Some("api"));
@@ -988,7 +982,7 @@ mod tests {
     // with no body, and that the response's openrouter_count/attempted fields parse; the
     // `models` array in the real response is intentionally ignored by this control.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn refresh_openrouter_registry_posts_and_parses_count_and_attempted() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1005,9 +999,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::refresh_openrouter_registry().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let resp = out.expect("refresh response parsed");
         assert_eq!(resp.openrouter_count, 345);
@@ -1018,7 +1011,7 @@ mod tests {
     // NOT an error. `refresh_openrouter_registry` must surface that as `Some(..)`, not
     // collapse it to `None` (which would incorrectly toast "could not reach the server").
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn refresh_openrouter_registry_no_key_is_some_not_none() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1035,9 +1028,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::refresh_openrouter_registry().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let resp = out.expect("a 200 with attempted:false must still parse as Some");
         assert_eq!(resp.openrouter_count, 0);
@@ -1047,12 +1039,11 @@ mod tests {
     // Transport failure (server unreachable) collapses to None — the UI shows the "could
     // not reach the server" toast rather than misreporting a fetch attempt.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn refresh_openrouter_registry_returns_none_when_server_unreachable() {
         // An address nothing is listening on — no MockServer mounted.
-        std::env::set_var("CAMERATA_BFF_URL", "http://127.0.0.1:1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", "http://127.0.0.1:1");
         let out = super::refresh_openrouter_registry().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(out.is_none(), "an unreachable server collapses to None");
     }
@@ -1061,7 +1052,7 @@ mod tests {
     // trigger, 3 of 3 — see crates/server/src/lib.rs for triggers 1 and 2). Mirrors the
     // three OpenRouter refresh-helper tests immediately above, one for one.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn refresh_anthropic_registry_posts_and_parses_count_and_attempted() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1078,9 +1069,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::refresh_anthropic_registry().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let resp = out.expect("refresh response parsed");
         assert_eq!(resp.anthropic_count, 4);
@@ -1091,7 +1081,7 @@ mod tests {
     // NOT an error. `refresh_anthropic_registry` must surface that as `Some(..)`, not
     // collapse it to `None` (which would incorrectly toast "could not reach the server").
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn refresh_anthropic_registry_no_key_is_some_not_none() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1108,9 +1098,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::refresh_anthropic_registry().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let resp = out.expect("a 200 with attempted:false must still parse as Some");
         assert!(!resp.attempted);
@@ -1119,12 +1108,11 @@ mod tests {
     // Transport failure (server unreachable) collapses to None — the UI shows the "could
     // not reach the server" toast rather than misreporting a fetch attempt.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn refresh_anthropic_registry_returns_none_when_server_unreachable() {
         // An address nothing is listening on — no MockServer mounted.
-        std::env::set_var("CAMERATA_BFF_URL", "http://127.0.0.1:1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", "http://127.0.0.1:1");
         let out = super::refresh_anthropic_registry().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(out.is_none(), "an unreachable server collapses to None");
     }

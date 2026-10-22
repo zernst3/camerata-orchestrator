@@ -381,7 +381,7 @@ mod tests {
     // ── Tier 2: network-helper tests (wiremock) ─────────────────────────────────
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_provider_policy_parses_safe_mode_and_pin() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -402,9 +402,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::fetch_provider_policy().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let policy = result.expect("parses");
         assert!(!policy.safe_mode);
@@ -412,7 +411,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_provider_policy_posts_body_and_parses_echo() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -432,9 +431,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::set_provider_policy(false, Some("novita".to_string())).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let policy = result.expect("parses");
         assert!(!policy.safe_mode);
@@ -442,7 +440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_provider_policy_returns_none_on_error_status() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -454,15 +452,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::set_provider_policy(true, None).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(result.is_none());
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_model_providers_sends_model_id_query_param_and_parses_rows() {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -481,9 +478,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::fetch_model_providers("deepseek/deepseek-chat").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let resp = result.expect("parses");
         assert_eq!(resp.providers.len(), 1);

@@ -1110,10 +1110,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn investigation_run_honors_cancel_before_start() {
         // A cancel that landed before the executor ran leaves the run terminal Cancelled
         // and does NOT advance it to AwaitingQa or record a placeholder note.
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
         let runs = RunStore::new();
         let uow = UowStore::new();
         let clarifications = ClarificationStore::new();
@@ -1150,11 +1151,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn investigation_run_without_live_refuses_and_leaves_note_untouched() {
         // Live mode off (default in tests): no agent spawned. The run now REFUSES honestly
         // (Failed) rather than writing a synthetic "pending" note. The UoW investigation note
         // stays UNTOUCHED. This is the CI-safe path.
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
         let runs = RunStore::new();
         let uow = UowStore::new();
         let clarifications = ClarificationStore::new();

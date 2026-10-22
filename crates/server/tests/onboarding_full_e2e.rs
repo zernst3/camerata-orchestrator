@@ -37,7 +37,7 @@ use camerata_server::AppState;
 
 // `propose_corpus_rules` reads a process-global env var (`CAMERATA_CORPUS_PATH`). Serialize the
 // env-mutating tests so they never race a parallel test (same guard as onboarding_flow_e2e).
-// The env-mutating test carries `#[serial_test::serial(corpus_env)]`, so it never races a
+// The env-mutating test carries `#[serial_test::serial(process_env)]`, so it never races a
 // parallel test and (unlike a std mutex guard) is safe to hold across its `.await`s.
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -148,7 +148,7 @@ fn arm_rule(id: &str, enforcement: &str, repo: &str) -> ArmRule {
 // ════════════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-#[serial_test::serial(corpus_env)]
+#[serial_test::serial(process_env)]
 async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
     let repo_spec = "me/api".to_string();
 
@@ -170,7 +170,7 @@ async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
     // ── SCAN the on-disk repo: stack detect + (deterministic) proposal.
     let repo_dir = write_rust_repo_with_a_floor_finding();
     let corpus = write_tiny_corpus();
-    std::env::set_var("CAMERATA_CORPUS_PATH", corpus.path());
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_CORPUS_PATH", corpus.path());
 
     let sources = vec![(repo_spec.clone(), repo_dir.path().to_path_buf())];
     let scan = camerata_server::onboard::scan_repos(&sources, Vec::new()).await;
@@ -301,7 +301,6 @@ async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
         );
     }
 
-    std::env::remove_var("CAMERATA_CORPUS_PATH");
     // repo_dir + corpus (TempDirs) are RAII-cleaned on drop.
 }
 

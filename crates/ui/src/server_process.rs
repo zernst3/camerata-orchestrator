@@ -511,14 +511,13 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(server_bin_env)]
+    #[serial_test::serial(process_env)]
     fn resolve_honors_env_override_even_if_missing() {
-        std::env::set_var(
+        let _env = camerata_test_env::EnvGuard::set(
             "CAMERATA_SERVER_BIN",
             "/nonexistent/override/camerata-server",
         );
         let resolved = resolve_server_bin();
-        std::env::remove_var("CAMERATA_SERVER_BIN");
         assert_eq!(
             resolved,
             PathBuf::from("/nonexistent/override/camerata-server")
@@ -526,9 +525,9 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(server_bin_env)]
+    #[serial_test::serial(process_env)]
     fn resolve_without_override_prefers_an_existing_candidate() {
-        std::env::remove_var("CAMERATA_SERVER_BIN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_SERVER_BIN");
         let resolved = resolve_server_bin();
         // Regardless of which candidate wins, it must be a concrete path ending in the
         // platform binary name — and if any candidate exists on this machine, the

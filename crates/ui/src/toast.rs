@@ -338,7 +338,7 @@ mod tests {
     // both the path it hits AND that a representative connections payload parses into
     // the typed ConnectionsView (id/label/configured/ok/error_category/login).
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_connections_gets_endpoint_and_parses_report() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -368,9 +368,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let report = super::fetch_connections().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let report = report.expect("the /api/connections payload parses into ConnectionsView");
         assert_eq!(report.connections.len(), 2);
@@ -388,7 +387,7 @@ mod tests {
     // fetch_connections returns None when the server errors (non-200 / unparseable),
     // so the watcher loop simply skips that probe rather than panicking.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_connections_returns_none_on_server_error() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -400,9 +399,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let report = super::fetch_connections().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(report.is_none(), "a 500 yields None, not a panic");
     }
@@ -411,7 +409,7 @@ mod tests {
     // param and parses the feed (notifications + cursor high-water mark). Asserts the
     // path, the exact `since` query value, and that the body deserializes.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_notifications_passes_since_cursor_and_parses_feed() {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -431,9 +429,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let feed = super::fetch_notifications(42).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let feed = feed.expect("the /api/notifications payload parses into NotificationsFeed");
         assert_eq!(feed.cursor, 99);

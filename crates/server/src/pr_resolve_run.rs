@@ -422,8 +422,9 @@ mod tests {
     /// AwaitingQa. Token-free, no network, no agent. This also asserts the gate posture is
     /// unchanged: the run never claims a fix it did not make.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn resolve_with_live_mode_off_fails_honestly() {
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
         let dir = std::env::temp_dir().join(format!("cam-prres-off-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

@@ -939,6 +939,9 @@ impl AppState {
             .get(crate::credentials::ANTHROPIC_API_KEY)
         {
             Ok(Some(key)) if !key.trim().is_empty() => {
+                // The one sanctioned production env write (see `clippy.toml`): single-threaded
+                // startup, before any request thread exists, so there is no concurrent reader.
+                #[allow(clippy::disallowed_methods)]
                 std::env::set_var("ANTHROPIC_API_KEY", key);
             }
             Ok(_) => {}
@@ -16817,6 +16820,7 @@ mod tests {
     /// stored value is the ENTIRE input — no env fallback of any kind
     /// (`docs/design/2026-09-22_per-project-backend.md`).
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn get_settings_includes_chat_backend_and_api_key_present() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         state
@@ -16848,6 +16852,7 @@ mod tests {
     /// `POST /api/settings/chat-backend` persists a valid backend and echoes it plus
     /// `api_key_present`; the stored setting reflects the new value.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn post_chat_backend_persists_valid_value() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state.clone());
@@ -16877,9 +16882,10 @@ mod tests {
     /// `POST /api/settings/chat-backend` persists to the settings store WITHOUT touching
     /// process env at all — there is no `CAMERATA_LLM_BACKEND` env var to mutate anymore.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn post_chat_backend_does_not_mutate_process_env() {
         // Sentinel value the handler must NOT touch (proving no env write happens at all).
-        std::env::set_var("CAMERATA_LLM_BACKEND", "sentinel-untouched");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LLM_BACKEND", "sentinel-untouched");
 
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state.clone());
@@ -16907,7 +16913,6 @@ mod tests {
             Ok("sentinel-untouched"),
             "the handler must not mutate CAMERATA_LLM_BACKEND"
         );
-        std::env::remove_var("CAMERATA_LLM_BACKEND");
     }
 
     // ── Pass 2 (provider-safety UI): settings routes + the picker's data route ──────
@@ -16916,6 +16921,7 @@ mod tests {
     /// no pin) when nothing has ever been set — the same fail-safe guarantee
     /// `SettingsStore::provider_policy` gives at the store layer, now visible over HTTP.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn get_settings_includes_default_safe_mode_and_no_pin() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state);
@@ -17313,10 +17319,11 @@ mod tests {
     /// own message — no model call, no findings. Mirrors the main audit's
     /// `blocked_resolution_aborts_the_whole_scan_before_any_work` guard, at the endpoint layer.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn rescan_alternatives_blocked_when_project_is_api_backend_with_no_key() {
         // Defensive against the known cross-test env-var race (see
         // `resolve_backend_for_project_gathers_the_three_inputs_correctly`'s doc comment).
-        std::env::remove_var("ANTHROPIC_API_KEY");
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let p = state
             .projects
@@ -17364,8 +17371,9 @@ mod tests {
     /// Asserts the gate itself never refuses the request; it does not assert findings content
     /// (no live model runs in this test suite).
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn rescan_alternatives_proceeds_on_cli_backend_project() {
-        std::env::remove_var("ANTHROPIC_API_KEY");
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let p = state
             .projects
@@ -18637,6 +18645,7 @@ mod tests {
     /// escalation, resolved with Approve, RESUMES from its checkpoint (consuming it once-only) and
     /// records the decision on the UoW trail. Drives the real `answer_escalation` handler.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn uow_escalation_approve_resumes_and_consumes_checkpoint() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let (esc_id, ckpt_id) = seed_paused_uow_run(&state, "me/api#7");
@@ -18693,6 +18702,7 @@ mod tests {
     /// checkpoint (so the run can't be re-spawned) and records the abandonment. Drives the real
     /// `answer_escalation` handler.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn uow_escalation_reject_stops_and_consumes_checkpoint() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let (esc_id, ckpt_id) = seed_paused_uow_run(&state, "me/api#8");
@@ -18847,6 +18857,7 @@ mod tests {
     /// layer (arm_files_for_repo always produces current content) is covered by the
     /// `re_emit_for_onboarded_project_always_writes_current_content` test in arm.rs.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn emit_project_local_route_runs_for_onboarded_project_no_workspace_guard() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
 
@@ -20187,9 +20198,10 @@ mod tests {
     /// #20: with no GitHub token the list endpoint degrades gracefully — `ok:false`,
     /// an empty list, and a hint — instead of erroring or panicking.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn github_issues_list_is_token_optional_and_never_panics() {
         // Ensure no token is visible to this test process.
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -20255,6 +20267,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn start_run_proceeds_once_decisions_are_approved() {
         let state = AppState::seeded();
         let story = "GATE-2";
@@ -20302,8 +20315,9 @@ mod tests {
     /// attached. A user must never be able to click "Run" and watch a fabricated dev cycle
     /// complete with real-looking compliance evidence while zero code was written.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn start_run_without_live_fails_and_does_not_advance_or_attach() {
-        std::env::remove_var("CAMERATA_LIVE_BUILD"); // ensure live mode is OFF
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD"); // ensure live mode is OFF
         let state = AppState::seeded();
         let story = "HONEST-1";
 
@@ -20403,6 +20417,7 @@ mod tests {
 
     /// Once the active run is done, a fresh start proceeds (the guard only blocks LIVE runs).
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn lifecycle9_start_proceeds_once_prior_run_is_done() {
         let state = AppState::seeded();
         let story = "SF-2";
@@ -20782,6 +20797,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn get_investigation_reports_note_present_and_decisions() {
         let state = seeded_with_artifacts().await;
         let story = "REVIEW-1";
@@ -21001,6 +21017,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn dev_run_tiered_path_starts_once_decisions_are_approved() {
         let state = AppState::seeded();
         let story = "TIER-GATE-2";
@@ -21132,9 +21149,9 @@ mod tests {
     /// same "live mode is off" placeholder note again, which isn't useful, so this must be
     /// a real refusal, not a silent no-op success.
     #[tokio::test]
-    #[serial_test::serial(camerata_live_build)]
+    #[serial_test::serial(process_env)]
     async fn rerun_investigation_refuses_honestly_when_live_mode_off() {
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
         let state = AppState::seeded();
         let story = "INV-RERUN-1";
         state.uow.begin_investigation(story).unwrap(); // now Investigating
@@ -21171,9 +21188,9 @@ mod tests {
     /// `rerun-investigation` 409s when the story is still at Intake — investigation has not
     /// started, so `begin-investigation` is the right endpoint there, not a re-run.
     #[tokio::test]
-    #[serial_test::serial(camerata_live_build)]
+    #[serial_test::serial(process_env)]
     async fn rerun_investigation_409s_when_still_at_intake() {
-        std::env::set_var("CAMERATA_LIVE_BUILD", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LIVE_BUILD", "1");
         let state = AppState::seeded();
         let story = "INV-RERUN-2";
         state.uow.get_or_create(story); // stays at Intake
@@ -21189,7 +21206,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let json = body_json(resp).await;
         assert!(json["reason"]
@@ -21203,9 +21219,9 @@ mod tests {
     /// Intake on the first begin); `rerun-investigation` spawns a fresh pass instead,
     /// WITHOUT repeating that transition.
     #[tokio::test]
-    #[serial_test::serial(camerata_live_build)]
+    #[serial_test::serial(process_env)]
     async fn rerun_investigation_spawns_run_for_investigating_story_without_409() {
-        std::env::set_var("CAMERATA_LIVE_BUILD", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LIVE_BUILD", "1");
         let state = AppState::seeded();
         let story = "INV-RERUN-3";
         state.uow.begin_investigation(story).unwrap(); // now Investigating
@@ -21232,7 +21248,6 @@ mod tests {
             "returns a pollable run id"
         );
         assert_eq!(json["story_id"], story);
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
 
         // The stage is STILL Investigating IMMEDIATELY after the response — the endpoint
         // itself must not repeat the Intake → Investigating transition (that repetition is
@@ -21498,6 +21513,7 @@ mod tests {
     /// success-branch of the watcher is covered separately by
     /// `stamp_on_success_advances_stage_and_attaches_evidence`.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn resumed_run_without_live_refuses_and_freezes_provenance_without_advancing() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let story = "me/api#7";
@@ -21877,8 +21893,9 @@ mod tests {
     /// POST /api/workitems/pull degrades gracefully with no token: it returns an
     /// empty item list plus a hint, never an error.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_pull_no_token_returns_empty_with_message() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -21902,8 +21919,9 @@ mod tests {
     /// POST /api/workitems/comments degrades gracefully with no token: it returns an
     /// empty comment list (never an error) so the modal renders "No comments."
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_comments_no_token_returns_empty() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -21927,8 +21945,9 @@ mod tests {
     /// POST /api/workitems/assignees degrades gracefully with no token: it returns an
     /// empty user list so the @-autocomplete simply shows no suggestions.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_assignees_no_token_returns_empty() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -21951,8 +21970,9 @@ mod tests {
 
     /// GET /api/me returns `{ login: null }` with no token (the UI hides "Assign to me").
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn me_no_token_returns_null_login() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -21978,8 +21998,9 @@ mod tests {
     /// POST /api/workitems/assign errors without a token (there is nothing to assign
     /// against), and rejects an empty assignee.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_assign_requires_token_and_nonempty_assignee() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -22008,8 +22029,9 @@ mod tests {
     /// POST /api/workitems/updated-check degrades gracefully with no token: it returns an
     /// empty updates list (never an error) so a background poll is silent.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_updated_check_no_token_returns_empty() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -22037,8 +22059,9 @@ mod tests {
     /// second (created=false, same uow_id, no duplicate). Token-free: the spine row is
     /// seeded from the id alone, so this is hermetic.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn uow_from_workitem_dedups_by_external_ref() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // ISOLATION: the dedup + listing are now project-scoped; activate a project whose
         // repos cover the work item's repo (`o/r`).
@@ -22078,8 +22101,9 @@ mod tests {
     /// GET /api/uows returns each UoW with the WorkItem it references (resolved from
     /// the spine, repo set) and its lifecycle stage.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn uows_list_carries_workitem_and_stage() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // ISOLATION: /api/uows is project-scoped; activate a project covering `o/r`.
         state.projects.create("P", vec!["o/r".to_string()]).unwrap();
@@ -22157,7 +22181,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
     }
 
     /// The work-item id parser produces the (repo, number) the comment/refresh paths
@@ -22314,10 +22337,11 @@ mod tests {
     /// even when the LLM is unavailable (token-free): the endpoint degrades gracefully
     /// with a clear note rather than crashing, and the user message is recorded.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn author_endpoint_appends_chat_without_token() {
         // Ensure no API key is set so the LLM path returns the graceful note (the CLI may
         // or may not exist on CI; either way the user turn is appended and we get a 200).
-        std::env::remove_var("ANTHROPIC_API_KEY");
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let uow_store = state.uow.clone();
         let app = router(state);
@@ -22356,8 +22380,9 @@ mod tests {
     /// `POST /api/uow/:id/publish` rejects (non-2xx) with a clear reason when no GitHub
     /// token is configured.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn publish_without_token_is_rejected_with_reason() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let uow_store = state.uow.clone();
         let app = router(state);
@@ -25001,8 +25026,10 @@ mod tests {
     /// by something. The silent-knowledge-loss class this fix closes is specifically "the
     /// pass-claimed-to-cover-it tool never ran AND nothing else ever checked it either".
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn semgrep_covered_rule_never_reads_verified_clean_when_the_pass_does_not_run() {
-        std::env::set_var(crate::scan_tools::DISABLE_SEMGREP_ENV_VAR, "1");
+        let _env =
+            camerata_test_env::EnvGuard::set(crate::scan_tools::DISABLE_SEMGREP_ENV_VAR, "1");
 
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -25067,8 +25094,6 @@ mod tests {
         .await;
         report.excluded_mechanical_rules = excluded_mechanical;
         merge_scan_preview(&mut report, &sources, &preview_rules, Some(&corpus), None).await;
-
-        std::env::remove_var(crate::scan_tools::DISABLE_SEMGREP_ENV_VAR);
 
         let entry = report
             .ledger
@@ -25499,6 +25524,7 @@ mod tests {
     /// `typst` being on PATH (the PDF half needs it); the workbook half runs unconditionally
     /// via the other degenerate-input tests in `xlsx_export`.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
         if !typst_on_path() {
             eprintln!(
@@ -25738,6 +25764,7 @@ mod tests {
     /// the export builders for freshness identifiers, so a future wiring is caught at the
     /// import, before it ever produces output.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn no_corpus_freshness_text_reaches_any_client_artifact() {
         // ── Anti-vacuity: the operator surfaces really do carry the markers ──────────────
         let operator_json = updates_payload(
@@ -26564,9 +26591,10 @@ mod tests {
 
     /// When the GitHub token is absent, `POST /api/uow/:story_id/intake/ship` returns 400.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn intake_ship_returns_bad_request_when_no_github_token() {
         // Remove the token from the test env so the handler detects its absence.
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
 
         let state = AppState::seeded();
         let app = router(state);
@@ -26604,8 +26632,9 @@ mod tests {
     /// — never a scaffold, never a GitHub call, even with no workspace root or token
     /// configured at all.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn create_app_from_scratch_target_returns_reason_without_scaffolding() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::seeded();
         let app = router(state);
         let req = Request::builder()
@@ -26632,8 +26661,9 @@ mod tests {
     /// A `Skeleton` (default target) request with no workspace root configured fails
     /// soft: `ok:false` with a message naming the workspace, never a 500.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn create_app_skeleton_without_workspace_root_fails_soft() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::seeded();
         let app = router(state);
         let req = Request::builder()
@@ -26661,8 +26691,9 @@ mod tests {
     /// A `Skeleton` request with a workspace root but no GitHub token fails soft:
     /// `ok:false` with a message naming the missing token.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn create_app_skeleton_without_github_token_fails_soft() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::seeded();
         let tmp = tempfile::tempdir().expect("tempdir");
         state
@@ -27110,6 +27141,7 @@ mod tests {
     /// describes for Feature A ("the picker's available Claude models become a function
     /// of the active backend").
     #[test]
+    #[serial_test::serial(process_env)]
     fn use_live_anthropic_models_requires_both_api_backend_and_key() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         // API backend selected, but no key yet.
@@ -27310,9 +27342,10 @@ mod tests {
     /// the credential env-fallback test flaky. The driver path now reads the key store-first, so
     /// no env mutation is needed for a freshly-saved key to take effect.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn set_anthropic_credential_does_not_mutate_process_env() {
         // Sentinel value the handler must NOT overwrite.
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-sentinel");
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-sentinel");
 
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         let app = router(state.clone());
@@ -27344,11 +27377,11 @@ mod tests {
             Ok("sk-ant-sentinel"),
             "the handler must not mutate ANTHROPIC_API_KEY"
         );
-        std::env::remove_var("ANTHROPIC_API_KEY");
     }
 
     /// `AppState::github_token()` prefers the credential store over the env var.
     #[test]
+    #[serial_test::serial(process_env)]
     fn github_token_method_prefers_store_over_env() {
         // Set a value in the store.
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
@@ -27358,7 +27391,7 @@ mod tests {
             .expect("set must succeed");
 
         // Ensure the env var is NOT set so we are testing the store path.
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
 
         let resolved = state.github_token();
         assert_eq!(
@@ -27370,13 +27403,13 @@ mod tests {
 
     /// `AppState::github_token()` falls back to env var when store is empty.
     #[test]
+    #[serial_test::serial(process_env)]
     fn github_token_method_falls_back_to_env_when_store_empty() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         // Store is empty (MemoryCredentialStore starts empty).
 
-        std::env::set_var("CAMERATA_GITHUB_TOKEN", "env_token");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_GITHUB_TOKEN", "env_token");
         let resolved = state.github_token();
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
 
         assert_eq!(
             resolved.as_deref(),
@@ -27403,15 +27436,15 @@ mod tests {
     /// `anthropic_api_key_present` returns true when only the env var is set (empty
     /// keychain), and false when neither source has a key.
     #[test]
+    #[serial_test::serial(process_env)]
     fn anthropic_api_key_present_reflects_env_when_keychain_empty() {
         let store = crate::credentials::MemoryCredentialStore::new();
         // Neither source set → false.
-        std::env::remove_var("ANTHROPIC_API_KEY");
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
         assert!(!anthropic_api_key_present(&store));
         // Env-only → true.
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-env");
+        let _env2 = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env");
         let present = anthropic_api_key_present(&store);
-        std::env::remove_var("ANTHROPIC_API_KEY");
         assert!(present, "env var alone makes the key present");
     }
 
@@ -27422,6 +27455,7 @@ mod tests {
     /// using the keychain path for the key (not the env var) so this test can't race the
     /// env-var-based tests around it.
     #[test]
+    #[serial_test::serial(process_env)]
     fn resolve_backend_for_project_gathers_the_two_inputs_correctly() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
 
@@ -27431,7 +27465,7 @@ mod tests {
         // poisoned by another test's ANTHROPIC_API_KEY mutation running concurrently (the
         // known env-var race noted on
         // `credentials::tests::resolve_falls_back_to_env_when_store_empty`).
-        std::env::remove_var("ANTHROPIC_API_KEY");
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
         assert_eq!(
             resolve_backend_for_project(&state, None),
             crate::llm::BackendResolution::Cli
@@ -28140,6 +28174,7 @@ mod tests {
     /// Exercises schema enforcement, node materialization, tree listing, node deletion,
     /// and publish (no-token error path). Mirrors `hierarchy_schema_http_round_trip_and_export`.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn design_draft_tree_http_round_trip() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         let p = state
