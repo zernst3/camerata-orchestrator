@@ -88,8 +88,13 @@ pub fn architectural_input<'a>(
 
 /// Armed rules that reason from the ABSENCE of a reference and so are unsound on a scan that
 /// stopped at its file limit: an importer may be among the files that were dropped, and a file
-/// that is in fact used then looks unreachable.
-const RULES_NEEDING_COMPLETE_SCAN: &[&str] = &[camerata_checks::dead_code_checker::RULE_DEAD_CODE];
+/// that is in fact used then looks unreachable. The React Hooks lint rule is the second shape of
+/// the same problem: "no lint configuration enables the rules" is false if the configuration is
+/// among the dropped files.
+const RULES_NEEDING_COMPLETE_SCAN: &[&str] = &[
+    camerata_checks::dead_code_checker::RULE_DEAD_CODE,
+    camerata_checks::react_hooks_lint_checker::RULE_REACT_HOOKS_LINT,
+];
 
 /// Whether `rule_id` is one of the rules an incomplete scan withholds.
 pub fn is_withheld_on_incomplete_scan(rule_id: &str) -> bool {
@@ -510,5 +515,122 @@ mod tests {
         // With it, the file is mentioned by a live file and stays silent.
         let input = architectural_input(&code, &reference, &armed);
         assert!(audit_architectural("acme/app", &input, &armed).is_empty());
+    }
+
+    // ── UI-REACT-HOOKS-LINT-1: the lint-configuration gap, through the scan seam ──────────
+
+    const HOOKS_LINT: &str = camerata_checks::react_hooks_lint_checker::RULE_REACT_HOOKS_LINT;
+    const REACT_APP: &str = r#"{ "name": "app", "dependencies": { "react": "^18.2.0" } }"#;
+
+    fn hooks_lint_armed() -> HashSet<&'static str> {
+        ids(&[HOOKS_LINT])
+    }
+
+    #[test]
+    fn a_react_repo_with_no_lint_configuration_is_reported_through_the_architectural_tier() {
+        let f = files(vec![
+            ("package.json", REACT_APP),
+            ("src/App.jsx", "export {};\n"),
+        ]);
+        let findings = audit_architectural("acme/web", &f, &hooks_lint_armed());
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        let finding = &findings[0];
+        assert_eq!(finding.rule_id, HOOKS_LINT);
+        assert_eq!(finding.path, "package.json");
+        assert_eq!(finding.preview_tool.as_deref(), Some(ARCH_PREVIEW_TOOL));
+        assert_eq!(
+            finding.kind,
+            Some(camerata_api_types::audit::FindingKind::Defect)
+        );
+        assert!(finding.detail.contains("react-hooks/exhaustive-deps"));
+    }
+
+    #[test]
+    fn the_hooks_lint_gap_is_not_reported_unless_the_rule_is_armed() {
+        let f = files(vec![("package.json", REACT_APP)]);
+        assert!(audit_architectural("acme/web", &f, &HashSet::new()).is_empty());
+        assert!(audit_architectural("acme/web", &f, &dead_code_armed()).is_empty());
+    }
+
+    #[test]
+    fn the_hooks_lint_gap_is_silent_for_enabled_unreadable_and_non_react_repos() {
+        for f in [
+            files(vec![
+                ("package.json", REACT_APP),
+                (
+                    ".eslintrc.json",
+                    r#"{ "extends": ["plugin:react-hooks/recommended"] }"#,
+                ),
+            ]),
+            files(vec![
+                ("package.json", REACT_APP),
+                ("eslint.config.mjs", "export default [];\n"),
+            ]),
+            files(vec![(
+                "package.json",
+                r#"{ "name": "api", "dependencies": { "express": "4" } }"#,
+            )]),
+        ] {
+            assert!(
+                audit_architectural("acme/web", &f, &hooks_lint_armed()).is_empty(),
+                "{f:?}"
+            );
+        }
+    }
+
+    /// The reason for the withholding: the lint configuration may be among the files a
+    /// truncated scan dropped, and without it the repository looks like it has none.
+    #[test]
+    fn a_truncated_scan_withholds_the_hooks_lint_rule_which_would_otherwise_report_a_false_gap() {
+        let armed = ids(&[HOOKS_LINT, "ARCH-ONE-IMPORT-PATH-1"]);
+        assert!(is_withheld_on_incomplete_scan(HOOKS_LINT));
+        assert_eq!(
+            withhold_on_incomplete_scan(&armed, true),
+            ids(&["ARCH-ONE-IMPORT-PATH-1"])
+        );
+        assert_eq!(withhold_on_incomplete_scan(&armed, false), armed);
+
+        // The scan sees only the manifest (the config was past the file limit): a false gap.
+        let f = files(vec![
+            ("package.json", REACT_APP),
+            ("src/App.jsx", "export {};\n"),
+        ]);
+        assert_eq!(audit_architectural("acme/web", &f, &armed).len(), 1);
+        let withheld = withhold_on_incomplete_scan(&armed, true);
+        assert!(audit_architectural("acme/web", &f, &withheld).is_empty());
+    }
+
+    /// An unreadable lint setup is not a verified answer: the ledger must not credit the rule
+    /// as a clean detector run for it, while a gap and an enabled configuration are real answers.
+    #[test]
+    fn the_ledger_credits_the_hooks_lint_rule_only_for_a_repo_the_checker_could_answer() {
+        let credited = |f: &[(String, String)]| {
+            camerata_checks::arch_checker::ledger_detector_rule_ids_for_repo(&RepoView {
+                spec: "acme/web",
+                files: f,
+            })
+            .contains(HOOKS_LINT)
+        };
+        let component = ("src/App.jsx", "export {};\n");
+        assert!(
+            credited(&files(vec![("package.json", REACT_APP), component])),
+            "a gap is an answer"
+        );
+        assert!(credited(&files(vec![
+            ("package.json", REACT_APP),
+            component,
+            (".eslintrc.json", r#"{ "extends": "next/core-web-vitals" }"#),
+        ])));
+        assert!(!credited(&files(vec![
+            ("package.json", REACT_APP),
+            component,
+            ("eslint.config.js", "export default [];\n"),
+        ])));
+        // A `react` dependency with no React code is not assessed, never "verified clean".
+        assert!(!credited(&files(vec![
+            ("package.json", REACT_APP),
+            ("src/index.ts", "export const plugin = 1;\n"),
+        ])));
+        assert!(!credited(&files(vec![("src/main.rs", "fn main() {}\n")])));
     }
 }

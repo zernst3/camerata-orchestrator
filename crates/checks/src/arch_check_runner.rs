@@ -518,14 +518,54 @@ mod tests {
     #[test]
     fn every_other_registered_checker_still_runs_at_write_time() {
         for checker in all_checkers() {
-            let is_dead_code = checker.rule_ids().contains(&"ARCH-DEAD-CODE-1");
+            let scan_and_ci_only = checker
+                .rule_ids()
+                .iter()
+                .any(|id| matches!(*id, "ARCH-DEAD-CODE-1" | "UI-REACT-HOOKS-LINT-1"));
             assert_eq!(
                 checker.runs_at_write_time(),
-                !is_dead_code,
+                !scan_and_ci_only,
                 "{:?}",
                 checker.rule_ids()
             );
         }
+    }
+
+    /// Fixing the React Hooks lint gap installs a dependency and picks its version, which the
+    /// project's rules route to a human, so a bounced agent could not satisfy the gate.
+    #[tokio::test]
+    async fn the_write_time_runner_never_reports_the_react_hooks_lint_gap_but_the_scan_tier_does() {
+        let dir = tmpdir();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{ "name": "app", "dependencies": { "react": "^18" } }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(
+            dir.path().join("src").join("App.jsx"),
+            "export const App = () => null;\n",
+        )
+        .unwrap();
+        let role = role_armed_with(&["UI-REACT-HOOKS-LINT-1"]);
+        let outcome = NativeArchCheckRunner::new()
+            .check(&role, dir.path())
+            .await
+            .expect("must not err");
+        assert!(outcome.violated.is_empty(), "{outcome:?}");
+
+        let checker = all_checkers()
+            .into_iter()
+            .find(|c| c.rule_ids().contains(&"UI-REACT-HOOKS-LINT-1"))
+            .expect("registered");
+        let files = collect_interest_files(dir.path(), checker.interest_globs());
+        let view = RepoView {
+            spec: "t/r",
+            files: &files,
+        };
+        let vs = checker.check(&view);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].file, "package.json");
     }
 
     #[test]

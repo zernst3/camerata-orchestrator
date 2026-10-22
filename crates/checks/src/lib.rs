@@ -154,6 +154,15 @@ pub mod shared_constant_checker;
 /// `crates/rules/principles/universal/arch-dead-code-1.toml`.
 pub mod dead_code_checker;
 
+/// `UI-REACT-HOOKS-LINT-1` (W29, `docs/design/2026-10-21_w29-detector-implementation.md`): a
+/// React repo whose own ESLint setup does not enable the two React Hooks rules
+/// (`react-hooks/rules-of-hooks`, `react-hooks/exhaustive-deps`). The violations those rules
+/// report are NOT this checker's: they ride the provisioned-eslint scan tier under the existing
+/// `JAVASCRIPT-REACT-*` rule ids. This checker reads only the repository's own lint
+/// configuration, and stays silent whenever a configuration cannot be read with certainty. See
+/// `crates/rules/principles/javascript/react/ui-react-hooks-lint-1.toml`.
+pub mod react_hooks_lint_checker;
+
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
 /// checker registry — "Plug point B" in
 /// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.3. Composed into

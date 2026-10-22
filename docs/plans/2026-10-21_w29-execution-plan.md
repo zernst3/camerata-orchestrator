@@ -53,9 +53,15 @@ canonical-symbol algorithm.
    not dead).
 
 ### Wave B — the tool-oracle rule (now unblocked)
-8. **UI-REACT-HOOKS-LINT-1** (D, layer-2) — react-hooks correctness via eslint. Detector: ALREADY
-   EXISTS (the eslint tier + `react-hooks/*` selectors). Mostly corpus-rule authoring + wiring +
-   the two tests; the live detection path is proven green post-W30. Land early — lowest cost now.
+8. **UI-REACT-HOOKS-LINT-1** (D, layer-2) — react-hooks correctness via eslint. DONE 2026-10-22.
+   Amended: the "detector already exists" premise was right for the VIOLATIONS but they were
+   already owned by `JAVASCRIPT-REACT-RULES-OF-HOOKS-1` / `JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1`
+   (grounded, mechanical, routed to eslint, grounded back by `eslint_floor_category`), so a third
+   rule claiming the eslint selectors would have reported every violation twice. The new rule
+   owns only the second clause of the work order, the lint-CONFIGURATION gap, via a new
+   `ArchChecker` (`react_hooks_lint_checker`) that reads the repo's own config and stays silent
+   whenever it cannot read it with certainty. Design and traps: the "UI-REACT-HOOKS-LINT-1" section
+   of `docs/design/2026-10-21_w29-detector-implementation.md`.
 
 ### Wave C — the clone detector (the differentiator) and its reuse
 4. **ARCH-SINGLE-SOURCE-LOGIC-1** (H) — logic implemented once. Build the token-based cross-file

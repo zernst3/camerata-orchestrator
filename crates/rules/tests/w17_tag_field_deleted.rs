@@ -156,7 +156,7 @@ fn req_w17_layer_is_untouched_on_every_corpus_rule() {
     }
     let expected: BTreeMap<String, usize> = [
         ("architecture", 7usize),
-        ("framework", 113),
+        ("framework", 114),
         ("language", 91),
         ("library", 34),
         ("platform", 35),

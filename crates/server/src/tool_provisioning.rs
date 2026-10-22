@@ -290,12 +290,13 @@ fn eslint_packages_installed(workspace: &Path) -> bool {
         if !node_modules.join(name).join("package.json").exists() {
             return false;
         }
-        // W30: a present-but-WRONG-MAJOR package (a workspace that drifted to eslint 10 /
-        // react-hooks 7 under the old unpinned list) must re-provision, not read as installed —
-        // otherwise the presence-only probe would leave the drifted, finding-zeroing workspace
-        // in place forever. A spec with no pin imposes no version constraint.
-        match npm_pinned_major(spec) {
-            Some(want) => installed_major(&node_modules, name) == Some(want),
+        // W30: a present-but-WRONG-VERSION package (a workspace that drifted to eslint 10 /
+        // react-hooks 7 under the old unpinned list, or to another minor under a caret range)
+        // must re-provision, not read as installed. The pins are EXACT, so the check is exact:
+        // the graded accuracy tests need the tool to behave identically on every machine. A
+        // spec with no pin imposes no version constraint.
+        match npm_pinned_version(spec) {
+            Some(want) => installed_version(&node_modules, name).as_deref() == Some(want),
             None => true,
         }
     })
@@ -349,22 +350,82 @@ fn eslint_config_is_current(workspace: &Path) -> bool {
 /// [`eslint_is_provisioned`], so adding one, or bumping a pin, makes existing
 /// workspaces re-provision.
 ///
-/// W30: each entry is VERSION-PINNED to a major compatible with the bundled flat
-/// config. Before this, the entries were bare names, so `npm install` pulled
-/// LATEST — which drifted to eslint 10 + eslint-plugin-react-hooks 7, majors the
+/// W30: each entry is VERSION-PINNED, and since the review of UI-REACT-HOOKS-LINT-1 to an
+/// EXACT version, not a caret major. Before W30 the entries were bare names, so `npm install`
+/// pulled LATEST — which drifted to eslint 10 + eslint-plugin-react-hooks 7, majors the
 /// bundled config cannot register (`--rule react-hooks/exhaustive-deps` → "could
 /// not find plugin react-hooks"), silently zeroing every plugin-backed preview
-/// finding on a freshly-provisioned machine. eslint 9 + react-hooks 5 (verified to
-/// produce the finding) and their eslint-9-line companions are the correct pins.
-/// Bump these deliberately, in lockstep with the bundled config, never by letting
-/// `npm` choose.
+/// finding on a freshly-provisioned machine. The W30 fix pinned caret MAJORS, which stopped
+/// that drift but still let minors and patches (and every transitive dependency) move between
+/// machines and between days; the graded accuracy tests need repeatable tool behavior, so the
+/// pins are now exact and `assets/eslint/package-lock.json` pins the whole tree. eslint 9 +
+/// react-hooks 5 (verified to produce the finding) and their eslint-9-line companions are the
+/// correct line. Bump these deliberately, in lockstep with the bundled config, the committed
+/// `assets/eslint/package.json` and the lockfile (a test holds the three together), never by
+/// letting `npm` choose.
 const ESLINT_NPM_PACKAGES: &[&str] = &[
-    "eslint@^9",
-    "@typescript-eslint/parser@^8",
-    "@typescript-eslint/eslint-plugin@^8",
-    "eslint-plugin-react-hooks@^5",
-    "eslint-plugin-jest@^28",
+    "eslint@9.39.5",
+    "@typescript-eslint/parser@8.72.0",
+    "@typescript-eslint/eslint-plugin@8.72.0",
+    "eslint-plugin-react-hooks@5.2.0",
+    "eslint-plugin-jest@28.14.0",
 ];
+
+/// The workspace `package.json`: every package at its exact pinned version, no range. Written
+/// into the workspace before the install so `npm ci` has a manifest that matches the lockfile.
+fn eslint_package_json() -> String {
+    let dev: serde_json::Map<String, serde_json::Value> = ESLINT_NPM_PACKAGES
+        .iter()
+        .filter_map(|spec| {
+            Some((
+                npm_package_name(spec).to_string(),
+                serde_json::Value::String(npm_pinned_version(spec)?.to_string()),
+            ))
+        })
+        .collect();
+    serde_json::json!({
+        "name": "camerata-eslint-tooling",
+        "version": "1.0.0",
+        "private": true,
+        "devDependencies": dev,
+    })
+    .to_string()
+}
+
+/// The `npm` arguments that install the workspace. With the committed lockfile in place,
+/// `npm ci` installs exactly that tree (and fails loudly if it disagrees with the manifest);
+/// without it (a packaging problem), install the exact pins. `--prefer-offline` either way: a
+/// warm npm cache needs no network.
+fn eslint_install_args(have_lockfile: bool) -> Vec<String> {
+    if have_lockfile {
+        return vec!["ci".to_string(), "--prefer-offline".to_string()];
+    }
+    let mut args: Vec<String> = ["install", "--save-dev", "--prefer-offline"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    args.extend(ESLINT_NPM_PACKAGES.iter().map(|s| (*s).to_string()));
+    args
+}
+
+/// Source path of the committed workspace manifest next to the bundled flat config. Provisioning
+/// generates the manifest from [`ESLINT_NPM_PACKAGES`]; the committed copy exists so the
+/// lockfile has a human-readable partner, and a test holds the two equal.
+#[cfg(test)]
+fn bundled_eslint_package_json_src() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("eslint")
+        .join("package.json")
+}
+
+/// Source path of the committed lockfile that pins the whole eslint tool tree.
+fn bundled_eslint_lock_src() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("eslint")
+        .join("package-lock.json")
+}
 
 /// The bare npm package name from an [`ESLINT_NPM_PACKAGES`] spec, dropping any
 /// `@<range>` version suffix. Handles scoped names: the scope `@` at index 0 is not
@@ -377,21 +438,20 @@ fn npm_package_name(spec: &str) -> &str {
     }
 }
 
-/// The pinned MAJOR version from a spec (e.g. `eslint@^9` → `Some(9)`), or `None`
-/// when the spec carries no version. Tolerates a leading `^`/`~`/`>=` range marker.
-fn npm_pinned_major(spec: &str) -> Option<u32> {
+/// The pinned version from a spec (e.g. `eslint@9.39.5` → `Some("9.39.5")`), or `None`
+/// when the spec carries no version. The text after the last `@` is returned as written: the
+/// pins are exact, so it is compared for equality, never parsed as a range.
+fn npm_pinned_version(spec: &str) -> Option<&str> {
     let i = spec.rfind('@').filter(|&i| i > 0)?;
-    let ver = spec[i + 1..].trim_start_matches(['^', '~', '>', '=', ' ']);
-    ver.split('.').next()?.parse::<u32>().ok()
+    Some(&spec[i + 1..])
 }
 
-/// The installed MAJOR version of a package in `node_modules`, read from its
-/// `package.json` `version` field. `None` if absent or unparseable.
-fn installed_major(node_modules: &Path, name: &str) -> Option<u32> {
+/// The installed version of a package in `node_modules`, read from its `package.json`
+/// `version` field. `None` if absent or unparseable.
+fn installed_version(node_modules: &Path, name: &str) -> Option<String> {
     let pkg_json = std::fs::read_to_string(node_modules.join(name).join("package.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&pkg_json).ok()?;
-    let ver = v.get("version")?.as_str()?;
-    ver.split('.').next()?.parse::<u32>().ok()
+    Some(v.get("version")?.as_str()?.to_string())
 }
 
 /// Ensure eslint (and its companion packages) are provisioned in the tooling
@@ -400,8 +460,9 @@ fn installed_major(node_modules: &Path, name: &str) -> Option<u32> {
 /// Steps:
 /// 1. Health-probe; return early if already good.
 /// 2. Verify `npm` is available.
-/// 3. Write a minimal `package.json` to the workspace dir.
-/// 4. `npm install` the required packages.
+/// 3. Write the exact-version `package.json` and the committed `package-lock.json` to the
+///    workspace dir.
+/// 4. `npm ci --prefer-offline` (the exact pinned tree from the lockfile).
 /// 5. Copy the bundled flat config into the workspace.
 /// 6. Final health probe.
 pub async fn ensure_eslint(tooling: &Path) -> Result<PathBuf, ProvisionError> {
@@ -421,13 +482,19 @@ pub async fn ensure_eslint(tooling: &Path) -> Result<PathBuf, ProvisionError> {
 
     tokio::fs::create_dir_all(&workspace).await?;
 
-    // Write a minimal package.json so npm install has an anchor.
-    let pkg_json = r#"{"name":"camerata-eslint-tooling","version":"1.0.0","private":true}"#;
-    tokio::fs::write(workspace.join("package.json"), pkg_json).await?;
+    // The workspace manifest pins every package to its exact version, and the committed
+    // lockfile pins the whole tree (transitive dependencies included): `npm ci` then installs
+    // the same tool on every machine. If the lockfile cannot be read (a packaging problem),
+    // fall back to installing the exact pins rather than failing to provision at all.
+    tokio::fs::write(workspace.join("package.json"), eslint_package_json()).await?;
+    let have_lockfile = tokio::fs::copy(
+        bundled_eslint_lock_src(),
+        workspace.join("package-lock.json"),
+    )
+    .await
+    .is_ok();
 
-    // npm install the packages.
-    let mut npm_args: Vec<&str> = vec!["install", "--save-dev", "--prefer-offline"];
-    npm_args.extend(ESLINT_NPM_PACKAGES.iter().copied());
+    let npm_args = eslint_install_args(have_lockfile);
 
     let npm_out = tokio::process::Command::new("npm")
         .args(&npm_args)
@@ -819,44 +886,201 @@ mod tests {
     }
 
     #[test]
-    fn npm_pinned_major_parses_the_range() {
-        assert_eq!(npm_pinned_major("eslint@^9"), Some(9));
-        assert_eq!(npm_pinned_major("eslint-plugin-react-hooks@^5"), Some(5));
-        assert_eq!(npm_pinned_major("@typescript-eslint/parser@^8"), Some(8));
-        assert_eq!(npm_pinned_major("eslint-plugin-jest@^28"), Some(28));
-        assert_eq!(npm_pinned_major("eslint"), None); // unpinned
-        assert_eq!(npm_pinned_major("@scope/pkg"), None); // scoped, unpinned
+    fn npm_pinned_version_parses_the_exact_pin() {
+        assert_eq!(npm_pinned_version("eslint@9.39.5"), Some("9.39.5"));
+        assert_eq!(
+            npm_pinned_version("eslint-plugin-react-hooks@5.2.0"),
+            Some("5.2.0")
+        );
+        assert_eq!(
+            npm_pinned_version("@typescript-eslint/parser@8.72.0"),
+            Some("8.72.0")
+        );
+        assert_eq!(npm_pinned_version("eslint"), None); // unpinned
+        assert_eq!(npm_pinned_version("@scope/pkg"), None); // scoped, unpinned
     }
 
+    /// An exact pin is `major.minor.patch` and nothing else: a range marker (`^`, `~`, `>=`,
+    /// `x`, `*`) or a dist-tag lets `npm` pick, and the graded accuracy tests need the tool to
+    /// behave the same on every machine on every day.
     #[test]
-    fn every_bundled_eslint_pin_has_a_major() {
-        // The shipped list must stay pinned — the whole W30 fix is that none drifts to latest.
+    fn every_bundled_eslint_pin_is_an_exact_version() {
         for spec in ESLINT_NPM_PACKAGES {
+            let version = npm_pinned_version(spec).unwrap_or_else(|| {
+                panic!("ESLINT_NPM_PACKAGES entry {spec:?} is unpinned; it would drift to latest")
+            });
+            let parts: Vec<&str> = version.split('.').collect();
             assert!(
-                npm_pinned_major(spec).is_some(),
-                "ESLINT_NPM_PACKAGES entry {spec:?} is unpinned; it would drift to npm 'latest'"
+                parts.len() == 3 && parts.iter().all(|p| p.parse::<u32>().is_ok()),
+                "ESLINT_NPM_PACKAGES entry {spec:?} must pin an exact major.minor.patch, not a \
+                 range: {version:?}"
             );
         }
     }
 
     #[test]
-    fn installed_major_reads_package_json_and_forces_reprovision_on_mismatch() {
+    fn installed_version_reads_package_json_and_forces_reprovision_on_any_mismatch() {
         let tmp = TempDir::new().unwrap();
         let nm = tmp.path().join("node_modules");
         std::fs::create_dir_all(nm.join("eslint")).unwrap();
         std::fs::write(
             nm.join("eslint").join("package.json"),
-            r#"{"name":"eslint","version":"10.12.0"}"#,
+            r#"{"name":"eslint","version":"9.12.0"}"#,
         )
         .unwrap();
-        assert_eq!(installed_major(&nm, "eslint"), Some(10));
-        // The drifted major (10) does not equal the pinned major (9) → not "installed".
+        assert_eq!(installed_version(&nm, "eslint").as_deref(), Some("9.12.0"));
+        // The SAME major, a different minor: caret majors let this drift in silently. An exact
+        // pin does not read it as installed.
         assert_ne!(
-            installed_major(&nm, "eslint"),
-            npm_pinned_major("eslint@^9")
+            installed_version(&nm, "eslint").as_deref(),
+            npm_pinned_version("eslint@9.39.5")
         );
         // A package with no package.json reads as absent.
-        assert_eq!(installed_major(&nm, "nope"), None);
+        assert_eq!(installed_version(&nm, "nope"), None);
+    }
+
+    /// A workspace whose packages are the right MAJOR but not the pinned version must
+    /// re-provision (the old probe compared majors only).
+    #[test]
+    fn a_workspace_with_a_package_at_the_right_major_but_the_wrong_version_must_reprovision() {
+        for spec in ESLINT_NPM_PACKAGES {
+            let tmp = fully_provisioned_workspace();
+            let name = npm_package_name(spec);
+            let pinned = npm_pinned_version(spec).unwrap();
+            let major = pinned.split('.').next().unwrap();
+            std::fs::write(
+                tmp.path()
+                    .join("node_modules")
+                    .join(name)
+                    .join("package.json"),
+                format!("{{\"version\":\"{major}.99.99\"}}"),
+            )
+            .unwrap();
+            assert!(
+                !eslint_packages_installed(tmp.path()),
+                "`{name}` at {major}.99.99 is not the pinned {pinned}"
+            );
+        }
+    }
+
+    /// The generated workspace manifest pins every package to the exact version, no range.
+    #[test]
+    fn the_generated_workspace_package_json_has_exact_versions() {
+        let json: serde_json::Value = serde_json::from_str(&eslint_package_json()).unwrap();
+        let dev = json["devDependencies"]
+            .as_object()
+            .expect("devDependencies");
+        assert_eq!(dev.len(), ESLINT_NPM_PACKAGES.len());
+        for spec in ESLINT_NPM_PACKAGES {
+            let name = npm_package_name(spec);
+            assert_eq!(
+                dev.get(name).and_then(|v| v.as_str()),
+                npm_pinned_version(spec),
+                "{name}"
+            );
+        }
+        for (name, version) in dev {
+            let v = version.as_str().unwrap();
+            assert!(
+                !v.starts_with(['^', '~', '>', '<', '=', '*']) && !v.contains(['x', ' ', '|']),
+                "{name}: {v:?} is a range, not an exact version"
+            );
+        }
+    }
+
+    /// The committed lockfile is what provisioning installs from, so it must agree with the pins
+    /// (a lock built for other versions makes `npm ci` fail, or worse, install the wrong ones),
+    /// and the committed manifest next to it must be the one the code generates.
+    #[test]
+    fn the_committed_lockfile_and_manifest_agree_with_the_pins() {
+        let manifest = std::fs::read_to_string(bundled_eslint_package_json_src())
+            .expect("assets/eslint/package.json is committed");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&manifest).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&eslint_package_json()).unwrap(),
+            "assets/eslint/package.json must equal the generated manifest"
+        );
+        let lock: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(bundled_eslint_lock_src())
+                .expect("assets/eslint/package-lock.json is committed"),
+        )
+        .unwrap();
+        assert!(lock["lockfileVersion"].as_u64().unwrap_or(0) >= 2);
+        for spec in ESLINT_NPM_PACKAGES {
+            let name = npm_package_name(spec);
+            let pinned = npm_pinned_version(spec).unwrap();
+            assert_eq!(
+                lock["packages"][""]["devDependencies"][name].as_str(),
+                Some(pinned),
+                "lock root requirement for {name}"
+            );
+            assert_eq!(
+                lock["packages"][format!("node_modules/{name}")]["version"].as_str(),
+                Some(pinned),
+                "lock resolved version for {name}"
+            );
+            assert!(
+                lock["packages"][format!("node_modules/{name}")]["integrity"]
+                    .as_str()
+                    .is_some_and(|i| i.starts_with("sha512-")),
+                "the lock carries an integrity hash for {name}"
+            );
+        }
+    }
+
+    /// Network: a fresh provisioning into an empty tooling directory installs the pinned tree
+    /// from the committed lockfile (`npm ci`), leaves the workspace manifest exact, and reads as
+    /// provisioned. Ignored by default because it needs `npm` and the registry (or a warm npm
+    /// cache); run with `cargo test -p camerata-server --lib fresh_eslint -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs npm and network (or a warm npm cache)"]
+    async fn fresh_eslint_provisioning_installs_the_pinned_tree_from_the_lockfile() {
+        let tmp = TempDir::new().unwrap();
+        let bin = ensure_eslint(tmp.path()).await.expect("provisions");
+        let ws = eslint_workspace_dir(tmp.path());
+        assert!(bin.exists());
+        assert!(eslint_is_provisioned(&ws).await);
+        let nm = ws.join("node_modules");
+        for spec in ESLINT_NPM_PACKAGES {
+            assert_eq!(
+                installed_version(&nm, npm_package_name(spec)).as_deref(),
+                npm_pinned_version(spec),
+                "{spec}"
+            );
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(ws.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["devDependencies"]["eslint"], "9.39.5");
+        let lock = std::fs::read_to_string(ws.join("package-lock.json")).unwrap();
+        assert_eq!(
+            lock,
+            std::fs::read_to_string(bundled_eslint_lock_src()).unwrap(),
+            "`npm ci` must not rewrite the committed lockfile"
+        );
+    }
+
+    /// With the lockfile available provisioning installs exactly from it (`npm ci`, still
+    /// `--prefer-offline`); without it (a packaging problem) it falls back to installing the
+    /// exact pins, never to a range.
+    #[test]
+    fn eslint_installs_from_the_lockfile_and_falls_back_to_the_exact_pins() {
+        assert_eq!(eslint_install_args(true), ["ci", "--prefer-offline"]);
+        let fallback = eslint_install_args(false);
+        assert_eq!(
+            &fallback[..3],
+            ["install", "--save-dev", "--prefer-offline"]
+        );
+        assert!(
+            fallback.contains(&"eslint@9.39.5".to_string()),
+            "{fallback:?}"
+        );
+        assert!(
+            fallback[3..]
+                .iter()
+                .all(|a| npm_pinned_version(a).is_some()),
+            "every fallback package is an exact pin: {fallback:?}"
+        );
     }
 
     // ── path resolution (pure) ────────────────────────────────────────────────
@@ -917,10 +1141,10 @@ mod tests {
             let name = npm_package_name(spec);
             let dir = ws.join("node_modules").join(name);
             std::fs::create_dir_all(&dir).unwrap();
-            let major = npm_pinned_major(spec).unwrap_or(0);
+            let version = npm_pinned_version(spec).unwrap_or("0.0.0");
             std::fs::write(
                 dir.join("package.json"),
-                format!("{{\"version\":\"{major}.0.0\"}}"),
+                format!("{{\"version\":\"{version}\"}}"),
             )
             .unwrap();
         }
@@ -1072,10 +1296,10 @@ mod tests {
             let name = npm_package_name(spec);
             let dir = ws.join("node_modules").join(name);
             std::fs::create_dir_all(&dir).unwrap();
-            let major = npm_pinned_major(spec).unwrap_or(0);
+            let version = npm_pinned_version(spec).unwrap_or("0.0.0");
             std::fs::write(
                 dir.join("package.json"),
-                format!("{{\"version\":\"{major}.0.0\"}}"),
+                format!("{{\"version\":\"{version}\"}}"),
             )
             .unwrap();
         }

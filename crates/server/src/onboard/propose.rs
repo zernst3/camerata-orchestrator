@@ -1427,6 +1427,91 @@ mod tests {
         );
     }
 
+    /// `UI-REACT-HOOKS-LINT-1` lives in `javascript:react`, which the `React` framework label
+    /// reaches (a `react` dependency in a manifest), so no `domains_for_stack` edit is needed.
+    /// This proves it for React on JavaScript, on TypeScript and under Next.js, and proves the
+    /// rule is NOT suggested for a Node API, a Vue app or a Python repo. It is proposed beside
+    /// the two rules that own the lint violations themselves, never instead of them.
+    #[tokio::test]
+    async fn ui_react_hooks_lint_is_proposed_for_react_stacks_and_not_for_others() {
+        const ID: &str = "UI-REACT-HOOKS-LINT-1";
+        const OWNERS: [&str; 2] = [
+            "JAVASCRIPT-REACT-RULES-OF-HOOKS-1",
+            "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
+        ];
+        for (repo, source, manifest) in [
+            (
+                "acme/react-js",
+                "src/App.jsx",
+                r#"{"dependencies":{"react":"18.2.0","react-dom":"18.2.0"}}"#,
+            ),
+            (
+                "acme/react-ts",
+                "src/App.tsx",
+                r#"{"dependencies":{"react":"18.2.0"},"devDependencies":{"typescript":"5.4.0"}}"#,
+            ),
+            (
+                "acme/next-app",
+                "app/page.tsx",
+                r#"{"dependencies":{"next":"14.0.0","react":"18.2.0"}}"#,
+            ),
+        ] {
+            let repo_files = files(&[(source, "export {};"), ("package.json", manifest)]);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            assert!(
+                domains.contains(&"javascript:react".to_string()),
+                "{repo}: {domains:?}"
+            );
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            let rule = proposed
+                .iter()
+                .find(|r| r.id == ID)
+                .unwrap_or_else(|| panic!("{ID} must be proposed for {repo}"));
+            assert_eq!(rule.domain, "javascript:react");
+            assert!(rule.recommended, "{repo}: suggested, not merely available");
+            assert!(
+                rule.is_auto_recommended,
+                "{repo}: a grounded rule is auto-recommended (pre-checked)"
+            );
+            assert_eq!(rule.repos, vec![repo.to_string()]);
+            for owner in OWNERS {
+                assert!(
+                    proposed.iter().any(|r| r.id == owner && r.recommended),
+                    "{repo}: {owner} owns the lint violations and must be proposed beside {ID}"
+                );
+            }
+        }
+
+        for (repo, source, manifest) in [
+            (
+                "acme/node-api",
+                "src/server.js",
+                Some(r#"{"dependencies":{"express":"4.19.0"}}"#),
+            ),
+            (
+                "acme/vue-app",
+                "src/main.ts",
+                Some(r#"{"dependencies":{"vue":"3.4.0"}}"#),
+            ),
+            ("acme/py-app", "app/main.py", None),
+        ] {
+            let mut pairs = vec![(source, "export {};")];
+            if let Some(manifest) = manifest {
+                pairs.push(("package.json", manifest));
+            }
+            let repo_files = files(&pairs);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            let rule = proposed.iter().find(|r| r.id == ID);
+            assert!(
+                rule.is_none_or(|r| !r.recommended),
+                "{repo}: a repo that is not a React repo must not have {ID} suggested: {rule:?}"
+            );
+        }
+    }
+
     /// `ARCH-SHARED-CONSTANT-1` lives in the `universal` domain, which `propose_corpus_rules`
     /// binds to every repo by id with no stack match. The literal extractor covers TypeScript,
     /// JavaScript, Python and Rust, so each of those stacks must be handed the rule, pre-checked

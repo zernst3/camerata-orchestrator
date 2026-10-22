@@ -364,6 +364,11 @@ pub fn eslint_args(config_path: &str, runnable_selectors: &[String]) -> Vec<Stri
         config_path.to_string(),
         "--format".to_string(),
         ESLINT_FORMATTER.to_string(),
+        // The bundled config carries a "warn"-level baseline so eslint always has a coherent
+        // base; a selected rule is passed below at "error". `--quiet` drops every warning at the
+        // source, so the baseline cannot reach the output (see also
+        // [`keep_selected_eslint_findings`], which enforces the same on what is parsed).
+        "--quiet".to_string(),
     ];
     for sel in runnable_selectors {
         args.push("--rule".to_string());
@@ -371,6 +376,25 @@ pub fn eslint_args(config_path: &str, runnable_selectors: &[String]) -> Vec<Stri
     }
     args.push(".".to_string());
     args
+}
+
+/// Keep only the eslint findings whose rule id is one of the `selected` selectors (the
+/// runnable set handed to `--rule`).
+///
+/// # Why this exists
+///
+/// Camerata's bundled eslint config enables a baseline of core rules (`no-console`,
+/// `eqeqeq`, `no-var`, `prefer-const`, ...). Every message eslint printed used to become a
+/// preview [`Finding`], so a scan that selected only the React Hooks rules still shipped
+/// `no-console` and `eqeqeq` rows into `report.findings` and from there into every client
+/// artifact, and `eqeqeq` / `no-var` / `prefer-const` even grounded to
+/// `JAVASCRIPT-STRICT-EQUALITY-1`, `JAVASCRIPT-NO-VAR-1` and `JAVASCRIPT-CONST-DEFAULT-1`
+/// with their citations, selected or not. The scan reports what the project selected.
+pub fn keep_selected_eslint_findings(findings: Vec<Finding>, selected: &[String]) -> Vec<Finding> {
+    findings
+        .into_iter()
+        .filter(|f| selected.iter().any(|s| s == &f.rule_id))
+        .collect()
 }
 
 pub fn note_finding(repo: &str, tool: &str, message: impl Into<String>) -> Finding {
@@ -1628,7 +1652,7 @@ async fn run_one_tool<'r>(
                             ),
                         });
                     }
-                    Ok((fs, gaps))
+                    Ok((keep_selected_eslint_findings(fs, &runnable), gaps))
                 }
                 Err(e) => Err(tool_output_error(
                     ScanTool::Eslint,
@@ -3552,6 +3576,65 @@ mod tests {
             console.severity, "medium",
             "eslint severity 1 (warning) maps to medium"
         );
+
+        // The parser is faithful to eslint's output: it does not know which rules the project
+        // selected. The selection filter is a separate step (`keep_selected_eslint_findings`),
+        // and THAT is what stops the bundled baseline (`no-console`, `eqeqeq`, ...) from
+        // reaching the report as findings nobody asked for. Only `no-var` was selected here.
+        let kept = keep_selected_eslint_findings(findings, &["no-var".to_string()]);
+        let ids: Vec<&str> = kept.iter().map(|f| f.rule_id.as_str()).collect();
+        assert_eq!(ids, ["no-var"], "{kept:?}");
+    }
+
+    /// The baseline-leak filter: only findings whose eslint rule id is in the runnable selector
+    /// set survive, for core, plugin and scoped ids alike; an empty selection keeps nothing.
+    #[test]
+    fn keep_selected_eslint_findings_keeps_only_the_selected_rule_ids() {
+        let mk = |rule: &str| {
+            preview_finding("me/web", ScanTool::Eslint, "a.js", 1, rule, "warning", "m")
+        };
+        let all = vec![
+            mk("no-console"),
+            mk("eqeqeq"),
+            mk("react-hooks/exhaustive-deps"),
+            mk("@typescript-eslint/no-explicit-any"),
+            mk("react-hooks/rules-of-hooks"),
+        ];
+        let selectors = vec![
+            "react-hooks/exhaustive-deps".to_string(),
+            "@typescript-eslint/no-explicit-any".to_string(),
+        ];
+        let kept = keep_selected_eslint_findings(all.clone(), &selectors);
+        let ids: Vec<&str> = kept.iter().map(|f| f.rule_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "react-hooks/exhaustive-deps",
+                "@typescript-eslint/no-explicit-any"
+            ]
+        );
+        assert!(keep_selected_eslint_findings(all, &[]).is_empty());
+    }
+
+    /// Belt and braces: `--quiet` drops every warning-level baseline row at the source, and the
+    /// baseline's one `error`-level rule (`no-duplicate-case`) is demoted to `warn` so `--quiet`
+    /// removes it too. A selected rule is always passed at `error`, so it survives `--quiet`.
+    #[test]
+    fn eslint_runs_quiet_and_the_bundled_baseline_has_no_error_level_rule() {
+        let args = eslint_args("/cfg/c.mjs", &["eqeqeq".to_string()]);
+        assert!(args.iter().any(|a| a == "--quiet"), "{args:?}");
+
+        let config = include_str!("../assets/eslint/camerata.config.mjs");
+        let code_lines: Vec<&str> = config
+            .lines()
+            .map(str::trim)
+            .filter(|l| !(l.starts_with("//") || l.starts_with('*') || l.starts_with("/*")))
+            .collect();
+        assert!(
+            code_lines.iter().all(|l| !l.contains("\"error\"")),
+            "a baseline rule at error level would survive --quiet and reach the report"
+        );
+        assert!(config.contains("\"no-duplicate-case\": \"warn\""));
     }
 
     /// req_c11: a `fatal` parse error is NEVER emitted as a finding (it is not a statement
@@ -3885,6 +3968,230 @@ export function Thing({ id }) {
              findings={findings:?} notes={notes:?}"
         );
     }
+    // ── UI-REACT-HOOKS-LINT-1: who owns what, so a violation is reported exactly once ──────
+
+    /// The three React rules, selected together the way a React project's scan selects them.
+    const HOOKS_OWNERS: [&str; 2] = [
+        "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
+        "JAVASCRIPT-REACT-RULES-OF-HOOKS-1",
+    ];
+    const HOOKS_LINT_RULE: &str = "UI-REACT-HOOKS-LINT-1";
+
+    /// `UI-REACT-HOOKS-LINT-1` is the lint-configuration gap; the two `JAVASCRIPT-REACT-*`
+    /// rules own the eslint rule ids. If the new rule also carried a `react-hooks:` linter
+    /// source, the eslint run would receive each selector twice and every violation would be
+    /// reported under two rule ids. This pins the split against the REAL corpus.
+    #[tokio::test]
+    async fn ui_react_hooks_lint_adds_no_second_eslint_route_so_a_violation_is_never_reported_twice(
+    ) {
+        let (corpus, errors) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let rule = corpus
+            .get_by_id(HOOKS_LINT_RULE)
+            .expect("UI-REACT-HOOKS-LINT-1 is in the corpus");
+        assert_eq!(rule.enforcement, EnforcementKind::Architectural);
+        assert!(
+            rule.sources.iter().all(|s| s.linter.is_none()),
+            "a `linter` annotation would route this rule to eslint a second time: {:?}",
+            rule.sources
+        );
+        assert_eq!(tool_for_rule(rule), None);
+
+        // Exactly the two owners claim a `react-hooks/*` selector.
+        let mut claimants: Vec<&str> = corpus
+            .iter()
+            .filter(|r| {
+                r.sources
+                    .iter()
+                    .filter_map(|s| s.linter.as_deref())
+                    .filter_map(selector_for_linter)
+                    .any(|sel| sel.starts_with("react-hooks/"))
+            })
+            .map(|r| r.id.0.as_str())
+            .collect();
+        claimants.sort_unstable();
+        assert_eq!(claimants, HOOKS_OWNERS);
+
+        // Selected together, the eslint run is handed each owner once and the new rule is
+        // neither routed nor reported as unrouted (it has its own checker).
+        let selection: Vec<SelectedRule> = [HOOKS_OWNERS[0], HOOKS_OWNERS[1], HOOKS_LINT_RULE]
+            .into_iter()
+            .map(selected)
+            .collect();
+        let lookup = |id: &str| corpus.get_by_id(id);
+        let (by_tool, ungrouped) = group_by_tool(&selection, &lookup, None);
+        assert!(
+            ungrouped.is_empty(),
+            "the new rule must not appear as unrouted: {ungrouped:?}"
+        );
+        let mut routed: Vec<&str> = by_tool[&ScanTool::Eslint]
+            .iter()
+            .map(|sr| sr.id.as_str())
+            .collect();
+        routed.sort_unstable();
+        assert_eq!(routed, HOOKS_OWNERS);
+        assert_eq!(
+            by_tool.len(),
+            1,
+            "no other tool is driven: {:?}",
+            by_tool.keys()
+        );
+    }
+
+    /// The real shape of eslint's own JSON output for the two hooks rules: each report is a
+    /// finding at its line, carrying the lint message (the fix, instantiated for that hook and
+    /// that variable), under the raw eslint rule id the two owner rules ground.
+    #[test]
+    fn eslint_json_hooks_reports_become_findings_at_their_line_with_the_lint_message() {
+        let json = r#"[{
+          "filePath": "/work/web/src/Bad.jsx",
+          "messages": [
+            { "ruleId": "react-hooks/rules-of-hooks", "severity": 2, "line": 5,
+              "message": "React Hook \"useState\" is called conditionally. React Hooks must be called in the exact same order in every component render." },
+            { "ruleId": "react-hooks/exhaustive-deps", "severity": 1, "line": 9,
+              "message": "React Hook useEffect has a missing dependency: 'id'. Either include it or remove the dependency array." },
+            { "ruleId": null, "severity": 2, "line": 1, "message": "eslint speaking for itself" }
+          ]
+        }]"#;
+        let (findings, shape) = parse_eslint_json("me/web", json).expect("parses");
+        assert_eq!(shape.files_reported, 1);
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+
+        let hook = &findings[0];
+        assert_eq!(hook.rule_id, "react-hooks/rules-of-hooks");
+        assert_eq!(hook.line, 5);
+        assert!(
+            hook.detail.contains("is called conditionally"),
+            "{}",
+            hook.detail
+        );
+
+        let deps = &findings[1];
+        assert_eq!(deps.rule_id, "react-hooks/exhaustive-deps");
+        assert_eq!(deps.line, 9);
+        assert!(
+            deps.detail.contains("missing dependency: 'id'"),
+            "the instantiated fix names the variable: {}",
+            deps.detail
+        );
+
+        for f in &findings {
+            assert_eq!(
+                f.severity, "medium",
+                "an eslint error/warning caps at medium"
+            );
+            assert_eq!(f.kind, Some(camerata_api_types::audit::FindingKind::Defect));
+            assert!(f.preview && f.preview_tool.as_deref() == Some("eslint"));
+            assert_eq!(
+                crate::eslint_floor_category(&f.rule_id).map(|id| HOOKS_OWNERS.contains(&id)),
+                Some(true),
+                "grounds to one of the two owner rules, never to {HOOKS_LINT_RULE}"
+            );
+        }
+    }
+
+    /// Live, over the real corpus rules and the real provisioned eslint: a file with a hook
+    /// called in a condition and an effect missing a dependency produces one finding per
+    /// violation at its line, under the raw eslint ids and NEVER under `UI-REACT-HOOKS-LINT-1`;
+    /// a second file written correctly (complete dependencies, hooks at the top level) produces
+    /// none. The violating file in the same run is the positive control that proves eslint
+    /// evaluated the rules rather than reading nothing. Skips (never fails) when no Camerata
+    /// eslint workspace with the plugin is cached.
+    #[tokio::test]
+    async fn live_eslint_reports_a_conditional_hook_and_a_missing_dependency_once_and_spares_their_safe_twins(
+    ) {
+        if cached_eslint_workspace_with_react_hooks_plugin().is_none() {
+            eprintln!(
+                "skipping live_eslint_reports_a_conditional_hook_and_a_missing_dependency_once_\
+                 and_spares_their_safe_twins: no cached Camerata eslint workspace with \
+                 eslint-plugin-react-hooks on this machine (this test never provisions)"
+            );
+            return;
+        }
+        let (corpus, errors) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let bad = "import { useEffect, useState } from \"react\";\n\
+                   \n\
+                   export function Bad({ id, enabled }) {\n\
+                   \x20 if (enabled) {\n\
+                   \x20   const [open, setOpen] = useState(false);\n\
+                   \x20   console.log(open, setOpen);\n\
+                   \x20 }\n\
+                   \x20 useEffect(() => {\n\
+                   \x20   console.log(id);\n\
+                   \x20 }, []);\n\
+                   \x20 return null;\n\
+                   }\n";
+        let good = "import { useEffect, useState } from \"react\";\n\
+                    \n\
+                    export function Good({ id, enabled }) {\n\
+                    \x20 const [open, setOpen] = useState(false);\n\
+                    \x20 useEffect(() => {\n\
+                    \x20   console.log(id, enabled, open, setOpen);\n\
+                    \x20 }, [id, enabled, open]);\n\
+                    \x20 return null;\n\
+                    }\n";
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(dir.path().join("Bad.jsx"), bad).expect("write Bad.jsx");
+        std::fs::write(dir.path().join("Good.jsx"), good).expect("write Good.jsx");
+
+        let selection: Vec<SelectedRule> = [HOOKS_OWNERS[0], HOOKS_OWNERS[1], HOOKS_LINT_RULE]
+            .into_iter()
+            .map(selected)
+            .collect();
+        let lookup = |id: &str| corpus.get_by_id(id);
+        let (findings, notes, attempted) =
+            run_scan_tools("me/web", dir.path(), &selection, &lookup, None, None).await;
+        assert!(attempted.contains("eslint"), "notes={notes:?}");
+        assert!(
+            notes.iter().all(|n| !n.message.contains(HOOKS_LINT_RULE)),
+            "the new rule is not an unrouted rule: {notes:?}"
+        );
+
+        let hooks: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.rule_id.starts_with("react-hooks/"))
+            .collect();
+        let at = |rule: &str, file: &str| -> Vec<usize> {
+            hooks
+                .iter()
+                .filter(|f| f.rule_id == rule && f.path.ends_with(file))
+                .map(|f| f.line)
+                .collect()
+        };
+        // The conditional hook is reported at its call, once.
+        assert_eq!(
+            at("react-hooks/rules-of-hooks", "Bad.jsx"),
+            [5],
+            "{hooks:#?}"
+        );
+        // The incomplete array is reported once, on the effect.
+        let deps_lines = at("react-hooks/exhaustive-deps", "Bad.jsx");
+        assert_eq!(deps_lines.len(), 1, "{hooks:#?}");
+        assert!((8..=10).contains(&deps_lines[0]), "{deps_lines:?}");
+        let deps = hooks
+            .iter()
+            .find(|f| f.rule_id == "react-hooks/exhaustive-deps")
+            .expect("present");
+        assert!(
+            deps.detail.contains("'id'"),
+            "names the missing variable: {}",
+            deps.detail
+        );
+        // Safe twins: nothing for the correct file, and nothing under the new rule's id.
+        assert!(
+            hooks.iter().all(|f| !f.path.ends_with("Good.jsx")),
+            "complete dependencies and top-level hooks must be silent: {hooks:#?}"
+        );
+        assert!(
+            findings.iter().all(|f| f.rule_id != HOOKS_LINT_RULE),
+            "{findings:#?}"
+        );
+    }
+
     /// Best-effort probe for a provisioned Camerata eslint workspace — the eslint BINARY and
     /// the bundled flat config, nothing more (unlike
     /// `cached_eslint_workspace_with_react_hooks_plugin`, this test needs no plugin: it uses

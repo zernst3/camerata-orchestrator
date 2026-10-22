@@ -430,4 +430,5 @@
 "UI-CONSENT-GATED-1" = { version = 1, hash = "sha256:e6c3f5d7b6515134c550f1a6e56e1eb17cb2639e521e882fa7c9a85ad52ca2f4" }
 "UI-IMAGE-COMPONENT-1" = { version = 1, hash = "sha256:374657d6779df5537116b0c280b32408e27c20129442aaff9f0cc8013445a157" }
 "UI-QUERY-LIBRARY-1" = { version = 1, hash = "sha256:5ab942c313ed9523997f1ca14a68129b7564b0f4d59173f7edd11bf6277102f7" }
+"UI-REACT-HOOKS-LINT-1" = { version = 2, hash = "sha256:1f090815f828a8076b2451c8617feaa7f5323eadd53b9f9e1aea40e742d3e863" }
 "UI-UTC-DATES-1" = { version = 1, hash = "sha256:4732b95885a63d6de9c2fe542cdd92aedd4532b1849e7a319a4ecf670efa43e4" }
