@@ -352,3 +352,153 @@ fn pin_all_from_with_parentheses_and_other_commands_without_them_are_distinguish
     ]);
     assert_flags_only(&prose, "app/javascript/widgets/gauge_widget.js");
 }
+
+// ── glob strings with a literal part: TypeORM entities, Nest modules, handlers ──
+
+#[test]
+fn twin_typeorm_entity_glob_in_a_config_object_keeps_the_entities_live() {
+    let f = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        ("src/main.ts", "import './data-source';\n"),
+        (
+            "src/data-source.ts",
+            "export const dataSource = { migrations: ['src/migrations/*.ts'], entities: ['src/**/*.entity.ts'] };\n",
+        ),
+        ("src/users/user.entity.ts", "export class User {}\n"),
+        ("src/orders/deep/order.entity.ts", "export class Order {}\n"),
+        ("src/users/stranded_service.ts", "export class S {}\n"),
+    ]);
+    assert_flags_only(&f, "src/users/stranded_service.ts");
+}
+
+#[test]
+fn positive_sibling_an_entity_file_outside_the_globs_root_is_still_flagged() {
+    let f = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        ("src/main.ts", "import './data-source';\n"),
+        (
+            "src/data-source.ts",
+            "export const dataSource = { entities: ['src/**/*.entity.ts'] };\n",
+        ),
+        ("src/users/user.entity.ts", "export class User {}\n"),
+        ("lib/outside.entity.ts", "export class Outside {}\n"),
+    ]);
+    assert_flags_only(&f, "lib/outside.entity.ts");
+}
+
+#[test]
+fn twin_module_and_brace_basename_globs_keep_their_matches_live() {
+    let f = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        (
+            "app.config.ts",
+            "export default { modules: ['**/*.module.ts'], resolvers: [\"src/**/*.resolver.{ts,js}\"] };\n",
+        ),
+        ("src/billing/billing.module.ts", "export class B {}\n"),
+        ("src/billing/billing.resolver.ts", "export class R {}\n"),
+        ("src/billing/ledger.resolver.js", "module.exports = {};\n"),
+        ("src/billing/stranded_service.ts", "export class S {}\n"),
+    ]);
+    assert_flags_only(&f, "src/billing/stranded_service.ts");
+}
+
+#[test]
+fn a_literal_directory_below_a_wildcard_makes_the_glob_meaningful() {
+    let f = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        ("src/app.ts", "export const all = ['**/handlers/*.ts'];\n"),
+        ("src/orders/handlers/create_order.ts", "export {};\n"),
+        ("src/orders/stranded_service.ts", "export {};\n"),
+    ]);
+    assert_flags_only(&f, "src/orders/stranded_service.ts");
+}
+
+#[test]
+fn pure_extension_globs_stay_ignored_so_a_tailwind_repo_is_still_checked() {
+    let f = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        (
+            "tailwind.config.js",
+            "module.exports = { content: ['./src/**/*.{js,ts,jsx,tsx}', './app/**/*.tsx', './pages/*.{ts,tsx}', '**/*.html'] };\n",
+        ),
+        ("src/dead_widget.tsx", "export default 1;\n"),
+        ("app/dead_screen.tsx", "export default 1;\n"),
+        ("pages/dead_page.ts", "export default 1;\n"),
+    ]);
+    let got = flagged(&f);
+    assert_eq!(got.len(), 3, "{got:?}");
+}
+
+#[test]
+fn a_glob_resolves_from_the_nearest_manifest_folder_as_well_as_the_repository_root() {
+    let f = files(vec![
+        ("packages/api/package.json", r#"{"private":true}"#),
+        ("packages/api/src/main.ts", "import './ormconfig';\n"),
+        (
+            "packages/api/src/ormconfig.ts",
+            "export default { entities: ['dist/**/*.entity.js', 'src/**/*.entity.ts'] };\n",
+        ),
+        (
+            "packages/api/src/users/user.entity.ts",
+            "export class U {}\n",
+        ),
+    ]);
+    assert_silent(&f);
+}
+
+#[test]
+fn tsconfig_style_files_are_not_a_source_of_glob_strings() {
+    // `exclude` lists name files a project does NOT want built; they must not keep them alive.
+    let f = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        (
+            "tsconfig.json",
+            r#"{"exclude": ["src/legacy/**/*.legacy_unit.ts"]}"#,
+        ),
+        (
+            "tsconfig.build.json",
+            r#"{"exclude": ["src/old/**/*.old_unit.ts"]}"#,
+        ),
+        ("src/app.ts", "export {};\n"),
+        ("src/legacy/a/thing.legacy_unit.ts", "export {};\n"),
+        ("src/old/b/thing.old_unit.ts", "export {};\n"),
+    ]);
+    let text: String = run(&f).iter().map(|v| v.message.clone()).collect();
+    assert!(
+        text.contains("legacy_unit") && text.contains("old_unit"),
+        "{text}"
+    );
+}
+
+#[test]
+fn glob_helpers_expand_braces_and_judge_meaning() {
+    use super::super::dynamic::{expand_braces, is_meaningful_glob};
+    assert_eq!(expand_braces("a/*.{ts,js}"), ["a/*.ts", "a/*.js"]);
+    assert_eq!(
+        expand_braces("{a,b}/{c,d}.ts"),
+        ["a/c.ts", "a/d.ts", "b/c.ts", "b/d.ts"]
+    );
+    assert_eq!(expand_braces("plain/*.ts"), ["plain/*.ts"]);
+    assert_eq!(expand_braces("broken/{a,b"), ["broken/{a,b"]);
+    for yes in [
+        "src/**/*.entity.ts",
+        "**/*.module.ts",
+        "src/**/*.resolver.{ts,js}",
+        "**/handlers/*.ts",
+        "*.entity.ts",
+    ] {
+        assert!(is_meaningful_glob(yes), "{yes}");
+    }
+    for no in [
+        "./src/**/*.{js,ts,jsx,tsx}",
+        "./src/**/*.tsx",
+        "**/*.html",
+        "src/components/**/*.ts",
+        "*.ts",
+        "!**/*.entity.ts",
+        "src/no_glob.entity.ts",
+        "a b/**/*.entity.ts",
+    ] {
+        assert!(!is_meaningful_glob(no), "{no}");
+    }
+}

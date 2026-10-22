@@ -829,6 +829,11 @@ safe-twin test; the places the build chose something the text above left open or
   `bin/Any CPU/Release` are pruned as .NET output; liveness is one linear worklist; a main-guard
   window no longer splits a multibyte character; a rule withheld on a truncated scan carries
   its own ledger note ("the scan stopped at its file limit"), not the config-gated one.
+- **Glob strings with a literal part (added 2026-10-21).** A quoted glob whose basename has a
+  literal beyond the extension list (`'src/**/*.entity.ts'`, `'**/*.module.ts'`,
+  `'**/handlers/*.ts'`) roots every file matching the whole pattern, resolved from the repository
+  root and the nearest manifest folder; `tsconfig*.json`/`jsconfig*.json` are not read. Pure
+  extension lists (Tailwind `content`, `include`) still root nothing.
 - **Coverage note (recorded, not changed).** R7 roots a whole package when a manifest entry
   (`main`, `bin`, `exports`, `types`) names a file the scan cannot see, which includes any
   `main: "dist/index.js"` whose output is not committed. That makes the rule silent on many

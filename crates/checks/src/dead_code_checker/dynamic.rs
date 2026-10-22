@@ -9,9 +9,14 @@
 //!   the folder the literal names is rooted. Scan lists that are not loader calls (a Tailwind
 //!   `content` glob, a tsconfig `include`) are deliberately NOT honoured: they would mark every
 //!   file in `src/` alive and silence the rule.
+//! - Glob strings with a literal part (`entities: ['src/**/*.entity.ts']`, `'**/*.module.ts'`,
+//!   `'**/handlers/*.ts'`): every file matching the whole pattern is rooted. A glob that is only
+//!   an extension list under a literal prefix (`./src/**/*.{js,ts,tsx}`) is the Tailwind and
+//!   tsconfig `include` shape and stays ignored, or the rule would be silent in every such repo.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
+use crate::arch_checker::glob_match;
 use crate::extract::resolver::{directory_of, normalize_join};
 use crate::extract::{self, ComputedLoad};
 
@@ -73,7 +78,156 @@ pub(super) fn dynamic_roots(files: &[(String, String)], manifests: &ManifestDirs
         }
         literal_directory_roots(&mut roots, path, content, manifests, &dirs);
     }
+    glob_string_roots(&mut roots, files, manifests);
     roots
+}
+
+/// Cap on brace expansions of one pattern (`{a,b}{c,d}{e,f}...`).
+const MAX_BRACE_EXPANSIONS: usize = 64;
+
+/// `pattern` with every `{a,b}` group expanded (no nesting). An unbalanced brace is left as is.
+pub(super) fn expand_braces(pattern: &str) -> Vec<String> {
+    let Some(open) = pattern.find('{') else {
+        return vec![pattern.to_string()];
+    };
+    let Some(close) = pattern[open..].find('}').map(|i| open + i) else {
+        return vec![pattern.to_string()];
+    };
+    let (head, tail) = (&pattern[..open], &pattern[close + 1..]);
+    let mut out = Vec::new();
+    for alt in pattern[open + 1..close].split(',') {
+        for rest in expand_braces(tail) {
+            if out.len() >= MAX_BRACE_EXPANSIONS {
+                return out;
+            }
+            out.push(format!("{head}{alt}{rest}"));
+        }
+    }
+    out
+}
+
+fn has_literal(segment: &str) -> bool {
+    segment
+        .chars()
+        .any(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn has_wildcard(segment: &str) -> bool {
+    segment.contains(['*', '?', '{', '['])
+}
+
+/// Whether a glob string names a SET OF FILES by something other than their extension: the
+/// basename has a literal part beyond its extension list (`*.entity.ts`, `*.module.ts`,
+/// `*.resolver.{ts,js}`), or a literal folder follows a wildcard (`**/handlers/*.ts`). A literal
+/// folder PREFIX with a pure extension list (`./src/**/*.{js,ts}`, Tailwind's `content`,
+/// tsconfig's `include`) is not meaningful: it would mark everything under `src/` alive.
+pub(super) fn is_meaningful_glob(pattern: &str) -> bool {
+    if pattern.starts_with('!')
+        || pattern.contains(char::is_whitespace)
+        || pattern.len() > 200
+        || !pattern.contains('*')
+    {
+        return false;
+    }
+    let segments: Vec<&str> = pattern.split('/').collect();
+    let Some((basename, dirs)) = segments.split_last() else {
+        return false;
+    };
+    // The basename minus its extension list: `*.entity.ts` gives `*.entity`; `*.{ts,js}` gives `*`.
+    let stem = match basename.rfind('.') {
+        Some(dot) if !basename[dot..].contains('*') => &basename[..dot],
+        _ => match basename.find(".{") {
+            Some(dot) => &basename[..dot],
+            None => basename,
+        },
+    };
+    let stem_is_meaningful = has_wildcard(basename) && has_literal(stem);
+    let first_wild = dirs.iter().position(|s| has_wildcard(s));
+    let dir_below_wildcard = first_wild.is_some_and(|i| {
+        dirs[i + 1..]
+            .iter()
+            .any(|s| !has_wildcard(s) && has_literal(s) && *s != "." && *s != "..")
+    });
+    stem_is_meaningful || dir_below_wildcard
+}
+
+/// Quoted strings of `content` that are meaningful globs.
+fn glob_strings(content: &str) -> Vec<&str> {
+    if !content.contains('*') {
+        return Vec::new();
+    }
+    let bytes = content.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if matches!(bytes[i], b'\'' | b'"' | b'`') {
+            let quote = bytes[i];
+            let end = bytes[i + 1..]
+                .iter()
+                .position(|&b| b == quote || b == b'\n')
+                .map(|n| i + 1 + n);
+            let Some(end) = end else { break };
+            if bytes[end] == quote {
+                let literal = &content[i + 1..end];
+                if is_meaningful_glob(literal) {
+                    out.push(literal);
+                }
+                i = end + 1;
+            } else {
+                i = end;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Files that a meaningful glob string anywhere in the scan matches are rooted. The pattern is
+/// resolved from the repository root and from the nearest manifest folder of the file holding it.
+/// `tsconfig*.json` and `jsconfig*.json` are not read: their lists mostly say which files NOT to
+/// build.
+fn glob_string_roots(roots: &mut RootSet, files: &[(String, String)], manifests: &ManifestDirs) {
+    let mut patterns: BTreeSet<(String, String)> = BTreeSet::new();
+    for (path, content) in files {
+        let base_name = path.rsplit('/').next().unwrap_or(path);
+        if (base_name.starts_with("tsconfig") || base_name.starts_with("jsconfig"))
+            && base_name.ends_with(".json")
+        {
+            continue;
+        }
+        for literal in glob_strings(content) {
+            let trimmed = literal.trim_start_matches("./").trim_start_matches('/');
+            // A pattern with no folder part matches at any depth, like a gitignore entry.
+            let anchored = if trimmed.contains('/') {
+                trimmed.to_string()
+            } else {
+                format!("**/{trimmed}")
+            };
+            for base in [manifests.nearest(path), ""] {
+                for expanded in expand_braces(&anchored) {
+                    patterns.insert((base.to_string(), expanded));
+                }
+            }
+        }
+    }
+    if patterns.is_empty() {
+        return;
+    }
+    for (path, _) in files {
+        let matched = patterns.iter().any(|(base, pattern)| {
+            let rel = if base.is_empty() {
+                Some(path.as_str())
+            } else {
+                path.strip_prefix(base.as_str())
+                    .and_then(|r| r.strip_prefix('/'))
+            };
+            rel.is_some_and(|rel| glob_match(pattern, rel))
+        });
+        if matched {
+            roots.insert_file(path.clone());
+        }
+    }
 }
 
 /// The folder `rel` names when read from `base`, if the scan has such a folder.
