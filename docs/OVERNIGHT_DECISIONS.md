@@ -32,6 +32,12 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-21 (Opus, within Zach's "narrow" ruling, false-positive-safe narrowings after the
+  Fable review of ARCH-SHARED-CONSTANT-1): N1 rates require >= 2 significant digits (keeps 0.12,
+  0.075; drops 0.9, 0.001, 1e-9); Django URL-name callees (reverse, reverse_lazy, redirect,
+  resolve_url) are excluded; grouping is scoped to the nearest package root (package.json,
+  pyproject.toml, Cargo.toml) so "import the constant" is always possible. Router path vs
+  <Link>/href repeats stay IN scope (legitimate under the S2 ruling).
 - 2026-10-21 (Zach, W29 scope): ARCH-DEAD-CODE-1 ships FILE-level in v1; unused individual
   exports become a separate future rule once the tooling is false-positive-safe.
   ARCH-SHARED-CONSTANT-1 uses the narrow four-shape "domain literal" definition (dashed/colon
