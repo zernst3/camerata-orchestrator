@@ -1,1 +1,11 @@
 allow-unwrap-in-tests = true
+
+# Process-global environment mutation is a test-isolation hazard: cargo runs a binary's tests
+# on parallel threads of one process, so a raw set/remove races every other test (and every
+# reader) of that variable, and a panic skips the manual restore. Tests use
+# `camerata_test_env::EnvGuard` (RAII restore) plus `#[serial_test::serial(process_env)]`;
+# that crate is the only place allowed to call these.
+disallowed-methods = [
+    { path = "std::env::set_var", reason = "use camerata_test_env::EnvGuard + #[serial_test::serial(process_env)] (tests), or inject the value (production)" },
+    { path = "std::env::remove_var", reason = "use camerata_test_env::EnvGuard + #[serial_test::serial(process_env)] (tests), or inject the value (production)" },
+]
