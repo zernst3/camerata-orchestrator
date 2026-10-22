@@ -1687,8 +1687,10 @@ enum FileUse {
     Skipped,
 }
 
-/// Whether `path` (with its `content`) is excluded from counting altogether. `emitted` is
-/// [`crate::extract::paths::emitted_js_paths`] over the whole repo.
+/// Whether `path` (with its `content`) contributes no copies. `emitted` is
+/// [`crate::extract::paths::emitted_js_paths`] over the whole repo. The tests' view of
+/// [`classify_file`].
+#[cfg(test)]
 fn is_excluded_file(path: &str, content: &str, emitted: &HashSet<&str>) -> bool {
     classify_file(path, content, emitted) != FileUse::Counted
 }

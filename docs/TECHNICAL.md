@@ -2002,14 +2002,17 @@ checkers read a default as "no reason to exclude".
 or more files with no constant, or that has a module-level constant and is bare in at least one
 other file. "Domain value" is deliberately narrow (owner ruling, 2026-10-21): a hyphen, colon or
 slash separated lowercase name, a route template, a multi-word SCREAMING_SNAKE token, or a decimal
-rate strictly between 0 and 1 (never 0.5, 0.25, 0.75) that is an operand of arithmetic in every
-bare copy. Dotted keys, snake_case strings, single words and integers are out of scope. Guards run
+rate strictly between 0 and 1 with at least two significant digits (never 0.5, 0.25, 0.75) that is
+an operand of arithmetic in every bare copy. Dotted keys, snake_case strings, single words and integers are out of scope. Guards run
 at four levels: file (tests, fixtures, config and settings, migrations, scripts, docs, generated
 code, declaration files, committed build output), value shape (protocol, style, platform and path
 tokens), occurrence (object keys, subscripts, non-route attribute arguments, CSS property values)
 and value (an i18n call or catalogue key, a class name, an environment variable name, a type
 member, a module specifier, a header name, a logger name, a query fragment, a DOM event name
-removes the value everywhere). Two homes with no bare copy is not a finding. The checker emits
+removes the value everywhere). Values are compared only inside one package (the nearest
+manifest directory or monorepo app), a constant in a configuration file still counts as a home,
+and test code (including Rust `#[cfg(test)]` modules) is never read. Two homes with no bare copy
+is not a finding. The checker emits
 `medium`; the corpus rule's `max_severity = "low"` clamps it at report time. The full algorithm
 and every trap are in `docs/design/2026-10-21_w29-detector-implementation.md`.
 

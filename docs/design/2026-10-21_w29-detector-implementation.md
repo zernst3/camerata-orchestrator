@@ -1243,6 +1243,84 @@ the build does.
   privately in the checker, because the two checkers were built in parallel; hoist them into
   `extract::paths` when both have landed.
 
+### 8a. Adversarial review round (2026-10-21): what changed and what was left
+
+An adversarial review of the built checker found false positives; each is fixed with a failing
+test first. The scope decisions below were made by the orchestrator (recorded in
+`docs/OVERNIGHT_DECISIONS.md` on the orchestrator's branch) and are built as stated.
+
+Fixes (case ids are the review harness's):
+
+- **Test paths** (17, 18, 51, 98): `is_test_path` also matches the stems `tests`, `test` and
+  `test_*` (Django's `tests.py`, pytest's `test_*.py`). Shared with ARCH-ONE-IMPORT-PATH-1.
+- **Rust test code** (27, 56, 78): `#[cfg(test)]` modules and items, `#[test]`, `#[tokio::test]`
+  and `#[rstest]` functions are not read (`cfg(not(test))` is read).
+- **More home shapes** (19, 20, 21, 22, 23, 24, 25, 26, 74, 75, 84, 85, 92): `Object.freeze({..})`,
+  `export default`, CommonJS `module.exports` / `exports.X`, TypeScript enum members (for every
+  shape; an S1 or S3 member is still removed by V4, a route member is a home), namespace members,
+  static fields of a module-level class, Python class-body attributes of a module-level class
+  (`Class.ATTR`), Django `TextChoices` / `IntegerChoices` / `Choices` as enum bases, `LazyLock` /
+  `Lazy` / `LazyCell` / `OnceLock::from` initializers, `lazy_static!` bodies (parsed as `static
+  ref` items) and a Rust function whose whole body is the literal. A class body the walker cannot
+  name (nested, or in a function) sets `LiteralCtx.unattributed` and is neither home nor bare
+  (fail-closed).
+- **Environment names** (11, 12, 13, 14, 15, 73): V3 matches when the callee chain's receiver ends
+  with `env`, `environ` or `META`, for any verb, and `set_var`, `remove_var`, `setdefault`,
+  `putenv`, `unsetenv` and `config` join the callees.
+- **HTML attribute values** (01, 02, 03, 10, 65, 72, 88, 60): any occurrence that is the value of
+  a JSX attribute, or of a key in a Django widget's `attrs={..}` dict, is not counted, except a
+  route (`href`, `to`). `ctx.jsx_attr` carries the attribute name for both.
+- **Recovered parses** (07): a literal under a tree-sitter error node is dropped, and a JavaScript
+  file that does not parse cleanly is re-parsed with the TSX grammar (which handles `class=` and
+  `for=`).
+- **Type positions** (54): an occurrence in a type position is not counted unless it is itself a
+  home (an enum member).
+- **`classList`** (08, 71): V2 also applies when the callee chain contains `classList`.
+- **String concatenation** (83, 31): `+` next to a string or template literal is not arithmetic.
+- **Comments before the first argument** (76, 94, 57): the first named argument that is not a
+  comment is the specifier.
+- **Config-file homes** (58): a configuration file (F2) contributes the constants it defines but
+  never a copy, so the message no longer says "Give it one home" when a home exists under
+  `config/`. Tests, fixtures, migrations, scripts, docs, generated and declaration files
+  contribute nothing, so a constant in a test file is not a home (97).
+
+Scope decisions:
+
+- **A. Rates need two significant digits.** A significant digit is a non-zero digit after the
+  leading zeros of the fraction. `0.12` and `0.075` stay; `0.9`, `0.001` and `1e-9` are scales and
+  epsilons (28, 29, 30).
+- **B. URL names.** String arguments of `reverse`, `reverse_lazy`, `redirect` and `resolve_url`
+  are not domain values (16). Applied to the token shape only, because a route passed to
+  `res.redirect('/login')` is a route.
+- **C. Grouping by package.** A value is compared only inside one package: the nearest directory
+  with a `package.json`, `pyproject.toml` or `Cargo.toml` below the repository root, else the
+  child of a conventional monorepo container (`apps`, `packages`, `services`, `libs`, `crates`,
+  `modules`, `projects`), else the whole repository (46). The container rule is an extension so a
+  monorepo without per-app manifests still separates; it only ever hides findings. The manifests
+  join the checker's interest globs.
+- **D. No change.** A router definition repeated in a `<Link to>` / `href` stays flagged (06, 82).
+
+Cheap protocol tokens added from the review's plausible list: cipher and digest names (`aes-`,
+`sha-`, `rsa-`, `hmac-`, ...), model identifiers of the common hosted families (`gpt-`, `claude-`,
+`gemini-`, ...), Node `ERR_*` codes, date-format tokens (`hh:mm:ss`, `yyyy-mm-dd`), cloud regions
+(`us-east-1`, `us-gov-west-1`), `get`/`set` on a `req`/`res`/`request`/`response`/`headers`
+receiver as header verbs, and `start_as_current_span`, `startSpan`, `startActiveSpan`, `setTag`,
+`set_tag`, `setAttribute`, `set_attribute` as logger-like callees.
+
+Residual risk, left as is (all would be reported):
+
+- Firebase and similar SDK error codes (`auth/user-not-found`, case 33), git subcommands passed to
+  a subprocess (36), unlisted Tailwind-like classes in plain objects (37), Redux action types
+  shared between a slice and a middleware (38), react-query keys (39), Kubernetes label keys (40),
+  Celery task names (41), clap argument names (42), Rust match-arm strings against a variant name
+  (43), GraphQL documents (45), vendor analytics events (47), Django `choices` tuples against a
+  filter (48), `getElementById` ids (09), Sentry tags beyond `setTag` (61), and `ab-1`-shaped
+  values with a digit segment (95).
+- A `typeof NAME` type derived in another file from an `as const` tuple (53): the tuple's members
+  stay candidates, so a bare use elsewhere is reported against the tuple as its home.
+- Python tuple-unpacking and `self.x = ...` assignments are not homes (59, 87).
+- An ECMA decorator argument such as Nest's `@Processor('orders-high')` is counted (67).
+
 ## Scope note
 Dead-code, one-import-path, shared-constant, state-shape, needless-complexity are **deterministic**
 (no model, no token cost). Single-source/naming/shared-primitive add ONE shared clone pass and an
