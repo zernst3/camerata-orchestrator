@@ -2103,6 +2103,70 @@ is not a finding. The checker emits
 `medium`; the corpus rule's `max_severity = "low"` clamps it at report time. The full algorithm
 and every trap are in `docs/design/2026-10-21_w29-detector-implementation.md`.
 
+### The clone detector and the Wave C clone rules (`extract::clone`, `clone_rules`, `onboard::clone_advisory`)
+
+Three corpus rules read the same index of repeated code: `ARCH-SINGLE-SOURCE-LOGIC-1` (one application
+decision written in several files), `ARCH-NAMING-ONE-CONCEPT-1` (one helper under several names) and
+`UI-SHARED-PRIMITIVE-1` (one UI mechanism hand-written in several React-family components). Whether a
+repeat is a decision, a concept or a mechanism is a judgment, so none of them is an `ArchChecker`. The
+shape is three layers, and the first two are deterministic and token-free:
+
+1. **The detector** (`crates/checks/src/extract/clone.rs` plus `extract/clone/*`) tokenizes each
+   TypeScript, JavaScript, Python and Rust file (tree-sitter, and `proc_macro2` for Rust so macro bodies
+   count), collapses free identifiers, property names, literals and operator families
+   (`TokenMode::Structural`), fingerprints 30-token windows with winnowing (`K = 30`, `W = 11`, so every
+   pair sharing 40 tokens is found), verifies and extends each match, and returns `CloneFamily` values
+   (at least two files of one language family). It skips tests, generated, vendored, minified,
+   migration, i18n and data files. `exact_diff` then compares two members with literal values, property
+   names and operator text kept, which is how "the copies do not agree" becomes a fact with both lines.
+2. **The producer** (`crates/checks/src/clone_rules.rs` and `clone_rules/*`). `candidates(files, armed)`
+   builds the index once and applies each armed rule's deterministic funnel, then ranks and caps the
+   survivors at `CLONE_JUDGE_MAX_PER_RULE = 160` per rule (the overflow is counted in `over_cap`).
+   `judge_input(candidate, files)` builds the bounded judge input: at most 3 members of at most 30
+   lines each plus the deterministic facts, never a whole file. The producer is NOT in
+   `arch_checker::all_checkers()`: a registered checker's output becomes a finding with no judgment in
+   between, and the model-free write-time runner and `camerata-check` would read an empty result as
+   clean. `mechanical_gate::detector_channel` maps the three ids to the channel `clone_advisory`, the
+   ledger loop in `audit_repos` leaves them to the seam, and `camerata-check --rule-id` reports them as
+   `unsupported_rule_ids` (`NOT CLEAN`, `clean = false`, exit 1 under `--strict`).
+3. **The seam** (`crates/server/src/onboard/clone_advisory.rs`) runs inside `audit_repos`, right after
+   `audit_architectural` and its ledger loop, gated on `run_ai_review`. One closed question per rule;
+   the answer is a verdict word from a closed vocabulary (`same_decision | different | boilerplate |
+   unsure`, `same_concept | different_concept | adapter | unsure`, `same_mechanism | different |
+   unsure`). Only the affirmative word ships a finding.
+
+| What the judge returns | What happens |
+|---|---|
+| the affirmative word | one finding (deterministic tier, `preview`, `confidence = high`), cached |
+| any other word in the vocabulary | no finding, counted as judged, cached |
+| `unsure`, no verdict, a word outside the vocabulary, a contradictory repeat of an id | no finding, counted as unjudged, NOT cached, retried next scan |
+| an id that was not asked about | ignored |
+| an unparseable response or a failed request | that batch is unjudged; other batches are unaffected; a `FailedPass` ("clone-candidate judgment") discloses it |
+| no model (deterministic-only, compliance block) | zero findings, one `not_assessed` row per armed rule that has candidates, ledger `ran = false` with `ADVISORY_UNAVAILABLE_NOTE` |
+| no candidates | the rule ran clean: no row |
+
+Cost controls: batches of 16 (`ceil(judged / 16)` calls, at most 10 per rule), at most 160 judged
+candidates per rule per scan with the overflow counted and disclosed in one `not_assessed` row, a
+content-keyed verdict cache (`VerdictCache`, keyed on the rule, the judge model, the prompt schema
+version, the candidate's content id, the exact-mode differences and the rule-specific facts (for a
+single-source candidate, every copy's decision tokens), so a moved
+file hits and a judge model change misses), the stable prompt prefix as the single cache breakpoint, and
+the project's fast tier (`resolve_clone_judge_model`: explicit pick, then `CAMERATA_CLONE_JUDGE_MODEL`,
+then `fleet::tier::default_fast_model()`; stamped in `ScanProvenance.clone_judge_model` when the judge
+made a call). The cache rides in the scan manifest (`ScanManifest.clone_verdicts`, `serde(default)`,
+`MANIFEST_VERSION` unchanged) in the app data directory, never in the client's repository. Usage is
+folded into the same `UsageMeter` as every other pass; the full ranked candidate list and every verdict
+are written to the scan transcript under the agent `clone-judge:<rule id>:<repo>`.
+
+Severity is deterministic: `high` when the copies of a single-source candidate disagree on a decision
+token (an operator, a number, or a property name inside a decision test), `medium` otherwise (copies that
+agree, or that differ only in a string, a callee or an action type), `low` for the other two rules. The
+three rules emit no convention or "clean" row: a search that finds nothing proves nothing, so the only
+statement a scan makes about a rule with no candidates is the ledger's credit that it ran. `audit_repos` is a thin wrapper over
+`audit_repos_with_llm(llm: &dyn LlmPort, ...)`, which exists so a test can run the whole pipeline with a
+scripted model. The full design, every trap and the Wave C build notes are in
+`docs/design/2026-10-21_w29-detector-implementation.md`.
+
 ### Scan-time deterministic preview (`crates/server/src/scan_tools.rs`)
 
 Mechanical rules stay out of the AI review (above), but Camerata still gives the

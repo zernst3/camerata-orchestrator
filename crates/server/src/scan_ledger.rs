@@ -334,6 +334,15 @@ pub struct ScanLedger {
     /// are queued. Transient scan-time plumbing only.
     #[serde(skip)]
     incomplete_scan_pending: BTreeSet<String>,
+    /// Rule ids queued for [`ADVISORY_UNAVAILABLE_NOTE`] via
+    /// [`Self::note_advisory_unavailable_rule`]: a clone-based rule whose deterministic pass
+    /// found candidates but whose reviewed judgment did not run. Transient scan-time plumbing.
+    #[serde(skip)]
+    advisory_unavailable_pending: BTreeSet<String>,
+    /// Rule ids queued for [`ADVISORY_PARTIAL_NOTE`] via [`Self::note_advisory_partial_rule`]:
+    /// a clone-based rule whose judgment ran but left candidates undecided. Transient.
+    #[serde(skip)]
+    advisory_partial_pending: BTreeSet<String>,
     /// Rule ids queued for [`RuleLedgerEntry::not_applicable`] via [`Self::
     /// note_not_applicable_rule`], consumed by every subsequent [`Self::record_rule`] call for
     /// the same id — same queue-then-settle shape as `config_gated_pending`, for the same
@@ -581,10 +590,30 @@ impl ScanLedger {
         self.incomplete_scan_pending.insert(rule_id.into());
     }
 
-    /// The coverage note queued for `rule_id`: the incomplete-scan one wins over config-gated.
+    /// Queue the [`ADVISORY_UNAVAILABLE_NOTE`] disclosure for a clone-based rule (Wave C) whose
+    /// deterministic pass found candidate sites but whose reviewed judgment did not run this
+    /// scan (no model, deterministic-only, compliance block). Same queue-then-settle shape as
+    /// [`Self::note_incomplete_scan_rule`].
+    pub fn note_advisory_unavailable_rule(&mut self, rule_id: impl Into<String>) {
+        self.advisory_unavailable_pending.insert(rule_id.into());
+    }
+
+    /// Queue the [`ADVISORY_PARTIAL_NOTE`] disclosure for a clone-based rule whose judgment ran
+    /// but left candidate sites undecided (over the per-scan limit, `unsure`, no verdict, or a
+    /// failed batch).
+    pub fn note_advisory_partial_rule(&mut self, rule_id: impl Into<String>) {
+        self.advisory_partial_pending.insert(rule_id.into());
+    }
+
+    /// The coverage note queued for `rule_id`. Precedence: the incomplete-scan note, then the
+    /// advisory-unavailable note, then the advisory-partial note, then config-gated.
     fn pending_coverage_note(&self, rule_id: &str) -> Option<String> {
         if self.incomplete_scan_pending.contains(rule_id) {
             Some(INCOMPLETE_SCAN_NOTE.to_string())
+        } else if self.advisory_unavailable_pending.contains(rule_id) {
+            Some(ADVISORY_UNAVAILABLE_NOTE.to_string())
+        } else if self.advisory_partial_pending.contains(rule_id) {
+            Some(ADVISORY_PARTIAL_NOTE.to_string())
         } else {
             self.config_gated_pending
                 .contains(rule_id)
@@ -1054,6 +1083,22 @@ pub const INCOMPLETE_SCAN_NOTE: &str =
     "withheld: the scan stopped at its file limit, so the deterministic check, which reports \
      what nothing references, was not run for this repo (an importer may be among the files \
      that were not read) — reviewed semantically instead of mechanically";
+
+/// The honest [`RuleLedgerEntry::coverage_note`] (and, when the rule did not run at all, the
+/// `skip_reason`) for a clone-based rule (Wave C) whose deterministic pass found candidate
+/// sites but whose reviewed judgment did not run this scan. The candidates are never promoted:
+/// the rule is reported as not assessed, one `not_assessed` row per rule with the count.
+pub const ADVISORY_UNAVAILABLE_NOTE: &str =
+    "withheld: the deterministic pass found candidate sites but the reviewed judgment that \
+     decides which are real did not run this scan, so the rule is reported as not assessed \
+     rather than clean";
+
+/// The honest [`RuleLedgerEntry::coverage_note`] for a clone-based rule whose judgment ran but
+/// left some candidate sites undecided.
+pub const ADVISORY_PARTIAL_NOTE: &str =
+    "partly assessed: the deterministic pass found candidate sites that the reviewed judgment \
+     did not decide this scan (the per-scan limit, an undecided verdict or a failed batch), so \
+     the rule is reported as not fully assessed rather than clean";
 
 /// A runtime disclosure for a rule that declared mechanical/architectural enforcement but has
 /// no wired detector (the W1-item-4 defect, closed at build time by `crate::mechanical_gate`

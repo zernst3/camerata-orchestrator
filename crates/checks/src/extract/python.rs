@@ -25,7 +25,7 @@ use super::{
     LiteralKind, MethodCall, ModuleConst,
 };
 
-fn parse(source: &str) -> Option<Tree> {
+pub(crate) fn parse(source: &str) -> Option<Tree> {
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_python::LANGUAGE.into())

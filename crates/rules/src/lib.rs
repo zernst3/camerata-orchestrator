@@ -3285,7 +3285,10 @@ fn domain_to_glob(domain: &str) -> String {
         "rust" => "**/*.rs".to_owned(),
         "sql" => "**/*.sql".to_owned(),
         "javascript" => "**/*.{js,ts,jsx,tsx}".to_owned(),
-        "ui" => "**/*.{tsx,css}".to_owned(),
+        // UI rules reach component files in every JSX/TSX dialect and the hooks and helpers
+        // beside them (`.jsx`, `.tsx`, `.ts`, `.js`), plus stylesheets. It used to be
+        // `**/*.{tsx,css}`, which left a role scoped to UI work unable to write `.jsx`.
+        "ui" => "**/*.{jsx,tsx,ts,js,css}".to_owned(),
         "iac" => "**/*.tf".to_owned(),
         "ci-cd" => "**/.github/**".to_owned(),
         "go" => "**/*.go".to_owned(),
@@ -4321,6 +4324,21 @@ mod tests {
                 "{sub} must map to the supabase glob"
             );
         }
+    }
+
+    #[test]
+    fn domain_to_glob_ui_covers_jsx_and_the_other_component_dialects() {
+        // `ui` feeds an emitted `Role.allowed_paths`; the old `**/*.{tsx,css}` missed `.jsx`,
+        // so a role scoped to UI work could not write a React `.jsx` component.
+        let glob = domain_to_glob("ui");
+        assert_eq!(glob, "**/*.{jsx,tsx,ts,js,css}");
+        for ext in ["jsx", "tsx", "ts", "js", "css"] {
+            assert!(glob.contains(ext), "{ext} must be covered by {glob}");
+        }
+        // Sub-domains of ui map the same way.
+        assert_eq!(domain_to_glob("ui:forms"), glob);
+        let paths = derive_allowed_paths(&["ui"]);
+        assert!(paths.contains(&glob), "{paths:?}");
     }
 
     #[test]

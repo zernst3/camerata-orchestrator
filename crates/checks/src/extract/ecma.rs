@@ -47,7 +47,7 @@ fn language_for(dialect: EcmaDialect) -> tree_sitter::Language {
 /// Parse `source` with the grammar for `dialect`. Returns `None` only if the grammar itself
 /// could not be loaded (never happens for our statically-linked, version-pinned grammars) —
 /// kept as an `Option` so callers degrade gracefully instead of unwrapping.
-fn parse(dialect: EcmaDialect, source: &str) -> Option<Tree> {
+pub(crate) fn parse(dialect: EcmaDialect, source: &str) -> Option<Tree> {
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&language_for(dialect)).ok()?;
     parser.parse(source, None)

@@ -18,7 +18,7 @@ A single all-Rust workspace that does two things, sharing one governance core:
    deny-before-execute gate that blocks a forbidden write before it touches disk (binary
    pass/fail, not an LLM grading an LLM).
 
-Both rest on the **rule corpus** (~417 rules) and **deterministic gates**.
+Both rest on the **rule corpus** (~423 rules) and **deterministic gates**.
 
 ## The crate map, grouped by role
 
@@ -29,13 +29,14 @@ CONTRACTS / CORE
   app-core      framework-agnostic application core (projects, readiness)
 
 THE CORPUS + ITS ENFORCEMENT
-  rules         the ~417-rule corpus loader + schema + corpus gates + the CORPUS_FRESHNESS watermark
+  rules         the ~423-rule corpus loader + schema + corpus gates + the CORPUS_FRESHNESS watermark
                 + per-rule `version` and the content-hash lock (CORPUS_LOCK.toml)
   checks        the deterministic CHECKERS: arch/import/layering/RLS/weak-rand/one-import-path/
                 dead-code/react-hooks-lint (does the project's OWN eslint config enable the hooks
                 rules; reads config, runs no eslint)/… + the AST extractors (extract::ecma|python|rust_syn incl. `mod_decls`
                 and `computed_loads`, resolver, shared `paths`, and the literal index behind the
-                cross-file ARCH-SHARED-CONSTANT-1 check) + integration gate
+                cross-file ARCH-SHARED-CONSTANT-1 check, and the shared token clone detector
+                `extract::clone` with the Wave C candidate producer `clone_rules`) + integration gate
   linter-registry  stack→linter mapping
   camerata-check   thin check CLI
 
@@ -65,6 +66,10 @@ repo ─▶ ONBOARD/DETECT        stack detection (languages, frameworks) → wh
           • deterministic floor   content-rule + architectural checkers (checks/)      no model
                                   (the architectural tier also gets a separate reference-text
                                   list: HTML, components, docs; never the AI digest or the floor)
+          • clone advisory (Wave C) repeated-decision / one-concept / UI-mechanism CANDIDATES
+                                  (checks/clone_rules, deterministic) judged one closed question
+                                  at a time on the fast model tier (server/onboard/clone_advisory);
+                                  only an affirmative verdict ships, no model = "not assessed"   fast model
           • external-tool preview  eslint / ruff / semgrep / clippy (SARIF/JSON)        no model
                                   (React Hooks: the violations come from here, under the two
                                   JAVASCRIPT-REACT-* rules; whether the repo's own lint config
@@ -107,11 +112,11 @@ And two kinds of GATE guard quality:
 - **The corpus gates** (`crates/rules/tests/w*.rs`): ESLint-flat-config-style structural
   enforcement ON THE CORPUS ITSELF — schema, sources, client-facing voice, no vendor name, no
   high+ finding without a fix+citation, no truncated option ids, CWE on security rules, etc.
-  These are why the ~417 rules stay consistent as they change.
+  These are why the ~423 rules stay consistent as they change.
 
 ## The rule corpus in one paragraph
 
-~417 TOML rules under `crates/rules/principles/<domain>/<id>.toml`. Each declares its
+~423 TOML rules under `crates/rules/principles/<domain>/<id>.toml`. Each declares its
 enforcement tier, kind, severity bounds, `inspectable`, authoritative `[[sources]]`, and one or
 more `[[option]]`s (the directive emitted to the client's `AGENTS.md`/`CONVENTIONS.md`, a
 client-facing remediation, and finding text). Rules are selected per detected stack by DOMAIN.

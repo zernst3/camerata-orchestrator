@@ -484,7 +484,7 @@ If the code genuinely conforms everywhere, return {"findings": [], "proposed_rul
 
 /// Pull the first balanced-looking JSON object out of a model response (tolerates
 /// markdown fences or stray prose around it).
-fn extract_json_object(s: &str) -> Option<&str> {
+pub(crate) fn extract_json_object(s: &str) -> Option<&str> {
     let start = s.find('{')?;
     let end = s.rfind('}')?;
     if end > start {
@@ -1949,7 +1949,7 @@ const AGGREGATE_MAX_TOKENS_CEILING: u32 = 32_000;
 /// `max_tokens` for a call describing `n_items` things, given a per-item token estimate —
 /// clamped to `[AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING]` so small batches
 /// keep today's flat budget and large batches never request more than the ceiling.
-fn scaled_max_tokens(n_items: usize, per_item_tokens: u32) -> u32 {
+pub(crate) fn scaled_max_tokens(n_items: usize, per_item_tokens: u32) -> u32 {
     (n_items as u32)
         .saturating_mul(per_item_tokens)
         .clamp(AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING)

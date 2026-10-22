@@ -19,7 +19,7 @@ fn basename(path: &str) -> &str {
 /// conventions the dead-code rule additionally meets: pytest's `conftest.py`, `test_*.py` and
 /// `tests.py`, NestJS-style `*.e2e-spec.ts`, and snapshot files. Test code is live by
 /// definition; the test file is a root, so a helper imported only by tests stays live.
-pub(super) fn is_test_file(path: &str) -> bool {
+pub(crate) fn is_test_file(path: &str) -> bool {
     if is_test_path(path) {
         return true;
     }
@@ -42,7 +42,7 @@ pub(super) fn is_test_file(path: &str) -> bool {
 
 /// `*.d.ts`, `*.d.mts`, `*.d.cts` and `*.pyi`: consumed by the type checker through
 /// `include`, `typeRoots` or triple-slash references, never imported.
-pub(super) fn is_declaration_file(path: &str) -> bool {
+pub(crate) fn is_declaration_file(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     [".d.ts", ".d.mts", ".d.cts", ".pyi"]
         .iter()
@@ -74,7 +74,7 @@ const CONFIG_BASENAME_PREFIXES: &[&str] = &[
 
 /// Whether a path is root-level, inside or named like a dot-directory, or shaped like a file a
 /// tool loads by name (`*.config.*`, `*rc.js`, `*.setup.*`, `middleware.*` and the like).
-pub(super) fn is_config_shaped(path: &str) -> bool {
+pub(crate) fn is_config_shaped(path: &str) -> bool {
     if !path.contains('/') {
         return true;
     }
@@ -105,7 +105,7 @@ pub(super) fn is_config_shaped(path: &str) -> bool {
 /// reference text, because a router or codegen step is often the only importer of hand-written
 /// files (TanStack's `routeTree.gen.ts` imports every route). Codegen output is regenerated, not
 /// deleted, so it is never reported, and what it imports is alive.
-pub(super) fn is_generated_path(path: &str) -> bool {
+pub(crate) fn is_generated_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     let mut segments: Vec<&str> = lower.split('/').collect();
     let file = segments.pop().unwrap_or("");
@@ -131,7 +131,7 @@ fn head_lines(content: &str) -> impl Iterator<Item = &str> {
 }
 
 /// A generated-file marker in the first ten lines. Codegen output is regenerated, not deleted.
-pub(super) fn has_generated_marker(content: &str) -> bool {
+pub(crate) fn has_generated_marker(content: &str) -> bool {
     head_lines(content).any(|line| {
         let lower = line.to_ascii_lowercase();
         GENERATED_MARKERS.iter().any(|m| lower.contains(m))

@@ -82,7 +82,9 @@ mod analysis;
 mod conventions;
 mod dynamic;
 mod emit;
-mod exclusions;
+// `pub(crate)`: the clone detector reuses the generated-file, declaration-file and test-file
+// predicates rather than keeping a second copy of the marker lists.
+pub(crate) mod exclusions;
 mod manifests;
 mod mentions;
 mod roots;

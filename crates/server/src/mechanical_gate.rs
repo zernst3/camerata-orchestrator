@@ -18,7 +18,9 @@
 //!    gate's own rule registry (`camerata_gateway::lookup_arm`), a bundled Semgrep rule
 //!    (derived from the ACTUAL shipped ruleset, not a hand-maintained list), or the rule's own
 //!    `[[sources]]` naming a linter the scan-time preview actually runs
-//!    (`crate::scan_tools::tool_for_linter`).
+//!    (`crate::scan_tools::tool_for_linter`). Wave C adds a fifth, [`CLONE_ADVISORY_CHANNEL`]:
+//!    the three clone-based rules, whose deterministic candidates are judged by a model before
+//!    they can ship (`crate::onboard::clone_advisory`).
 //! 2. NO deterministic detector exists, but the rule is GUARANTEED to reach the semantic/AI
 //!    pass — every selected, applicable rule does, as of W4, UNLESS it is a governance/process
 //!    rule (`ORCH-*`/`SPIRIT-*`/`PROC-*` — see `onboard::audit::is_code_auditable_rule`), which
@@ -55,6 +57,10 @@ pub fn semgrep_covered_rule_ids() -> HashSet<&'static str> {
         .collect()
 }
 
+/// The [`detector_channel`] name of the clone-based rules: deterministic candidates judged by a
+/// model before they can ship (see `onboard::clone_advisory`).
+pub const CLONE_ADVISORY_CHANNEL: &str = "clone_advisory";
+
 /// Channel 4: does ANY of `rule`'s own authored `[[sources]]` name a linter the scan-time
 /// preview actually runs? Reuses `scan_tools::tool_for_linter` verbatim — not a parallel
 /// linter list that could drift from the real one.
@@ -83,12 +89,22 @@ pub fn has_preview_tool_source(rule: &camerata_rules::Rule) -> bool {
 /// channel 3 (semgrep) over channel 2 (gateway rule registry) when BOTH exist, inverting
 /// the normal precedence. See that const's doc comment for why this is scoped to a named
 /// allowlist rather than a global reorder.
+///
+/// Wave C: the three clone-based rules (`camerata_checks::clone_rules::RULE_IDS`) resolve to a
+/// fifth channel, `"clone_advisory"`: a deterministic candidate producer plus a model judgment
+/// (`onboard::clone_advisory`). They are deliberately NOT registered `ArchChecker`s (a registered
+/// checker's output ships with no judgment, and the model-free write-time runner and
+/// `camerata-check` would read an empty result as clean), so they never appear in
+/// `checker_ids`; the scan records them from the advisory seam, not from the generic ledger loop.
 pub fn detector_channel(
     rule_id: &str,
     checker_ids: &HashSet<&str>,
     semgrep_ids: &HashSet<&str>,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Option<&'static str> {
+    if camerata_checks::clone_rules::RULE_IDS.contains(&rule_id) {
+        return Some(CLONE_ADVISORY_CHANNEL);
+    }
     if checker_ids.contains(rule_id) {
         return Some("arch_checker");
     }
@@ -197,6 +213,32 @@ mod tests {
             detector_channel("SEC-NO-RAW-SQL-CONCAT-1", &checker_ids, &semgrep_ids, None),
             Some("semgrep"),
             "must prefer the semgrep channel over the gateway rule registry for this id"
+        );
+    }
+
+    /// Wave C: the three clone-based rules resolve to the `clone_advisory` channel (so the
+    /// ledger loop in `audit_repos` has a name for them and does not record them itself), and
+    /// no OTHER id does. They are not registered `ArchChecker`s, so the checker set never
+    /// carries them.
+    #[test]
+    fn clone_rules_resolve_to_the_clone_advisory_channel_and_only_they_do() {
+        let checker_ids = camerata_checks::arch_checker::all_checker_rule_ids();
+        let semgrep_ids = semgrep_covered_rule_ids();
+        for id in camerata_checks::clone_rules::RULE_IDS {
+            assert!(
+                !checker_ids.contains(id),
+                "{id} must not be a registered checker"
+            );
+            assert_eq!(
+                detector_channel(id, &checker_ids, &semgrep_ids, None),
+                Some("clone_advisory"),
+                "{id}"
+            );
+        }
+        assert_eq!(CLONE_ADVISORY_CHANNEL, "clone_advisory");
+        assert_ne!(
+            detector_channel("ARCH-SHARED-CONSTANT-1", &checker_ids, &semgrep_ids, None),
+            Some("clone_advisory")
         );
     }
 

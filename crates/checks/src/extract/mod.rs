@@ -25,6 +25,7 @@
 //! `docs/design/2026-07-27_ast-extractor-layer.md` §1).
 
 mod ancestry;
+pub mod clone;
 pub mod ecma;
 pub mod enclosing;
 pub mod paths;

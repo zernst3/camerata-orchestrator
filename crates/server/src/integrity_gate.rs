@@ -49,8 +49,8 @@ use std::collections::{BTreeMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::scan_ledger::{
-    RuleTier, ScanLedger, CORPUS_LOAD_FAILED_NOTE, CORPUS_LOAD_FAILED_REASON,
-    NO_WIRED_DETECTOR_REASON,
+    RuleTier, ScanLedger, ADVISORY_UNAVAILABLE_NOTE, CORPUS_LOAD_FAILED_NOTE,
+    CORPUS_LOAD_FAILED_REASON, NO_WIRED_DETECTOR_REASON,
 };
 
 /// Why a rule did not run, reduced to the only question the gate asks: was the skip
@@ -179,6 +179,13 @@ impl SkipClass {
             "excluded by configuration",
         ];
         if SCOPED_OUT_PHRASES.iter().any(|p| lower.contains(p)) {
+            return SkipClass::ScopedOut;
+        }
+        // Wave C: a clone-based rule's reviewed judgment did not run because the AI review was
+        // not requested or was blocked (the seam only records this reason when no model was
+        // available for the scan), which is the same disclosed scope choice as the phrases
+        // above. A judgment that was attempted and failed uses its own, unrecognised wording.
+        if lower.contains(&ADVISORY_UNAVAILABLE_NOTE.to_ascii_lowercase()) {
             return SkipClass::ScopedOut;
         }
 
@@ -1412,6 +1419,23 @@ mod tests {
         assert_eq!(
             SkipClass::classify(Some(&format!("has {NO_WIRED_DETECTOR_REASON}"))),
             SkipClass::NoWiredDetector
+        );
+    }
+
+    /// Wave C: a clone-based rule whose reviewed judgment did not run because no model was
+    /// available is a disclosed scope choice (justified), while a judgment that was attempted
+    /// and failed carries wording the gate does not recognise, so it stays a defect.
+    #[test]
+    fn a_clone_rule_whose_judgment_was_unavailable_is_scoped_out_and_a_failed_one_is_not() {
+        assert_eq!(
+            SkipClass::classify(Some(ADVISORY_UNAVAILABLE_NOTE)),
+            SkipClass::ScopedOut
+        );
+        assert_eq!(
+            SkipClass::classify(Some(
+                "clone-candidate judgment failed: every batch returned an error"
+            )),
+            SkipClass::Unrecognised
         );
     }
 

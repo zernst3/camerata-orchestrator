@@ -71,6 +71,7 @@ fn report() -> ScanReport {
             }],
             audit_model: None,
             calibration_model: None,
+            clone_judge_model: None,
             mode: "parallel".to_string(),
             thorough: false,
             deep: false,

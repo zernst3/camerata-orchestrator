@@ -18,6 +18,7 @@
 // ── Submodules ──────────────────────────────────────────────────────────────────
 pub mod architectural;
 pub mod audit;
+pub mod clone_advisory;
 pub mod files;
 pub mod finding_context;
 pub mod greenfield;
@@ -610,6 +611,13 @@ pub struct ScanProvenance {
     pub audit_model: Option<String>,
     /// The model resolved for the calibration pass. `None` when calibration never ran.
     pub calibration_model: Option<String>,
+    /// The model the clone-candidate judge (`clone_advisory`, Wave C) ran on, resolved by
+    /// `resolve_clone_judge_model`: the explicit pick, else `CAMERATA_CLONE_JUDGE_MODEL`, else
+    /// the project's fast tier. `None` when the judge never made a model call this scan (no
+    /// clone rule armed, no candidates, or no model available), so a before/after comparison
+    /// can attribute a change in the clone rules' findings to the judge.
+    #[serde(default)]
+    pub clone_judge_model: Option<String>,
     /// The execution mode (`parallel` | `sequential`).
     pub mode: String,
     /// Whether thorough (multi-pass consensus) calibration was requested (#51).
@@ -1205,8 +1213,72 @@ pub async fn scan_repos(
     }
     report
 }
+/// The production entry point of the brownfield audit: builds the real `Llm` for the resolved
+/// transport (with the cockpit's cumulative usage ledger attached when given) and runs
+/// [`audit_repos_with_llm`]. The signature, and so every caller, is unchanged.
 #[allow(clippy::too_many_arguments)]
 pub async fn audit_repos(
+    sources: &[(String, std::path::PathBuf)],
+    selected: &[SelectedRule],
+    extra_notes: Vec<String>,
+    model: Option<&str>,
+    calibration_model: Option<&str>,
+    mode: crate::ai_audit::ScanMode,
+    thorough: bool,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    job: Option<(&crate::jobs::JobStore, &str)>,
+    incremental_prior: Option<&crate::scan_cache::ScanManifest>,
+    deep: bool,
+    soc2_enabled: bool,
+    run_ai_review: bool,
+    run_deterministic: bool,
+    ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
+    backend_resolution: crate::llm::BackendResolution,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_options: &std::collections::HashMap<String, String>,
+) -> (ScanReport, crate::scan_cache::ScanManifest) {
+    // The transport this run's `Llm` is built with: EXACTLY the resolution's Cli/Api choice,
+    // never re-derived from env. `Blocked` never reaches a model call (`run_ai_review` is forced
+    // off for it inside); `Cli` is supplied defensively so the `Llm` still constructs.
+    let llm_backend = match &backend_resolution {
+        crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
+        crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
+        crate::llm::BackendResolution::Blocked { .. } => crate::llm::Backend::Cli,
+    };
+    let llm = match ledger {
+        Some(l) => crate::llm::Llm::from_env_with_backend_and_ledger(llm_backend, l),
+        None => crate::llm::Llm::from_env_with_backend(llm_backend),
+    };
+    audit_repos_with_llm(
+        &llm,
+        sources,
+        selected,
+        extra_notes,
+        model,
+        calibration_model,
+        mode,
+        thorough,
+        feedback,
+        job,
+        incremental_prior,
+        deep,
+        soc2_enabled,
+        run_ai_review,
+        run_deterministic,
+        backend_resolution,
+        corpus,
+        chosen_options,
+    )
+    .await
+}
+
+/// The brownfield audit over an injected model. [`audit_repos`] is this with the real `Llm`; a
+/// test passes a scripted [`crate::llm::LlmPort`] so the WHOLE pipeline (floor, architectural
+/// checkers, the clone advisory seam, the semantic pass, calibration) runs with no network and
+/// no spend. Everything about the audit is documented on the parameters below and in the body.
+#[allow(clippy::too_many_arguments)]
+pub async fn audit_repos_with_llm(
+    llm: &dyn crate::llm::LlmPort,
     sources: &[(String, std::path::PathBuf)],
     selected: &[SelectedRule],
     extra_notes: Vec<String>,
@@ -1238,11 +1310,6 @@ pub async fn audit_repos(
     // (`merge_scan_preview`) on the same `run_deterministic` flag.
     run_ai_review: bool,
     run_deterministic: bool,
-    // Process-global cumulative usage ledger. When `Some`, the audit's `Llm` is built WITH it
-    // attached, so every audit/calibration/deep-tier model call folds into the cockpit's
-    // session-wide usage meter (in addition to the per-audit `UsageMeter` below). `None` in
-    // tests / non-cockpit callers — recording is then simply skipped. Observability only.
-    ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
     // The compliance-safety backend gate (see
     // `docs/design/2026-09-22_per-project-backend.md`). The caller resolves this from the
     // project's `backend` setting + key presence via `crate::llm::resolve_backend` BEFORE
@@ -1304,15 +1371,6 @@ pub async fn audit_repos(
         ai_blocked_reason = Some(message.clone());
         run_ai_review = false;
     }
-    // The transport this run's `Llm` (below) is built with: EXACTLY the resolution's
-    // Cli/Api choice, never re-derived from env. `Blocked` never reaches here with
-    // `run_ai_review` still true (forced off above), so its transport value is moot; `Cli` is
-    // supplied defensively so the `Llm` below still constructs.
-    let llm_backend = match &backend_resolution {
-        crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
-        crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
-        crate::llm::BackendResolution::Blocked { .. } => crate::llm::Backend::Cli,
-    };
     // W16: THE SCAN SET. Every rule the corpus declares `inspectable = false` is dropped
     // HERE, before anything in this function has looked at it — before the rule fingerprint,
     // before `audited_rule_ids`, before `repo_selected_ids`, before the semantic prompt,
@@ -1393,13 +1451,18 @@ pub async fn audit_repos(
     // the FIRST is kept (matching `ai_blocked_reason`'s single-reason shape); it is still
     // also folded into `notes` below so it is not lost from the human-readable message either.
     let mut first_ai_error: Option<String> = None;
-    let llm = match ledger {
-        Some(l) => crate::llm::Llm::from_env_with_backend_and_ledger(llm_backend, l),
-        None => crate::llm::Llm::from_env_with_backend(llm_backend),
-    };
     // Aggregates REAL usage across every repo's audit (passes + calibration) for the
     // actual-vs-estimated readout.
     let meter = crate::ai_audit::UsageMeter::default();
+    // Wave C: the clone-candidate judge's verdict cache. Seeded from the prior manifest even when
+    // that manifest is not usable as an AI baseline (verdicts are keyed by the content of the
+    // question, so a changed rule set or an AI-off prior scan does not invalidate them); a
+    // forced full scan passes no prior manifest and so re-asks. Carried into the fresh manifest.
+    let mut clone_verdicts = incremental_prior
+        .map(|m| m.clone_verdicts.clone())
+        .unwrap_or_default();
+    // The model the clone judge actually ran on, when it made at least one call this scan.
+    let mut clone_judge_model_used: Option<String> = None;
 
     // A re-run must start from a clean transcript: drop the prior audit's per-agent
     // prompts/output so the Agent-activity drawer shows THIS run, not the last one.
@@ -1707,6 +1770,12 @@ pub async fn audit_repos(
                                     0,
                                 );
                             }
+                            // Wave C: the clone-based rules have a candidate producer, not a
+                            // verdict, so whether they ran is decided by the advisory seam
+                            // (`clone_advisory`), which records them once per repo right after
+                            // this loop. Recording them here too would credit a run that the
+                            // judgment has not made.
+                            Some(crate::mechanical_gate::CLONE_ADVISORY_CHANNEL) => {}
                             // W4: NO channel is no longer recorded here at all — this rule has
                             // no shipped deterministic detector, so its only possible route is
                             // the semantic pass. It is in `semantic` (nothing excludes it
@@ -1742,6 +1811,50 @@ pub async fn audit_repos(
                         }
                     }
                     repo_findings.extend(arch);
+
+                    // Wave C: the clone-based rules. Candidates are deterministic (found here,
+                    // token-free); a closed model judgment decides which candidates ship, so the
+                    // judge is gated on `run_ai_review` exactly like every other model pass. With
+                    // no model the rule is reported as not assessed, never as clean. See
+                    // `clone_advisory` for the verdict classes and the cost controls.
+                    let clone_armed: std::collections::HashSet<&str> = repo_selected_ids
+                        .iter()
+                        .copied()
+                        .filter(|id| camerata_checks::clone_rules::RULE_IDS.contains(id))
+                        .collect();
+                    if !clone_armed.is_empty() {
+                        let set = camerata_checks::clone_rules::candidates(&files, &clone_armed);
+                        let judge_model = clone_advisory::resolve_clone_judge_model(None);
+                        let unavailable = ai_blocked_reason
+                            .clone()
+                            .unwrap_or_else(|| "deterministic-only scan".to_string());
+                        let outcome = clone_advisory::judge_clone_candidates(
+                            run_ai_review.then_some(llm),
+                            clone_advisory::JudgeRequest {
+                                repo: spec,
+                                files: &files,
+                                set,
+                                judge_model: &judge_model,
+                                corpus,
+                                unavailable_reason: &unavailable,
+                            },
+                            &mut clone_verdicts,
+                            Some(&meter),
+                            feedback,
+                        )
+                        .await;
+                        clone_advisory::record_in_ledger(&mut pipeline_ledger, &outcome);
+                        if outcome.judge_model.is_some() {
+                            clone_judge_model_used = outcome.judge_model.clone();
+                        }
+                        all_failed_passes.extend(outcome.failed.iter().cloned());
+                        let mut produced = outcome.findings.clone();
+                        produced.extend(outcome.not_assessed.iter().cloned());
+                        if let Some((jstore, jid)) = job {
+                            jstore.add_findings(jid, produced.clone());
+                        }
+                        repo_findings.extend(produced);
+                    }
                 } else {
                     // W1: an honestly-disclosed scope choice, not a pipeline defect — every
                     // rule the floor/architectural engine would otherwise have evaluated is
@@ -1861,7 +1974,7 @@ pub async fn audit_repos(
                         }
                     } else {
                         match crate::ai_audit::audit_repo(
-                            &llm,
+                            llm,
                             spec,
                             &part.changed,
                             &semantic,
@@ -2070,7 +2183,7 @@ pub async fn audit_repos(
                 if run_ai_review && !repo_findings.is_empty() {
                     let (fixed_findings, fix_failed_passes) =
                         crate::ai_audit::generate_fix_specifics(
-                            &llm,
+                            llm,
                             spec,
                             repo_findings,
                             &files,
@@ -2108,7 +2221,7 @@ pub async fn audit_repos(
         let mut per_repo = Vec::new();
         for (spec, files) in &deep_inputs {
             let dr = crate::ai_audit::run_deep_tier(
-                &llm,
+                llm,
                 spec,
                 files,
                 model,
@@ -2231,6 +2344,7 @@ pub async fn audit_repos(
         audited_refs,
         audit_model: ai_ran.then(|| crate::ai_audit::resolve_audit_model(model)),
         calibration_model: calibration_model.map(str::to_string),
+        clone_judge_model: clone_judge_model_used,
         mode: match mode {
             crate::ai_audit::ScanMode::Sequential => "sequential",
             crate::ai_audit::ScanMode::Parallel => "parallel",
@@ -2258,7 +2372,10 @@ pub async fn audit_repos(
     let ai_covered = run_ai_review && report.ai_error.is_none();
     (
         report,
-        manifest_builder.with_ai_covered(ai_covered).finish(),
+        manifest_builder
+            .with_ai_covered(ai_covered)
+            .with_clone_verdicts(clone_verdicts)
+            .finish(),
     )
 }
 
@@ -5708,6 +5825,7 @@ mod tests {
             ],
             audit_model: Some("claude-sonnet-5".to_string()),
             calibration_model: Some("claude-haiku-4-5".to_string()),
+            clone_judge_model: None,
             mode: "parallel".to_string(),
             thorough: true,
             deep: false,

@@ -316,6 +316,7 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
             }],
             audit_model: Some("test-model".to_string()),
             calibration_model: None,
+            clone_judge_model: None,
             mode: "parallel".to_string(),
             thorough: false,
             deep: false,

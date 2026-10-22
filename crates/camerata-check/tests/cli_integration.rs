@@ -287,6 +287,61 @@ fn unmatched_rule_id_surfaces_a_note_and_still_exits_clean() {
         .stdout(predicate::str::contains("ARCH-STRUCTURED-ERRORS-1"));
 }
 
+#[test]
+fn clone_based_rule_ids_are_reported_unsupported_and_never_clean() {
+    let repo = fixture("clean_repo");
+    for id in [
+        "ARCH-SINGLE-SOURCE-LOGIC-1",
+        "ARCH-NAMING-ONE-CONCEPT-1",
+        "UI-SHARED-PRIMITIVE-1",
+    ] {
+        // Human output: not clean, names the id, says why. The default gate does not fail on a
+        // rule it cannot evaluate (a CI author who lists every corpus id must not be locked
+        // out), but it never says "clean".
+        bin()
+            .arg(&repo)
+            .arg("--rule-id")
+            .arg(id)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("NOT CLEAN"))
+            .stdout(predicate::str::contains(id))
+            .stdout(predicate::str::contains("advisory tier"))
+            .stdout(predicate::str::contains("camerata-check: clean").not());
+
+        // --strict: a rule that was never checked fails the gate.
+        bin()
+            .arg(&repo)
+            .arg("--rule-id")
+            .arg(id)
+            .arg("--strict")
+            .assert()
+            .failure()
+            .code(1);
+
+        // JSON: `clean` is false and the id is listed as unsupported, not as unmatched.
+        let out = bin()
+            .arg(&repo)
+            .arg("--rule-id")
+            .arg(id)
+            .arg("--format")
+            .arg("json")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        assert_eq!(value["clean"], false, "{id}");
+        assert_eq!(
+            value["unsupported_rule_ids"],
+            serde_json::json!([id]),
+            "{id}"
+        );
+        assert_eq!(value["unmatched_rule_ids"], serde_json::json!([]), "{id}");
+    }
+}
+
 // ── --strict ─────────────────────────────────────────────────────────────────
 
 #[test]

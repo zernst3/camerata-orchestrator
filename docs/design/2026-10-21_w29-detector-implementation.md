@@ -1721,6 +1721,175 @@ every registered checker and would report an empty `check()` as clean. Instead:
   `mechanical` for a missing channel; `is_ci_tier_rule` routes them to the ledger loop, which
   now knows the channel).
 
+### 8. Clone detector: build notes (2026-10-22)
+
+Built as `crates/checks/src/extract/clone.rs` plus `extract/clone/{builder,cache,families,index,
+rust_tokens,skip,ts_tokens,verify}.rs` and tests under `extract/clone/tests/`. The API of
+section 1 is as written except for the additions in 8.1. Every place the spec was silent or
+wrong, and what was decided:
+
+**8.1 API additions and one signature note.** `detect` takes `opts: &CloneOptions` (as section 1
+writes it). Additions: `CloneFamily.house_pattern: bool` (section 6 B1 names the flag, section 1
+omits the field; set when the family spans at least 5 files and more than 25% of the indexed
+files of its language family); `ItemTokens.texts: Vec<String>` (the Exact text of each token,
+parallel to `tokens`, empty in Structural mode: `exact_diff` receives no source and no interner,
+so a `Disagreement` can only name a token if the item carries its text); `pub const K`;
+`pub fn token_id(TokenClass, &str) -> u32` and the `TEXT_*` constants (a rule asks whether a
+sequence holds a `$CMP` by comparing ids, it has no other way to read a Structural token);
+`pub fn span_tokens(&ItemTokens, &CodeSpan) -> &[Token]`; `impl Default for CloneOptions`.
+`Token.id` is not an interner index: it is the 32-bit FNV-1a of the class and the normalized
+text, because the family `key` must be stable across runs and files without a shared interner.
+Equality always compares id AND class, which makes a 32-bit collision need a collision inside
+one class and a 30-token window; Exact-mode ids are compared the same way.
+
+**8.2 Item numbering.** `ItemTokens.item` and `CodeSpan.item` are the index in the `Vec` that
+`tokens()` returns. An item with no tokens (an import block, a comment) takes no number. Both
+modes tokenize the same stream, so item numbers, token counts, lines and byte ranges are
+identical, and a `CodeSpan` from the Structural index addresses the same tokens in an Exact
+tokenization (tested: `both_modes_tokenize_the_same_stream_shape`). `ItemTokens.kind` is one of
+`function class variable statement namespace data impl impl-empty trait const static macro other`;
+`data` marks a lookup-table item (D5), and a file made only of `data` items is skipped.
+
+**8.3 Tokenizers.**
+- *tree-sitter dialects.* One cursor loop (no recursion; a 20,000-term `a + a + ...` chain is
+  thousands of levels deep). An item holding a parse-error node is dropped, the rest of the file
+  is kept (the spec says "ParseFailed" for the whole file; a file with one broken item is still
+  evidence). A JavaScript file with errors is re-parsed with the TSX grammar, as the literal
+  extractor does. Method and class-field NAMES are `$ID` (they declare, they are not read through
+  `.`); an object-literal key is `$PROP`. TS type annotations stay in the stream (only top-level
+  type items are excluded). Python docstrings are dropped like comments; Python keyword-argument
+  names and attribute names are `$PROP`; `self`/`cls` are kept. `not in` and `is not` are one
+  comparison token. A JSX text node is a string token (whitespace-only text is dropped).
+- *Rust.* The file is lexed by `proc_macro2` and parsed by `syn::parse2`; `syn` supplies item
+  boundaries and kinds, the tokens come from each item's token stream, so macro bodies are
+  tokenized. Inline `mod x { .. }` is flattened (each function inside is an item; a window must
+  not run across a module). Items marked `#[cfg(test)]` (and not `not(test)`), `#[test]` or
+  `#[tokio::test]` are excluded as test code. `pub`/`pub(..)` is dropped wherever it appears, not
+  only at top level (a `pub fn` inside an `impl` would otherwise split a family). Rust has no
+  token-level unary/binary or generic/comparison distinction, so both are decided by the previous
+  token (a name or literal before `-`/`*`/`&` makes it binary; a type-like name, `::`, `impl`, or a
+  non-operand before `<` makes it a generic bracket). A wrong guess moves a token between classes
+  consistently in every copy; it can make two sequences differ, never invent a match. Group
+  nesting deeper than 200 is refused as `ParseFailed` (`syn`'s token buffer is recursive and a
+  stack overflow aborts the process, so `foo!((((...` would kill a scan). `proc_macro2` keeps a
+  per-thread source map of everything it lexed; each Rust tokenization ends by calling
+  `proc_macro2::extra::invalidate_current_thread_spans`, so 20,000 files do not accumulate (and
+  its 32-bit offsets do not wrap). Any `Span` another piece of code holds on the same thread is
+  invalidated by that call, so nothing in this crate may keep a span across a `tokens()` call.
+- *Numbers and strings (Exact).* Numbers go through `canonical_number` (Rust: after dropping a
+  type suffix); strings are their content with delimiters and prefix removed and `\'`, `\"`, `\\`
+  resolved, so a quote-style change is not a disagreement. A template or f-string substitution
+  appears as `${}` / `{}` inside the string text and its tokens follow the string token.
+
+**8.4 Skips.** Order: not a source language, test path (`dead_code_checker::exclusions::
+is_test_file`, a superset of `paths::is_test_path`), generated (`is_generated_path`, the marker
+list of DEAD-CODE G11, `.pb.`/`_pb2.`/`_pb2_grpc.` names, `.d.ts`/`.pyi`, a committed `.js` beside
+its `.ts` via `paths::emitted_js_paths`), migrations and seeds, vendored segments (D2 plus
+`site-packages`, `venv`, `.venv`), minified (`.min.`/`.bundle.`, a line over 1,000 bytes, over 60
+tokens per line), i18n segments, then the token-level guards (over 20,000 tokens, data module).
+`SkipReason` has no variant for D6, so migrations and seeds report `Generated`, and a data module
+reports `I18nCatalog`; the enum is exactly the spec's. The three predicates in `exclusions.rs`
+became `pub(crate)` rather than copied.
+
+**8.5 Hashing and the index.**
+- *The fingerprint is really 16 bytes.* The spec's `(hash u64, file u32, item u32, token_index
+  u32)` is 20 bytes of fields and 24 as a Rust struct. The build stores `(hash u64, file u32,
+  position u32)`, `position` being the K-gram's token offset across all of the file's items; phase 3
+  recovers `(item, index)` from the re-tokenized file (a test pins `size_of == 16`, so
+  `max_index_bytes` is the true memory).
+- *D10 is per window and per match.* A K-gram whose tokens are 60% or more data (`$STR $NUM $LIT`
+  and `, : [ ] { }`) hashes to "never select" (winnowing skips it, the guarantee holds for every
+  window that has a usable K-gram), and a verified match that is itself 60% data is dropped.
+- *Boilerplate.* A bucket is dropped (and counted) when it spans more than `max_members` files
+  OR holds more than `4 * max_members` fingerprints: one bucket of hundreds of fingerprints in a
+  few files would otherwise spend the whole verification budget on one pattern.
+- *Overlap.* Two spans of one item that overlap are trimmed to one period (a block repeated three
+  times in a function yields two non-overlapping copies), not discarded as the spec says; the
+  claim stays true and a repeated block is not lost. Family members that still overlap each other
+  are reduced to the earliest.
+- *Language families.* TypeScript, TSX and JavaScript are one family; Python and Rust are their
+  own. A per-family salt is mixed into every fingerprint, and verification would reject a mismatch
+  anyway, so a TS and a Python sequence of identical tokens never meet.
+- *Determinism.* Inputs are sorted by `(path, content)` and exact duplicates dropped; fingerprints
+  are totally ordered; phases 1 and 3 run on up to `available_parallelism` threads but write
+  per-file or per-group results that are merged and sorted, so the thread count never shows (a
+  property test shuffles the files; another compares repeated runs). A panic inside a parser is
+  caught and becomes a `ParseFailed` skip (or an empty group), so `detect` cannot take a scan down.
+
+**8.6 The pair cap counts extensions, in rounds.** The spec bounds "candidate pairs" at 200,000
+and says each is an extension. Measured at K = 20 on this repository's `crates/` plus `agora-mono`
+(1,400 indexed files), a clone region of 100 tokens has about seven fingerprints, so the same
+two files produce seven candidates and one extension (41,511 of 130,130 candidates were inside a
+region an earlier extension had matched), and about three quarters of the extensions that remain
+(67,133 of 88,614) are 20 to 39 token coincidences that die after the extension. Counting
+generated candidates would truncate a 3,000-file repository. The build therefore produces candidates a round at a time
+(at most 100,000, and no more than `max_pairs`), skips any candidate inside a region an earlier
+extension already matched (no tokenizing, not counted), and counts only extensions attempted.
+`truncated` is set when the cap is spent and a not-yet-matched candidate remains; a spent cap
+with only matched candidates left is not a truncation. The consequence is that candidates are
+never all in memory and a larger cap costs only time.
+
+**8.7 Cache.** Spec section 4 says an LRU of 256 files and section 5 says 64 MiB. A tokenized
+150-line file is 25 to 50 KB (20 bytes a token), so 256 files is at most a fifth of the byte
+budget. The cache is bounded by
+the 64 MiB budget (split across the workers) with an entry guard of 16,384, evicting least
+recently used in O(log n). A file larger than the whole budget is used once and not kept.
+
+**8.8 Measured (release, 8 cores, 2026-10-22).**
+- Tokenizing one core: TypeScript 6.5 MB/s, Python 5.9, Rust 7.1 (the tree-sitter parse alone is
+  7.4 MB/s on the same TypeScript: the walk adds under 15%).
+- Real code (`camerata-orchestrator/crates` plus `agora-mono`, 2,540 files, 26.6 MB, 1,400
+  indexed), at the spec's K = 20: 3.7 s, 90,425 fingerprints, 88,614 extensions, 4,082 families, not truncated (K = 30: table in 8.10).
+- Synthetic 20,000 files, 131 MB, 1.77M lines (`tests/perf.rs`, `--ignored`), K = 30 defaults
+  (8.10): 95.7 s, 19,990 files indexed, 9,968 families, 87 boilerplate buckets, NOT truncated;
+  peak resident memory 416 MB against 217 MB for the generated corpus alone. With the pair cap
+  lifted the run needs 340,622 extensions and takes 104 to 114 s (about 690 CPU-seconds; each
+  extension is tokenization-bound). At the spec's K = 20 the same corpus needed far more: with
+  the cap at 200,000 it was spent on 20 to 39 token coincidences (526 families, 96 s,
+  `truncated = true`), and lifted it took 659 s (3,902 CPU-seconds) and 630 MB.
+- Raising `max_pairs` is safe memory-wise (8.6); it costs about 0.3 ms of CPU per extension when
+  the files are cached and about 2 ms when they are not.
+
+**8.10 K = 30, W = 11 (orchestrator decision, 2026-10-22).** The consumer rules only use families
+of 40 tokens or more (40 for UI-SHARED-PRIMITIVE-1, 60 for the two logic rules), so a K-gram below
+the 40-token floor buys nothing. `K = 30`, `W = T - K + 1 = 11`, `T = 40`: the detection floor is
+unchanged and a test pins it (`the_winnowing_parameters_guarantee_a_floor_no_rule_threshold_
+undercuts`: `T = W + K - 1`, `T <= 40`). Defaults moved with it: `max_index_bytes` 64 MiB to
+96 MiB (K = 30 keeps 1.8x the fingerprints), `max_pairs` 200,000 to 400,000 (the 20,000-file
+synthetic repository needs 340,622 extensions and finishes in about 96 s with the default).
+
+Measured on the real corpus (`camerata-orchestrator/crates` plus `agora-mono`, 1,400 indexed
+files), families dumped from both builds and diffed by (key, length, members):
+
+| | K = 20, W = 21 | K = 30, W = 11 |
+|---|---|---|
+| Fingerprints | 90,425 | 160,417 |
+| Index bytes (16 each) | 1.38 MiB | 2.45 MiB |
+| Extensions attempted | 88,614 | 41,834 (0.47x) |
+| Wall time | 3.77 s | 1.86 s |
+| Families | 4,082 | 4,275 |
+
+Recall of the 4,082 K = 20 families (all of length >= 40): 4,059 are identical under K = 30; 22
+are strict supersets (same key and length, K = 30 lists copies K = 20 missed); 1 is lost; K = 30
+also finds 216 families K = 20 did not. The lost family is key `5dca05b5d8be9cd2`, 53 tokens,
+`QuoteService.ts:69-78` against `auth/mePayload.ts:27-36`: a `key: row.field,` object-literal
+mapping. It is not a winnowing failure: the only fingerprint the two copies share under K = 30
+falls in a bucket spanning more than 50 files, which B1 drops as boilerplate (K = 20 found the pair
+only because it happened to select a different, non-ubiquitous fingerprint; with `max_members`
+lifted K = 30 finds it again). Decision: accept it. Dropping a ubiquitous pattern is the B1 guard
+working as specified and errs toward a false negative; neither K covers that pattern reliably;
+and no consumer rule would act on it (a pure field mapping has no decision token for
+SINGLE-SOURCE-LOGIC, and NAMING needs different names for one body, which the advisory judge
+decides anyway).
+
+
+**8.9 Tests.** `extract/clone/tests/`: `tokenize` (the normalization table row by row, exclusions,
+positions, malformed and hostile input), `detect` (families, sorting, keys, subsumption, house
+pattern, ubiquity, floors), `skips` (every D1 to D7 guard with the same body indexed in an
+ordinary path), `exact` (named disagreements with both lines), `caps` (index and pair caps, cache
+eviction, winnowing and verification internals), `props` (seeded property tests; the workspace
+has no property-testing crate), `perf` (`#[ignore]` harness, see its header for the commands).
+
 ## ARCH-SINGLE-SOURCE-LOGIC-1: the algorithm and its traps
 
 ### 1. What a CANDIDATE is (deterministic)
@@ -1798,7 +1967,7 @@ request is ignored.
 
 - The full ranked candidate list (section 1) and every verdict are appended to the scan
   transcript (`TranscriptStore`, the same `feedback` channel `verify_findings` records into)
-  under an agent named `clone-judge:<rule>`, and the ledger records per rule: candidates
+  under an agent named `clone-judge:<rule>:<repo>`, and the ledger records per rule: candidates
   found, judged, confirmed, unjudged, over cap. An operator can see every candidate; a client
   never sees an unjudged one.
 - A candidate becomes a client finding only through a `same_decision` verdict. No model, no
@@ -1819,14 +1988,24 @@ The fact stated, in two forms:
 
 - **Copies do not agree (severity `high`):** "The same decision is written in 3 places and the
   copies do not agree. `src/cart/total.ts:41-52`, `src/checkout/summary.ts:15-26` and
-  `src/api/quote.ts:70-81` are the same 74-token block apart from local names, which appears to
+  `src/api/quote.ts:70-81` are the same 74-token block apart from variable names, which appears to
   compute the premium discount, but at `src/cart/total.ts:44` the rate is `0.2` while
   `src/checkout/summary.ts:18` uses `0.15`. Implement it once: one function in one module,
   imported at every listed site, so a change to the rate is one edit. Verify by diffing the
-  listed lines: the only differences are local names and the values named here."
+  listed lines: the only differences are variable names and the differences described here."
+- **Copies differ only outside the decision (severity `medium`; Wave C review):** "The same
+  decision is written in 3 places. ... are the same 117-token block apart from variable names.
+  The operators, numbers and tested properties are the same in every copy, and the copies
+  differ only in these places: at `app/api/items/route.ts:13` the code has `item` while
+  `app/api/orders/route.ts:13` has `order`. Implement it once and import it, so the copies
+  cannot drift. ..." A difference is a DECISION difference only when it sits on an operator, a
+  number, or a property name inside a decision test (the head of an `if`, `elif`, `while`,
+  `switch`, `match` or `when`, or the condition of a ternary); strings, template names, action
+  types, callee names, renamed-inconsistently variables and a property that is only copied
+  through are named after the decision differences and never raise the severity.
 - **Copies agree (severity `medium`):** "The same decision is written in 2 places and the
   copies currently agree. `src/a.ts:10-21` and `src/b.ts:33-44` are the same 66-token block
-  apart from local names, which appears to derive the order status. Implement it once and
+  apart from variable names, which appears to derive the order status. Implement it once and
   import it, so the two cannot drift. Verify by diffing the listed lines."
 
 "Appears to compute <concept>" is the judge's phrase and is the only non-deterministic clause;
@@ -1844,7 +2023,13 @@ an empty concept the clause is omitted. "Do not agree" is stated ONLY from a non
   Exact-mode callee name is identical across members and resolves, via `imports()`, to one
   module), the repeated code is the call site plus its options, not a second implementation.
   Guard: a family whose shared sequence contains a call whose callee is imported from the same
-  resolved module in every member file is dropped before the judge (`composed_variant`).
+  resolved module in every member file is dropped before the judge (`composed_variant`) ONLY
+  WHEN that call dominates the sequence (Wave C review, D2): the call expression (callee through
+  its closing parenthesis) covers at least 50% of the sequence's tokens, or every
+  decision-bearing token of the sequence lies inside the call's argument list. A decision
+  written around an unrelated imported call (`render(`, `auth(`, `useState(`, `t(`) is still a
+  decision written in two places and stays a candidate; the judge's `boilerplate` verdict is
+  what removes a framework shape.
 - **Test arrange blocks**: D3.
 - **A property-name difference that is not a disagreement about the rule** (`user.id` versus
   `account.id`): it IS reported as a disagreement, and the message names both tokens with
@@ -1860,13 +2045,17 @@ an empty concept the clause is omitted. "Do not agree" is stated ONLY from a non
 - **Generated, vendored, minified, migration, i18n, data**: D1 to D7, D10.
 - **Same-file repetition only**: not a family.
 - **Truncated scan or truncated index**: the rule still runs (a found family is a found
-  family; absence is not claimed), but the convention row (section 7, "clean" statement) is
-  withheld, exactly as DEAD-CODE withholds on an incomplete scan.
+  family; absence is not claimed). No "clean" row is ever emitted by these rules (decision D1,
+  below), so there is nothing to withhold.
 
 ### 6. Severity, confidence, domain, message, corpus TOML
 
-- **Severity.** `high` when `!agree`, `medium` when `agree` (the work order's "drops one
-  level; the finding stays"). TOML `max_severity = "high"`. W26 applies: the rule carries
+- **Severity.** `high` when the copies disagree on a DECISION token (an operator, a number, or a
+  property name inside a decision test; see section 4), `medium` otherwise: copies that agree,
+  and copies that differ only in a string, a template name, an action type, a callee or a
+  property that is merely copied through (the work order's "drops one level; the finding
+  stays"). Orchestrator decision 3 (2026-10-22): the Redux and Django repros differ only in
+  strings and must not read `high`. TOML `max_severity = "high"`. W26 applies: the rule carries
   `[[sources]]` and a `remediation` with `effort`.
 - **Confidence.** `Some("high")`, `needs_review = false`. The model's verdict is a GATE on
   which families are shown, not a claim inside the row; every sentence except "appears to
@@ -1911,16 +2100,27 @@ an empty concept the clause is omitted. "Do not agree" is stated ONLY from a non
   report's methodology ("N further repeated-decision candidates were found and not assessed
   this scan"), and never shipped. The cap is a constant (`CLONE_JUDGE_MAX_PER_RULE`), not a
   config knob, so cost is bounded by construction.
-- **Tokens:** a candidate is at most 3 members x 30 lines (about 360 tokens each) plus facts,
-  under 1,200 input tokens; a batch of 16 is under 20k input plus a 1.2k-token stable prefix
+- **Tokens (measured, Wave C review D7):** a candidate is at most 3 members x 30 lines, each
+  line cut at 120 characters (`MAX_LINE_CHARS`), plus capped fact lists. Measured on the widest
+  possible candidate (thirty 200-character lines in every copy) the serialized judge input is
+  10.9 KB, about 2,700 input tokens; the stated bound is 14,000 bytes (about 3,500 tokens) per
+  candidate, asserted by `the_widest_judge_input_stays_inside_the_stated_per_candidate_bound`
+  and, for a full batch, `a_full_batch_of_the_widest_candidates_stays_inside_the_stated_bound`.
+  Typical code (lines of about 40 characters) is about 1,000 tokens per candidate. A batch of
+  16 is therefore at most about 44k input tokens (typically about 16k) plus a stable prefix
   (system prompt, rule text, output schema; marked as the single cache breakpoint, so it is
-  served from cache after the first batch). Output: `scaled_max_tokens(16, 80)` = the 4,096
-  floor; actual output about 60 tokens per candidate.
+  served from cache after the first batch). The earlier figure of "under 1,200 tokens per
+  candidate, under 20k per batch" held only for short lines and is withdrawn. Output:
+  `scaled_max_tokens(16, 80)` = the 4,096 floor; actual output about 60 tokens per candidate.
+- **Overlap pass (Wave C review, D4):** before the cap, a candidate whose every site lies
+  within a site of an already-kept candidate of the same rule is dropped, the wider candidate
+  being considered first whatever its rank. One function copied in three files is found as a
+  family for the whole function and for each periodic sub-block of it; it is one candidate.
 - **Model calls:** `ceil(judged / 16)` per rule; worst case 10. On the registry's fast tier
   (`claude-haiku-4-5-20251001`, $1 in / $5 out per million, `model_registry.rs`): worst case
-  for this rule 200k input + 10k output = about $0.25; a typical 3k-file repo with 10 to 20
-  candidates is one or two calls, about $0.03. Zero on a re-scan whose families are unchanged
-  (verdict cache).
+  for this rule 10 x 44k = 440k input + 10k output = about $0.50; a typical 3k-file repo with
+  10 to 20 candidates is one or two calls of about 16k to 32k input, about $0.03. Zero on a
+  re-scan whose families are unchanged (verdict cache).
 
 ### 8. Tests, by name (checks crate: no model; server crate: stub model)
 
@@ -1951,8 +2151,14 @@ Safe twins (zero candidates unless stated):
 - `twin_error_wrapper_skeleton_is_not_a_candidate`: identical `try { ... } catch (e) { if (e
   instanceof X) throw ...; log(e) }` in two files (decision only inside catch).
 - `twin_test_arrange_blocks_are_never_read`: the copies live in `*.test.ts`.
-- `twin_composed_variant_calling_one_helper_is_not_a_candidate`: both files import
-  `applyDiscount` from `./pricing` and call it with different options.
+- `twin_composed_twin_whose_call_and_options_dominate_is_not_a_candidate` and
+  `twin_composed_twin_whose_every_decision_is_inside_the_call_arguments_is_not_a_candidate`:
+  both files import a helper from one module and the call dominates the sequence. The
+  positives beside them: `composed_variant_with_its_own_decisions_around_the_helper_is_a_candidate`
+  (the earlier twin, whose fixture has its own premium and coupon tests around the helper call,
+  was over-broad and is now a candidate) and
+  `an_unrelated_imported_call_beside_the_decision_is_still_a_candidate` (`render`, `auth`,
+  `useState`, `t`).
 - `twin_house_pattern_in_a_quarter_of_files_is_skipped`: the same route-handler skeleton with a
   `status === 401` check in 6 of 20 files.
 - `twin_same_file_repetition_is_not_a_family`.
@@ -2191,7 +2397,7 @@ Severity `low`, `kind = Defect`, `confidence = Some("high")`, `captures = {"mech
 `also_locations` for the other members: "4 components hand-write the same outside-click
 dismiss: `components/Menu.tsx:22-31`, `components/Popover.tsx:40-49`,
 `features/filters/Dropdown.tsx:15-24` and `app/(shop)/CartDrawer.tsx:58-67` contain the same
-58-token effect apart from local names and strings. Make it one hook or component in the
+58-token effect apart from variable names and strings. Make it one hook or component in the
 shared UI module and use it in each listed place. Verify by diffing the listed ranges."
 Strings are set aside explicitly in the sentence because labels and class names are
 normalized (the work order: "with only labels differing").
@@ -2343,27 +2549,26 @@ failure (some batches judged) ships the judged findings and ONE `not_assessed` r
 unjudged remainder with the count; `FailedPass { pass: "clone-candidate judgment" }` carries
 the error text to the methodology disclosure.
 
-**Index truncated / scan incomplete.** Findings still ship (a found family is a fact). The
-ConventionObserved "clean" row below is withheld and the ledger note says the index was
-partial.
+**Index truncated / scan incomplete.** Findings still ship (a found family is a fact).
 
 **Ledger.** The seam records each armed H rule once per repo under `RuleTier::Architectural`
 with `files_evaluated = index.files_read` and `findings_emitted = confirmed`. The loop at
 `onboard.rs:1700` skips ids whose `detector_channel` is `"clone_advisory"`. The transcript
 agent per rule records the full ranked candidate list and raw verdict JSON.
 
-**Convention row (work order section 83).** After judging, for each armed H rule with `ran =
-true`, `confirmed == 0`, no finding under that id from ANY tier (the semantic pass also reads
-every rule, `semantic_rule_ids_for_repo`, so an AI-tier row under the id counts as a trace,
-exactly like `conventions_observed_findings`'s `any_trace`), index not truncated, scan not
-incomplete: emit one `ConventionObserved` row (`convention_option_id` = the rule's default
-option, `severity = "info"`) whose detail states the detector's fact, not an affirmation the
-detector cannot make: "No application decision was found written in more than one file (N
-source files read, 60-token threshold, K candidate sites reviewed and judged not to be the same
-decision). Reported so the single-implementation convention can be adopted explicitly." It is
-emitted by the seam, not through `conventions_observed_findings` (which needs a
-`RuleRecommendation` the model produces for multi-option rules), and it respects the 46984f9
-asymmetry: when any condition fails, no row.
+**No convention row (orchestrator decision D1, 2026-10-22; replaces work order section 83 for
+these three rules).** The three clone rules emit NO `ConventionObserved` or "clean" row in V1. A
+candidate search that finds nothing, or whose candidates were all judged not to be the thing,
+proves nothing: the detector sees repeated code of one shape, in one language family, above a
+threshold, and a house pattern or a family of five disagreeing copies is dropped before the judge.
+A row saying "no application decision was found written in more than one file" would claim an
+absence that the Django, Next and house-pattern repros show to be false. A rule with zero
+candidates is still credited in the ledger as having run (`ran = true`, nothing found), and that
+is the whole statement the scan makes about it. Tests:
+`no_repro_repo_gets_a_convention_row_through_the_real_pipeline` (Django, Next, house pattern and a
+truly clean repo, through `audit_repos_with_llm`),
+`a_repo_with_no_repeated_code_gets_no_rows_but_the_rules_are_credited_as_run`,
+`a_clean_rule_is_credited_in_the_ledger_but_claims_nothing_to_the_client`.
 
 **Coexistence with the semantic tier.** Every rule, including these three, is also in the
 whole-file semantic prompt by the owner's 2026-10-09 ruling. An AI-tier row under an H id is an
@@ -2388,13 +2593,192 @@ React fixture, with the `domain_to_glob` fix); (5) positive + safe-twin tests (c
 the seam tests with the stub model (server crate); (6) `ScanProvenance.clone_judge_model`;
 (7) `VerdictCache` sidecar; (8) `ADVISORY_UNAVAILABLE_NOTE` + `note_advisory_unavailable_rule`;
 (9) `ecma::parse`/`python::parse` to `pub(crate)`; (10) transcript agent names
-`clone-judge:<rule>`.
+`clone-judge:<rule>:<repo>`.
 
 **Total model cost of Wave C per scan.** Three rules x at most 10 batches = at most 30 fast-tier
-calls, about 600k input (mostly cache-served after the first batch) and 30k output: under $0.80
+calls, about 1.3M input at the measured worst case (the stable prefix is cache-served after the first batch) and 30k output: under $1.50
 worst case at the registry's Haiku 4.5 price, about $0.05 to $0.10 on a typical repo, $0 on an
 unchanged re-scan. For comparison the audit pass runs on the audit model over every chunk of
 the repo; the judge never sees a file.
+
+## Wave C build notes: the producer, the seam and the corpus rules (2026-10-22)
+
+Built as `crates/checks/src/clone_rules.rs` plus `clone_rules/{bindings,compare,composed,context,
+decision,facts,judge,names,naming,primitive,single_source}.rs` and tests under
+`clone_rules/tests/`; `crates/server/src/onboard/clone_advisory.rs` plus `clone_advisory/{cache,
+findings,prompt}.rs` and tests under `clone_advisory/tests/`; the three corpus TOMLs; an end-to-end
+test, `crates/server/tests/clone_advisory_e2e.rs`, that runs the whole `audit_repos` pipeline with a
+scripted model. The sections above stand; this list is every place the build decided something the
+spec left open or departed from it, and why. The detector API is used as built (section 8).
+
+**W.1 Producer shape.**
+- `Candidate.facts` is one `CandidateFacts { token_len, sites, agree, disagreements, rule }` with a
+  `RuleFacts` enum (`Logic`, `Naming`, `Primitive`) for what only one rule knows, instead of per-rule
+  fact structs. `sites` is every place a candidate lives, which is the one list the finding, the judge
+  input and the transcript read; for a naming module roll-up it is the union of every pair's sites, and
+  `family` is the longest pair's family.
+- `CandidateSet.by_rule` is ranked and capped (as specified) and gains `found(rule)` (judged plus
+  `over_cap`). `IndexSummary` gains `files_skipped`, `families` and `ui_files` (see W.5). An ARMED rule
+  always has an entry, empty when it found nothing, so the seam can tell "ran, nothing" from "not armed".
+- Disagreements are deduplicated per member and per pair of texts (a block that repeats `total` versus
+  `subtotal` five times is one named difference at its first position), and a difference is a named
+  token pair with both lines, never a characterization.
+- Rust `?` is not a ternary: the ternary test is skipped for Rust, and for other languages needs at
+  least one token between the `?` and the `:` (`x?: T` is an optional member, not a branch).
+
+**W.2 ARCH-SINGLE-SOURCE-LOGIC-1.**
+- The decision test (a decision keyword, operator family or ternary, AND a literal or property name)
+  counts only tokens OUTSIDE `catch`/`except` clauses and `throw`/`raise` statements. The spec excludes
+  a sequence whose only decision tokens sit there; requiring both halves outside is the stricter,
+  false-negative-leaning reading. The `throw`/`raise` region ends at a `;` at its own depth, the close of
+  the enclosing block, or (Python) the end of its line; over-extending only removes tokens from the test.
+- "Distinct token kinds" is read as distinct normalized token ids in the shared sequence (at least 8).
+- "Every member is inside a function" is: the member's item is a function, or an `extract::functions`
+  span contains the member's lines, or it is a module-level statement in a file that is not config
+  shaped (`is_config_shaped` became `pub(crate)`).
+- `composed_variant` uses its own import reader (`clone_rules/bindings.rs`): `extract::imports` records no
+  name for a default import (`import Modal from '..'`), which would have made the guard blind to the
+  commonest component import. The guard fires when the shared sequence has an `$ID (` call at the same
+  offset in every copy, the same callee text in every copy, imported in every copy's file from one module
+  after resolving relative specifiers against the importing file (`./pricing` in `src/a.ts` and
+  `../src/pricing` elsewhere are one module). A Rust `self::`/`super::` path is made unique to its file so
+  it can never compare equal.
+  The guard fires only when that call also DOMINATES the sequence (W.9, D2).
+
+**W.3 ARCH-NAMING-ONE-CONCEPT-1.**
+- "Covers at least 90% of one function span" is read as at least 90% of one TOP-LEVEL function item of
+  the detector's tokenization (`ItemTokens.kind == "function"`, which includes `const f = () => {}`).
+  Methods inside a class or an `impl` block are one `class`/`impl` item and are not read in v1; that is a
+  false negative added to section 9.
+- The wrapper guard is: a member's span calls (an `$ID (` token) a name another member declares, from
+  another file, and its file imports that name. The roll-up links only candidates that span exactly two
+  files; a candidate that spans three or more stays a function candidate so no file is lost. A roll-up's
+  `token_len` is the sum of its pairs'.
+- Name words treat an acronym run as one word (`HTTPResponse` is `http`, `response`); a name that the
+  verb/noise removal would empty keeps its words (`get` and `set` stay different).
+
+**W.4 UI-SHARED-PRIMITIVE-1.**
+- A UI unit also includes a component: a function whose body renders JSX. Without it a copy-pasted
+  component (the clone is the whole function, so no sub-region is a separate family) would never be a
+  candidate, which would miss the rule's plainest case. The mechanism mark and the judge still decide.
+- Marks that depend on a name (a hook call, `addEventListener`, `ref.current`, `document.`) are read from
+  each copy's source, because Structural mode collapses those names, and the mechanism must fire in EVERY
+  copy (the intersection of the copies' marks). A `function useX(` declaration is not a hook call.
+- A copy in a package outside the React-family scope is dropped from the candidate, not the whole family:
+  the remaining copies must still span two files and at most 40 places. The package gate reads the
+  nearest `package.json` among the scan's files (`dependencies`, `devDependencies`, `peerDependencies`).
+- The composed-variant exclusion counts a default-imported tag as imported (W.2's reader).
+
+**W.5 The seam.**
+- `audit_repos` is now a thin wrapper that builds the real `Llm` and calls `audit_repos_with_llm(llm:
+  &dyn LlmPort, ...)`. The signature of `audit_repos` and every caller are unchanged; the new function is
+  what lets a test run the whole pipeline with a scripted model, which the spec's "audit_repos end-to-end
+  test with the stub model" requires.
+- The judge takes a `JudgeRequest` struct instead of the spec's long argument list, and reports
+  `rejected` (a definite non-affirmative verdict) and `model_calls` in addition to the spec's counts.
+- **The verdict cache is a field of the scan manifest**, `ScanManifest.clone_verdicts` (`serde(default)`,
+  `MANIFEST_VERSION` unchanged), not a separate sidecar file. It lives in the same app-data file the
+  manifest already does, never in the repo; it needs no new store, no new project-id plumbing and no
+  change to `audit_repos`' signature, and "Full scan (ignore incremental cache)" correctly re-asks.
+  It is seeded from the prior manifest even when that manifest is unusable as an AI baseline (the keys are
+  content). Capped at 4,000 verdicts, oldest dropped first.
+- The cache key is path-independent AND order-independent: the exact-mode differences are an unordered
+  set of text pairs (a moved file can swap which copy sorts first), and the single-source key includes the
+  sorted multiset of EVERY copy's Exact decision tokens, whether or not the copies agree (Wave C review,
+  D5): a tested property renamed in all copies leaves `agree` and every difference unchanged but is a
+  different decision, and must be judged again. `PROMPT_SCHEMA_VERSION` is 2.
+- Offline never reads the cache: "zero findings" is absolute when no model is available.
+- `resolve_clone_judge_model(None)` is what `audit_repos` calls; no caller pick is plumbed through the
+  scan request (that would change a signature used by about 30 callers for a knob nobody has asked for).
+  The environment override works today. `ScanProvenance.clone_judge_model` is stamped when the judge made
+  at least one call this scan (cache hits make none), the way `audit_model` is stamped only when a model ran.
+  It is on `ScanProvenance` (so it is in the persisted report and any machine read of it); the PDF cover
+  and the workbook print only the audit and calibration models today and were not changed, because the
+  three artifacts are held equal by cross-artifact gates and a new cover row is a presentation decision.
+- Not-assessed rows: the spec emits one when no model ran or a batch failed. The build also emits the one
+  row when candidates were left `unsure`, got no verdict, or lay beyond the 160 cap, with the counts, so a
+  rule with candidates it could not decide never reads clean. Reason: `PassFailed` for no model or a
+  failure, `ModelDeclined` for undecided.
+- Ledger: a rule is `ran` only when every candidate found got a definite verdict (a rule with nothing
+  found ran clean). `ADVISORY_UNAVAILABLE_NOTE` has no `N` (the count is in the row; a note that varies
+  could not be matched by the integrity gate); `ADVISORY_PARTIAL_NOTE` and `note_advisory_partial_rule`
+  cover a judgment that ran and fell short. The integrity gate classifies the unavailable note as
+  `ScopedOut` (it is only recorded when no model was available, the same disclosed scope choice as
+  "AI/semantic review not requested"); a partial judgment's reason is deliberately unrecognised, so it
+  stays a defect if the semantic pass did not settle the rule.
+- The ledger loop skips the clone ids by arm (`CLONE_ADVISORY_CHANNEL`), as specified.
+- **There is no convention row** (D1, section "Wiring the H rules"). The first build emitted one after
+  the semantic pass; the Wave C review withdrew it. `convention_rows`, `convention_row` and the
+  `onboard.rs` call are removed.
+- **`evaluated_option_id` is `None`, not the violating option.** The export resolves a finding's Fix
+  through `evaluated_option_id` first, and the violating options carry no remediation (the fix text is on
+  the default option), so naming the violating option made the Fix line vanish and, under C5-8, the row be
+  held. Every other deterministic checker's defect leaves it `None`. Tested end to end through
+  `build_report_json` (`a_judged_scan_ships_the_confirmed_finding_and_stamps_the_judge`).
+- The concept clause reads "which appears to be the premium discount calculation" (the prompt asks for a
+  noun phrase beginning with "the"); the spec's example verbs ("compute", "derive") cannot be chosen
+  without knowing the concept. The phrase is scrubbed because it is model output reaching a client
+  sentence (Wave C review, D6): at most the first 8 whitespace-separated words are read, quotes and
+  backticks become apostrophes and dashes hyphens, and the WHOLE phrase is rejected (the sentence then
+  omits the clause) if anything outside letters, digits, spaces, commas, apostrophes, parentheses and
+  hyphens remains, so a sentence smuggled through `;`, `:`, a path or markup is dropped, not repaired.
+- Live-preview progress: the seam streams its findings into the job (`add_findings`) but does not emit
+  `det_tool_*` events; the UI's tool-name map has no label for it and the step is dominated by one model call.
+- The transcript session is `clone-judge:<rule id>:<repo>` (Wave C review): a multi-repo scan shares one
+  transcript key, and a session named for the rule alone was replaced by every later repo.
+
+**W.6 `camerata-check`.** The three ids are reported in a new `unsupported_rule_ids` field (`serde(default)`,
+so older output still parses), the human output says `NOT CLEAN` and names them, and `clean` is `false`.
+The default gate still exits 0 (a CI file that lists every corpus rule id must not be locked out of the
+binary), and `--strict` exits 1: a strict gate must not pass on a rule it never checked. They are not folded
+into `unmatched_rule_ids`, which means "no checker answers this id at all" (a typo, or a deferred rule). A run
+with no `--rule-id` is unchanged: it states what its registered checkers did.
+
+**W.7 Corpus.** All three rules are `enforcement = "architectural"`, `kind = "defect"`, `verification =
+"policy"` with internal sources, and each `qualifies` states that the result is a reviewed assessment on top of
+a deterministic search, with every exclusion and the 160-candidate limit. Single-source is `max_severity =
+"high"`; the other two `"low"`. The pinned layer histogram moves `universal` 133 to 136 (the ui rule keeps
+`layer = "universal"`). `domain_to_glob("ui")` is `**/*.{jsx,tsx,ts,js,css}`.
+
+**W.8 Measured.** On this repository's `crates/` (493 files read, 350 indexed, 866 families), release build,
+the producer takes 2.0 s: 94 single-source, 7 naming and 0 shared-primitive candidates (no React package), none
+over the cap. The 20,000-file budget in section 8.8 is dominated by the detector; the funnel adds one
+tokenization per file that belongs to a family.
+
+**W.9 Adversarial review fixes (2026-10-22).** An adversarial review of Wave C found the defects
+below; the owner's decisions D1 to D7 (docs/OVERNIGHT_DECISIONS.md, DECISIONS MADE, 2026-10-22)
+ruled on them. Each probe scenario is a committed test.
+- **D1 No convention row.** Removed (section "Wiring the H rules", W.5). A zero-candidate rule is
+  still credited as run in the ledger.
+- **D2 Composed-variant guard.** Fires only when the shared imported call dominates (at least 50% of
+  the sequence's tokens, or every decision-bearing token inside its arguments). The earlier twin test
+  had its own decisions around the helper call and is now a positive; a true composed twin and an
+  unrelated-call positive pin the boundary. A consequence worth knowing: a React form pair whose only
+  shared imported calls are `useState(` is now also an ARCH-SINGLE-SOURCE-LOGIC-1 candidate (the judge's
+  `boilerplate` verdict decides), where before the hook call hid it.
+- **Severity.** `high` only when a DECISION token differs (`NamedDisagreement.decision`: an operator or a
+  number anywhere in the shared sequence, or a property name inside a decision test, computed by
+  `decision_test_mask`). Strings, callees, a property outside any test and inconsistent variable use are
+  named in a trailing clause and leave the severity at `medium`. A number outside a test (a rate passed to
+  a helper) counts: it is the plainest "the copies disagree" there is.
+- **Naming and the UI rule.** When UI-SHARED-PRIMITIVE-1 is armed, ARCH-NAMING-ONE-CONCEPT-1 drops a
+  candidate any member of which is a function rendering JSX in a package the UI rule reads (React
+  family); JSX in a package the UI rule does not read stays a naming candidate, because nothing else
+  would report it.
+- **D3 Callee names.** In Exact mode the name of a called function (ECMAScript and Python `call`, a
+  `new` constructor, a Rust name directly followed by a parenthesis that is not a declaration) is kept,
+  so a changed callee is a named disagreement. Structural mode, which finds families, is unchanged.
+  "Apart from local names" is now "apart from variable names", and the claim is checked: free identifiers
+  must map one to one between the two copies (`inconsistent_renames`), or the place where they do not is
+  a named difference.
+- **D4 Overlapping families.** `rank_and_cap` drops a candidate wholly inside a kept candidate of the
+  same rule (see section 7).
+- **D5 Cache key.** The sorted multiset of every copy's decision tokens (W.5).
+- **D6 Concept scrub.** Eight words, whole-phrase rejection (W.5).
+- **D7 Cost.** `MAX_LINE_CHARS` is 120; section 7 states the measured bounds and a test asserts them.
+- **Transcript.** `clone-judge:<rule>:<repo>` (W.5).
+- **UI end to end.** `ui_shared_primitive_ships_a_finding_for_hand_written_components_end_to_end` runs
+  a React manifest through `audit_repos_with_llm` with the stub model.
 
 ## Owner questions for Wave C
 

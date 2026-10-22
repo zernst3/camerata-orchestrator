@@ -39,7 +39,14 @@ camerata-check [PATH] [--format human|json] [--config PATH] [--rule-id ID]... [-
   checker. A rule id no registered checker answers at all (deterministic or advisory — e.g. one
   of the two Group E rules, `ARCH-STRUCTURED-ERRORS-1` / `ARCH-EXACT-DECIMALS-1`, deliberately
   left AI-review-only, see `docs/design/2026-07-27_ast-extractor-layer.md` §4) is reported back
-  in `unmatched_rule_ids` rather than silently producing nothing.
+  in `unmatched_rule_ids` rather than silently producing nothing. The three clone-based rules
+  (`ARCH-SINGLE-SOURCE-LOGIC-1`, `ARCH-NAMING-ONE-CONCEPT-1`, `UI-SHARED-PRIMITIVE-1`) are a
+  different case: they are real rules this binary cannot evaluate, because they find repeated
+  code deterministically but need the scan's advisory tier (a reviewed judgment of which repeats
+  are real) to decide what to report. They are listed in `unsupported_rule_ids`, the output says
+  `NOT CLEAN`, and `clean` is `false`; they are never reported as clean. The default gate still
+  exits `0` for them (a CI file that lists every corpus rule id must not be locked out), and
+  `--strict` exits `1`.
 - `--strict` — also fail the build on needs-review-grade findings (a checker whose findings are
   `advisory_coexisting` by the rule's own design, e.g. `ARCH-RESOURCE-LIFECYCLE-1`'s spawn
   facet; or a finding whose message carries the `[needs review` marker, e.g.
@@ -61,6 +68,7 @@ camerata-check [PATH] [--format human|json] [--config PATH] [--rule-id ID]... [-
   "repo": "path/as/given",
   "checkers_run": 8,
   "unmatched_rule_ids": [],
+  "unsupported_rule_ids": [],
   "violations": [
     {
       "rule_id": "SUPABASE-RLS-ENABLED-1",
