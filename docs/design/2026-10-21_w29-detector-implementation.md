@@ -43,6 +43,8 @@ Vec<(file, span)>>` built in the checker. Shape heuristics from the source: igno
 (0/1/"", protocol/i18n strings) via an allowlist; flag a domain literal repeated across ≥2 modules.
 
 ### Shared pass 2 — a token clone detector (the big one; for 3 rules)
+(Superseded by the full build spec "Clone detector: the algorithm and its traps" and the three
+rule sections that follow it, 2026-10-22; kept as the origin sketch.)
 A jscpd-class, token-based, cross-file duplicate detector. This is the one genuinely new
 substantial pass; rules 4/5/6 reuse it.
 
@@ -196,7 +198,8 @@ verify as real is worse than a missed one.
   codes, protocol strings, and i18n keys repeat everywhere legitimately. **Guard:** an allowlist of
   trivial/protocol/i18n shapes; only flag a DOMAIN value repeated across ≥2 modules.
 
-- **The H rules (single-source / naming / shared-primitive) — the candidate-vs-finding line.** The
+- **The H rules (single-source / naming / shared-primitive) — the candidate-vs-finding line.**
+  (Superseded by the full build specs below, 2026-10-22; kept as the origin of the guard.) The
   clone detector's output is a CANDIDATE list, not findings. Presenting candidates directly would
   flag coincidental structural similarity as a defect. **Guard:** the advisory tier judges "same
   business decision / same concept / same mechanism"; only confirmed candidates become findings.
@@ -1400,6 +1403,1004 @@ Residual risk, left as is (all would be reported):
   stay candidates, so a bare use elsewhere is reported against the tuple as its home.
 - Python tuple-unpacking and `self.x = ...` assignments are not homes (59, 87).
 - An ECMA decorator argument such as Nest's `@Processor('orders-high')` is counted (67).
+
+## Clone detector: the algorithm and its traps
+
+Written 2026-10-22 against branch tip `d8afd50`, after reading `extract/{mod,ecma,python,rust_syn,
+paths,ancestry,enclosing}.rs`, `arch_checker.rs`, `onboard/{files,architectural}.rs`,
+`onboard.rs` (`audit_repos`), `ai_audit.rs` (`verify_findings`, `conventions_observed_findings`,
+`UsageMeter`, `FailedPass`), `scan_ledger.rs`, `scan_cache.rs`, `mechanical_gate.rs`, the
+`LlmPort` seam and its test stubs, `model_registry.rs` and `fleet/src/tier.rs`. Build-ready; every
+"decide" below is decided. Same law as the three built rules: **false-negative, never
+false-positive.** The clone detector itself never produces a finding. It produces a CANDIDATE
+INDEX that three rules read, and the only sentences that reach a client are facts the detector can
+prove by token comparison.
+
+### 1. API and types
+
+New module `crates/checks/src/extract/clone.rs` (a sibling of `literals`; the extractors stay
+in `camerata-checks`, which must not depend on the server or the model).
+
+```
+/// How a source token is normalized before hashing. See the table in section 2.
+pub enum TokenMode {
+    /// Identifier-insensitive: free identifiers, property names, literals and operator
+    /// families are each collapsed to a class token, so `title ?? slug` and `name || id`
+    /// hash the same. The mode the FAMILY search runs in.
+    Structural,
+    /// Free identifiers still collapse; property names, literal values and operator text are
+    /// kept verbatim. Never used to find families; used to decide whether the members of a
+    /// found family AGREE (ARCH-SINGLE-SOURCE-LOGIC-1).
+    Exact,
+}
+
+pub enum TokenClass { Ident, Prop, JsxTag, JsxAttr, Str, Num, Lit, BinOp, UnOp, Assign, Keyword, Punct, Block }
+
+pub struct Token {
+    pub id: u32,          // interned text of the NORMALIZED token (per mode)
+    pub class: TokenClass,
+    pub line: u32,        // 1-based line of the source token
+    pub raw: Range<u32>,  // byte range in the source, for Exact-mode diffs and messages
+}
+
+/// One top-level item's token sequence. Windows never cross an item boundary.
+pub struct ItemTokens { pub item: u32, pub kind: &'static str, pub name: Option<String>,
+                        pub start_line: u32, pub end_line: u32, pub tokens: Vec<Token> }
+
+pub fn tokens(lang: SourceLang, source: &str, mode: TokenMode) -> Vec<ItemTokens>;
+
+pub struct CodeSpan { pub file: String, pub item: u32, pub token_start: u32, pub token_len: u32,
+                      pub start_line: u32, pub end_line: u32 }
+
+pub struct CloneFamily {
+    pub key: u64,                 // FNV-1a of the shared Structural token ids; stable across runs
+    pub token_len: u32,           // length of the shared sequence (every member has exactly it)
+    pub members: Vec<CodeSpan>,   // sorted by (file, start_line); >= 2 distinct files
+    pub distinct_files: u32,
+}
+
+pub struct CloneOptions { pub min_tokens: u32 /* 40 */, pub max_members: u32 /* 50 */,
+                          pub max_pairs: u32 /* 200_000 */, pub max_index_bytes: usize /* 64 MiB */ }
+
+pub enum SkipReason { NotSource, TestPath, Generated, Vendored, Minified, I18nCatalog, TooLarge, ParseFailed }
+
+pub struct CloneIndex {
+    pub families: Vec<CloneFamily>,          // sorted by (key); deterministic
+    pub files_read: u32,
+    pub skipped: Vec<(String, SkipReason)>,
+    pub boilerplate_buckets_skipped: u32,    // buckets over max_members (section 4, B1)
+    pub truncated: bool,                     // a cap fired; rules treat as "not fully indexed"
+}
+
+pub fn detect(files: &[(String, String)], opts: &CloneOptions) -> CloneIndex;
+
+pub struct Disagreement { pub position: u32, pub line_a: u32, pub line_b: u32, pub a: String, pub b: String }
+/// Exact-mode comparison of two spans known to be Structural-equal. Empty when they agree.
+pub fn exact_diff(a: &ItemTokens, a_span: &CodeSpan, b: &ItemTokens, b_span: &CodeSpan) -> Vec<Disagreement>;
+```
+
+`detect` is pure over `(path, content)` pairs, never panics (a file that fails to parse is
+skipped with `ParseFailed`), and runs ONCE per repo for all three rules (section 7 explains the
+single-checker shape). `min_tokens = 40` is the index floor; each rule applies its own, higher,
+threshold on `token_len` (section 3).
+
+### 2. Tokenization per dialect
+
+The source parses already exist: tree-sitter for TS/TSX/JS (`ecma.rs`, grammar chosen by
+`lang_for_path`, with the JS-to-TSX re-parse the literal extractor already does for `class=`
+attributes) and Python (`python.rs`); `syn` for Rust. `ecma::parse` and `python::parse` become
+`pub(crate)`. Rust is tokenized with `proc_macro2` (already a dependency with `span-locations`,
+`Cargo.toml:32`), not `syn`: a token stream carries every macro body (`json!`, `format!`,
+`sqlx::query!`) that a `syn` AST walk hides, and macro bodies are code the client wrote.
+
+**Leaves.** For tree-sitter, the token stream is the pre-order sequence of leaf nodes (named
+and anonymous), except: a `string`/`template_string` node is ONE token (its substitutions'
+tokens are emitted inside it between a `${` and `}` pair); a `comment` is dropped; a Python
+`block` emits a synthetic `{` on entry and `}` on exit (tree-sitter-python has no indent
+leaves, and without these `if a:\n  return 1\nreturn 2` and `if a:\n  return 1\n  return 2`
+would tokenize identically). For `proc_macro2`: `Ident`, `Punct` (joint puncts fused into one
+operator: `==`, `&&`, `..=`, `->`), `Literal`, and `Group` as open-delimiter, contents,
+close-delimiter. Doc comments arrive as `#[doc = "..."]` attributes and are dropped.
+
+**Excluded items.** The following top-level items contribute NO tokens, so an import block or
+a type-only file can never be a clone: ECMA `import_statement`, `export_statement` whose only
+child is a re-export (`export ... from`), `interface_declaration`, `type_alias_declaration`,
+`enum_declaration`, `declare` statements; Python `import_statement`, `import_from_statement`;
+Rust `use`, `extern crate`, `mod x;`, `struct`/`enum`/`union`/`trait` items with no function
+bodies, `type` aliases, `#![...]` inner attributes. An `export` / `export default` / `pub` /
+`pub(crate)` prefix on a declaration is dropped (one token of visibility must not split a
+family). Decorators and attributes are kept as tokens.
+
+**Normalization table.** "Kept" means the token's own text is the interned string.
+
+| Token | Structural | Exact |
+|---|---|---|
+| Free identifier (variable, parameter, function/class/type name, callee) | `$ID` | `$ID` |
+| Property/field/attribute name after `.` or `?.` (`property_identifier`, Python `attribute.attribute`, Rust field after `.`, a method name after `.`) | `$PROP` | kept |
+| JSX element tag name (`jsx_opening_element`/`jsx_self_closing_element` `name`) | kept | kept |
+| JSX attribute name | kept | kept |
+| String / template literal (fragments only; substitutions tokenized inside) | `$STR` | kept (unescaped value) |
+| Number literal | `$NUM` | kept (`canonical_number`) |
+| `true false null undefined None True False` | `$LIT` | kept |
+| Binary operators (`+ - * / % ** == === != !== < > <= >= && \|\| ?? and or in is not instanceof \| & ^ << >> >>>`), `??=` etc. | one class token per family: `$ARITH`, `$CMP`, `$LOGIC`, `$BIT` | kept |
+| Unary operators (`! - + ~ typeof void await not`) | `$UNOP` (`await`/`not` kept) | kept |
+| Assignment operators (`= += -= ...`) | `$ASSIGN` | kept |
+| Keywords and `this`/`self`/`super`/`cls` | kept | kept |
+| Punctuation (`( ) { } [ ] , ; : . ?. => -> ...`) and the synthetic Python block braces | kept | kept |
+
+Why property names collapse in Structural but not in Exact: the family search must land
+`user.isPremium ? price * 0.2 : 0` and `account.premium ? amount * 0.2 : 0` in one family (a
+renamed field is still the same decision shape), while the agree check must say that
+`order.total * 0.12` and `order.subtotal * 0.12` apply the rate to different fields. Both are
+facts a client can check by reading the two lines the finding cites. JSX tag and attribute names
+stay kept in both modes because a `<div><span/></div>` matching a `<ul><li/></ul>` is a false
+family with no deterministic defence.
+
+**Positions.** Every token carries its line; a span's `start_line`/`end_line` are its first and
+last token lines. Messages cite `file:start-end`.
+
+### 3. Window size and thresholds, with the justification
+
+- **Hash unit `K = 20` tokens**, fixed. A 20-token k-gram is about two statements; smaller
+  k-grams collide constantly in an identifier-insensitive stream (`$ID ( $ID , $ID ) ;` is
+  everywhere), larger ones miss short matches the winnowing guarantee below needs.
+- **Index floor `min_tokens = 40`** (the winnowing guarantee length `T`). Every pair of spans
+  sharing at least 40 consecutive Structural tokens is found (section 4). 40 tokens is roughly
+  four to six lines of logic or one small JSX block; below that, structural coincidence between
+  unrelated code is common and no rule here wants it.
+- **Per-rule thresholds on `token_len`:** ARCH-SINGLE-SOURCE-LOGIC-1 and
+  ARCH-NAMING-ONE-CONCEPT-1 require `token_len >= 60`; UI-SHARED-PRIMITIVE-1 requires `>= 40`.
+  jscpd's default is 50 tokens with identifiers KEPT; this stream collapses identifiers, so the
+  logic rules sit above jscpd's default on purpose. The UI rule sits at the floor because JSX is
+  punctuation-dense (a spinner block is ~35 tokens, an outside-click effect ~60) and that rule
+  carries a further structural requirement (a mechanism mark, section "UI-SHARED-PRIMITIVE-1").
+- **Distinct token kinds >= 8** inside the shared sequence (a window of `$ID , $ID , $ID` has
+  two kinds). Guards tiny-vocabulary clones that pass the length test.
+- **Members must span >= 2 distinct files.** A sequence repeated only inside one file is not a
+  sharing problem for any of the three rules (the SHARED-CONSTANT ruling). Same-file members of
+  a cross-file family ARE listed.
+
+### 4. Rolling hash, winnowing, verification, merging, determinism
+
+**Phase 1, streaming fingerprints.** Files are processed in path order. For each file:
+tokenize (Structural), then for each item compute the polynomial rolling hash of every
+K-gram over interned ids (`h = sum id_k * B^(K-1-k) mod 2^64`, `B` a fixed odd constant; O(1)
+per step). Winnow (Schleimer, Wilkerson, Aiken 2003): over each window of `W = T - K + 1 = 21`
+consecutive k-gram hashes keep the minimum (rightmost on ties); any two spans sharing `T`
+tokens share at least one selected fingerprint. Push `(hash u64, file u32, item u32,
+token_index u32)` (16 bytes) and DISCARD the tokens. Expected density `2/(W+1)`, about 9% of
+k-grams.
+
+**Phase 2, buckets.** Sort fingerprints by hash. A bucket is a run of equal hashes. Drop
+buckets whose fingerprints come from one file. Drop and count (`boilerplate_buckets_skipped`)
+buckets with more than `max_members` (50) distinct files: a sequence present in more than fifty
+files is a framework or house pattern, not a copy anybody made (B1 below). Every surviving
+bucket yields the candidate pairs of its members (first by file order), subject to
+`max_pairs`.
+
+**Phase 3, verification and extension.** For each candidate pair `(A: file,item,i)`,
+`(B: file,item,j)`: re-tokenize both files (an LRU of 256 tokenized files bounds this; a file
+is tokenized at most once per eviction), compare the K tokens by id (a hash collision is
+rejected here), then extend left and right while tokens are equal and both cursors stay inside
+their items. The result is a maximal matched pair with length `L >= K`; keep it when `L >=
+min_tokens`. A pair whose spans overlap each other (same file, same item, ranges intersect) is
+discarded. Each maximal pair is recorded once per `(A span, B span)`; later fingerprints inside
+an already-recorded pair are skipped (the pair set is keyed on the spans).
+
+**Phase 4, families.** A maximal pair's two spans have identical token ids by construction, so
+both carry the same `key = FNV-1a(token ids)` and the same `token_len`. A family is the set of
+distinct spans sharing `(key, token_len)`. Then subsumption: family `F` is dropped when every
+member of `F` lies inside some member of a family `F'` with `F'.token_len > F.token_len` and
+`|F'.members| >= |F.members|` (the longer family already says everything `F` says). Two families
+that overlap partially both survive; a span may appear in more than one family, and the rules
+below cite it twice when that happens.
+
+**Determinism.** Files are read in path order; buckets, pairs and members are sorted; the
+LRU affects only time, never output; `key` is content-derived so a family has the same id on
+every run of the same tree. No randomness, no model, no clock.
+
+### 5. Complexity bounds and the memory budget on a 20k-file repo
+
+Assume the scan's hard cap (`HARD_CAP_FILES = 20_000`, `files.rs:12`), a 150-line average
+source file, 8 tokens per line: `N = 24M` tokens.
+
+- Tokenizing is one extra parse per file (the existing extractors already parse each file once
+  per call: `imports`, `functions`, `exports`, `literals`, `computed_loads` are five parses; a
+  shared parse cache is a later win, noted in "found wrong"). O(N).
+- Fingerprints: `0.09 * N = 2.2M` entries at 16 bytes: 35 MB, sorted in place. The
+  `max_index_bytes` cap (64 MiB) stops phase 1 and sets `truncated = true` before memory grows
+  past the budget; a truncated index is still correct for everything it found, and every rule
+  reports "not fully indexed" (section 7) instead of claiming cleanliness.
+- Verification: bounded by `max_pairs` (200k extensions, each O(L), L typically < 400 tokens);
+  the LRU holds at most 256 tokenized files (a 400 KB file is ~60k tokens at 16 bytes: 1 MB
+  worst case, 256 MB absolute worst, in practice a few tens of MB; the LRU capacity is also
+  byte-bounded at 64 MiB and evicts by size).
+- Families: output only. Tens of thousands at most, each a few spans.
+
+Budget: index 64 MiB + LRU 64 MiB + output; wall time dominated by parsing, the same order as
+the existing extractor passes on the same tree. No model tokens are spent by this pass (work
+order section 91).
+
+### 6. Traps and their guards (the detector level)
+
+File-level skips (never tokenized; listed in `skipped` with a reason):
+- **D1 Generated code.** DEAD-CODE G11 markers in the first 10 lines; `.gen.* .generated.*
+  .pb.* _pb2.* .d.ts` basenames; `generated/ __generated__/` segments. The scan prunes most of
+  these (`files.rs`); the detector re-checks because the CI tree differs (G30).
+- **D2 Vendored code.** Segments `vendor third_party third-party external deps node_modules
+  bower_components dist build out`.
+- **D3 Tests, fixtures, mocks, stories, e2e, snapshots.** `extract::paths::is_test_path`,
+  plus `conftest.py`, `__snapshots__/`, `.snap`.
+- **D4 Minified or bundled.** Any line longer than 1,000 bytes, or more than 60 tokens per
+  line on average, or a basename containing `.min.` or `.bundle.`.
+- **D5 i18n catalogs and data files.** Segments `locales i18n lang langs translations messages
+  intl`; files whose every top-level item is a single object/array/dict literal (a data
+  module: a lookup table, a fixture list, a routes table).
+- **D6 Migrations and seeds.** Segments `migrations migration alembic versions seeds seeders
+  seed db/migrate`.
+- **D7 Size.** Over `MAX_FILE_BYTES` never arrives; a file over 20k tokens is skipped as
+  `TooLarge` (it is a bundle or a generated table).
+
+Stream-level guards (applied while tokenizing):
+- **D8 Imports, exports, type declarations, license headers.** Excluded items and dropped
+  comments (section 2). A file that is only imports has an empty stream.
+- **D9 Boilerplate items.** Items whose kind is a React `propTypes`/`defaultProps` assignment,
+  a `module.exports = {...}` object, a Django `Meta` class, a Rust `impl Default`/`From`/
+  `Display` with a single-expression body, or a getter/setter pair (`get x() { return
+  this._x }`) are tokenized (they are code) but can never clear the per-rule filters: no
+  decision (SINGLE-SOURCE), not a function body under two names (NAMING), no JSX/hook
+  (SHARED-PRIMITIVE). No special case is needed; the rule filters are the guard and the tests
+  in each rule section prove it.
+- **D10 Data windows.** A window where `$STR + $NUM + $LIT + , : [ ] { }` tokens are 60% or
+  more of the tokens is a table, not logic; it is not fingerprinted. (Catches an inline
+  translation map, a country list, a test matrix, a Tailwind variant map.)
+
+Bucket-level guards:
+- **B1 Ubiquity.** A bucket in more than 50 files is dropped and counted (section 4). A family
+  present in more than 25% of the files of its language family AND in at least 5 files is
+  flagged `house_pattern = true`; SINGLE-SOURCE and NAMING skip such families (a Next.js route
+  handler skeleton, a Django class-view override, an Express error wrapper, a Rust `impl`
+  skeleton all repeat by framework design); SHARED-PRIMITIVE keeps them up to 40 members
+  (repetition across components is that rule's point).
+- **B2 Tiny clones.** `min_tokens`, the distinct-kinds floor, and the per-rule thresholds.
+- **B3 Nested self-overlap.** A span never pairs with itself or an overlapping span.
+
+What the detector does NOT decide: whether a family is a business decision, the same concept,
+or the same mechanism. Those are the three rules' judgments (sections below), and the
+candidate-versus-finding line from the trap list above holds: a family is never a finding.
+
+### 7. Shape: one candidate producer, three rules, one advisory seam
+
+The three H rules are produced by ONE module, `crates/checks/src/clone_rules.rs`, so the index
+is built once per repo:
+
+```
+pub const RULE_SINGLE_SOURCE: &str = "ARCH-SINGLE-SOURCE-LOGIC-1";
+pub const RULE_NAMING: &str = "ARCH-NAMING-ONE-CONCEPT-1";
+pub const RULE_SHARED_PRIMITIVE: &str = "UI-SHARED-PRIMITIVE-1";
+pub const RULE_IDS: &[&str] = &[RULE_SINGLE_SOURCE, RULE_NAMING, RULE_SHARED_PRIMITIVE];
+pub const INTEREST_GLOBS: &[&str] = &["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.mjs",
+                                      "**/*.cjs", "**/*.py", "**/*.rs"];
+
+pub enum CloneRule { SingleSourceLogic, NamingOneConcept, SharedPrimitive }
+
+pub struct Candidate {
+    pub rule: CloneRule,
+    pub id: String,            // "<RULE>:<family key hex>:<token_len>"; stable across scans
+    pub family: CloneFamily,
+    pub facts: CandidateFacts, // the deterministic facts the finding will state (per rule)
+    pub rank: u32,             // 0 = judged first (per-rule ranking, section "Cost")
+}
+
+pub struct CandidateSet {
+    pub by_rule: BTreeMap<CloneRule, Vec<Candidate>>,  // ranked, capped (section "Cost")
+    pub over_cap: BTreeMap<CloneRule, u32>,            // candidates NOT judged this scan
+    pub index: IndexSummary,                           // files_read, skipped counts, truncated
+}
+
+/// Deterministic. `armed` selects which rules' candidates are built; an unarmed rule costs
+/// nothing. Never panics.
+pub fn candidates(files: &[(String, String)], armed: &HashSet<&str>) -> CandidateSet;
+
+/// The structured, bounded input one candidate hands the judge (section "Wiring"): never a
+/// whole file.
+pub fn judge_input(c: &Candidate, files: &[(String, String)]) -> JudgeInput;
+```
+
+`clone_rules` is NOT registered in `arch_checker::all_checkers`. A registered checker's
+`check()` output becomes a `Defect` finding in `arch_violation_to_finding` with no judgment in
+between, and the write-time runner and the `camerata-check` CI binary (which have no model) run
+every registered checker and would report an empty `check()` as clean. Instead:
+
+- `mechanical_gate::detector_channel` gains an arm: `clone_rules::RULE_IDS` → `Some("clone_advisory")`,
+  so the ledger loop in `audit_repos` (around `onboard.rs:1700`) has a named channel for these
+  ids and does NOT record them there (the advisory seam records them; "Wiring").
+- `camerata-check --rule-ids ARCH-SINGLE-SOURCE-LOGIC-1` reports the id as unsupported ("needs
+  the scan's advisory tier"), never clean.
+- The three rules keep `enforcement = "architectural"` (the W26/W4 gates only inspect
+  `mechanical` for a missing channel; `is_ci_tier_rule` routes them to the ledger loop, which
+  now knows the channel).
+
+## ARCH-SINGLE-SOURCE-LOGIC-1: the algorithm and its traps
+
+### 1. What a CANDIDATE is (deterministic)
+
+A clone family from the index such that ALL of the following hold:
+
+1. `token_len >= 60`, `distinct_files >= 2`, not `house_pattern`.
+2. **Decision test.** The shared sequence contains (a) at least one of: a `$ARITH`/`$CMP`/
+   `$LOGIC` token, an `if`/`elif`/`else if`/`match`/`switch`/`case`/`when` keyword, or a
+   ternary (`?` followed later by `:` at the same nesting depth; Python `if`/`else` expression);
+   AND (b) at least one of: a `$NUM`, a `$STR`, a `$LIT`, or a `$PROP`. (The work order's
+   "conditional on a domain identifier": a comparison that touches a field or a literal.)
+3. **Not an error wrapper.** Excluding sequences whose only decision tokens sit inside a
+   `catch`/`except` clause or a `throw`/`raise` statement (a retry/log/rethrow skeleton has
+   comparisons and literals but is not a business decision; the advisory would reject most of
+   these, and the cheaper deterministic cut keeps them off the bill).
+4. Every member is inside a function, method or arrow body (`extract::functions` spans), or
+   is a top-level expression statement in a module that is not a config-shaped file
+   (DEAD-CODE G3 basenames). Module-level constant tables are D5/D10.
+
+For a candidate, the detector then computes the facts the finding will state:
+
+- `agree: bool` and `disagreements: Vec<Disagreement>`: the Exact-mode token sequence of every
+  member is compared with the first member's (members sorted by path). **"Agree" means: the
+  Exact-mode token sequences of all members are identical.** Since Structural equality already
+  holds, the only tokens that can differ are property names, literal values and operator text;
+  a disagreement therefore always reads as one of "`??` versus `||`", "`0.12` versus `0.15`",
+  "`total` versus `subtotal`", "`>=` versus `>`", "`'pending'` versus `'PENDING'`", each with
+  both lines. The family does not agree iff any member differs from the first.
+- `decision_tokens`: the Exact text of the operator/literal/property tokens in the shared
+  sequence (for ranking and for the judge).
+
+### 2. What the advisory judgment decides, and the exact structured input
+
+The judge answers ONE question per candidate: **is this one application decision implemented
+in each listed place** (a price, fee, status derivation, display name, permission check, tier
+or bucket computation), as opposed to boilerplate, a framework shape, or a coincidence? It does
+not decide agreement (deterministic), locations (deterministic), or severity (deterministic
+from `agree`).
+
+Input per candidate (`JudgeInput`, serialized as JSON in the prompt; never a whole file):
+
+```
+{
+  "id": "ARCH-SINGLE-SOURCE-LOGIC-1:9f3a...:74",
+  "rule": "ARCH-SINGLE-SOURCE-LOGIC-1",
+  "token_len": 74,
+  "member_count": 3,
+  "members": [                       // at most 3 shown, the rest counted in member_count
+    { "path": "src/cart/total.ts", "lines": "41-52",
+      "enclosing": "function applyDiscount",          // extract::functions name, if any
+      "code": "  if (user.isPremium) {\n    ..." },   // the span's raw source lines,
+                                                      // at most 30 lines, trimmed
+    ...
+  ],
+  "decision_tokens": ["isPremium", "?", "*", "0.2", ":", "0"],
+  "agree": false,
+  "disagreements": [{ "a": "0.2", "b": "0.15", "line_a": 44, "line_b": 18 }]
+}
+```
+
+Output per candidate, a closed vocabulary parsed with `extract_json_object` exactly like the
+calibration pass's verdicts:
+
+```
+{"verdicts":[{"id":"...","verdict":"same_decision|different|boilerplate|unsure","concept":"<= 8 words naming the decision, or empty"}]}
+```
+
+Only `same_decision` produces a finding. `different` and `boilerplate` are retained as judged
+candidates (transcript + ledger counts), `unsure` and any unparsed or missing verdict are
+UNJUDGED (never a finding; counted; disclosed). An id in the response that was not in the
+request is ignored.
+
+### 3. Never dropped, never shipped unjudged
+
+- The full ranked candidate list (section 1) and every verdict are appended to the scan
+  transcript (`TranscriptStore`, the same `feedback` channel `verify_findings` records into)
+  under an agent named `clone-judge:<rule>`, and the ledger records per rule: candidates
+  found, judged, confirmed, unjudged, over cap. An operator can see every candidate; a client
+  never sees an unjudged one.
+- A candidate becomes a client finding only through a `same_decision` verdict. No model, no
+  key, a failed batch, a parse failure, a verdict for an unknown id, `unsure`: none of these
+  can promote a candidate. The degradation is a `not_assessed` row (Wiring, section "Offline").
+- The verdict cache (Wiring) is keyed on the candidate's content, so an unchanged family on a
+  re-scan is judged by its cached verdict, never re-billed and never re-guessed.
+
+### 4. What becomes a client finding, and the verifiable fact it states
+
+One finding per confirmed family. `path`/`line` = first member by path; `snippet` = the first
+member's first source line; `also_locations` = every other member as a `MergedLocation` (so the
+export lists every site and the ledger's location accounting reconciles); `captures = {"concept":
+<judge concept>}`; `kind = Defect`; `preview = true`, `preview_tool = ARCH_PREVIEW_TOOL`;
+`confidence = Some("high")` (section 6 explains); `evaluated_option_id = Some(violating option)`.
+
+The fact stated, in two forms:
+
+- **Copies do not agree (severity `high`):** "The same decision is written in 3 places and the
+  copies do not agree. `src/cart/total.ts:41-52`, `src/checkout/summary.ts:15-26` and
+  `src/api/quote.ts:70-81` are the same 74-token block apart from local names, which appears to
+  compute the premium discount, but at `src/cart/total.ts:44` the rate is `0.2` while
+  `src/checkout/summary.ts:18` uses `0.15`. Implement it once: one function in one module,
+  imported at every listed site, so a change to the rate is one edit. Verify by diffing the
+  listed lines: the only differences are local names and the values named here."
+- **Copies agree (severity `medium`):** "The same decision is written in 2 places and the
+  copies currently agree. `src/a.ts:10-21` and `src/b.ts:33-44` are the same 66-token block
+  apart from local names, which appears to derive the order status. Implement it once and
+  import it, so the two cannot drift. Verify by diffing the listed lines."
+
+"Appears to compute <concept>" is the judge's phrase and is the only non-deterministic clause;
+every location, count, token length and disagreement is machine-verified. If the judge returns
+an empty concept the clause is omitted. "Do not agree" is stated ONLY from a non-empty
+`disagreements` list, with the first three disagreements named and "and N more" for the rest.
+
+### 5. False-positive traps, each with a guard
+
+- **Boilerplate with a decision in it** (client factories with a `?? default`, Express/Next
+  error wrappers, retry loops): guard 3 (error wrappers) and B1 (house patterns) remove most;
+  the judge's `boilerplate` verdict removes the rest; `unsure` never ships.
+- **Intentional per-surface variants** (work order safe twin: "documented in a shared
+  helper's options"): if every member CALLS the same helper (a `$ID (` token sequence whose
+  Exact-mode callee name is identical across members and resolves, via `imports()`, to one
+  module), the repeated code is the call site plus its options, not a second implementation.
+  Guard: a family whose shared sequence contains a call whose callee is imported from the same
+  resolved module in every member file is dropped before the judge (`composed_variant`).
+- **Test arrange blocks**: D3.
+- **A property-name difference that is not a disagreement about the rule** (`user.id` versus
+  `account.id`): it IS reported as a disagreement, and the message names both tokens with
+  their lines, so the claim is checkable in one look. The alternative (collapsing property
+  names in Exact mode) would make "the copies agree" false for `total` versus `subtotal`.
+  Decided: a disagreement names what differs; it never characterizes it beyond that.
+- **Operator-only differences that are semantically equal** (`x !== null` versus `x != null`
+  on a value that is never `undefined`): reported as a disagreement (they are different code);
+  severity `high` is per the work order; the message is still true.
+- **Cross-language copies** (a TS client and a Python server computing the same fee): never
+  grouped; the grammars tokenize differently and the fix "one helper" does not exist across
+  languages (the SHARED-CONSTANT ruling).
+- **Generated, vendored, minified, migration, i18n, data**: D1 to D7, D10.
+- **Same-file repetition only**: not a family.
+- **Truncated scan or truncated index**: the rule still runs (a found family is a found
+  family; absence is not claimed), but the convention row (section 7, "clean" statement) is
+  withheld, exactly as DEAD-CODE withholds on an incomplete scan.
+
+### 6. Severity, confidence, domain, message, corpus TOML
+
+- **Severity.** `high` when `!agree`, `medium` when `agree` (the work order's "drops one
+  level; the finding stays"). TOML `max_severity = "high"`. W26 applies: the rule carries
+  `[[sources]]` and a `remediation` with `effort`.
+- **Confidence.** `Some("high")`, `needs_review = false`. The model's verdict is a GATE on
+  which families are shown, not a claim inside the row; every sentence except "appears to
+  compute X" is a token-comparison fact, and that clause is marked as an appearance. A
+  `needs-review` grade would route every row to the held bucket (`is_held_for_review`, C5-4)
+  and `group_structural_needs_review` (P7) would collapse the medium rows of this rule into one
+  grouped row, erasing the per-family disagreement the rule exists to state. This is the
+  decision; it is reversible by one line in the seam if scan data shows the judge confirming
+  coincidences.
+- **Domain.** `universal` (Domain home table). Proposed-rules tests: proposed for a TS, a
+  Python and a Rust repo; `recommended` and `is_auto_recommended` true (`policy`).
+- **Message shape**: section 4. Client voice, no product names, no em-dashes. The site list
+  is complete (every member; no "and N more" for sites; disagreements cap at three named).
+- **Corpus TOML** `crates/rules/principles/universal/arch-single-source-logic-1.toml`:
+  `id = "ARCH-SINGLE-SOURCE-LOGIC-1"`, `version = 1`, `domain = "universal"`, `layer =
+  "universal"`, `enforcement = "architectural"`, `kind = "defect"`, `inspectable = true`,
+  `max_severity = "high"`, `default = true`, `verification = "policy"`, `[[sources]]` internal
+  only (this section; work order section 2; `docs/OVERNIGHT_DECISIONS.md` 2026-10-21 go). No
+  external authority states the rule as specified; related controls for a TOML comment, not
+  `[[sources]]`: jscpd and PMD CPD (token clone detectors; they report any duplication, not
+  decisions, and never compare copies), SonarSource "duplicated blocks". `qualifies` states, in
+  client voice: the token threshold, the one-language-family grouping, the decision test, that
+  copies are compared for agreement after local names are set aside, that the "same decision"
+  judgment is a reviewed assessment of the listed code, and every exclusion (tests, generated,
+  vendored, migrations, i18n, data tables, framework-wide patterns, composed variants). Options:
+  `each-decision-is-implemented-once` (default; directive: a price, fee, status derivation,
+  display name, permission check or bucket computation is written in one function or module
+  and imported wherever it is needed; `remediation`: move the logic into one exported function
+  in the module that owns the concept, call it at every listed site, delete the copies, and
+  verify by searching for the distinctive operator or value and finding only the one
+  implementation; `effort = "medium"`) and `the-same-decision-is-written-in-several-places`
+  (`violates = true`; fault-first `why`: copies drift, and a corrected rule in one place leaves
+  the old rule running in the others).
+
+### 7. Cost per scan, ranking and caps
+
+- **Ranking** (deterministic, before any model call): `!agree` first; then `member_count`
+  descending; then decision density (`decision_tokens.len() / token_len`) descending; then
+  `token_len` descending; then first member path ascending.
+- **Cap:** at most 160 candidates judged per rule per scan (10 batches of 16). Candidates
+  beyond the cap are counted in `over_cap`, disclosed in the ledger coverage note and in the
+  report's methodology ("N further repeated-decision candidates were found and not assessed
+  this scan"), and never shipped. The cap is a constant (`CLONE_JUDGE_MAX_PER_RULE`), not a
+  config knob, so cost is bounded by construction.
+- **Tokens:** a candidate is at most 3 members x 30 lines (about 360 tokens each) plus facts,
+  under 1,200 input tokens; a batch of 16 is under 20k input plus a 1.2k-token stable prefix
+  (system prompt, rule text, output schema; marked as the single cache breakpoint, so it is
+  served from cache after the first batch). Output: `scaled_max_tokens(16, 80)` = the 4,096
+  floor; actual output about 60 tokens per candidate.
+- **Model calls:** `ceil(judged / 16)` per rule; worst case 10. On the registry's fast tier
+  (`claude-haiku-4-5-20251001`, $1 in / $5 out per million, `model_registry.rs`): worst case
+  for this rule 200k input + 10k output = about $0.25; a typical 3k-file repo with 10 to 20
+  candidates is one or two calls, about $0.03. Zero on a re-scan whose families are unchanged
+  (verdict cache).
+
+### 8. Tests, by name (checks crate: no model; server crate: stub model)
+
+Positive (`clone_rules.rs`, `candidates(files, armed)` with only this rule armed; expect ONE
+candidate unless stated, with the stated facts):
+- `premium_discount_written_twice_with_different_rates_is_a_disagreeing_candidate`:
+  `src/cart.ts` and `src/quote.ts` each hold a 12-line function applying `user.isPremium ?
+  subtotal * 0.2 : 0` plus a tax branch; the second uses `0.15`. Expect `agree == false`,
+  `disagreements == [{a:"0.2", b:"0.15", ..}]`, `token_len >= 60`.
+- `identical_copies_under_renamed_locals_agree`: same bodies, every local renamed. `agree ==
+  true`, `disagreements` empty.
+- `nullish_versus_or_is_a_named_disagreement`: `title ?? slug` block in one file, `title ||
+  slug` in another, padded to 60 tokens with identical surrounding logic. One disagreement
+  `??`/`||`.
+- `property_name_difference_is_a_named_disagreement`: `order.total * rate` versus
+  `order.subtotal * rate`. One disagreement `total`/`subtotal`.
+- `three_files_are_all_listed_and_sorted`: three copies; members sorted by path.
+- `python_status_derivation_copied_across_modules_is_a_candidate`: two `.py` modules with the
+  same `if/elif` ladder over `order.state` and string literals.
+- `rust_fee_computation_in_two_modules_is_a_candidate`: two `.rs` files with the same `match`
+  over a field with numeric arms.
+- `ranking_puts_disagreeing_families_first`: one agreeing, one disagreeing; `rank` order.
+- `judge_input_shows_at_most_three_members_and_thirty_lines_each`.
+
+Safe twins (zero candidates unless stated):
+- `twin_client_factory_boilerplate_without_a_decision_is_not_a_candidate`: two identical
+  `createClient(url, key, { auth: {...} })` blocks (no operator/conditional).
+- `twin_error_wrapper_skeleton_is_not_a_candidate`: identical `try { ... } catch (e) { if (e
+  instanceof X) throw ...; log(e) }` in two files (decision only inside catch).
+- `twin_test_arrange_blocks_are_never_read`: the copies live in `*.test.ts`.
+- `twin_composed_variant_calling_one_helper_is_not_a_candidate`: both files import
+  `applyDiscount` from `./pricing` and call it with different options.
+- `twin_house_pattern_in_a_quarter_of_files_is_skipped`: the same route-handler skeleton with a
+  `status === 401` check in 6 of 20 files.
+- `twin_same_file_repetition_is_not_a_family`.
+- `twin_generated_vendored_minified_and_migration_files_are_skipped`: one copy in `src/`, the
+  other in `vendor/`, then in a `@generated` file, then in a `.min.js`, then in `migrations/`.
+- `twin_data_table_window_is_not_fingerprinted`: two identical 80-token object literals of
+  strings and numbers.
+- `twin_cross_language_copies_are_not_grouped`: the same logic in `a.ts` and `a.py`.
+- `twin_type_declarations_and_imports_contribute_no_tokens`: two files identical in imports and
+  interfaces, different bodies.
+- `twin_tiny_clone_below_threshold_is_not_a_candidate`: a 40-token decision block (index finds
+  it; rule threshold 60 excludes it).
+- `twin_malformed_and_empty_inputs_never_panic`.
+
+Advisory seam (`crates/server/src/onboard/clone_advisory.rs`, with a `StubJudge: LlmPort`
+whose `complete_streaming` returns scripted verdict JSON, the `StubModel` pattern of
+`config_gated_architectural_rule_semantic_coverage_e2e.rs`; no live model, no key):
+- `same_decision_verdict_becomes_a_high_finding_when_copies_disagree`: message contains "do not
+  agree", both values, every path; `severity == "high"`, `confidence == Some("high")`,
+  `also_locations.len() == members - 1`.
+- `same_decision_verdict_becomes_a_medium_finding_when_copies_agree`.
+- `different_and_boilerplate_verdicts_produce_no_finding_but_are_counted`.
+- `unsure_and_missing_verdicts_never_produce_a_finding`.
+- `an_unparseable_response_leaves_the_batch_unjudged_and_emits_not_assessed`.
+- `a_verdict_for_an_unknown_id_is_ignored`.
+- `no_model_emits_one_not_assessed_row_per_armed_rule_with_candidates_and_no_findings`.
+- `zero_candidates_emits_no_not_assessed_row_and_credits_the_rule_as_run`.
+- `cached_verdict_is_reused_without_a_model_call` (the stub counts calls).
+- `over_cap_candidates_are_counted_and_disclosed_not_judged`.
+- `judge_model_is_the_fast_tier_unless_overridden` and `judge_model_is_recorded_in_provenance`.
+- `candidate_list_and_verdicts_are_written_to_the_transcript`.
+
+### 9. Known false-negative limits (stated plainly)
+
+- Copies shorter than 60 Structural tokens are never candidates; a two-line fee formula
+  copied ten times is missed (ARCH-SHARED-CONSTANT-1 catches its literal when it has a domain
+  shape).
+- Copies that differ structurally (an `if` ladder versus a `switch`; a loop versus `.map`) are
+  not the same family and are missed.
+- Copies across languages, in tests, in generated or vendored code, in migrations, in config
+  files, or in a pattern present in a quarter of the files are never reported.
+- A candidate the judge marks `unsure`, a batch that fails, and every candidate past the
+  160-per-rule cap are not reported this scan.
+- "Do not agree" compares the shared sequence only; a difference OUTSIDE the shared block
+  (an extra guard before one copy) is not seen.
+
+## ARCH-NAMING-ONE-CONCEPT-1: the algorithm and its traps
+
+### 1. What a CANDIDATE is (deterministic)
+
+The work order lists three shapes. Two are built; the third is a stated limit.
+
+**(a) Near-identical function bodies under different names.** A clone family with `token_len
+>= 60`, `distinct_files >= 2`, not `house_pattern`, where every member span covers at least 90%
+of the tokens of ONE function span (`extract::functions`; the smallest span containing the
+member) and the set of declared names of those functions has at least two members whose
+**name words differ**. Name words: split on `_`, `-`, camel and Pascal boundaries, lower-case,
+drop the leading verb when it is one of `get set fetch load compute calc calculate format
+render build make create to from as is has should` and the trailing noise words `impl helper
+util utils fn func`. Two names are "different" iff the resulting word multisets differ
+(`formatPrice`/`formatMoney` → `{price}`/`{money}`: different; `getUser`/`fetchUser` → `{user}`/
+`{user}`: NOT different, that is a verb choice, not a concept split; `formatPrice`/
+`format_price`: same). Members whose names are `<anonymous>` or `default` are kept in the
+family listing but do not count toward "two different names".
+
+**(b) Module overlap.** When two files are linked by two or more (a)-candidates (two function
+pairs cloned between the same two files) the pair candidates are ROLLED UP into one module
+candidate naming both files and every pair; the per-function candidates are removed. This is
+the work order's `lib/format` versus `utils/format`; the rule states which functions overlap
+instead of guessing at purpose from folder names.
+
+**(c) Misleading names** (a `refresh` never called, a `public` fetch returning private fields):
+no deterministic candidate exists without data-flow analysis; out of v1 (section 7).
+
+Facts computed per candidate: the name pairs with their files and lines; the Exact-mode
+diff (as in SINGLE-SOURCE; a naming family is also a logic family, and the message says whether
+the bodies agree); the module roll-up when (b) applies.
+
+### 2. What the advisory decides and its input
+
+ONE question: **do these differently named functions implement the same concept** (one helper
+that should have one name), as opposed to domain homonyms or a deliberate adapter at a
+boundary? Input per candidate: `JudgeInput` as above with `"rule": "ARCH-NAMING-ONE-CONCEPT-1"`,
+`"names": [{"name": "formatPrice", "path": "lib/format.ts", "lines": "4-19"}, ...]`, the member
+code (at most 3 x 30 lines), `"agree"` and `"disagreements"`; for a roll-up, `"module_pair":
+["lib/format.ts", "utils/format.ts"]` and the pair list. Output vocabulary: `same_concept |
+different_concept | adapter | unsure`; only `same_concept` ships. `adapter` is retained as a
+judged candidate (a boundary rename is the work order's safe twin).
+
+### 3. Never dropped, never shipped unjudged
+Identical to SINGLE-SOURCE section 3 (same seam, same transcript, same cache, same counts).
+
+### 4. The client finding and its verifiable fact
+
+Severity `low`, `kind = Defect`, `confidence = Some("high")`, `preview = true`, `captures =
+{"concept": ...}`, `also_locations` for the other members.
+
+- Function pair: "The same thing is called `formatPrice` in `lib/format.ts:4-19` and
+  `formatMoney` in `utils/money.ts:11-26`: the two bodies are the same 68-token block apart from
+  local names, and they currently agree. Keep one, re-export or delete the other, and give it
+  the name that says what it does. Verify by diffing the two bodies."
+- With a disagreement: "... and they do not agree: at `lib/format.ts:9` the fallback is `'USD'`
+  while `utils/money.ts:16` uses `'EUR'`." (The disagreement is stated as in SINGLE-SOURCE; the
+  severity stays `low`, because the rule's subject is the name. When the same family is also a
+  SINGLE-SOURCE finding, that finding carries the severity and this one links to it by sharing
+  `captures["family"]`; the exporter's location merge does not collapse them because the rule
+  ids differ.)
+- Module roll-up: "`lib/format.ts` and `utils/format.ts` overlap: `formatDate` matches
+  `fmtDate` (`lib/format.ts:4-19` / `utils/format.ts:3-18`) and `formatNumber` matches
+  `numberToText` (...). Keep one module; re-export from the other during the move, then delete
+  it."
+
+### 5. False-positive traps and guards
+
+- **Domain homonyms** (two `normalize` functions for two different concepts): they are not in
+  one family unless the bodies are token-identical; and if they are, the judge's
+  `different_concept` keeps them out. `unsure` never ships.
+- **Adapters that rename at a boundary** (`toApiUser` wrapping `mapUser`): the composed-variant
+  guard from SINGLE-SOURCE applies (a member that calls the other member's function, resolved
+  through `imports()`, is a wrapper, not a copy); what remains goes to the judge with the
+  `adapter` verdict available.
+- **Verb-only differences** (`getX`/`fetchX`, `buildX`/`makeX`): not "different names" by the
+  word rule; never a candidate.
+- **Overloads and dialect twins** (`foo.ts` and `foo.js` emitted copy): `emitted_js_paths`
+  excludes the twin; a `.d.ts` is D1.
+- **Framework-required duplicate names** (Next `page.tsx` files each exporting `default`,
+  Django views each defining `get`): `default`/`<anonymous>` do not count; identical method
+  names (`get` and `get`) are the same name, not a naming split.
+- **Generated, vendored, test, migration, data**: D1 to D7.
+
+### 6. Severity, domain, message, corpus TOML
+
+- `low` always (`max_severity = "low"`); "misleading names at medium" is not attempted (c).
+- Domain `universal`; proposed-rules tests for TS, Python, Rust repos.
+- TOML `crates/rules/principles/universal/arch-naming-one-concept-1.toml`: `kind = "defect"`,
+  `enforcement = "architectural"`, `inspectable = true`, `default = true`, `verification =
+  "policy"`, internal `[[sources]]` (this section, work order section 5, the 2026-10-21 go).
+  Options `one-concept-has-one-name` (default; directive: a helper that does one thing exists
+  once under one name, and modules do not duplicate each other's helpers under different names;
+  `remediation`: keep one implementation, re-export it from the old location while callers
+  move, then delete the copy, and verify by searching for both names and finding one
+  definition; `effort = "low"`) and `the-same-helper-exists-under-several-names` (`violates =
+  true`). `qualifies` names the 60-token threshold, the whole-body requirement, the name-word
+  rule, the agreement statement, the reviewed "same concept" judgment, and the exclusions.
+  Related controls in a comment: none states this rule (eslint `no-dupe-*` rules are intra-file).
+
+### 7. Cost, ranking, caps
+
+Ranking: module roll-ups first (most sites per call); then `!agree`; then `member_count`
+descending; then `token_len` descending; then path. Cap 160 judged per scan, batches of 16;
+worst case about $0.25 on the fast tier, typically one call.
+
+### 8. Tests, by name
+
+Positive:
+- `two_functions_with_identical_bodies_and_different_nouns_are_a_candidate`: `formatPrice` in
+  `lib/format.ts`, `formatMoney` in `utils/money.ts`, 70-token identical bodies.
+- `python_helpers_under_two_names_are_a_candidate`: `to_display_name` / `display_label`.
+- `rust_free_functions_under_two_names_are_a_candidate`.
+- `two_cloned_pairs_between_two_files_roll_up_to_one_module_candidate`.
+- `body_disagreement_is_carried_into_the_naming_facts`.
+- `name_words_ignore_verbs_separators_and_case`: unit test on the word rule (`getUser` /
+  `fetch_user` same; `formatPrice` / `formatMoney` different; `userName` / `user_name` same).
+
+Safe twins:
+- `twin_same_name_in_two_modules_is_not_a_naming_candidate`: two `formatPrice` (that is
+  SINGLE-SOURCE's job, not this rule's).
+- `twin_verb_only_difference_is_not_a_candidate`.
+- `twin_wrapper_that_calls_the_other_function_is_not_a_candidate`.
+- `twin_partial_body_overlap_below_ninety_percent_is_not_a_naming_candidate`: two functions
+  sharing a 60-token middle but with different prologues (SINGLE-SOURCE may still see it).
+- `twin_default_exports_do_not_count_as_different_names`: two Next pages.
+- `twin_emitted_js_twin_is_ignored`.
+- `twin_test_generated_vendored_files_are_skipped`.
+
+Seam (stub model): `same_concept_verdict_becomes_a_low_finding_listing_both_names`,
+`different_concept_and_adapter_verdicts_produce_no_finding`, `module_rollup_finding_lists_every_pair`,
+plus the shared seam tests (no model, cache, cap, provenance, transcript) parameterized over the
+rule.
+
+### 9. Known false-negative limits
+
+Misleading names (c) are not detected. Two helpers for one concept whose bodies differ
+structurally are missed. Names differing only by verb are never reported. Bodies under 60
+tokens, or in files D1 to D7 exclude, are never read. Module overlap is reported only through
+cloned function pairs, never from export names or folder names alone.
+
+## UI-SHARED-PRIMITIVE-1: the algorithm and its traps
+
+### 1. What a CANDIDATE is (deterministic)
+
+Scope: files with `lang_for_path` in `{Tsx, JavaScript (.jsx only), TypeScript (.ts), JavaScript
+(.js)}` under a package whose nearest `package.json` depends on `react`, `preact`, `next`,
+`react-native` or `expo` (detected from manifest text; the `ui` domain is proposed for those
+stacks). Rust `rsx!`/Leptos `view!` and Vue/Svelte templates are out of v1 (section 9).
+
+A clone family with `token_len >= 40`, `distinct_files >= 2`, at most 40 members (B1's
+ubiquity skip does NOT apply; the 50-file bucket cap does), such that:
+
+1. **Every member lies inside a UI unit:** a `jsx_element`/`jsx_self_closing_element`/
+   `jsx_fragment` subtree (the span's first and last tokens are inside one JSX node), OR the
+   body of a function passed to `useEffect`/`useLayoutEffect`/`useCallback`/`useMemo`/
+   `useImperativeHandle`, OR the body of a function whose name matches `^use[A-Z]` (a custom
+   hook).
+2. **Mechanism mark:** the shared sequence contains at least one of: a conditional (`&&`
+   inside JSX, a ternary, an `if`), a JSX attribute whose name starts with `on` followed by an
+   upper-case letter, a `use[A-Z]...` call, `addEventListener`/`removeEventListener`, a
+   `ref.current` access, `setTimeout`/`requestAnimationFrame`, `document.`/`window.`. Pure
+   static markup (a layout with no behaviour) is the "one-off layout" safe twin and is not a
+   mechanism.
+3. **Not already composed:** when the outermost JSX node of every member's span is a single
+   element whose tag is an identifier IMPORTED in that file (`imports()` names it) and the
+   tokens outside that element are fewer than 40, the family is use of a shared component, not
+   a hand-written mechanism; dropped (`composed_variant`). A wrapper with its own conditional
+   or handler around an imported component stays a candidate.
+
+Facts: `mechanism_marks` (which of the marks fired, with Exact text: `onClick`, `useEffect`,
+`addEventListener('mousedown'...)`), `jsx_tags` (the kept tag names in order), `hooks` (the
+`use*` callees), member count and files, and for the message the first member's first line.
+
+### 2. What the advisory decides and its input
+
+ONE question: **is this one UI mechanism hand-written in each listed component** (a spinner,
+retry control, menu host, fade latch, empty state, focus trap, outside-click, scroll lock),
+as opposed to unrelated markup that happens to share shape? Input: `JudgeInput` with `"rule":
+"UI-SHARED-PRIMITIVE-1"`, members (at most 3 x 30 lines), `"jsx_tags"`, `"hooks"`,
+`"mechanism_marks"`. Output: `same_mechanism | different | unsure`; only `same_mechanism` ships;
+the `concept` field names the mechanism (`"outside-click dismiss"`, `"loading spinner"`).
+
+### 3. Never dropped, never shipped unjudged
+As above.
+
+### 4. The client finding and its verifiable fact
+
+Severity `low`, `kind = Defect`, `confidence = Some("high")`, `captures = {"mechanism": ...}`,
+`also_locations` for the other members: "4 components hand-write the same outside-click
+dismiss: `components/Menu.tsx:22-31`, `components/Popover.tsx:40-49`,
+`features/filters/Dropdown.tsx:15-24` and `app/(shop)/CartDrawer.tsx:58-67` contain the same
+58-token effect apart from local names and strings. Make it one hook or component in the
+shared UI module and use it in each listed place. Verify by diffing the listed ranges."
+Strings are set aside explicitly in the sentence because labels and class names are
+normalized (the work order: "with only labels differing").
+
+### 5. False-positive traps and guards
+
+- **One-off layouts**: the mechanism mark (1.2).
+- **Variants already composed from the primitive**: 1.3, plus the judge.
+- **Design-system wrappers** (`<Button variant="ghost">` everywhere): a single imported element
+  is composed; a family of attribute lists is under 40 tokens or fails the mark.
+- **Framework-mandated wiring** (Next `layout.tsx` shells, Storybook stories, Remix route
+  exports): stories are D3; a `layout`/`page` shell with no mechanism fails 1.2; one with a
+  mechanism repeated in 10 routes is a real finding.
+- **Hook rule boilerplate** (`useEffect(() => { ... }, [])` subscribe/unsubscribe pairs for
+  DIFFERENT events): tag/attribute/hook names are kept, strings are not, so
+  `addEventListener('scroll')` and `addEventListener('resize')` effects DO match structurally;
+  the judge decides whether a "window event subscription" is one mechanism. The message names
+  the Exact text of the differing string in a trailing clause ("the subscribed events differ:
+  `scroll`, `resize`") so the client sees the difference the rule set aside.
+- **Tests, stories, generated, vendored, minified**: D1 to D7.
+- **Non-React JSX (Solid, Qwik)**: the manifest gate keeps the rule off packages without a React
+  family dependency (false negative).
+
+### 6. Severity, domain, message, corpus TOML
+
+- `low` (`max_severity = "low"`).
+- Domain `ui`. **Carries the recorded `domain_to_glob("ui")` fix**: `crates/rules/src/lib.rs:3288`
+  still maps `ui` to `**/*.{tsx,css}` (this feeds an emitted `Role.allowed_paths`, not the scan;
+  the scan uses `INTEREST_GLOBS`). Widen to `**/*.{jsx,tsx,ts,js,css}` with a test. The
+  proposed-rules test for this rule uses the `src/app.jsx` + React manifest fixture already in
+  `propose.rs`.
+- TOML `crates/rules/principles/ui/ui-shared-primitive-1.toml`: `domain = "ui"`, `layer =
+  "universal"`, `enforcement = "architectural"`, `kind = "defect"`, `inspectable = true`,
+  `default = true`, `verification = "policy"`, internal `[[sources]]` (this section, work order
+  section 6, the go). Options `repeated-ui-mechanisms-are-one-shared-component` (default;
+  `remediation`: extract the mechanism into one hook or component in the shared UI module,
+  replace each listed copy with a use of it, and verify by searching for the mechanism's
+  distinctive call and finding it only in the shared module; `effort = "low"`) and
+  `ui-mechanisms-are-hand-written-per-component` (`violates = true`). `qualifies` states the
+  JSX/hook scope, the 40-token threshold, the mechanism marks, the composed-variant exclusion,
+  the React-family package gate and the reviewed "same mechanism" judgment. Related control in
+  a comment: the existing per-subject rules (`UI-IMAGE-COMPONENT-1`, `UI-UTC-DATES-1`) which
+  this generalizes.
+
+### 7. Cost, ranking, caps
+
+Ranking: `member_count` descending; then number of mechanism marks descending; then
+`token_len`; then path. Cap 160, batches of 16, worst case about $0.25 on the fast tier.
+
+### 8. Tests, by name
+
+Positive:
+- `outside_click_effect_in_three_components_is_a_candidate`: three `.tsx` files with the same
+  `useEffect` subscribe/unsubscribe/contains block.
+- `conditional_spinner_block_in_two_components_is_a_candidate`: `{loading && (<div ...><Spinner
+  /><span>Loading</span></div>)}` padded with a retry button `onClick`.
+- `empty_state_with_retry_handler_is_a_candidate`.
+- `custom_hook_body_duplicated_across_files_is_a_candidate`: `useScrollLock` in two files.
+- `jsx_file_under_react_package_is_in_scope`.
+- `differing_labels_and_classnames_still_match_and_are_named`: message names the differing
+  strings.
+
+Safe twins:
+- `twin_static_layout_without_a_mechanism_is_not_a_candidate`: identical 60-token markup, no
+  conditional/handler/hook.
+- `twin_single_imported_component_with_props_is_composed`: `<Modal open={x} onClose={f}>`
+  usage in five files.
+- `twin_wrapper_with_its_own_conditional_around_an_imported_component_is_still_a_candidate`
+  (positive sibling of the above).
+- `twin_stories_and_tests_are_skipped`.
+- `twin_package_without_react_family_dependency_is_out_of_scope`: Solid JSX.
+- `twin_vue_and_svelte_files_are_never_read`.
+- `twin_below_forty_tokens_is_not_a_candidate`.
+
+Seam (stub model): `same_mechanism_verdict_becomes_a_low_finding_counting_components`,
+`different_verdict_produces_no_finding`, plus the shared seam tests.
+
+### 9. Known false-negative limits
+
+Rust `rsx!`/`view!`, Vue, Svelte, Angular templates and CSS-only mechanisms are not read.
+Mechanisms split across a component and a hook file are not one span. Static markup is never
+reported. Packages without a React-family dependency are never reported. Anything below 40
+tokens, or structurally different (a class component versus a hook), is missed.
+
+## Wiring the H rules: the advisory seam
+
+**Where.** New module `crates/server/src/onboard/clone_advisory.rs` (server side: it needs
+`LlmPort`). Called from `audit_repos` immediately after `audit_architectural` and the ledger
+loop (`onboard.rs:1642` to `1744`), inside the `run_deterministic` block (candidates are
+deterministic), with the judge call gated on `run_ai_review` (the same gate as every other
+model pass; `Blocked` has already forced it off at `onboard.rs:1306`). It uses the SAME `llm`
+(`onboard.rs:1396`) and folds usage into the SAME `meter`, so the cockpit's actual-versus-
+estimated readout sees it.
+
+```
+pub struct JudgeOutcome { pub findings: Vec<Finding>, pub not_assessed: Vec<Finding>,
+                          pub counts: BTreeMap<CloneRule, JudgeCounts>, pub failed: Vec<FailedPass> }
+pub struct JudgeCounts { pub found: u32, pub judged: u32, pub confirmed: u32, pub unjudged: u32, pub over_cap: u32, pub cached: u32 }
+
+pub async fn judge_clone_candidates(
+    llm: Option<&dyn LlmPort>,        // None: no model this scan (deterministic-only or blocked)
+    repo: &str, files: &[(String, String)], set: CandidateSet, armed: &HashSet<&str>,
+    judge_model: &str, cache: &mut VerdictCache, meter: Option<&UsageMeter>,
+    feedback: Option<(&TranscriptStore, &str)>, index_truncated: bool,
+) -> JudgeOutcome;
+```
+
+**Prompt shape** (mirrors `verify_findings`): system prompt = the judge's role and the closed
+output vocabulary; user prompt = `Repository: {repo}\n` + the rule's `directive` and `qualifies`
+text from the corpus (so the model judges against the client-facing definition) + the batch's
+`JudgeInput` JSON array. One cache breakpoint after the rule text (`with_cache_prefix_len`).
+`max_tokens = scaled_max_tokens(batch_len, 80)`. Streamed via `complete_streaming` so the
+transcript shows real output. One batch failure loses only that batch's candidates (unjudged),
+never the scan.
+
+**Model choice.** Classification on bounded structured input is the fast band of the project's
+tier map (`docs/decisions/2026-06-20_deterministic_model_tiering.md`; the owner's rule that
+tiering applies to Camerata's own calls, and the session process line "Haiku does mechanical
+work"). `resolve_clone_judge_model(caller_pick)`: the caller's explicit pick, else
+`CAMERATA_CLONE_JUDGE_MODEL`, else the project's `TierMap.fast` primary
+(`fleet::tier::default_fast_model()` = `claude-haiku-4-5-20251001`). Never the audit model by
+default. The resolved id is stamped into a new `ScanProvenance.clone_judge_model:
+Option<String>` (beside `audit_model`/`calibration_model`), so a before/after comparison can
+attribute a change to the judge; the graded sweep's GRADER model is a separate harness setting
+and is not touched by this work (MASTER-SEQUENCE 19f: grader model fixed, rubric revised).
+On the CLI backend the id is passed as `--model` exactly as today (`llm.rs:1323`).
+
+**Cache.** `VerdictCache`: a sidecar JSON beside the project's scan manifest (same app-data
+location as `scan_cache`, NOT in the repo), `serde(default)` additive so `MANIFEST_VERSION` is
+not bumped. Key = `fnv1a(rule_id | judge_model | PROMPT_SCHEMA_VERSION | candidate.id |
+normalized Structural token ids of the family | the Exact-mode disagreement list)`; value =
+`{verdict, concept, judged_at}`. Keyed on content, not paths, so a moved file hits. A verdict of
+`unsure` is NOT cached (it is retried next scan). Invalidated wholesale by a judge model change
+or a prompt schema bump. The clone index itself is recomputed every scan (deterministic,
+token-free); only verdicts are cached.
+
+**Offline / no key / deterministic-only.** `llm == None` (or `run_ai_review == false`): no call
+is made. For every armed H rule with `found > 0`: zero findings, ONE `not_assessed` row
+(`FindingKind::NotAssessed { reason: PassFailed, reason_detail: "advisory judgment did not run
+(<ai_blocked_reason | 'deterministic-only scan'>); N candidate families found, 0 judged" }`,
+severity `info`, `path` empty, `located = false`, `preview = true`), and a ledger entry
+`record_rule(id, RuleTier::Architectural, ran = false, skip_reason = Some(ADVISORY_UNAVAILABLE_NOTE),
+files_read, 0)` plus `note_advisory_unavailable_rule(id)` (a new queue beside
+`note_incomplete_scan_rule`, constant `ADVISORY_UNAVAILABLE_NOTE = "withheld: the deterministic
+pass found N candidate sites but the reviewed judgment that decides which are real did not run
+this scan, so the rule is reported as not assessed rather than clean"`). Candidates are NEVER
+promoted. With `found == 0` the rule ran and found nothing: `ran = true`, no row. A partial
+failure (some batches judged) ships the judged findings and ONE `not_assessed` row for the
+unjudged remainder with the count; `FailedPass { pass: "clone-candidate judgment" }` carries
+the error text to the methodology disclosure.
+
+**Index truncated / scan incomplete.** Findings still ship (a found family is a fact). The
+ConventionObserved "clean" row below is withheld and the ledger note says the index was
+partial.
+
+**Ledger.** The seam records each armed H rule once per repo under `RuleTier::Architectural`
+with `files_evaluated = index.files_read` and `findings_emitted = confirmed`. The loop at
+`onboard.rs:1700` skips ids whose `detector_channel` is `"clone_advisory"`. The transcript
+agent per rule records the full ranked candidate list and raw verdict JSON.
+
+**Convention row (work order section 83).** After judging, for each armed H rule with `ran =
+true`, `confirmed == 0`, no finding under that id from ANY tier (the semantic pass also reads
+every rule, `semantic_rule_ids_for_repo`, so an AI-tier row under the id counts as a trace,
+exactly like `conventions_observed_findings`'s `any_trace`), index not truncated, scan not
+incomplete: emit one `ConventionObserved` row (`convention_option_id` = the rule's default
+option, `severity = "info"`) whose detail states the detector's fact, not an affirmation the
+detector cannot make: "No application decision was found written in more than one file (N
+source files read, 60-token threshold, K candidate sites reviewed and judged not to be the same
+decision). Reported so the single-implementation convention can be adopted explicitly." It is
+emitted by the seam, not through `conventions_observed_findings` (which needs a
+`RuleRecommendation` the model produces for multi-option rules), and it respects the 46984f9
+asymmetry: when any condition fails, no row.
+
+**Coexistence with the semantic tier.** Every rule, including these three, is also in the
+whole-file semantic prompt by the owner's 2026-10-09 ruling. An AI-tier row under an H id is an
+ordinary AI finding: calibrated, cited, merged by `merge_by_location` when it lands on a site
+the seam also reports. The seam's rows are deterministic-tier (`preview = true`) and are never
+calibrated. No new merge logic.
+
+**How a needs-review grade is presented.** It is not used for H rows (decided above, each
+rule's section 6): the judge gates, the row states token facts, `confidence = Some("high")`.
+The ONLY hedged outputs of this seam are the `not_assessed` rows, which the existing exporters
+already render as "armed but not evaluated" (`report_export.rs:6036`, `xlsx_export.rs:3516`) and
+which `is_informational` keeps out of the action tiers. Should scan data show the judge
+confirming coincidences, the one-line change is `confidence = Some("needs-review")` in
+`findings_from_verdicts`, which routes the rows to the held bucket via the existing
+`is_held_for_review` gate; the P7 grouping consequence for the low rows is noted in
+SINGLE-SOURCE section 6.
+
+**Checklist per rule** (the orphan-rule list, applied): (1) TOML under the recorded go, `camerata
+corpus lock`; (2) `clone_rules.rs` candidates + facts; (3) `detector_channel` arm and the
+`camerata-check` unsupported notice; (4) proposed-rules test (universal x3 stacks; `ui` for the
+React fixture, with the `domain_to_glob` fix); (5) positive + safe-twin tests (checks crate) and
+the seam tests with the stub model (server crate); (6) `ScanProvenance.clone_judge_model`;
+(7) `VerdictCache` sidecar; (8) `ADVISORY_UNAVAILABLE_NOTE` + `note_advisory_unavailable_rule`;
+(9) `ecma::parse`/`python::parse` to `pub(crate)`; (10) transcript agent names
+`clone-judge:<rule>`.
+
+**Total model cost of Wave C per scan.** Three rules x at most 10 batches = at most 30 fast-tier
+calls, about 600k input (mostly cache-served after the first batch) and 30k output: under $0.80
+worst case at the registry's Haiku 4.5 price, about $0.05 to $0.10 on a typical repo, $0 on an
+unchanged re-scan. For comparison the audit pass runs on the audit model over every chunk of
+the repo; the judge never sees a file.
+
+## Owner questions for Wave C
+
+None that change what a rule means. Every choice above is decided and justified in place; the
+ones an owner might want to overturn later are called out as one-line reversals (the H-row
+confidence grade; the 60/40-token thresholds; property names counting as disagreements).
 
 ## Scope note
 Dead-code, one-import-path, shared-constant, state-shape, needless-complexity are **deterministic**
