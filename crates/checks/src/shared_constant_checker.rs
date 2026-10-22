@@ -1792,6 +1792,8 @@ mod tests {
             "app/seeds/b.py",
             "app/conftest.py",
             "app/b_test.py",
+            "app/tests.py",
+            "app/test_b.py",
         ] {
             assert_guarded(
                 vec![("app/a.py", py), (test_path, py)],
@@ -3267,6 +3269,9 @@ mod tests {
             "src/a.stories.tsx",
             "app/conftest.py",
             "conftest.py",
+            "app/tests.py",
+            "app/test_x.py",
+            "orders/test_client.py",
             "app/seeds/orders.py",
             "db/seed/orders.ts",
             "src/test/helper.rs",

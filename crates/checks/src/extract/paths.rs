@@ -34,9 +34,14 @@ pub fn is_test_path(path: &str) -> bool {
     }
     file.rfind('.').is_some_and(|dot| {
         let stem = &file[..dot];
-        [".test", ".spec", "_test", ".cy", ".stories"]
-            .iter()
-            .any(|suffix| stem.ends_with(suffix))
+        // `tests.py` / `test.py` / `test_x.py` are test modules by the Python and Django
+        // conventions (pytest's `test_*.py`, Django's `tests.py`).
+        stem == "tests"
+            || stem == "test"
+            || stem.starts_with("test_")
+            || [".test", ".spec", "_test", ".cy", ".stories"]
+                .iter()
+                .any(|suffix| stem.ends_with(suffix))
     })
 }
 
@@ -55,4 +60,40 @@ pub fn emitted_js_paths(files: &[(String, String)]) -> HashSet<&str> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn python_test_module_names_are_test_paths() {
+        for p in [
+            "app/tests.py",
+            "app/test.py",
+            "app/test_x.py",
+            "orders/test_client.py",
+            "src/tests.ts",
+            "src/test_helpers.rs",
+            "app/Tests.py",
+        ] {
+            assert!(is_test_path(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn names_that_only_contain_test_are_not_test_paths() {
+        for p in [
+            "app/testing.py",
+            "app/contest.py",
+            "app/attest.py",
+            "app/latest.py",
+            "app/testimony.py",
+            "app/x_test_data.py",
+            "app/protest_x.py",
+        ] {
+            // `x_test_data` and the others end in neither `_test` nor start with `test_`.
+            assert!(!is_test_path(p), "{p}");
+        }
+    }
 }
