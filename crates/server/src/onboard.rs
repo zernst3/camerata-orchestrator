@@ -1465,8 +1465,8 @@ pub async fn audit_repos(
                 files,
                 reference_files,
                 truncated,
+                reference_truncated,
                 excluded_noise,
-                ..
             }) => {
                 files_total += files.len();
                 files_excluded_total += excluded_noise;
@@ -1513,8 +1513,15 @@ pub async fn audit_repos(
                     spec,
                     files: &files,
                 };
-                let ledger_checker_rule_ids =
-                    camerata_checks::arch_checker::ledger_detector_rule_ids_for_repo(&repo_view);
+                // A scan that stopped at a file limit (code or reference text) cannot prove a
+                // file is unreferenced, so rules that reason from absence are withheld: not run
+                // below, and not credited here, which sends them to the config-gated
+                // disclosure instead of "verified clean".
+                let scan_incomplete = truncated || reference_truncated;
+                let ledger_checker_rule_ids = architectural::withhold_on_incomplete_scan(
+                    &camerata_checks::arch_checker::ledger_detector_rule_ids_for_repo(&repo_view),
+                    scan_incomplete,
+                );
                 let semantic: Vec<(String, String)> = semantic_rule_ids_for_repo(selected, spec);
                 // Multi-option semantic rules in THIS repo's `semantic` set (audit-integrated
                 // alternative recommendation — see `build_rule_alternatives`'s doc comment).
@@ -1603,12 +1610,13 @@ pub async fn audit_repos(
                     // Reference text (HTML, components, docs) is handed to the architectural
                     // tier ONLY, and only when an armed rule needs it: the AI digest and the
                     // secrets floor above and below keep reading `files` alone.
-                    let arch_input = architectural::architectural_input(
-                        &files,
-                        &reference_files,
+                    let arch_armed = architectural::withhold_on_incomplete_scan(
                         &repo_selected_ids,
+                        scan_incomplete,
                     );
-                    let arch = audit_architectural(spec, &arch_input, &repo_selected_ids);
+                    let arch_input =
+                        architectural::architectural_input(&files, &reference_files, &arch_armed);
+                    let arch = audit_architectural(spec, &arch_input, &arch_armed);
                     if let Some((jstore, jid)) = job {
                         jstore.det_tool_done(jid, "architectural", arch.len());
                         jstore.add_findings(jid, arch.clone());
