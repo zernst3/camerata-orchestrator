@@ -183,3 +183,47 @@ async fn a_scan_that_hit_its_file_limit_does_not_run_the_dead_code_rule() {
         report.ledger.rule(RULE)
     );
 }
+
+/// Codegen and module-variant importers reach the checker through the scan feed: TanStack's
+/// generated route tree and an `.mjs` module are the ONLY importers of the files below.
+#[tokio::test]
+async fn generated_and_module_variant_importers_keep_their_targets_alive() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "package.json", r#"{"private":true}"#);
+    write(
+        root,
+        "src/main.tsx",
+        "import { routeTree } from './routeTree.gen';\n",
+    );
+    write(
+        root,
+        "src/routeTree.gen.ts",
+        "import { Route as About } from './routes/about'\n",
+    );
+    write(root, "src/routes/about.tsx", "export const Route = 1;\n");
+    write(
+        root,
+        "src/db/index.mjs",
+        "import { rows } from './seedRows.ts';\n",
+    );
+    write(root, "src/db/seedRows.ts", "export const rows = [];\n");
+    write(root, "src/stranded_screen.tsx", "export const Route = 1;\n");
+    git(root, &["init", "-q", "-b", "main"]);
+    git(
+        root,
+        &["config", "user.email", "dead-code-e2e@example.test"],
+    );
+    git(root, &["config", "user.name", "Dead Code E2E"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "fixture"]);
+
+    let report = scan(root, "e2e/dead-code-generated").await;
+    let dead: Vec<&str> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == RULE)
+        .map(|f| f.path.as_str())
+        .collect();
+    assert_eq!(dead, ["src/stranded_screen.tsx"], "{:?}", report.findings);
+}

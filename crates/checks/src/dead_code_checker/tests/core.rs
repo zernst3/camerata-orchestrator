@@ -761,3 +761,26 @@ fn a_large_repository_is_analysed_without_blowing_up() {
     );
     assert_eq!(vs[0].object.as_deref(), Some("src/stranded/"));
 }
+
+// ── generated code is context: it is never reported, and what it imports is used ──
+
+#[test]
+fn generated_code_by_name_or_folder_keeps_the_files_it_imports_alive() {
+    // TanStack Router: `routeTree.gen.ts` is the only importer of the route files. The scan
+    // hands it to the checker as reference text.
+    let f = files(vec![
+        ("package.json", r#"{"private":true}"#),
+        ("src/main.tsx", "import { routeTree } from './routeTree.gen';\n"),
+        (
+            "src/routeTree.gen.ts",
+            "import { Route as AboutRoute } from './routes/about'\nimport { Route as DashRoute } from './routes/_authenticated/dashboard.settings'\n",
+        ),
+        ("src/routes/about.tsx", "export const Route = 1;\n"),
+        ("src/routes/_authenticated/dashboard.settings.tsx", "export const Route = 1;\n"),
+        ("src/api/__generated__/client_ops.ts", "import '../../routes/ops_screen'\nexport {};\n"),
+        ("src/routes/ops_screen.tsx", "export const Route = 1;\n"),
+        ("src/schema.generated.ts", "export {};\n"),
+        ("src/stranded_screen.tsx", "export const Route = 1;\n"),
+    ]);
+    assert_flags_only(&f, "src/stranded_screen.tsx");
+}

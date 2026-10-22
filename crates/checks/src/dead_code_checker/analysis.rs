@@ -10,7 +10,8 @@ use super::conventions::Conventions;
 use super::dynamic::dynamic_roots;
 use super::emit::{self, DeadFile};
 use super::exclusions::{
-    has_generated_marker, has_keep_marker, is_config_shaped, is_declaration_file, is_test_file,
+    has_generated_marker, has_keep_marker, is_config_shaped, is_declaration_file,
+    is_generated_path, is_test_file,
 };
 use super::manifests::{manifest_roots, ManifestDirs, Packages};
 use super::mentions::{is_always_mentioned, key_of, MentionIndex};
@@ -22,6 +23,7 @@ fn is_excluded(path: &str, content: &str) -> bool {
     is_test_file(path)
         || is_declaration_file(path)
         || is_config_shaped(path)
+        || is_generated_path(path)
         || has_generated_marker(content)
         || has_keep_marker(content)
 }

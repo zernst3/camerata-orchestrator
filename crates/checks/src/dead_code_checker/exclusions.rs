@@ -98,6 +98,22 @@ pub(super) fn is_config_shaped(path: &str) -> bool {
         .any(|prefix| file.starts_with(prefix))
 }
 
+/// Generated code by NAME: a `.gen.` or `.generated.` file, or anything in a `generated/` or
+/// `__generated__/` folder. The scan prunes these from the audited list but hands them over as
+/// reference text, because a router or codegen step is often the only importer of hand-written
+/// files (TanStack's `routeTree.gen.ts` imports every route). Codegen output is regenerated, not
+/// deleted, so it is never reported, and what it imports is alive.
+pub(super) fn is_generated_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let mut segments: Vec<&str> = lower.split('/').collect();
+    let file = segments.pop().unwrap_or("");
+    segments
+        .iter()
+        .any(|s| matches!(*s, "generated" | "__generated__"))
+        || file.contains(".gen.")
+        || file.contains(".generated.")
+}
+
 /// Markers (lowercase) that a tool wrote the file and a person should not edit it.
 const GENERATED_MARKERS: &[&str] = &[
     "@generated",

@@ -16,8 +16,9 @@ pub(crate) const MAX_FILE_BYTES: usize = 400_000;
 /// Extensions worth auditing (source + config text). Keeps the scan off images,
 /// lockfiles, and binaries.
 const CODE_EXTS: &[&str] = &[
-    "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "rb", "php", "cs", "sql", "toml", "yaml",
-    "yml", "json", "sh", "env", "cfg", "ini", "tf", "kt", "swift", "c", "cpp", "h",
+    "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "py", "go", "java", "rb", "php",
+    "cs", "sql", "toml", "yaml", "yml", "json", "sh", "env", "cfg", "ini", "tf", "kt", "swift",
+    "c", "cpp", "h",
     // IaC: Terragrunt/Packer HCL, Azure Bicep (Terraform `.tf` is already above).
     "hcl", "bicep",
 ];
@@ -162,6 +163,21 @@ const NOISE_SUFFIXES: &[&str] = &[
     ".freezed.dart",
 ];
 
+/// The subset of [`NOISE_SUFFIXES`] and [`NOISE_DIRS`] that marks machine-written code which is
+/// pruned from the audited list but still handed to the architectural tier as reference text:
+/// codegen is often the only importer of hand-written files (TanStack Router's
+/// `routeTree.gen.ts` imports every route). Minified bundles, source maps and protobuf output
+/// stay dropped.
+const GENERATED_NOISE_SUFFIXES: &[&str] = &[
+    ".gen.ts",
+    ".gen.tsx",
+    ".gen.js",
+    ".generated.ts",
+    ".generated.tsx",
+    ".generated.js",
+];
+const GENERATED_NOISE_DIRS: &[&str] = &["generated", "__generated__"];
+
 /// True if a path has a code extension (from `CODE_EXTS`) or is a `CODE_BASENAMES` match.
 pub(crate) fn has_code_ext(path: &str) -> bool {
     let basename = path.rsplit('/').next().unwrap_or(path);
@@ -275,9 +291,14 @@ impl ReferenceSink {
     /// A file over the size limit or not valid UTF-8 is dropped, like any other file; a list
     /// that is already full is marked truncated instead of growing.
     fn offer(&mut self, rel: &str, full: &std::path::Path) {
-        if !is_reference_text(rel) {
-            return;
+        if is_reference_text(rel) {
+            self.accept(rel, full);
         }
+    }
+
+    /// Take `rel` as reference text whatever its name: generated code that audit admission
+    /// pruned ([`is_generated_only_noise`]).
+    fn accept(&mut self, rel: &str, full: &std::path::Path) {
         if self.files.len() >= self.cap {
             self.truncated = true;
             return;
@@ -347,6 +368,17 @@ pub(crate) fn is_engine_artifact(path: &str) -> bool {
 /// minified bundle / source map. `extra_dirs` holds any project-specific dir names from
 /// `CAMERATA_SCAN_EXCLUDE_DIRS`.
 pub(crate) fn is_noise_path(path: &str, extra_dirs: &[String]) -> bool {
+    noise_path(path, extra_dirs, false)
+}
+
+/// True when `path` is noise ONLY because it is generated code ([`GENERATED_NOISE_SUFFIXES`],
+/// [`GENERATED_NOISE_DIRS`]): the same path under `node_modules/`, `dist/` or an excluded dir is
+/// not, and neither is a minified bundle or a source map.
+pub(crate) fn is_generated_only_noise(path: &str, extra_dirs: &[String]) -> bool {
+    noise_path(path, extra_dirs, false) && !noise_path(path, extra_dirs, true)
+}
+
+fn noise_path(path: &str, extra_dirs: &[String], allow_generated: bool) -> bool {
     // Checked FIRST: the engine's own output is never audit input, regardless of what it is
     // named or where it sits. Cheapest check, and the one whose absence shipped a CRITICAL
     // finding about Camerata's own cache file to a client report.
@@ -358,13 +390,19 @@ pub(crate) fn is_noise_path(path: &str, extra_dirs: &[String]) -> bool {
     if NOISE_FILES.contains(&basename) {
         return true;
     }
-    if NOISE_SUFFIXES.iter().any(|s| basename.ends_with(s)) {
+    let generated_suffix = |s: &&str| GENERATED_NOISE_SUFFIXES.contains(s);
+    if NOISE_SUFFIXES
+        .iter()
+        .filter(|s| !(allow_generated && generated_suffix(s)))
+        .any(|s| basename.ends_with(s))
+    {
         return true;
     }
     let segs: Vec<&str> = segments.collect();
     segs.iter().enumerate().any(|(i, seg)| {
         extra_dirs.iter().any(|d| d == seg)
-            || NOISE_DIRS.contains(seg)
+            || (NOISE_DIRS.contains(seg)
+                && !(allow_generated && GENERATED_NOISE_DIRS.contains(seg)))
             || (*seg == "bin"
                 && segs
                     .get(i + 1)
@@ -505,6 +543,8 @@ fn read_local_repo_files_gitignore(
         }
         if !noise && !admissible {
             reference.offer(&rel, p);
+        } else if noise && admissible && is_generated_only_noise(&rel, extra_dirs) {
+            reference.accept(&rel, p);
         }
         if noise || !admissible {
             continue;
@@ -549,6 +589,8 @@ fn read_local_repo_files_gitignore(
                 let full = root.join(&rel);
                 if !noise && !admissible {
                     reference.offer(&rel, &full);
+                } else if noise && admissible && is_generated_only_noise(&rel, extra_dirs) {
+                    reference.accept(&rel, &full);
                 }
                 if noise || !admissible {
                     continue;
@@ -634,7 +676,8 @@ fn read_local_repo_files_noise_denylist(
             if ft.is_dir() {
                 // Prune noise dirs (don't descend) — is_noise_path matches any segment, so a
                 // noise dir name prunes the whole subtree before we read a single file in it.
-                if !is_noise_path(&rel, extra_dirs) {
+                // Generated folders are descended: their files are reference text.
+                if !is_noise_path(&rel, extra_dirs) || is_generated_only_noise(&rel, extra_dirs) {
                     stack.push(p);
                 }
                 continue;
@@ -649,6 +692,8 @@ fn read_local_repo_files_noise_denylist(
             }
             if !noise && !admissible {
                 reference.offer(&rel, &p);
+            } else if noise && admissible && is_generated_only_noise(&rel, extra_dirs) {
+                reference.accept(&rel, &p);
             }
             if noise || !admissible {
                 continue;
@@ -986,5 +1031,143 @@ mod tests {
         roomy.offer("missing.md", &dir.path().join("missing.md"));
         assert_eq!(roomy.files.len(), 1);
         assert!(!roomy.truncated);
+    }
+
+    // ── module-variant extensions ───────────────────────────────────────────────
+
+    #[test]
+    fn module_variant_extensions_are_audited_code() {
+        for path in [
+            "src/a.mjs",
+            "src/a.cjs",
+            "src/a.mts",
+            "src/a.cts",
+            "src/A.MJS",
+        ] {
+            assert!(has_code_ext(path), "{path}");
+            assert!(is_admissible_text(path), "{path}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/db/index.mjs",
+            "import { rows } from './seedRows.ts';\n",
+        );
+        write(
+            dir.path(),
+            "src/db/seedRows.ts",
+            "export const rows = [];\n",
+        );
+        write(dir.path(), "src/legacy.cjs", "module.exports = {};\n");
+        let extracted = scan(dir.path());
+        assert_eq!(
+            paths(&extracted),
+            ["src/db/index.mjs", "src/db/seedRows.ts", "src/legacy.cjs"]
+        );
+    }
+
+    // ── generated code: out of the audited list, kept as reference ──────────────
+
+    #[test]
+    fn generated_code_is_still_noise_but_is_recognised_as_generated_only_noise() {
+        let none: &[String] = &[];
+        for path in [
+            "src/routeTree.gen.ts",
+            "src/schema.generated.tsx",
+            "src/__generated__/types.ts",
+            "src/generated/client.ts",
+            "api/ops.gen.js",
+        ] {
+            assert!(
+                is_noise_path(path, none),
+                "{path} stays out of the audited list"
+            );
+            assert!(is_generated_only_noise(path, none), "{path}");
+        }
+        for path in [
+            "node_modules/x/a.gen.ts",
+            "dist/a.gen.ts",
+            "src/app.min.js",
+            "src/a.js.map",
+            "src/__snapshots__/a.test.tsx",
+            "src/a.ts",
+        ] {
+            assert!(!is_generated_only_noise(path, none), "{path}");
+        }
+    }
+
+    fn generated_fixture(root: &std::path::Path) {
+        write(
+            root,
+            "src/main.tsx",
+            "import { routeTree } from './routeTree.gen';\n",
+        );
+        write(
+            root,
+            "src/routeTree.gen.ts",
+            "import { Route as About } from './routes/about'\n",
+        );
+        write(root, "src/routes/about.tsx", "export const Route = 1;\n");
+        write(
+            root,
+            "src/__generated__/ops.ts",
+            "import '../routes/about'\n",
+        );
+        write(root, "node_modules/x/vendored.gen.ts", "export {};\n");
+        write(root, "dist/bundle.gen.js", "export {};\n");
+        write(root, "src/vendor.min.js", "var a=1;\n");
+    }
+
+    fn expect_generated_tier(extracted: &ExtractedRepo) {
+        // The audited list (digest, secrets floor) is unchanged: no generated file in it.
+        assert_eq!(paths(extracted), ["src/main.tsx", "src/routes/about.tsx"]);
+        assert_eq!(
+            reference_paths(extracted),
+            ["src/__generated__/ops.ts", "src/routeTree.gen.ts"],
+            "generated code is kept as reference; vendored, built and minified code is not"
+        );
+        let expected = crate::ai_audit::build_digest(&[
+            (
+                "src/main.tsx".to_string(),
+                "import { routeTree } from './routeTree.gen';\n".to_string(),
+            ),
+            (
+                "src/routes/about.tsx".to_string(),
+                "export const Route = 1;\n".to_string(),
+            ),
+        ]);
+        assert_eq!(crate::ai_audit::build_digest(&extracted.files), expected);
+    }
+
+    #[test]
+    fn generated_code_goes_to_the_reference_tier_in_a_non_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        generated_fixture(dir.path());
+        expect_generated_tier(&scan(dir.path()));
+    }
+
+    #[test]
+    fn generated_code_goes_to_the_reference_tier_in_a_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        generated_fixture(dir.path());
+        expect_generated_tier(&scan(dir.path()));
+    }
+
+    #[test]
+    fn a_secret_in_generated_code_is_still_not_secrets_floor_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = concat!(
+            "export const API_KEY = \"Zq9Xk3Pm7Rt2",
+            "Vw5Yb8Nc4Jd6Hf1Ga0\";\n"
+        );
+        write(dir.path(), "src/client.gen.ts", body);
+        write(dir.path(), "src/a.ts", "export {};\n");
+        let extracted = scan(dir.path());
+        let findings = crate::onboard::audit::audit_files("o/r", &extracted.files);
+        assert!(
+            findings.iter().all(|f| f.path != "src/client.gen.ts"),
+            "{findings:#?}"
+        );
     }
 }
