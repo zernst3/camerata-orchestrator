@@ -414,6 +414,15 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
   `stages` target design, whether low-severity consistency rules should HARD-FAIL a client's CI
   build or report advisory; today any deterministic finding fails `camerata-check`.
 
+- **Model registry is stale** (found by the Wave C spec, 2026-10-22): `crates/llm/src/model_registry.rs`
+  has no entry for the current fast tier (Haiku 5.5) and its Sonnet prices may be outdated (a test
+  pins $3/$15). Verify every price against Anthropic's official pricing page (never from memory)
+  and update the registry + its tests; the Wave C clone judge should default to the current
+  cheapest capable tier once the registry is correct.
+- **Every extractor re-parses each file** (5 to 6 parses per file across imports/functions/
+  exports/literals/computed_loads/clone tokens). A shared per-file parse cache is a performance
+  win; not a defect, ledgered for after V1 unless scan time on a large repo becomes a problem.
+
 ## 3. Explicitly NOT doing
 
 - `ARCH-OBSERVABILITY-CORRELATION-ID-1` stays `decision` — prior ruling, recorded in the roster.
