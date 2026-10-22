@@ -1,0 +1,63 @@
+id = "UI-REACT-HOOKS-LINT-1"
+version = 1
+title = "A React project's own lint configuration enables the React Hooks rules, so a misused hook or an incomplete dependency array fails the lint step"
+domain = "javascript:react"
+layer = "framework"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+# Severity ceiling, transcribed from the work order (section 8): the lint setup being absent is a
+# gap in the safety net, not a fault in running behavior (a violation in code is reported at
+# medium by the two rules named below). The deterministic check emits at medium (a checker never
+# emits low directly); this ceiling brings the exported finding down to low.
+max_severity = "low"
+default = true
+# `grounded`: React's own documentation for eslint-plugin-react-hooks and for the Rules of Hooks
+# is the external authority for enabling these two lint rules, and both are real, established
+# linter rules. No source carries a `linter` annotation, deliberately. A `linter` annotation
+# routes a rule to the provisioned-eslint scan tier and registers the raw eslint id with the
+# grounding map; `JAVASCRIPT-REACT-RULES-OF-HOOKS-1` and `JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1`
+# already own both ids, and a second owner would run the same eslint rules twice and report each
+# violation under two rule ids. This rule is the other half: whether the project's own lint
+# configuration turns those rules on, so that its own CI and its agents' write-time lint step
+# catch what the scan finds. Only the owner sets `verified`.
+verification = "grounded"
+qualifies = "Deterministically checkable from the repository's files, with no judgment involved, for a project that depends on React. The check reads the project's own ESLint configuration and reports it only when it can read all of it and none of it enables `react-hooks/rules-of-hooks` or `react-hooks/exhaustive-deps`: the project has no ESLint configuration at all, or its JSON configuration (a `.eslintrc` or `.eslintrc.json` file, or the `eslintConfig` field of `package.json`) uses only presets and keys the check knows and enables neither rule. A configuration counts as enabling them when it extends `plugin:react-hooks/recommended`, `react-app`, `next` (including `next/core-web-vitals`) or `airbnb/hooks`, or turns either rule on in its rules or in an override. Not reported: a project whose configuration the check cannot read with certainty, which covers any `eslint.config.js` flat configuration or `.eslintrc.js` file (JavaScript can compute its configuration), YAML configurations, JSON that does not parse, a preset the check cannot see into (a shared team configuration, a relative path), a manifest that depends on a shared ESLint configuration, on the hooks plugin itself or on another linter such as Biome or oxlint, a lint script that points ESLint at a configuration of its own, and any configuration or manifest under an examples, documentation, template, vendored or test folder, which describes something other than the project. A configuration that enables one of the two rules is not reported, the severity of the rules is not inspected, and whether CI runs lint is not inspected. The check does not run on a scan that stopped at its file limit, since the configuration may be among the missing files. The violations the two rules report in code, a hook called in a condition or an effect missing a dependency, are found by running the project's code through ESLint and are reported under `JAVASCRIPT-REACT-RULES-OF-HOOKS-1` and `JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1`, not under this rule. No off-the-shelf linter rule reports that another linter rule is missing from the configuration."
+
+[[sources]]
+url = "https://react.dev/reference/eslint-plugin-react-hooks"
+title = "React docs: eslint-plugin-react-hooks"
+
+[[sources]]
+url = "https://react.dev/reference/eslint-plugin-react-hooks/lints/rules-of-hooks"
+title = "React docs: rules-of-hooks lint rule"
+
+[[sources]]
+url = "https://react.dev/reference/eslint-plugin-react-hooks/lints/exhaustive-deps"
+title = "React docs: exhaustive-deps lint rule"
+
+[[sources]]
+url = "https://react.dev/reference/rules/rules-of-hooks"
+title = "React docs: Rules of Hooks"
+
+[decision]
+question = "Does the project's own lint configuration enable the React Hooks rules?"
+default = "hooks-lint-rules-are-enabled"
+why = "React decides which hook state belongs to which call by the order in which hooks run, and it decides when an effect, callback or memo runs again by the values listed in its dependency array. A hook called inside a condition or a loop shifts that order between renders and attaches state to the wrong hook, and a value read but left out of the array leaves the effect holding a stale copy of it. Neither fails to compile, neither throws at the call site, and neither is visible in a short manual test, so a human reviewer reading the diff is the weakest place to catch them. The two lint rules that catch both are part of React's own tooling; a project whose configuration does not turn them on has no automatic check at all, however much code is added later."
+
+[[option]]
+id = "hooks-lint-rules-are-enabled"
+label = "The project's own lint configuration enables the React Hooks rules rules-of-hooks and exhaustive-deps"
+directive = "The project's ESLint configuration enables `react-hooks/rules-of-hooks` and `react-hooks/exhaustive-deps` from `eslint-plugin-react-hooks` (its recommended preset turns on both) at error severity, and CI runs the lint step so a violation fails the build. When one of them reports, change the code to satisfy it; do not turn the rule off, lower it to a warning or suppress it with a disable comment."
+remediation = """
+Install `eslint-plugin-react-hooks` as a development dependency and enable `react-hooks/rules-of-hooks` and `react-hooks/exhaustive-deps` at error severity in the project's ESLint configuration, either by extending the plugin's recommended preset or by listing the two rules. Run the lint step in CI so that a violation fails the build. Verify by calling a hook inside an `if` block in a scratch component and confirming that lint fails, then remove the scratch code.
+"""
+effort = "low"
+why = "Enabling two rules in a configuration file the project already has, and running the lint step it already has, is a small change. After it, every later hook mistake is caught on the author's machine or in CI instead of in production."
+
+[[option]]
+id = "hooks-lint-rules-are-not-enabled"
+violates = true
+label = "The project's own lint configuration does not enable the React Hooks rules"
+directive = "Leave the React Hooks lint rules out of the project's lint configuration, so that a misused hook or an incomplete dependency array is not reported by any automatic check."
+why = "With neither hooks rule enabled, a hook called inside a condition or a loop, or an effect, callback or memo that reads a value it leaves out of its dependency array, passes review and the build. It fails only when the app runs: as a crash when the number of hooks changes between renders, or as stale data when an effect keeps using an old copy of a value. Neither shows in a short manual test, and the first report of either is usually a user. Every hook added from here on is unchecked."
