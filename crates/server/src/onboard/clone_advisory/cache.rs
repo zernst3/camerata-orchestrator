@@ -3,9 +3,10 @@
 //! A verdict is cached by the CONTENT of the question, not by where the code lives: the rule, the
 //! judge model, the prompt schema version, the candidate's id (a hash of the family's normalized
 //! token sequence and its length), the exact-mode differences between the copies, and the
-//! rule-specific facts the judge was shown. A file that is moved or renamed hits the cache; a
-//! family whose tokens, differences or names changed misses it. A judge model change or a prompt
-//! schema bump changes every key, so the cache is invalidated wholesale by construction.
+//! rule-specific facts the judge was shown (for a logic candidate, every copy's decision
+//! tokens). A file that is moved or renamed hits the cache; a family whose tokens, differences,
+//! decisions or names changed misses it. A judge model change or a prompt schema bump changes
+//! every key, so the cache is invalidated wholesale by construction.
 //!
 //! `unsure` is NOT cached: it is retried next scan. The cache is persisted inside the project's
 //! scan manifest (`ScanManifest::clone_verdicts`, `serde(default)` so `MANIFEST_VERSION` is not
@@ -18,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when the prompt, the closed vocabulary or the judge input shape changes in a way that
 /// should invalidate every cached verdict.
-pub const PROMPT_SCHEMA_VERSION: u32 = 1;
+pub const PROMPT_SCHEMA_VERSION: u32 = 2;
 
 /// The most verdicts one project keeps. Older ones (by `judged_at`) are dropped first, so the
 /// manifest cannot grow without bound as code changes.
@@ -117,14 +118,17 @@ pub fn cache_key(candidate: &Candidate, judge_model: &str) -> String {
         push(b);
     }
     match &candidate.facts.rule {
-        RuleFacts::Logic { decision_tokens } => {
-            // The decision tokens are read from the first copy, which depends on the paths when
-            // the copies differ; the differences above already carry that. When the copies
-            // agree every copy has the same tokens, so they are content.
-            if candidate.facts.agree {
-                for t in decision_tokens {
-                    push(t);
-                }
+        RuleFacts::Logic {
+            member_decision_tokens,
+            ..
+        } => {
+            // EVERY copy's decision tokens, as a sorted multiset: independent of which copy
+            // sorts first and of the paths, and different whenever any copy's decision changed,
+            // whether or not the copies still agree with each other. (Renaming a tested
+            // property in all copies keeps `agree` and every difference unchanged, but it is a
+            // different decision and must be judged again.)
+            for t in member_decision_tokens {
+                push(t);
             }
         }
         RuleFacts::Naming { names, module } => {

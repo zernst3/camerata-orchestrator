@@ -494,7 +494,10 @@ async fn candidate_list_and_verdicts_are_written_to_the_transcript() {
     let agents = store.get("scan-key");
     assert_eq!(agents.len(), 1, "{agents:#?}");
     let agent = &agents[0];
-    assert_eq!(agent.session_id, "clone-judge:ARCH-SINGLE-SOURCE-LOGIC-1");
+    assert_eq!(
+        agent.session_id,
+        "clone-judge:ARCH-SINGLE-SOURCE-LOGIC-1:acme/shop"
+    );
     assert!(agent.role.contains("clone judge"), "{}", agent.role);
     // The full ranked candidate list is in the prompt; the raw response and each verdict are in
     // the output.

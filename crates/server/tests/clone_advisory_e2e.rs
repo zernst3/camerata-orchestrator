@@ -38,6 +38,8 @@ struct Scripted {
     /// Answer each rule's question with these words (single-source, naming).
     single_word: &'static str,
     naming_word: &'static str,
+    /// The answer to UI-SHARED-PRIMITIVE-1's question (`unsure` unless a test sets it).
+    ui_word: &'static str,
 }
 
 impl Scripted {
@@ -48,7 +50,13 @@ impl Scripted {
             models: std::sync::Mutex::new(Vec::new()),
             single_word,
             naming_word,
+            ui_word: "unsure",
         }
+    }
+
+    fn with_ui(mut self, word: &'static str) -> Self {
+        self.ui_word = word;
+        self
     }
 }
 
@@ -76,6 +84,8 @@ impl LlmPort for Scripted {
                 self.single_word
             } else if system.contains("same_concept") {
                 self.naming_word
+            } else if system.contains("same_mechanism") {
+                self.ui_word
             } else {
                 "unsure"
             };
@@ -266,20 +276,13 @@ async fn a_judged_scan_ships_the_confirmed_finding_and_stamps_the_judge() {
     );
     assert!(f.detail.contains("src/cart/total.ts") && f.detail.contains("src/checkout/summary.ts"));
     assert_eq!(f.also_locations.len() + 1, 2);
-    // The naming candidate was judged a different concept: no defect. The rule ran completely
-    // and found nothing to report, so it states the convention it observed instead.
-    let naming = under(&report, NAMING);
-    assert_eq!(naming.len(), 1, "{naming:#?}");
-    assert!(matches!(
-        naming[0].kind,
-        Some(FindingKind::ConventionObserved(_))
-    ));
+    // The naming candidate was judged a different concept: no defect, and no row of any kind.
+    // Nothing client-facing claims an absence (orchestrator decision D1); the ledger below
+    // still credits the rule as having run.
     assert!(
-        naming[0]
-            .detail
-            .contains("1 candidate sites reviewed and judged not to be the same concept"),
-        "{}",
-        naming[0].detail
+        under(&report, NAMING).is_empty(),
+        "{:#?}",
+        under(&report, NAMING)
     );
 
     // The ledger credits both rules as having run; the semantic pass read them too.
@@ -317,7 +320,7 @@ async fn a_judged_scan_ships_the_confirmed_finding_and_stamps_the_judge() {
     let agents = store.get("scan-key");
     let judge = agents
         .iter()
-        .find(|a| a.session_id == format!("clone-judge:{SINGLE}"))
+        .find(|a| a.session_id == format!("clone-judge:{SINGLE}:acme/shop"))
         .expect("a clone-judge transcript for the rule");
     assert!(judge.prompt.contains("Ranked candidates:"));
     assert!(judge.output.contains("same_decision"));
@@ -427,11 +430,10 @@ async fn an_unchanged_rescan_reuses_the_cached_verdicts_and_makes_no_judge_call(
     )
     .await;
     assert!(third.judge_calls.load(Ordering::SeqCst) >= 1);
-    let rows = under(&report3, SINGLE);
-    assert_eq!(rows.len(), 1, "{rows:#?}");
     assert!(
-        matches!(rows[0].kind, Some(FindingKind::ConventionObserved(_))),
-        "a candidate judged different is not a defect"
+        under(&report3, SINGLE).is_empty(),
+        "a candidate judged different is not a defect, and says nothing else: {:#?}",
+        under(&report3, SINGLE)
     );
 }
 
@@ -539,8 +541,18 @@ async fn a_blocked_project_names_the_block_in_the_not_assessed_row() {
     );
 }
 
+/// No row of the convention kind anywhere in the report.
+fn convention_rows(report: &ScanReport) -> Vec<&Finding> {
+    report
+        .findings
+        .iter()
+        .filter(|f| matches!(f.kind, Some(FindingKind::ConventionObserved(_))))
+        .filter(|f| [SINGLE, NAMING, UI].contains(&f.rule_id.as_str()))
+        .collect()
+}
+
 #[tokio::test]
-async fn a_repo_with_no_repeated_code_gets_convention_rows_not_findings() {
+async fn a_repo_with_no_repeated_code_gets_no_rows_but_the_rules_are_credited_as_run() {
     let dir = tempfile::tempdir().unwrap();
     stage(
         dir.path(),
@@ -553,7 +565,7 @@ async fn a_repo_with_no_repeated_code_gets_convention_rows_not_findings() {
         ],
     );
     let corpus = corpus().await;
-    // Deterministic-only: zero candidates means the rules ran clean without any judgment.
+    // Deterministic-only: zero candidates means the rules ran without any judgment.
     let (report, _) = scan(
         &Forbidden,
         dir.path(),
@@ -564,29 +576,18 @@ async fn a_repo_with_no_repeated_code_gets_convention_rows_not_findings() {
         None,
     )
     .await;
-    for (id, text) in [
-        (
-            SINGLE,
-            "No application decision was found written in more than one file",
-        ),
-        (NAMING, "No helper was found under more than one name"),
-    ] {
-        let rows = under(&report, id);
-        assert_eq!(rows.len(), 1, "{id}: {rows:#?}");
+    for id in [SINGLE, NAMING, UI] {
         assert!(
-            matches!(rows[0].kind, Some(FindingKind::ConventionObserved(_))),
-            "{id}"
-        );
-        assert!(rows[0].detail.starts_with(text), "{}", rows[0].detail);
-        assert_eq!(rows[0].severity, "info");
-        assert!(
-            report.ledger.rule(id).unwrap().verified_clean() || report.ledger.rule(id).unwrap().ran
+            under(&report, id).is_empty(),
+            "{id}: a clean search says nothing to the client: {:#?}",
+            under(&report, id)
         );
     }
-    assert!(
-        under(&report, UI).is_empty(),
-        "no React package: nothing to be consistent about"
-    );
+    assert!(convention_rows(&report).is_empty());
+    // The ledger is where the run is credited.
+    for id in [SINGLE, NAMING] {
+        assert!(report.ledger.rule(id).unwrap().ran, "{id}");
+    }
 }
 
 #[tokio::test]
@@ -621,4 +622,263 @@ async fn a_partly_judged_rule_says_so_in_the_ledger_and_in_one_row() {
         );
     }
     assert!(manifest.clone_verdicts.is_empty(), "unsure is never cached");
+}
+
+// ---- the adversarial review's repros through the real pipeline ----
+
+fn django_view(name: &str, model: &str, template: &str) -> String {
+    format!(
+        "from django.shortcuts import render
+from .models import {model}
+
+def {name}(request):
+    if request.user.is_staff:
+        qs = {model}.objects.all()
+    else:
+        qs = {model}.objects.filter(owner=request.user)
+    if request.GET.get('archived') == '1':
+        qs = qs.filter(archived=True)
+    page = int(request.GET.get('page', 1))
+    return render(request, '{template}', {{'items': qs, 'page': page}})
+"
+    )
+}
+
+fn next_route(entity: &str) -> String {
+    format!(
+        "import {{ NextResponse }} from 'next/server';
+import {{ auth }} from '@/lib/auth';
+import {{ db }} from '@/lib/db';
+
+export async function GET(req) {{
+  const session = await auth();
+  if (!session || !session.user) {{
+    return NextResponse.json({{ error: 'Unauthorized' }}, {{ status: 401 }});
+  }}
+  if (session.user.role !== 'admin' && session.user.role !== 'owner') {{
+    return NextResponse.json({{ error: 'Forbidden' }}, {{ status: 403 }});
+  }}
+  const rows = await db.{entity}.findMany({{ where: {{ tenantId: session.user.tenantId }} }});
+  return NextResponse.json(rows);
+}}
+"
+    )
+}
+
+#[tokio::test]
+async fn no_repro_repo_gets_a_convention_row_through_the_real_pipeline() {
+    let corpus = corpus().await;
+    let mut house: Vec<(String, String)> = (0..5)
+        .map(|i| {
+            (
+                format!("src/pricing{i}.ts"),
+                discount(&format!("price{i}"), &format!("0.{}", i + 1)),
+            )
+        })
+        .collect();
+    for i in 0..11 {
+        house.push((
+            format!("src/other{i}.ts"),
+            format!("export const k{i} = {i};\nexport function f{i}(x) {{ return x + {i}; }}\n"),
+        ));
+    }
+    let repos: Vec<(&str, Vec<(String, String)>)> = vec![
+        (
+            "django",
+            vec![
+                (
+                    "app/orders/views.py".to_string(),
+                    django_view("list_orders", "Order", "orders/list.html"),
+                ),
+                (
+                    "app/invoices/views.py".to_string(),
+                    django_view("list_invoices", "Invoice", "invoices/list.html"),
+                ),
+            ],
+        ),
+        (
+            "next",
+            vec![
+                (
+                    "package.json".to_string(),
+                    r#"{"dependencies":{"next":"14","react":"18"}}"#.to_string(),
+                ),
+                ("app/api/orders/route.ts".to_string(), next_route("order")),
+                ("app/api/users/route.ts".to_string(), next_route("user")),
+                ("app/api/items/route.ts".to_string(), next_route("item")),
+            ],
+        ),
+        ("house", house),
+        (
+            "clean",
+            vec![("src/a.ts".to_string(), "export const a = 1;\n".to_string())],
+        ),
+    ];
+    for (name, files) in repos {
+        let dir = tempfile::tempdir().unwrap();
+        let staged: Vec<(&str, String)> =
+            files.iter().map(|(p, c)| (p.as_str(), c.clone())).collect();
+        stage(dir.path(), &staged);
+        // A judge that rejects everything it is asked about: nothing may be said about the rest.
+        let llm = Scripted::new("different", "different_concept").with_ui("different");
+        let (report, _) = scan(
+            &llm,
+            dir.path(),
+            &corpus,
+            None,
+            true,
+            BackendResolution::Api,
+            None,
+        )
+        .await;
+        assert!(
+            convention_rows(&report).is_empty(),
+            "{name}: {:#?}",
+            convention_rows(&report)
+        );
+        for id in [SINGLE, NAMING, UI] {
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .filter(|f| f.rule_id == id)
+                    .all(|f| !matches!(f.kind, Some(FindingKind::ConventionObserved(_)))),
+                "{name} {id}"
+            );
+            // Credited as run in the ledger whether or not anything was found.
+            assert!(report.ledger.rule(id).unwrap().ran, "{name}: {id}");
+        }
+    }
+}
+
+fn react_form(name: &str, field: &str, label: &str) -> String {
+    format!(
+        "import React, {{ useState }} from 'react';
+export function {name}() {{
+  const [value, setValue] = useState('');
+  const [error, setError] = useState(null);
+  const submit = (e) => {{
+    e.preventDefault();
+    if (!value || value.length < 3) {{
+      setError('{label} is required');
+      return;
+    }}
+    setError(null);
+  }};
+  return (
+    <form onSubmit={{submit}}>
+      <label>{label}</label>
+      <input name=\"{field}\" value={{value}} onChange={{(e) => setValue(e.target.value)}} />
+      {{error && <span className=\"err\">{{error}}</span>}}
+      <button type=\"submit\">Save</button>
+    </form>
+  );
+}}
+"
+    )
+}
+
+fn react_repo(dest: &Path, manifest: &str) {
+    stage(
+        dest,
+        &[
+            ("package.json", manifest.to_string()),
+            (
+                "src/forms/NameForm.jsx",
+                react_form("NameForm", "name", "Name"),
+            ),
+            (
+                "src/forms/CityForm.jsx",
+                react_form("CityForm", "city", "City"),
+            ),
+        ],
+    );
+}
+
+#[tokio::test]
+async fn ui_shared_primitive_ships_a_finding_for_hand_written_components_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    react_repo(dir.path(), r#"{"dependencies":{"react":"18"}}"#);
+    let corpus = corpus().await;
+    // The naming judge would say "same concept" to anything it is asked, so a NAMING row here
+    // would mean the exclusion of JSX-rendering functions failed.
+    let llm = Scripted::new("different", "same_concept").with_ui("same_mechanism");
+    let store = TranscriptStore::new();
+    let (report, manifest) = scan(
+        &llm,
+        dir.path(),
+        &corpus,
+        None,
+        true,
+        BackendResolution::Api,
+        Some(&store),
+    )
+    .await;
+
+    let ui = under(&report, UI);
+    assert_eq!(ui.len(), 1, "{:#?}", report.findings);
+    let f = ui[0];
+    assert!(matches!(f.kind, Some(FindingKind::Defect)));
+    assert_eq!(f.severity, "low");
+    assert!(f.preview, "a deterministic-tier row");
+    assert!(
+        f.detail.starts_with("2 components hand-write the same"),
+        "{}",
+        f.detail
+    );
+    assert!(
+        f.detail.contains("src/forms/NameForm.jsx") && f.detail.contains("src/forms/CityForm.jsx"),
+        "{}",
+        f.detail
+    );
+    assert!(
+        f.detail.contains("`City` and `Name`") || f.detail.contains("`Name` and `City`"),
+        "the differing strings are named: {}",
+        f.detail
+    );
+    assert!(f.detail.contains("apart from variable names and strings"));
+    assert_eq!(f.also_locations.len() + 1, 2);
+    assert!(!f.detail.contains('\u{2014}'));
+    assert_eq!(
+        f.captures.get("mechanism").map(String::as_str),
+        Some("the premium discount calculation")
+    );
+
+    // The same two components are not ALSO a naming row.
+    assert!(
+        under(&report, NAMING).is_empty(),
+        "{:#?}",
+        under(&report, NAMING)
+    );
+    assert!(under(&report, SINGLE).is_empty());
+
+    // The ledger credits the rule; the transcript has its own session; the verdict is cached.
+    let entry = report.ledger.rule(UI).unwrap();
+    assert!(entry.ran, "{entry:?}");
+    assert_eq!(entry.findings_emitted, 1);
+    assert!(store
+        .get("scan-key")
+        .iter()
+        .any(|a| a.session_id == format!("clone-judge:{UI}:acme/shop")));
+    assert!(!manifest.clone_verdicts.is_empty());
+}
+
+#[tokio::test]
+async fn ui_shared_primitive_claims_nothing_outside_a_react_family_package() {
+    let dir = tempfile::tempdir().unwrap();
+    react_repo(dir.path(), r#"{"dependencies":{"solid-js":"1"}}"#);
+    let corpus = corpus().await;
+    let llm = Scripted::new("different", "different_concept").with_ui("same_mechanism");
+    let (report, _) = scan(
+        &llm,
+        dir.path(),
+        &corpus,
+        None,
+        true,
+        BackendResolution::Api,
+        None,
+    )
+    .await;
+    assert!(under(&report, UI).is_empty(), "{:#?}", under(&report, UI));
+    assert!(convention_rows(&report).is_empty());
 }

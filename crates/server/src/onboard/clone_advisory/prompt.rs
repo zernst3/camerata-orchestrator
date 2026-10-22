@@ -120,21 +120,40 @@ pub fn batch_prompt(
     (prompt, prefix_len)
 }
 
-/// Remove control characters, quotes, backticks and dashes that would break a client sentence,
-/// collapse whitespace, and cap the length.
+/// The most words of a concept phrase that are read.
+const MAX_CONCEPT_WORDS: usize = 8;
+
+/// Whether a character may appear in a concept phrase that reaches a client sentence.
+fn concept_char_allowed(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, ' ' | ',' | '\'' | '(' | ')' | '-')
+}
+
+/// Make the judge's concept phrase safe for a client sentence. Model output is data, so the
+/// phrase is read narrowly: at most the first [`MAX_CONCEPT_WORDS`] whitespace-separated words,
+/// quotes and backticks mapped to an apostrophe and dashes to a hyphen, and the WHOLE phrase is
+/// rejected (the finding then simply omits the clause) when anything outside letters, digits,
+/// spaces, commas, apostrophes, parentheses and hyphens is left. A sentence that smuggles an
+/// instruction through punctuation (`;`, `:`, a path, markup) is dropped, not repaired.
 pub fn scrub_concept(raw: &str) -> String {
-    let cleaned: String = raw
-        .chars()
-        .map(|c| match c {
-            '\u{2014}' | '\u{2013}' => '-',
-            c if c.is_control() => ' ',
-            '`' | '"' => '\'',
-            c => c,
+    let words: Vec<String> = raw
+        .split_whitespace()
+        .take(MAX_CONCEPT_WORDS)
+        .map(|word| {
+            word.chars()
+                .map(|c| match c {
+                    '\u{2014}' | '\u{2013}' => '-',
+                    '`' | '"' | '\u{2018}' | '\u{2019}' | '\u{201c}' | '\u{201d}' => '\'',
+                    c => c,
+                })
+                .collect()
         })
         .collect();
-    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut out: String = collapsed.chars().take(MAX_CONCEPT_CHARS).collect();
-    while out.ends_with(['.', ',', ';', ':']) {
+    let phrase = words.join(" ");
+    if !phrase.chars().all(concept_char_allowed) {
+        return String::new();
+    }
+    let mut out: String = phrase.chars().take(MAX_CONCEPT_CHARS).collect();
+    while out.ends_with([',', ' ']) {
         out.pop();
     }
     out

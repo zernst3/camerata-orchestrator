@@ -228,7 +228,7 @@ async fn same_mechanism_verdict_becomes_a_low_finding_counting_components() {
         f.detail.contains("components/Orders.tsx") && f.detail.contains("app/(shop)/Carts.tsx")
     );
     assert!(
-        f.detail.contains("apart from local names and strings"),
+        f.detail.contains("apart from variable names and strings"),
         "{}",
         f.detail
     );

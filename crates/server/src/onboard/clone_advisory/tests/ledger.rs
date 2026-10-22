@@ -1,7 +1,5 @@
 //! The ledger, the convention row, the corpus ids and the judge model.
 
-use camerata_api_types::audit::FindingKind;
-
 use super::*;
 use crate::integrity_gate::SkipClass;
 use crate::scan_ledger::{RuleTier, ScanLedger, ADVISORY_PARTIAL_NOTE, ADVISORY_UNAVAILABLE_NOTE};
@@ -114,182 +112,26 @@ async fn a_later_pass_that_ran_settles_ran_but_the_note_survives() {
     );
 }
 
-// ---- the convention row ----
+// ---- no convention row (orchestrator decision D1) ----
 
-fn clean_outcome() -> JudgeOutcome {
-    let mut outcome = JudgeOutcome {
-        model_available: true,
-        files_read: 42,
-        ..JudgeOutcome::default()
-    };
-    outcome.counts.insert(
-        RULE,
-        JudgeCounts {
-            found: 3,
-            judged: 3,
-            rejected: 3,
-            ..JudgeCounts::default()
-        },
-    );
-    outcome
-}
-
-fn other_row(rule_id: &str) -> Finding {
-    Finding {
-        rule_id: rule_id.to_string(),
-        ..Finding::default()
+#[tokio::test]
+async fn a_clean_rule_is_credited_in_the_ledger_but_claims_nothing_to_the_client() {
+    // A repo with nothing repeated: every armed rule has zero candidates. The ledger credits
+    // each as having run (it did), and the outcome carries no row at all: no "clean" row, no
+    // convention row, nothing that claims an absence the detector cannot prove.
+    let all = files(&[
+        ("src/a.ts", "export const a = 1;\n"),
+        ("src/b.ts", "export const b = 2;\n"),
+    ]);
+    let outcome = judge(None, &all, set_for(&all, &CloneRule::ALL)).await;
+    assert!(outcome.findings.is_empty() && outcome.not_assessed.is_empty());
+    let mut ledger = ScanLedger::new();
+    record_in_ledger(&mut ledger, &outcome);
+    for rule in CloneRule::ALL {
+        let entry = ledger.rule(rule.id()).expect("recorded");
+        assert!(entry.ran, "{}", rule.id());
+        assert!(entry.verified_clean(), "{}", rule.id());
     }
-}
-
-#[tokio::test]
-async fn a_complete_clean_run_emits_one_convention_row_stating_the_detectors_fact() {
-    let corpus = corpus().await;
-    let rows = convention_rows("acme/shop", &clean_outcome(), &[], Some(&corpus), false);
-    assert_eq!(rows.len(), 1);
-    let row = &rows[0];
-    assert_eq!(row.rule_id, RULE.id());
-    assert_eq!(row.severity, "info");
-    assert!(!row.located);
-    assert_eq!(
-        row.detail,
-        "No application decision was found written in more than one file (42 source files \
-         read, 60-token threshold, 3 candidate sites reviewed and judged not to be the same \
-         decision). Reported so the single-implementation convention can be adopted explicitly."
-    );
-    let Some(FindingKind::ConventionObserved(kind)) = &row.kind else {
-        panic!("a convention row");
-    };
-    assert_eq!(
-        kind.convention_option_id,
-        "each-decision-is-implemented-once"
-    );
-    assert!(kind
-        .convention_label
-        .starts_with("Each application decision is implemented once"));
-    assert!(!row.detail.contains('\u{2014}'));
-}
-
-#[tokio::test]
-async fn zero_candidates_in_a_deterministic_only_scan_still_state_the_fact() {
-    let corpus = corpus().await;
-    let mut outcome = clean_outcome();
-    outcome.model_available = false;
-    outcome.counts.insert(RULE, JudgeCounts::default());
-    let rows = convention_rows("acme/shop", &outcome, &[], Some(&corpus), false);
-    assert_eq!(rows.len(), 1);
-    assert!(
-        rows[0].detail.contains("0 candidate sites reviewed"),
-        "{}",
-        rows[0].detail
-    );
-}
-
-#[tokio::test]
-async fn every_failed_condition_silences_the_convention_row() {
-    let corpus = corpus().await;
-    let ok = || clean_outcome();
-    let run =
-        |outcome: &JudgeOutcome, findings: &[Finding], corpus: Option<&_>, incomplete: bool| {
-            convention_rows("acme/shop", outcome, findings, corpus, incomplete)
-        };
-    assert_eq!(run(&ok(), &[], Some(&corpus), false).len(), 1, "control");
-
-    // A confirmed finding.
-    let mut o = ok();
-    o.counts.get_mut(&RULE).unwrap().confirmed = 1;
-    assert!(run(&o, &[], Some(&corpus), false).is_empty(), "confirmed");
-    // A trace from any tier: a row, a same-location demotion, an absorbed site.
-    assert!(
-        run(&ok(), &[other_row(RULE.id())], Some(&corpus), false).is_empty(),
-        "ai row"
-    );
-    let mut demoted = other_row("SOMETHING-ELSE-1");
-    demoted.also_matches = vec![RULE.id().to_string()];
-    assert!(
-        run(&ok(), &[demoted], Some(&corpus), false).is_empty(),
-        "also_matches"
-    );
-    let mut absorbed = other_row("SOMETHING-ELSE-1");
-    absorbed.also_locations = vec![crate::onboard::MergedLocation {
-        repo: "acme/shop".to_string(),
-        path: "a.ts".to_string(),
-        line: 1,
-        rule_id: RULE.id().to_string(),
-        snippet: String::new(),
-        consequence: false,
-    }];
-    assert!(
-        run(&ok(), &[absorbed], Some(&corpus), false).is_empty(),
-        "also_locations"
-    );
-    // A row under another rule is no trace.
-    assert_eq!(
-        run(
-            &ok(),
-            &[other_row("ARCH-DEAD-CODE-1")],
-            Some(&corpus),
-            false
-        )
-        .len(),
-        1
-    );
-    // A truncated index, an incomplete scan.
-    let mut o = ok();
-    o.index_truncated = true;
-    assert!(
-        run(&o, &[], Some(&corpus), false).is_empty(),
-        "truncated index"
-    );
-    assert!(
-        run(&ok(), &[], Some(&corpus), true).is_empty(),
-        "incomplete scan"
-    );
-    // Candidates left undecided, over the cap, or never judged for want of a model.
-    let mut o = ok();
-    o.counts.get_mut(&RULE).unwrap().unjudged = 1;
-    assert!(run(&o, &[], Some(&corpus), false).is_empty(), "unjudged");
-    let mut o = ok();
-    o.counts.get_mut(&RULE).unwrap().over_cap = 1;
-    assert!(run(&o, &[], Some(&corpus), false).is_empty(), "over cap");
-    let mut o = ok();
-    o.model_available = false;
-    assert!(
-        run(&o, &[], Some(&corpus), false).is_empty(),
-        "candidates found but no model"
-    );
-    // Nothing read, and no corpus to name the convention.
-    let mut o = ok();
-    o.files_read = 0;
-    assert!(
-        run(&o, &[], Some(&corpus), false).is_empty(),
-        "no files read"
-    );
-    assert!(run(&ok(), &[], None, false).is_empty(), "no corpus");
-}
-
-#[tokio::test]
-async fn the_ui_rule_needs_react_files_in_scope_to_claim_a_clean_convention() {
-    let corpus = corpus().await;
-    let mut outcome = JudgeOutcome {
-        model_available: true,
-        files_read: 10,
-        ui_files: 0,
-        ..JudgeOutcome::default()
-    };
-    outcome
-        .counts
-        .insert(CloneRule::SharedPrimitive, JudgeCounts::default());
-    assert!(
-        convention_rows("acme/api", &outcome, &[], Some(&corpus), false).is_empty(),
-        "a repo with no React-family UI has nothing to be consistent about"
-    );
-    outcome.ui_files = 4;
-    let rows = convention_rows("acme/web", &outcome, &[], Some(&corpus), false);
-    assert_eq!(rows.len(), 1);
-    assert!(rows[0]
-        .detail
-        .contains("No UI mechanism was found hand-written in more than one component"));
-    assert!(rows[0].detail.contains("40-token threshold"));
 }
 
 // ---- the corpus ids ----

@@ -15,6 +15,7 @@ use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 mod cache;
 mod ledger;
 mod other_rules;
+mod repros;
 mod seam;
 
 type Script = Box<dyn FnMut(&LlmRequest, usize) -> anyhow::Result<String> + Send>;

@@ -1650,9 +1650,6 @@ pub async fn audit_repos_with_llm(
                 // down to account for (see that recording's doc comment).
                 let semgrep_ids = crate::mechanical_gate::semgrep_covered_rule_ids();
                 let mut repo_findings = Vec::new();
-                // Wave C: this repo's clone-judge outcome, kept so the convention rows can be
-                // decided after the semantic pass has produced its findings.
-                let mut clone_outcome: Option<clone_advisory::JudgeOutcome> = None;
                 if run_deterministic {
                     if let Some((jstore, jid)) = job {
                         jstore.det_tool_running(jid, "floor");
@@ -1857,7 +1854,6 @@ pub async fn audit_repos_with_llm(
                             jstore.add_findings(jid, produced.clone());
                         }
                         repo_findings.extend(produced);
-                        clone_outcome = Some(outcome);
                     }
                 } else {
                     // W1: an honestly-disclosed scope choice, not a pipeline defect — every
@@ -2115,19 +2111,6 @@ pub async fn audit_repos_with_llm(
                 manifest_builder.record_repo(spec, &files, &ai_for_repo);
 
                 repo_findings.extend(ai_for_repo);
-                // Wave C: the convention rows for clone rules that ran completely and found
-                // nothing, decided only now because "no trace under the rule's id from ANY
-                // tier" needs the semantic pass's findings too.
-                if let Some(outcome) = &clone_outcome {
-                    let rows = clone_advisory::convention_rows(
-                        spec,
-                        outcome,
-                        &repo_findings,
-                        corpus,
-                        scan_incomplete,
-                    );
-                    repo_findings.extend(rows);
-                }
                 // P7: drop any finding whose rule carries a stack exception that applies to
                 // THIS repo's detected stack + the finding's own path (e.g. monolith-first vs.
                 // a Supabase Edge Functions directory) — the finding names an idiomatic

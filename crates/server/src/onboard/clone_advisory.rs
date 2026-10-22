@@ -200,7 +200,10 @@ pub async fn judge_clone_candidates(
             outcome.counts.insert(rule, counts);
             continue;
         }
-        let session = format!("clone-judge:{}", rule.id());
+        // One session per rule AND repo: a multi-repo scan shares one transcript key, and a
+        // session named for the rule alone would be re-registered (and overwritten) by every
+        // repo after the first.
+        let session = format!("clone-judge:{}:{}", rule.id(), req.repo);
         register_transcript(feedback, &session, req.repo, rule, candidates, over_cap);
 
         let judged = judge_rule(
@@ -546,72 +549,4 @@ pub fn record_in_ledger(ledger: &mut ScanLedger, outcome: &JudgeOutcome) {
             counts.confirmed as usize,
         );
     }
-}
-
-/// The informational convention rows (work order section 83): for each armed rule that ran
-/// completely and found nothing to report, one `ConventionObserved` row stating the detector's
-/// fact. Emitted only when ALL of these hold, and silent otherwise:
-///
-/// - the rule is fully assessed (every candidate judged; none unjudged or over the cap);
-/// - nothing was confirmed;
-/// - no row at all under the rule's id from ANY tier in `findings` (the semantic pass also
-///   reads every rule, so an AI-tier row, a merged-away row or an absorbed site counts as a
-///   trace);
-/// - the index was not truncated and the scan was not incomplete;
-/// - the corpus rule and its default option are available to name the convention.
-///
-/// Called after the semantic pass has merged its findings, because only then can it see them.
-pub fn convention_rows(
-    repo: &str,
-    outcome: &JudgeOutcome,
-    findings: &[Finding],
-    corpus: Option<&camerata_rules::RuleSet>,
-    scan_incomplete: bool,
-) -> Vec<Finding> {
-    if outcome.index_truncated || scan_incomplete {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for (rule, counts) in &outcome.counts {
-        let fully = counts.fully_assessed() && (outcome.model_available || counts.found == 0);
-        if !fully || counts.confirmed > 0 {
-            continue;
-        }
-        // The rule must have had something to read: a repo with no source at all, or no
-        // React-family UI for the UI rule, has nothing to be consistent about.
-        if outcome.files_read == 0 || (*rule == CloneRule::SharedPrimitive && outcome.ui_files == 0)
-        {
-            continue;
-        }
-        let id = rule.id();
-        let any_trace = findings.iter().any(|f| {
-            f.rule_id.eq_ignore_ascii_case(id)
-                || f.also_matches.iter().any(|m| m.eq_ignore_ascii_case(id))
-                || f.also_locations
-                    .iter()
-                    .any(|l| l.rule_id.eq_ignore_ascii_case(id))
-        });
-        if any_trace {
-            continue;
-        }
-        let Some(label) = corpus
-            .and_then(|c| c.get_by_id(id))
-            .and_then(|r| {
-                r.options
-                    .iter()
-                    .find(|o| o.id == findings::default_option_id(*rule) && !o.violates)
-            })
-            .map(|o| o.label.clone())
-        else {
-            continue;
-        };
-        out.push(findings::convention_row(
-            repo,
-            *rule,
-            &label,
-            outcome.files_read,
-            counts.judged,
-        ));
-    }
-    out
 }

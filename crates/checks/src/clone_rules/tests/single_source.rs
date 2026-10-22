@@ -801,3 +801,31 @@ fn the_candidate_carries_every_members_decision_tokens_as_a_sorted_multiset() {
     };
     assert_eq!(again, member_decision_tokens);
 }
+
+#[test]
+fn a_variable_used_where_the_other_copy_uses_a_different_one_is_not_a_rename() {
+    // `apart from variable names` must be true: a consistent rename is one thing, but `base`
+    // in one copy where the other copy has `order` (while also using `base` elsewhere) is a
+    // different computation under the same token shape.
+    let a = ts_discount_default("0.2");
+    let b = a.replace("return base - 10;", "return order - 10;");
+    let c = one(&files(&[("src/a.ts", &a), ("src/b.ts", &b)]));
+    assert!(!c.facts.agree);
+    assert_eq!(
+        c.facts.disagreements.len(),
+        1,
+        "{:?}",
+        c.facts.disagreements
+    );
+    let d = &c.facts.disagreements[0];
+    assert_eq!((d.a.as_str(), d.b.as_str()), ("base", "order"));
+    assert!(!d.decision);
+    assert_eq!((d.line_a, d.line_b), (9, 9));
+    // A consistent rename of every use is still agreement.
+    let renamed = ts_discount("quoteTotal", "o", "u", "b", "0.2");
+    assert!(
+        one(&files(&[("src/a.ts", &a), ("src/c.ts", &renamed)]))
+            .facts
+            .agree
+    );
+}

@@ -220,3 +220,72 @@ fn the_cache_round_trips_through_json_and_an_older_manifest_loads_empty() {
         "adding the cache did not bump the manifest version"
     );
 }
+
+// ---- the key covers every copy's decision tokens (W29 Wave C review, D5) ----
+
+/// The discount repo with the tested property renamed in BOTH copies: the copies still agree or
+/// still disagree exactly as before, but the decision they write is a different one.
+fn renamed_everywhere(rate_a: &str, rate_b: &str, from: &str, to: &str) -> Vec<(String, String)> {
+    files(&[
+        (
+            "src/cart/total.ts",
+            &discount("applyDiscount", rate_a).replace(from, to),
+        ),
+        (
+            "src/checkout/summary.ts",
+            &discount("quoteTotal", rate_b).replace(from, to),
+        ),
+    ])
+}
+
+#[test]
+fn renaming_a_tested_property_in_every_copy_changes_the_key() {
+    for (rate_a, rate_b) in [("0.2", "0.15"), ("0.2", "0.2")] {
+        let before = renamed_everywhere(rate_a, rate_b, "user.isPremium", "user.isPremium");
+        let after = renamed_everywhere(rate_a, rate_b, "user.isPremium", "user.isAdmin");
+        assert_ne!(
+            key_of(&before, RULE, JUDGE),
+            key_of(&after, RULE, JUDGE),
+            "agree={}: the decision changed, so the old verdict does not apply",
+            rate_a == rate_b
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_cache_repro_a_rename_in_both_copies_forces_a_re_judge() {
+    let before = renamed_everywhere("0.2", "0.15", "user.isPremium", "user.isPremium");
+    let after = renamed_everywhere("0.2", "0.15", "user.isPremium", "user.isAdmin");
+    let mut cache = VerdictCache::default();
+    let first = StubJudge::answering("same_decision", "the premium discount");
+    let a = judge_with(Some(&first), &before, &mut cache, JUDGE).await;
+    assert_eq!((a.findings.len(), first.call_count()), (1, 1));
+
+    let second = StubJudge::answering("different", "");
+    let b = judge_with(Some(&second), &after, &mut cache, JUDGE).await;
+    assert_eq!(
+        second.call_count(),
+        1,
+        "the changed decision is asked again"
+    );
+    assert!(
+        b.findings.is_empty(),
+        "and the new answer is the one that counts"
+    );
+    assert_eq!(b.counts[&RULE].cached, 0);
+}
+
+#[test]
+fn the_key_does_not_depend_on_which_copy_sorts_first() {
+    // Swap which file holds which copy: the paths sort the other way round, so the "first" copy
+    // is the other one. The multiset of decision tokens, and the key, are the same.
+    let a = files(&[
+        ("src/a.ts", &discount("applyDiscount", "0.2")),
+        ("src/b.ts", &discount("quoteTotal", "0.15")),
+    ]);
+    let b = files(&[
+        ("src/a.ts", &discount("applyDiscount", "0.15")),
+        ("src/b.ts", &discount("quoteTotal", "0.2")),
+    ]);
+    assert_eq!(key_of(&a, RULE, JUDGE), key_of(&b, RULE, JUDGE));
+}

@@ -1,5 +1,7 @@
-//! What reaches a client: the finding for a confirmed candidate, the not-assessed row, and the
-//! convention row.
+//! What reaches a client: the finding for a confirmed candidate and the not-assessed row. There is
+//! no convention ("clean") row: a search that found nothing, or whose candidates were all judged
+//! not to be the thing, does not claim the absence of anything (orchestrator decision D1, W29
+//! Wave C review).
 //!
 //! Every sentence about a candidate is a fact the producer computed by token comparison (where
 //! the copies are, how long, whether they agree and what differs). The only clause the judge
@@ -8,9 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use camerata_api_types::audit::{
-    ConventionObservedKind, FindingKind, NotAssessedKind, NotAssessedReason,
-};
+use camerata_api_types::audit::{FindingKind, NotAssessedKind, NotAssessedReason};
 use camerata_checks::clone_rules::{
     Candidate, CloneRule, NameSite, NamedDisagreement, RuleFacts, Site,
 };
@@ -33,14 +33,6 @@ pub fn violating_option_id(rule: CloneRule) -> &'static str {
         CloneRule::SingleSourceLogic => "the-same-decision-is-written-in-several-places",
         CloneRule::NamingOneConcept => "the-same-helper-exists-under-several-names",
         CloneRule::SharedPrimitive => "ui-mechanisms-are-hand-written-per-component",
-    }
-}
-
-/// The shortest token threshold a rule applies, for the convention row's statement.
-fn threshold_tokens(rule: CloneRule) -> u32 {
-    match rule {
-        CloneRule::SingleSourceLogic | CloneRule::NamingOneConcept => 60,
-        CloneRule::SharedPrimitive => 40,
     }
 }
 
@@ -72,8 +64,11 @@ fn join_and(items: &[String]) -> String {
 }
 
 /// "at `a:44` the code has `0.2` while `b:18` has `0.15`", the first three, then "and N more".
+/// Decision differences are named first.
 fn disagreement_clause(ds: &[NamedDisagreement]) -> String {
-    let named: Vec<String> = ds
+    let mut ordered: Vec<&NamedDisagreement> = ds.iter().filter(|d| d.decision).collect();
+    ordered.extend(ds.iter().filter(|d| !d.decision));
+    let named: Vec<String> = ordered
         .iter()
         .take(3)
         .map(|d| {
@@ -130,26 +125,42 @@ fn logic_detail(c: &Candidate, concept: &str) -> String {
     } else {
         format!(", which appears to be {concept}")
     };
+    let block = format!(
+        "{} are the same {}-token block apart from variable names{appears}",
+        join_and(&sites),
+        c.facts.token_len
+    );
     if c.facts.agree {
         format!(
-            "The same decision is written in {n} places and the copies currently agree. {} are \
-             the same {}-token block apart from local names{appears}. Implement it once and \
-             import it, so the copies cannot drift. Verify by diffing the listed lines.",
-            join_and(&sites),
-            c.facts.token_len
+            "The same decision is written in {n} places and the copies currently agree. \
+             {block}. Implement it once and import it, so the copies cannot drift. Verify by \
+             diffing the listed lines."
+        )
+    } else if decision_differs(c) {
+        format!(
+            "The same decision is written in {n} places and the copies do not agree. {block}, \
+             but {}. Implement it once: one function in one module, imported at every listed \
+             site, so a change to any of these values is one edit. Verify by diffing the listed \
+             lines: the only differences are variable names and the differences described here.",
+            disagreement_clause(&c.facts.disagreements)
         )
     } else {
+        // The copies differ, but not in any operator, number or tested property: the decision
+        // itself is the same, and what differs is named after it.
         format!(
-            "The same decision is written in {n} places and the copies do not agree. {} are the \
-             same {}-token block apart from local names{appears}, but {}. Implement it once: \
-             one function in one module, imported at every listed site, so a change to any of \
-             these values is one edit. Verify by diffing the listed lines: the only differences \
-             are local names and the values named here.",
-            join_and(&sites),
-            c.facts.token_len,
+            "The same decision is written in {n} places. {block}. The operators, numbers and \
+             tested properties are the same in every copy, and the copies differ only where \
+             {}. Implement it once and import it, so the copies cannot drift. Verify by diffing \
+             the listed lines: the only differences are variable names and the differences \
+             described here.",
             disagreement_clause(&c.facts.disagreements)
         )
     }
+}
+
+/// Whether the copies differ in an operator, a number or a property inside a decision test.
+fn decision_differs(c: &Candidate) -> bool {
+    c.facts.disagreements.iter().any(|d| d.decision)
 }
 
 fn naming_detail(c: &Candidate) -> String {
@@ -200,7 +211,7 @@ fn naming_detail(c: &Candidate) -> String {
         .collect();
     format!(
         "The same thing is called {}: the {} bodies are the same {}-token block apart from \
-         local names, {agreement}. Keep one, re-export or delete the other, and give it the \
+         variable names, {agreement}. Keep one, re-export or delete the other, and give it the \
          name that says what it does. Verify by diffing the {} bodies.",
         join_and(&called),
         names.len(),
@@ -242,10 +253,27 @@ fn primitive_detail(c: &Candidate, concept: &str) -> String {
             shown.join("; ")
         )
     };
+    // Anything that differs and is not a string (a callee, a property, a number) is named too:
+    // "apart from variable names and strings" is said only of what the copies share.
+    let others: Vec<NamedDisagreement> = c
+        .facts
+        .disagreements
+        .iter()
+        .filter(|d| !differing_strings.contains(d))
+        .cloned()
+        .collect();
+    let also = if others.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " The copies also differ where {}.",
+            disagreement_clause(&others)
+        )
+    };
     format!(
         "{n} components hand-write the same {what}: {} contain the same {}-token block apart \
-         from local names and strings.{strings} Make it one hook or component in the shared UI \
-         module and use it in each listed place. Verify by diffing the listed ranges.",
+         from variable names and strings.{strings}{also} Make it one hook or component in the \
+         shared UI module and use it in each listed place. Verify by diffing the listed ranges.",
         join_and(&sites),
         c.facts.token_len
     )
@@ -258,8 +286,11 @@ pub fn confirmed_finding(
     concept: &str,
     files: &[(String, String)],
 ) -> Finding {
+    // High only when the copies disagree on the decision itself (an operator, a number, a tested
+    // property). Other differences (a string, a template name, an action type, a callee) are
+    // named in the detail and do not raise the severity.
     let severity = match c.rule {
-        CloneRule::SingleSourceLogic if !c.facts.agree => "high",
+        CloneRule::SingleSourceLogic if decision_differs(c) => "high",
         CloneRule::SingleSourceLogic => "medium",
         CloneRule::NamingOneConcept | CloneRule::SharedPrimitive => "low",
     };
@@ -358,64 +389,6 @@ pub fn not_assessed_row(
         kind: Some(FindingKind::NotAssessed(NotAssessedKind {
             reason,
             reason_detail,
-        })),
-        ..Finding::default()
-    }
-}
-
-/// What the convention row states, per rule: the detector's fact, not an affirmation it cannot
-/// make.
-fn convention_detail(rule: CloneRule, files_read: u32, reviewed: u32) -> String {
-    let (what, judged) = match rule {
-        CloneRule::SingleSourceLogic => (
-            "No application decision was found written in more than one file",
-            "the same decision",
-        ),
-        CloneRule::NamingOneConcept => (
-            "No helper was found under more than one name",
-            "the same concept",
-        ),
-        CloneRule::SharedPrimitive => (
-            "No UI mechanism was found hand-written in more than one component",
-            "the same mechanism",
-        ),
-    };
-    let adopt = match rule {
-        CloneRule::SingleSourceLogic => "single-implementation",
-        CloneRule::NamingOneConcept => "one-name-per-concept",
-        CloneRule::SharedPrimitive => "shared-primitive",
-    };
-    format!(
-        "{what} ({files_read} source files read, {}-token threshold, {reviewed} candidate \
-         sites reviewed and judged not to be {judged}). Reported so the {adopt} convention can \
-         be adopted explicitly.",
-        threshold_tokens(rule)
-    )
-}
-
-/// The informational convention row for a rule that ran completely and found nothing.
-pub fn convention_row(
-    repo: &str,
-    rule: CloneRule,
-    option_label: &str,
-    files_read: u32,
-    reviewed: u32,
-) -> Finding {
-    Finding {
-        repo: repo.to_string(),
-        path: String::new(),
-        line: 0,
-        rule_id: rule.id().to_string(),
-        severity: "info".to_string(),
-        snippet: option_label.chars().take(200).collect(),
-        detail: convention_detail(rule, files_read, reviewed),
-        located: false,
-        preview: true,
-        preview_tool: Some(ARCH_PREVIEW_TOOL.to_string()),
-        evaluated_option_id: Some(default_option_id(rule).to_string()),
-        kind: Some(FindingKind::ConventionObserved(ConventionObservedKind {
-            convention_option_id: default_option_id(rule).to_string(),
-            convention_label: option_label.to_string(),
         })),
         ..Finding::default()
     }
