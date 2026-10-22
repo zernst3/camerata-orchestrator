@@ -112,8 +112,10 @@ const NOISE_DIRS: &[&str] = &[
     "node_modules.bin",
 ];
 
-/// The build-configuration folders .NET writes under `bin/`. A `bin` segment directly followed
-/// by one of these is compiler output and is pruned like `obj/`; any other `bin/` is source.
+/// The build-configuration folders .NET writes under `bin/`, directly (`bin/Debug`) or under a
+/// platform folder (`bin/x64/Debug`, `bin/Any CPU/Release`). A path with one of these anywhere
+/// below a `bin` segment is compiler output and is pruned like `obj/`; any other `bin/` is
+/// source.
 const DOTNET_BUILD_CONFIGS: &[&str] = &["Debug", "Release"];
 
 /// Generated / lock / vendored FILE basenames that carry no architectural signal but are
@@ -404,9 +406,9 @@ fn noise_path(path: &str, extra_dirs: &[String], allow_generated: bool) -> bool 
             || (NOISE_DIRS.contains(seg)
                 && !(allow_generated && GENERATED_NOISE_DIRS.contains(seg)))
             || (*seg == "bin"
-                && segs
-                    .get(i + 1)
-                    .is_some_and(|next| DOTNET_BUILD_CONFIGS.contains(next)))
+                && segs[i + 1..]
+                    .iter()
+                    .any(|next| DOTNET_BUILD_CONFIGS.contains(next)))
     })
 }
 
@@ -758,6 +760,9 @@ mod tests {
         let none: &[String] = &[];
         for pruned in [
             "bin/Debug/net8.0/app.json",
+            "bin/x64/Debug/net8.0/app.json",
+            "src/Api/bin/Any CPU/Release/app.deps.json",
+            "bin/x86/Release",
             "bin/Release/app.deps.json",
             "src/Api/bin/Debug/net8.0/appsettings.json",
             "bin/Debug",
@@ -774,6 +779,9 @@ mod tests {
             "bin/debug/lowercase.rs",
             "bin/Debugger/x.js",
             "bin/ReleaseNotes.md",
+            "bin/x64/tool.js",
+            "Debug/notes/a.js",
+            "src/Debug/a.ts",
             "src/binary/x.rs",
         ] {
             assert!(!is_noise_path(kept, none), "{kept} is source");

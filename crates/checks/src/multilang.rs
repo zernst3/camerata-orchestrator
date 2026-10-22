@@ -90,7 +90,8 @@ pub(crate) const PRUNED_DIRS: &[&str] = &[
 
 /// The build-configuration folders .NET writes under `bin/`. `bin` itself is NOT in
 /// [`PRUNED_DIRS`]: it is also where Rust keeps `src/bin/*.rs` and Node keeps `bin/cli.js`, which
-/// are source. A directory named one of these directly under a `bin` directory is build output.
+/// are source. A directory named one of these anywhere below a `bin` directory (`bin/Debug`,
+/// `bin/x64/Debug`, `bin/Any CPU/Release`) is build output.
 const DOTNET_BUILD_CONFIGS: &[&str] = &["Debug", "Release"];
 
 /// Whether a walk should skip the directory `name` found inside `parent`: a [`PRUNED_DIRS`]
@@ -99,7 +100,8 @@ const DOTNET_BUILD_CONFIGS: &[&str] = &["Debug", "Release"];
 /// language detector prunes.
 pub(crate) fn is_pruned_dir(parent: &Path, name: &str) -> bool {
     PRUNED_DIRS.contains(&name)
-        || (DOTNET_BUILD_CONFIGS.contains(&name) && parent.file_name().is_some_and(|p| p == "bin"))
+        || (DOTNET_BUILD_CONFIGS.contains(&name)
+            && parent.components().any(|c| c.as_os_str() == "bin"))
 }
 
 // ─── coarse per-language layer-2 rule ids ────────────────────────────────────
@@ -2669,6 +2671,12 @@ mod tests {
     fn is_pruned_dir_prunes_dotnet_build_output_but_not_a_source_bin() {
         let p = Path::new;
         assert!(is_pruned_dir(p("proj/bin"), "Debug"));
+        assert!(
+            is_pruned_dir(p("proj/bin/x64"), "Debug"),
+            "platform folder in between"
+        );
+        assert!(is_pruned_dir(p("proj/bin/Any CPU"), "Release"));
+        assert!(!is_pruned_dir(p("proj/binary"), "Debug"));
         assert!(is_pruned_dir(p("bin"), "Release"));
         assert!(is_pruned_dir(p("x"), "node_modules"));
         assert!(is_pruned_dir(p("x"), "obj"));

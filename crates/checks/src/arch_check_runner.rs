@@ -436,6 +436,8 @@ mod tests {
             ("src/bin/tool.rs", "fn main() {}\n"),
             ("bin/cli.js", "console.log(1);\n"),
             ("bin/Debug/net8.0/gen.js", "built\n"),
+            ("bin/x64/Debug/gen.js", "built\n"),
+            ("bin/Any CPU/Release/gen.js", "built\n"),
             ("bin/Release/gen.js", "built\n"),
             ("node_modules/x/y.js", "vendored\n"),
         ] {
