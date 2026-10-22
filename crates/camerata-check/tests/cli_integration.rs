@@ -175,6 +175,57 @@ fn ci_gate_reports_dead_code_for_an_orphaned_file() {
     assert_eq!(dead[0]["file"], "src/orphan.ts", "{stdout}");
 }
 
+// ── React Hooks lint config gap runs in the CI gate (scan tier and CI only) ──
+
+/// The CI binary loads only the files matching each checker's interest globs, so this pins that
+/// the lint-configuration shapes (a dotfile included) reach the checker there.
+#[test]
+fn ci_gate_reports_a_react_repo_whose_lint_config_does_not_enable_the_hooks_rules() {
+    let hooks_lint_violations = |eslintrc: Option<&str>| -> Vec<serde_json::Value> {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let write = |rel: &str, body: &str| {
+            let path = tmp.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        write(
+            "package.json",
+            r#"{"name":"web","private":true,"main":"src/App.jsx","dependencies":{"react":"^18"}}"#,
+        );
+        write("src/App.jsx", "export const App = () => null;\n");
+        if let Some(body) = eslintrc {
+            write(".eslintrc.json", body);
+        }
+        let output = bin()
+            .arg(tmp.path())
+            .arg("--rule-id")
+            .arg("UI-REACT-HOOKS-LINT-1")
+            .arg("--format")
+            .arg("json")
+            .output()
+            .expect("must run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+        value["violations"]
+            .as_array()
+            .expect("violations must be an array")
+            .clone()
+    };
+
+    let gap = hooks_lint_violations(Some(r#"{"extends":["eslint:recommended"]}"#));
+    assert_eq!(gap.len(), 1, "{gap:?}");
+    assert_eq!(gap[0]["rule_id"], "UI-REACT-HOOKS-LINT-1");
+    assert_eq!(gap[0]["file"], ".eslintrc.json");
+
+    let none = hooks_lint_violations(None);
+    assert_eq!(none.len(), 1, "{none:?}");
+    assert_eq!(none[0]["file"], "package.json");
+
+    let enabled = hooks_lint_violations(Some(r#"{"extends":["plugin:react-hooks/recommended"]}"#));
+    assert!(enabled.is_empty(), "{enabled:?}");
+}
+
 // ── adversarial: malformed SQL / malformed config / binary file never panics ─
 
 #[test]

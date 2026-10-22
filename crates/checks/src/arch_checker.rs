@@ -254,6 +254,7 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
         Box::new(crate::one_import_path_checker::OneImportPathChecker),
         Box::new(crate::shared_constant_checker::SharedConstantChecker),
         Box::new(crate::dead_code_checker::DeadCodeChecker),
+        Box::new(crate::react_hooks_lint_checker::ReactHooksLintChecker),
     ]
 }
 
@@ -437,6 +438,7 @@ mod tests {
             "ARCH-ONE-IMPORT-PATH-1",
             "ARCH-SHARED-CONSTANT-1",
             "ARCH-DEAD-CODE-1",
+            "UI-REACT-HOOKS-LINT-1",
         ] {
             assert!(
                 ids.contains(expected),
@@ -623,9 +625,15 @@ allowed_in = ["repositories"]
 "#;
         // A source file too: `DeadCodeChecker` answers only for a repo that has source in a
         // language it reads (`config_unsatisfied_for`), so the config alone is not "satisfied".
+        // Likewise `ReactHooksLintChecker` answers only for a React repo whose lint setup it
+        // can read; a React manifest with no ESLint configuration is a (reportable) answer.
         let files: Vec<(String, String)> = vec![
             (".camerata/architecture.toml".to_string(), cfg.to_string()),
             ("src/app.ts".to_string(), String::new()),
+            (
+                "package.json".to_string(),
+                r#"{"dependencies":{"react":"18"}}"#.to_string(),
+            ),
         ];
         let repo = RepoView {
             spec: "test/repo",
