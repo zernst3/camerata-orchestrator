@@ -35,7 +35,10 @@ fn premium_discount_written_twice_with_different_rates_is_a_disagreeing_candidat
             RULE_SINGLE_SOURCE, c.family.key, c.family.token_len
         )
     );
-    let RuleFacts::Logic { decision_tokens } = &c.facts.rule else {
+    let RuleFacts::Logic {
+        decision_tokens, ..
+    } = &c.facts.rule
+    else {
         panic!("logic facts expected");
     };
     assert!(
@@ -273,7 +276,10 @@ export function priceFor(cart, user) {{
 }
 
 #[test]
-fn twin_composed_variant_calling_one_helper_is_not_a_candidate() {
+fn composed_variant_with_its_own_decisions_around_the_helper_is_a_candidate() {
+    // W29 Wave C review, D2: both copies call the same imported helper, but the premium and
+    // coupon tests and the base arithmetic are written around the call in each copy, and the
+    // call is a small part of the sequence. The decision is the copies' own.
     let imported = "import { applyDiscount } from './pricing';";
     let input = files(&[
         (
@@ -286,7 +292,111 @@ fn twin_composed_variant_calling_one_helper_is_not_a_candidate() {
         ),
     ]);
     assert_eq!(index_of(&input).families.len(), 1, "the detector sees it");
+    let c = one(&input);
+    assert!(!c.facts.agree);
+}
+
+/// A function whose body is nearly all one call to an imported helper and its options.
+fn call_dominated(options: &str, import: &str) -> String {
+    format!(
+        "{import}
+export function quoteFor(cart) {{
+  const base = cart.subtotal * cart.quantity;
+  return buildQuote(base, {options});
+}}
+"
+    )
+}
+
+const BUILD_QUOTE_IMPORT: &str = "import { buildQuote } from './pricing';";
+const LONG_OPTIONS: &str = "{ rate: 0.2, floor: 10, cap: 500, label: 'premium', tiers: [1, 2, 3], region: 'eu', rounding: 'up', currency: 'usd' }";
+
+#[test]
+fn twin_composed_twin_whose_call_and_options_dominate_is_not_a_candidate() {
+    let input = files(&[
+        (
+            "src/cart.ts",
+            &call_dominated(LONG_OPTIONS, BUILD_QUOTE_IMPORT),
+        ),
+        (
+            "src/quote.ts",
+            &call_dominated(&LONG_OPTIONS.replace("0.2", "0.15"), BUILD_QUOTE_IMPORT),
+        ),
+    ]);
+    assert_eq!(index_of(&input).families.len(), 1, "the detector sees it");
     assert!(found(RULE, &input).is_empty());
+}
+
+#[test]
+fn composed_twin_with_a_short_call_is_a_candidate_when_a_decision_sits_outside_it() {
+    // The positive sibling of the dominance twin: the same helper, but the call covers a small
+    // share of the sequence and a decision is written outside its arguments.
+    let body = |import: &str| {
+        let mut text = format!("{import}\nexport function run(a, b, c) {{\n");
+        for _ in 0..12 {
+            text.push_str("  const d = a;\n");
+        }
+        text.push_str("  const kind = a > 1 ? 'big' : 'small';\n  return buildQuote(b, c);\n}\n");
+        text
+    };
+    let input = files(&[
+        ("src/a.ts", &body(BUILD_QUOTE_IMPORT)),
+        ("src/b.ts", &body(BUILD_QUOTE_IMPORT)),
+    ]);
+    assert_eq!(index_of(&input).families.len(), 1, "the detector sees it");
+    assert_eq!(found(RULE, &input).len(), 1);
+}
+
+#[test]
+fn twin_composed_twin_whose_every_decision_is_inside_the_call_arguments_is_not_a_candidate() {
+    // The call covers well under half of the sequence, but every operator, literal and property
+    // of the sequence is inside its argument list: the decision belongs to the call's options.
+    let body = |import: &str| {
+        let mut text = format!("{import}\nexport function run(a, b, c) {{\n");
+        for _ in 0..14 {
+            text.push_str("  const d = a;\n");
+        }
+        text.push_str("  return buildQuote(a * b > 1, 'x');\n}\n");
+        text
+    };
+    let input = files(&[
+        ("src/a.ts", &body(BUILD_QUOTE_IMPORT)),
+        ("src/b.ts", &body(BUILD_QUOTE_IMPORT)),
+    ]);
+    assert_eq!(index_of(&input).families.len(), 1, "the detector sees it");
+    assert!(found(RULE, &input).is_empty());
+}
+
+#[test]
+fn an_unrelated_imported_call_beside_the_decision_is_still_a_candidate() {
+    for (callee, import) in [
+        ("render", "import { render } from './view';"),
+        ("auth", "import { auth } from '@/lib/auth';"),
+        ("useState", "import { useState } from 'react';"),
+        ("t", "import { t } from './i18n';"),
+    ] {
+        let source = format!(
+            "{import}
+export function priceFor(cart, user) {{
+  const base = cart.subtotal * cart.quantity;
+  if (user.isPremium && cart.coupon !== null) {{
+    return base - cart.coupon.value;
+  }}
+  if (base > 100 || cart.vip === true) {{
+    return base + cart.shipping;
+  }}
+  {callee}(base);
+  return base;
+}}
+"
+        );
+        let input = files(&[("src/a.ts", &source), ("src/b.ts", &source)]);
+        assert_eq!(
+            found(RULE, &input).len(),
+            1,
+            "a call to `{callee}` beside the decision must not hide it"
+        );
+    }
 }
 
 #[test]
@@ -491,4 +601,203 @@ fn twin_malformed_and_empty_inputs_never_panic() {
     let empty: Vec<(String, String)> = Vec::new();
     let set = candidates(&empty, &armed(&CloneRule::ALL));
     assert!(set.by_rule.values().all(Vec::is_empty));
+}
+
+// ---- which differences are decision differences (W29 Wave C review, severity rule) ----
+
+/// `(a, b, decision)` of every disagreement between two sources.
+fn flags(a: &str, b: &str, pa: &str, pb: &str) -> Vec<(String, String, bool)> {
+    let c = one(&files(&[(pa, a), (pb, b)]));
+    c.facts
+        .disagreements
+        .iter()
+        .map(|d| (d.a.clone(), d.b.clone(), d.decision))
+        .collect()
+}
+
+fn ts_flags(from: &str, to: &str) -> Vec<(String, String, bool)> {
+    let a = ts_discount_default("0.2");
+    let b = a.replace(from, to);
+    assert_ne!(a, b, "the replacement must change the source");
+    flags(&a, &b, "src/a.ts", "src/b.ts")
+}
+
+#[test]
+fn a_number_or_operator_difference_is_a_decision_difference() {
+    assert_eq!(
+        ts_flags("base * 0.2", "base * 0.15"),
+        [("0.2".to_string(), "0.15".to_string(), true)]
+    );
+    assert_eq!(
+        ts_flags("base > 100", "base >= 100"),
+        [(">".to_string(), ">=".to_string(), true)]
+    );
+    assert_eq!(
+        ts_flags("return base - 10;", "return base - 12;"),
+        [("10".to_string(), "12".to_string(), true)]
+    );
+}
+
+#[test]
+fn a_property_inside_the_decision_test_is_a_decision_difference() {
+    assert_eq!(
+        ts_flags("if (user.isPremium)", "if (user.isMember)"),
+        [("isPremium".to_string(), "isMember".to_string(), true)]
+    );
+    assert_eq!(
+        ts_flags("order.coupon !== null", "order.voucher !== null"),
+        [("coupon".to_string(), "voucher".to_string(), true)]
+    );
+}
+
+#[test]
+fn a_property_outside_any_decision_test_is_not_a_decision_difference() {
+    assert_eq!(
+        ts_flags("base + order.shipping", "base + order.freight"),
+        [("shipping".to_string(), "freight".to_string(), false)]
+    );
+}
+
+#[test]
+fn a_python_property_in_an_if_test_is_a_decision_difference_and_a_string_is_not() {
+    let a = py_status("status", "order");
+    let b = a.replace("order.state == 'refunded'", "order.phase == 'refunded'");
+    assert_eq!(
+        flags(&a, &b, "svc/a.py", "svc/b.py"),
+        [("state".to_string(), "phase".to_string(), true)]
+    );
+    let c = a
+        .replace("'closed'", "'CLOSED'")
+        .replace("'paid'", "'PAID'");
+    let found = flags(&a, &c, "svc/a.py", "svc/c.py");
+    assert!(!found.is_empty());
+    assert!(found.iter().all(|(_, _, decision)| !decision), "{found:?}");
+}
+
+#[test]
+fn a_callee_a_string_or_an_action_type_is_not_a_decision_difference() {
+    let a = redux_like("ADD_TODO", "REMOVE_TODO");
+    let b = redux_like("ADD_NOTE", "REMOVE_NOTE");
+    let found = flags(&a, &b, "src/a.js", "src/b.js");
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found.iter().all(|(_, _, decision)| !decision), "{found:?}");
+
+    let callee = |name: &str| {
+        format!(
+            "export function quote(order, user) {{
+  const base = order.subtotal * order.quantity;
+  if (user.isPremium) {{
+    const discount = {name}(base, 0.2);
+    return base - discount;
+  }}
+  if (base > 100 && order.coupon !== null) {{
+    return base - 10;
+  }}
+  return base + order.shipping;
+}}
+"
+        )
+    };
+    assert_eq!(
+        flags(
+            &callee("computeDiscount"),
+            &callee("computeSurcharge"),
+            "src/a.ts",
+            "src/b.ts"
+        ),
+        [(
+            "computeDiscount".to_string(),
+            "computeSurcharge".to_string(),
+            false
+        )]
+    );
+}
+
+/// A reducer over two action types; the type strings are the only difference between slices.
+pub(super) fn redux_like(add: &str, remove: &str) -> String {
+    format!(
+        "const initial = {{ items: [], loading: false }};
+export function reducer(state = initial, action) {{
+  switch (action.type) {{
+    case '{add}':
+      return {{ ...state, items: [...state.items, action.payload] }};
+    case '{remove}':
+      return {{ ...state, items: state.items.filter((i) => i.id !== action.payload.id) }};
+    case 'LOADING':
+      return {{ ...state, loading: action.payload === true }};
+    default:
+      return state;
+  }}
+}}
+"
+    )
+}
+
+#[test]
+fn a_callee_difference_makes_the_copies_disagree() {
+    let make = |name: &str| {
+        format!(
+            "export function quote(order, user) {{
+  const base = order.subtotal * order.quantity;
+  if (user.isPremium) {{
+    const discount = {name}(base, 0.2);
+    return base - discount;
+  }}
+  if (base > 100 && order.coupon !== null) {{
+    return base - 10;
+  }}
+  return base + order.shipping;
+}}
+"
+        )
+    };
+    let c = one(&files(&[
+        ("src/a.ts", &make("computeDiscount")),
+        ("src/b.ts", &make("computeSurcharge")),
+    ]));
+    assert!(!c.facts.agree, "the callee differs");
+    assert_eq!(c.facts.disagreements.len(), 1);
+    let same = one(&files(&[
+        ("src/a.ts", &make("computeDiscount")),
+        ("src/b.ts", &make("computeDiscount")),
+    ]));
+    assert!(same.facts.agree);
+}
+
+#[test]
+fn the_candidate_carries_every_members_decision_tokens_as_a_sorted_multiset() {
+    let a = ts_discount_default("0.2");
+    let b = ts_discount("quoteTotal", "o", "u", "b", "0.15");
+    let c = one(&files(&[("src/a.ts", &a), ("src/b.ts", &b)]));
+    let RuleFacts::Logic {
+        member_decision_tokens,
+        decision_tokens,
+    } = &c.facts.rule
+    else {
+        panic!("logic facts expected");
+    };
+    let mut sorted = member_decision_tokens.clone();
+    sorted.sort();
+    assert_eq!(member_decision_tokens, &sorted, "sorted");
+    assert_eq!(
+        member_decision_tokens.len(),
+        2 * decision_tokens.len(),
+        "every member contributes its own tokens"
+    );
+    for rate in ["0.2", "0.15"] {
+        assert_eq!(
+            member_decision_tokens.iter().filter(|t| *t == rate).count(),
+            1
+        );
+    }
+    // Independent of the order the files were given in and of their paths.
+    let swapped = one(&files(&[("src/z.ts", &a), ("src/y.ts", &b)]));
+    let RuleFacts::Logic {
+        member_decision_tokens: again,
+        ..
+    } = &swapped.facts.rule
+    else {
+        panic!("logic facts expected");
+    };
+    assert_eq!(again, member_decision_tokens);
 }

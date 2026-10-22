@@ -9,7 +9,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use crate::extract::clone::CloneFamily;
+use crate::extract::clone::{CloneFamily, TokenClass};
 
 use super::compare::compare_members;
 use super::composed::wraps_another_member;
@@ -42,6 +42,12 @@ pub(super) fn build(ctx: &mut Ctx<'_>, family: &CloneFamily) -> Option<Candidate
         let whole = item.kind == "function"
             && u64::from(member.token_len) * 100 >= WHOLE_BODY_PERCENT * item.tokens.len() as u64;
         if !whole {
+            return None;
+        }
+        // A function that renders JSX in a package UI-SHARED-PRIMITIVE-1 reads is that rule's to
+        // report (when it is armed): two rows for one pair of components would be a duplicate.
+        let renders_jsx = item.tokens.iter().any(|t| t.class == TokenClass::JsxTag);
+        if renders_jsx && ctx.ui_rule_armed && ctx.in_react_package(&member.file) {
             return None;
         }
         names.push(NameSite {

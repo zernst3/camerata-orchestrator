@@ -1,10 +1,19 @@
 //! The composed-variant guards: a family whose copies all call the same imported helper is the
-//! helper's call site plus its options, not a second implementation of the helper.
+//! helper's call site plus its options, not a second implementation of the helper. The guard
+//! fires only when that call DOMINATES the shared sequence (W29 Wave C review, D2): a decision
+//! written around an unrelated imported call (`render(`, `auth(`, `useState(`, `t(`) is still a
+//! decision written in two places.
 
 use crate::extract::clone::{CodeSpan, Token, TokenClass};
+use crate::extract::SourceLang;
 
 use super::bindings::{imports_name, module_of};
 use super::context::{is_punct, Ctx, SpanView};
+use super::decision::is_decision_token;
+
+/// The shared imported call dominates the sequence when its tokens cover at least this share of
+/// it, as a percentage.
+const DOMINANT_PERCENT: usize = 50;
 
 /// Offsets inside a span where a free identifier is called: an identifier token directly
 /// followed by `(`.
@@ -24,9 +33,43 @@ fn callee_at<'a>(
     ctx.token_text(&span.file, view.tokens().get(offset)?)
 }
 
+/// The index of the `)` that closes the `(` at `open`; the last index when the span ends first
+/// (which over-extends the call, and so errs toward dropping the candidate).
+fn matching_paren(tokens: &[Token], open: usize) -> usize {
+    let mut depth = 0usize;
+    for (i, token) in tokens.iter().enumerate().skip(open) {
+        if is_punct(token, "(") {
+            depth += 1;
+        } else if is_punct(token, ")") {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return i;
+            }
+        }
+    }
+    tokens.len().saturating_sub(1)
+}
+
+/// Whether the call whose callee sits at `offset` dominates the sequence: its tokens cover at
+/// least [`DOMINANT_PERCENT`] of it, OR every decision-bearing token of the sequence lies inside
+/// the call's argument list (the decision then belongs to the call's options).
+fn call_dominates(lang: SourceLang, tokens: &[Token], offset: usize) -> bool {
+    let end = matching_paren(tokens, offset + 1);
+    let covered = end + 1 - offset;
+    if covered * 100 >= tokens.len() * DOMINANT_PERCENT {
+        return true;
+    }
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| is_decision_token(lang, token))
+        .all(|(i, _)| i > offset + 1 && i < end)
+}
+
 /// Whether the shared sequence contains a call to a helper that every member file imports from
 /// the same module (`composed_variant`, ARCH-SINGLE-SOURCE-LOGIC-1): the same callee name at the
-/// same position in every copy, imported in each copy's file from one resolved module.
+/// same position in every copy, imported in each copy's file from one resolved module, AND that
+/// call dominates the sequence ([`call_dominates`]).
 pub(super) fn calls_one_shared_helper(ctx: &mut Ctx<'_>, members: &[CodeSpan]) -> bool {
     let Some(first) = members.first() else {
         return false;
@@ -76,7 +119,12 @@ pub(super) fn calls_one_shared_helper(ctx: &mut Ctx<'_>, members: &[CodeSpan]) -
             }
         }
         if every_member && module.is_some() {
-            return true;
+            let dominant = ctx
+                .lang(&first.file)
+                .is_some_and(|lang| call_dominates(lang, views[0].tokens(), offset));
+            if dominant {
+                return true;
+            }
         }
     }
     false

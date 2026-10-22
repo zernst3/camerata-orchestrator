@@ -99,6 +99,12 @@ pub struct NamedDisagreement {
     pub a: String,
     /// The token text in the differing copy.
     pub b: String,
+    /// The difference sits on a token that changes what the code decides: an operator, a number,
+    /// or a property name inside a decision test (an `if`/`elif`/`while`/`switch`/`match` head
+    /// or the condition of a ternary). A difference in a string, a callee or a property outside
+    /// any test (an action type, a template name, a field that is only copied through) is
+    /// real and named, but it is not a different decision.
+    pub decision: bool,
 }
 
 /// A declared function name and where it is (ARCH-NAMING-ONE-CONCEPT-1).
@@ -134,8 +140,12 @@ pub enum RuleFacts {
     /// ARCH-SINGLE-SOURCE-LOGIC-1.
     Logic {
         /// The Exact text of the operator, literal and property tokens of the shared sequence,
-        /// in order (for ranking and for the judge).
+        /// in order (for ranking and for the judge). Read from the first copy.
         decision_tokens: Vec<String>,
+        /// The same tokens of EVERY copy, sorted: a multiset that does not depend on the order
+        /// of the copies or on their paths, and that changes when any copy's decision changes
+        /// whether or not the copies still agree (the verdict cache keys on it).
+        member_decision_tokens: Vec<String>,
     },
     /// ARCH-NAMING-ONE-CONCEPT-1.
     Naming {

@@ -405,3 +405,86 @@ fn twin_test_generated_vendored_files_are_skipped() {
         1
     );
 }
+
+// ---- JSX-rendering functions belong to UI-SHARED-PRIMITIVE-1 (W29 Wave C review) ----
+
+fn react_form(name: &str, field: &str, label: &str) -> String {
+    format!(
+        "import React, {{ useState }} from 'react';
+export function {name}() {{
+  const [value, setValue] = useState('');
+  const [error, setError] = useState(null);
+  const submit = (e) => {{
+    e.preventDefault();
+    if (!value || value.length < 3) {{
+      setError('{label} is required');
+      return;
+    }}
+    setError(null);
+  }};
+  return (
+    <form onSubmit={{submit}}>
+      <label>{label}</label>
+      <input name=\"{field}\" value={{value}} onChange={{(e) => setValue(e.target.value)}} />
+      {{error && <span className=\"err\">{{error}}</span>}}
+      <button type=\"submit\">Save</button>
+    </form>
+  );
+}}
+"
+    )
+}
+
+const REACT_MANIFEST: &str = r#"{"dependencies":{"react":"18"}}"#;
+
+fn form_repo(manifest: &str) -> Vec<(String, String)> {
+    files(&[
+        ("package.json", manifest),
+        (
+            "src/forms/NameForm.jsx",
+            &react_form("NameForm", "name", "Name"),
+        ),
+        (
+            "src/forms/CityForm.jsx",
+            &react_form("CityForm", "city", "City"),
+        ),
+    ])
+}
+
+#[test]
+fn twin_component_pair_is_left_to_the_ui_rule_when_that_rule_is_armed() {
+    let input = form_repo(REACT_MANIFEST);
+    // The positive sibling: with only the naming rule armed the pair is a candidate, so it is the
+    // exclusion, not the fixture, that removes it below.
+    assert_eq!(found(RULE, &input).len(), 1);
+    let both = candidates(&input, &armed(&[RULE, CloneRule::SharedPrimitive]));
+    assert!(
+        both.by_rule[&RULE].is_empty(),
+        "naming must not double-report a UI mechanism: {:#?}",
+        both.by_rule[&RULE]
+    );
+    assert_eq!(
+        both.by_rule[&CloneRule::SharedPrimitive].len(),
+        1,
+        "the UI rule owns it"
+    );
+}
+
+#[test]
+fn jsx_in_a_package_the_ui_rule_does_not_read_is_still_a_naming_candidate() {
+    let input = form_repo(r#"{"dependencies":{"solid-js":"1"}}"#);
+    let both = candidates(&input, &armed(&[RULE, CloneRule::SharedPrimitive]));
+    assert_eq!(both.by_rule[&RULE].len(), 1, "nothing else would report it");
+    assert!(both.by_rule[&CloneRule::SharedPrimitive].is_empty());
+}
+
+#[test]
+fn a_helper_with_no_jsx_is_a_naming_candidate_with_the_ui_rule_armed() {
+    let input = files(&[
+        ("package.json", REACT_MANIFEST),
+        ("src/money.ts", &ts_money("formatMoney", "0")),
+        ("src/price.ts", &ts_money("renderPrice", "0")),
+    ]);
+    let both = candidates(&input, &armed(&[RULE, CloneRule::SharedPrimitive]));
+    assert_eq!(both.by_rule[&RULE].len(), 1);
+}

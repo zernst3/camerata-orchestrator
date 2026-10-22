@@ -13,7 +13,7 @@ pub const MAX_JUDGE_MEMBERS: usize = 3;
 /// At most this many source lines are shown per member.
 pub const MAX_JUDGE_LINES: usize = 30;
 /// A single source line is cut at this many characters.
-const MAX_LINE_CHARS: usize = 200;
+const MAX_LINE_CHARS: usize = 120;
 
 const MAX_DECISION_TOKENS: usize = 24;
 const MAX_DISAGREEMENTS: usize = 8;
@@ -200,7 +200,9 @@ pub fn judge_input(c: &Candidate, files: &[(String, String)]) -> JudgeInput {
         differing_strings: Vec::new(),
     };
     match &c.facts.rule {
-        RuleFacts::Logic { decision_tokens } => {
+        RuleFacts::Logic {
+            decision_tokens, ..
+        } => {
             input.decision_tokens = decision_tokens
                 .iter()
                 .take(MAX_DECISION_TOKENS)

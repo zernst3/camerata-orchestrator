@@ -26,7 +26,7 @@
 //! guards, and the exact-mode agreement comparison. Survivors are ranked per rule and capped at
 //! [`CLONE_JUDGE_MAX_PER_RULE`]; the overflow is counted, never judged, never shipped.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::extract::clone::{detect, CloneFamily, CloneOptions, SkipReason};
 
@@ -150,6 +150,7 @@ pub fn candidates(files: &[(String, String)], armed: &HashSet<&str>) -> Candidat
         ui_files: 0,
     };
     let mut ctx = Ctx::new(files);
+    ctx.ui_rule_armed = rules.contains(&CloneRule::SharedPrimitive);
     if rules.contains(&CloneRule::SharedPrimitive) {
         set.index.ui_files = count_ui_files(&mut ctx, &index);
     }
@@ -189,10 +190,92 @@ pub fn candidates(files: &[(String, String)], armed: &HashSet<&str>) -> Candidat
     set
 }
 
-/// Rank a rule's candidates and keep the first `max`; the count of the rest is returned, not
-/// dropped silently. Each kept candidate's `rank` is its position.
+/// Whether `inner` lies wholly inside `outer` (same file, lines contained).
+fn site_within(inner: &Site, outer: &Site) -> bool {
+    inner.path == outer.path
+        && outer.start_line <= inner.start_line
+        && inner.end_line <= outer.end_line
+}
+
+/// Whether every site of `candidate` lies within some site of `by`.
+fn covered_by(candidate: &Candidate, by: &Candidate) -> bool {
+    candidate
+        .facts
+        .sites
+        .iter()
+        .all(|site| by.facts.sites.iter().any(|outer| site_within(site, outer)))
+}
+
+/// The line length of the longest site: the size a container is ordered by.
+fn widest_site(candidate: &Candidate) -> u32 {
+    candidate
+        .facts
+        .sites
+        .iter()
+        .map(|s| s.end_line.saturating_sub(s.start_line) + 1)
+        .max()
+        .unwrap_or(0)
+}
+
+fn coverage(candidate: &Candidate) -> u64 {
+    candidate
+        .facts
+        .sites
+        .iter()
+        .map(|s| u64::from(s.end_line.saturating_sub(s.start_line) + 1))
+        .sum()
+}
+
+/// Drop every candidate whose sites all lie within the sites of a candidate that is kept (W29
+/// Wave C review, D4). One function copied in three files is found as a family for the whole
+/// function AND for every periodic sub-block of it; only the whole is the thing to report. The
+/// wider candidate is considered first whatever its rank, so a sub-family with more places cannot
+/// shut out the function that contains it; the survivors keep their ranked order.
+fn drop_overlapped(ranked: Vec<Candidate>) -> Vec<Candidate> {
+    let mut order: Vec<usize> = (0..ranked.len()).collect();
+    order.sort_by(|&a, &b| {
+        widest_site(&ranked[b])
+            .cmp(&widest_site(&ranked[a]))
+            .then_with(|| coverage(&ranked[b]).cmp(&coverage(&ranked[a])))
+            .then_with(|| a.cmp(&b))
+    });
+    let mut kept_at: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut keep = vec![false; ranked.len()];
+    for i in order {
+        let candidate = &ranked[i];
+        let dominated = candidate.facts.sites.first().is_some_and(|first| {
+            kept_at
+                .get(first.path.as_str())
+                .is_some_and(|ks| ks.iter().any(|&k| covered_by(candidate, &ranked[k])))
+        });
+        if dominated {
+            continue;
+        }
+        keep[i] = true;
+        let mut paths: Vec<&str> = candidate
+            .facts
+            .sites
+            .iter()
+            .map(|s| s.path.as_str())
+            .collect();
+        paths.sort_unstable();
+        paths.dedup();
+        for path in paths {
+            kept_at.entry(path).or_default().push(i);
+        }
+    }
+    ranked
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(candidate, kept)| kept.then_some(candidate))
+        .collect()
+}
+
+/// Rank a rule's candidates, drop the ones a kept candidate contains ([`drop_overlapped`]) and
+/// keep the first `max`; the count of the rest is returned, not dropped silently. Each kept
+/// candidate's `rank` is its position.
 fn rank_and_cap(rule: CloneRule, list: Vec<Candidate>, max: usize) -> (Vec<Candidate>, u32) {
-    let ranked = rank(rule, list);
+    let ranked = drop_overlapped(rank(rule, list));
     let found = ranked.len();
     let kept: Vec<Candidate> = ranked
         .into_iter()

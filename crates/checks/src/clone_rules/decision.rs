@@ -165,6 +165,76 @@ pub(super) fn has_decision(ids: &Ids, lang: SourceLang, tokens: &[Token]) -> boo
     false
 }
 
+/// Keywords whose head (up to the block or colon that follows) is a decision test.
+const TEST_KEYWORDS: &[&str] = &["if", "elif", "while", "switch", "match", "when"];
+
+/// The index just past the head of the test that starts at `start`: up to the `{` or block that
+/// opens its body, the `:` that ends a Python head, a `;`, or the close of an enclosing group.
+fn test_end(tokens: &[Token], start: usize) -> usize {
+    let mut depth = 0i32;
+    for (i, token) in tokens.iter().enumerate().skip(start) {
+        if is_punct(token, "(") || is_punct(token, "[") {
+            depth += 1;
+        } else if is_open_brace(token) {
+            if depth == 0 {
+                return i;
+            }
+            depth += 1;
+        } else if is_punct(token, ")") || is_punct(token, "]") || is_close_brace(token) {
+            depth -= 1;
+            if depth < 0 {
+                return i;
+            }
+        } else if depth == 0 && (is_punct(token, ";") || is_punct(token, ":")) {
+            return i;
+        }
+    }
+    tokens.len()
+}
+
+/// Which tokens of a span sit inside a decision test: the head of an `if`, `elif`, `while`,
+/// `switch`, `match` or `when`, or the condition of a ternary (back to the start of its
+/// expression). A property name that differs between two copies is a different DECISION only
+/// when it is read inside a test; a property that is merely copied through is not.
+pub(super) fn decision_test_mask(lang: SourceLang, tokens: &[Token]) -> Vec<bool> {
+    let mut mask = vec![false; tokens.len()];
+    for (i, token) in tokens.iter().enumerate() {
+        if TEST_KEYWORDS.iter().any(|k| is_keyword(token, k)) {
+            let end = test_end(tokens, i + 1);
+            for flag in &mut mask[i + 1..end] {
+                *flag = true;
+            }
+        } else if lang != SourceLang::Rust
+            && is_punct(token, "?")
+            && tokens.get(i + 1).is_some_and(|n| !is_punct(n, ":"))
+        {
+            // A ternary: its condition runs back to the start of the expression.
+            let mut depth = 0i32;
+            for j in (0..i).rev() {
+                let t = &tokens[j];
+                if is_punct(t, ")") || is_punct(t, "]") || is_close_brace(t) {
+                    depth += 1;
+                } else if is_punct(t, "(") || is_punct(t, "[") || is_open_brace(t) {
+                    depth -= 1;
+                    if depth < 0 {
+                        break;
+                    }
+                } else if depth == 0
+                    && (is_punct(t, ",")
+                        || is_punct(t, ";")
+                        || is_punct(t, ":")
+                        || t.class == TokenClass::Assign
+                        || is_keyword(t, "return"))
+                {
+                    break;
+                }
+                mask[j] = true;
+            }
+        }
+    }
+    mask
+}
+
 /// How many distinct token kinds (normalized token ids) the sequence holds. A window of
 /// `$ID , $ID , $ID` has two; a tiny vocabulary passes the length test without being logic.
 pub(super) fn distinct_kinds(tokens: &[Token]) -> usize {
@@ -181,17 +251,7 @@ pub(super) fn decision_tokens(lang: SourceLang, view: &SpanView) -> Vec<String> 
     const MAX_TEXT: usize = 40;
     let mut out = Vec::new();
     for (offset, token) in view.tokens().iter().enumerate() {
-        let wanted = match token.class {
-            TokenClass::BinOp
-            | TokenClass::Num
-            | TokenClass::Str
-            | TokenClass::Lit
-            | TokenClass::Prop => true,
-            TokenClass::Keyword => DECISION_KEYWORDS.iter().any(|k| is_keyword(token, k)),
-            TokenClass::Punct => lang != SourceLang::Rust && is_punct(token, "?"),
-            _ => false,
-        };
-        if !wanted {
+        if !is_decision_token(lang, token) {
             continue;
         }
         if let Some(text) = view.text(offset) {
@@ -199,6 +259,21 @@ pub(super) fn decision_tokens(lang: SourceLang, view: &SpanView) -> Vec<String> 
         }
     }
     out
+}
+
+/// Whether a token carries the decision: an operator, a literal, a property name, a branching
+/// keyword, or a ternary's `?`.
+pub(super) fn is_decision_token(lang: SourceLang, token: &Token) -> bool {
+    match token.class {
+        TokenClass::BinOp
+        | TokenClass::Num
+        | TokenClass::Str
+        | TokenClass::Lit
+        | TokenClass::Prop => true,
+        TokenClass::Keyword => DECISION_KEYWORDS.iter().any(|k| is_keyword(token, k)),
+        TokenClass::Punct => lang != SourceLang::Rust && is_punct(token, "?"),
+        _ => false,
+    }
 }
 
 /// Whether the span runs: it is (part of) a function, method or arrow body, or a module-level

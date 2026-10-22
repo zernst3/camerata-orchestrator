@@ -221,3 +221,63 @@ export function useScrollLock(locked) {
         Some("function useScrollLock")
     );
 }
+
+// ---- cost (W29 Wave C review, D7) ----
+
+/// The widest candidate the judge can be handed: members of thirty lines, every line about two
+/// hundred characters, in more files than are shown.
+fn widest_family(files_n: usize) -> (Vec<(String, String)>, Candidate) {
+    let line = format!(
+        "  if (a.b > 1 && c.d !== null) {{ x = x + 1; }} // {}",
+        "z".repeat(150)
+    );
+    let body: String = (0..30).map(|_| line.clone()).collect::<Vec<_>>().join("\n");
+    let all: Vec<(String, String)> = (0..files_n)
+        .map(|i| {
+            (
+                format!("src/wide{i}.ts"),
+                format!("export function f{i}(a, c) {{\n  let x = 0;\n{body}\n  return x;\n}}\n"),
+            )
+        })
+        .collect();
+    let list = found(CloneRule::SingleSourceLogic, &all);
+    let top = list
+        .into_iter()
+        .max_by_key(|c| c.facts.token_len)
+        .expect("a candidate");
+    (all, top)
+}
+
+/// One candidate's serialized judge input is bounded by construction: at most 3 members x 30
+/// lines x 120 characters of code (JSON escapes a newline as two bytes), plus short capped lists.
+pub(super) const MAX_JUDGE_INPUT_BYTES: usize = 14_000;
+
+#[test]
+fn a_source_line_is_cut_at_one_hundred_and_twenty_characters() {
+    let (all, c) = widest_family(4);
+    let input = judge_input(&c, &all);
+    assert_eq!(input.members.len(), 3);
+    for member in &input.members {
+        let longest = member
+            .code
+            .lines()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap();
+        assert!(longest <= 120, "{longest} characters in one line");
+        assert!(member.code.lines().count() <= 30);
+    }
+}
+
+#[test]
+fn the_widest_judge_input_stays_inside_the_stated_per_candidate_bound() {
+    let (all, c) = widest_family(4);
+    let bytes = serde_json::to_string(&judge_input(&c, &all)).unwrap().len();
+    assert!(
+        bytes <= MAX_JUDGE_INPUT_BYTES,
+        "{bytes} bytes for one candidate (about {} tokens)",
+        bytes / 4
+    );
+    // A batch is sixteen of them: the bound the cost statement makes.
+    assert!(16 * bytes <= 16 * MAX_JUDGE_INPUT_BYTES);
+}

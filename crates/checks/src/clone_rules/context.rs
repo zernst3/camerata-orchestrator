@@ -93,6 +93,9 @@ impl SpanView {
 pub(super) struct Ctx<'a> {
     pub files: &'a [(String, String)],
     pub ids: Ids,
+    /// UI-SHARED-PRIMITIVE-1 is armed in this run, so a function that renders JSX in a package
+    /// that rule reads belongs to it, not to ARCH-NAMING-ONE-CONCEPT-1.
+    pub ui_rule_armed: bool,
     by_path: HashMap<&'a str, usize>,
     structural: HashMap<usize, Rc<Vec<ItemTokens>>>,
     exact: HashMap<usize, Rc<Vec<ItemTokens>>>,
@@ -115,6 +118,7 @@ impl<'a> Ctx<'a> {
         Self {
             files,
             ids: Ids::new(),
+            ui_rule_armed: false,
             by_path,
             structural: HashMap::new(),
             exact: HashMap::new(),

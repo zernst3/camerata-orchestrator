@@ -45,6 +45,12 @@ pub(super) fn build(ctx: &mut Ctx<'_>, family: &CloneFamily) -> Option<Candidate
     let disagreements = compare_members(ctx, &family.members)?;
     let exact = ctx.exact_view(first)?;
     let decision = decision_tokens(lang, &exact);
+    let mut member_tokens: Vec<String> = Vec::new();
+    for member in &family.members {
+        let view = ctx.exact_view(member)?;
+        member_tokens.extend(decision_tokens(lang, &view));
+    }
+    member_tokens.sort_unstable();
     let mut sites: Vec<Site> = family.members.iter().map(Site::of).collect();
     sites.sort();
     Some(Candidate {
@@ -58,6 +64,7 @@ pub(super) fn build(ctx: &mut Ctx<'_>, family: &CloneFamily) -> Option<Candidate
             disagreements,
             rule: RuleFacts::Logic {
                 decision_tokens: decision,
+                member_decision_tokens: member_tokens,
             },
         },
         rank: 0,
@@ -66,7 +73,9 @@ pub(super) fn build(ctx: &mut Ctx<'_>, family: &CloneFamily) -> Option<Candidate
 
 fn decision_count(c: &Candidate) -> u64 {
     match &c.facts.rule {
-        RuleFacts::Logic { decision_tokens } => decision_tokens.len() as u64,
+        RuleFacts::Logic {
+            decision_tokens, ..
+        } => decision_tokens.len() as u64,
         _ => 0,
     }
 }

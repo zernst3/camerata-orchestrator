@@ -5,6 +5,7 @@
 use crate::extract::clone::{exact_diff, CodeSpan, TokenClass};
 
 use super::context::Ctx;
+use super::decision::decision_test_mask;
 use super::facts::NamedDisagreement;
 
 /// The differences between the first member and each other member. `None` when a member's tokens
@@ -15,6 +16,8 @@ pub(super) fn compare_members(
 ) -> Option<Vec<NamedDisagreement>> {
     let first = members.first()?;
     let first_view = ctx.exact_view(first)?;
+    let lang = ctx.lang(&first.file)?;
+    let in_test = decision_test_mask(lang, first_view.tokens());
     let mut out: Vec<NamedDisagreement> = Vec::new();
     for other in members.iter().skip(1) {
         let other_view = ctx.exact_view(other)?;
@@ -27,6 +30,15 @@ pub(super) fn compare_members(
                 continue;
             }
             seen.push(pair);
+            let position = d.position as usize;
+            let decision = first_view
+                .tokens()
+                .get(position)
+                .is_some_and(|t| match t.class {
+                    TokenClass::BinOp | TokenClass::Num => true,
+                    TokenClass::Prop => in_test.get(position).copied().unwrap_or(false),
+                    _ => false,
+                });
             out.push(NamedDisagreement {
                 path_a: first.file.clone(),
                 path_b: other.file.clone(),
@@ -34,6 +46,7 @@ pub(super) fn compare_members(
                 line_b: d.line_b,
                 a: d.a,
                 b: d.b,
+                decision,
             });
         }
     }
@@ -69,6 +82,7 @@ pub(super) fn string_differences(
                 line_b: d.line_b,
                 a: d.a,
                 b: d.b,
+                decision: false,
             });
         }
     }
