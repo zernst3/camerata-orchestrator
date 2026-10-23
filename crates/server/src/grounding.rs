@@ -242,7 +242,10 @@ pub fn render_repo_digest(repo: &str, dir: &Path) -> Option<String> {
         s.push_str("  …(repo file scan truncated at the hard cap)\n");
     }
 
-    Some(s)
+    // The digest goes to a model (escalation chat, conflict and PR resolvers, decomposition) and
+    // quotes manifests and docs verbatim: redact credential values like every other prompt
+    // (docs/design/2026-10-23_secret-redaction-and-release-gate.md, section 5.3).
+    Some(camerata_secrets::redact_str(&s).into_owned())
 }
 
 /// Assemble the full grounding block from a pre-rendered rule section and the per-repo
@@ -290,6 +293,9 @@ pub fn assemble(
     s.push_str("=== END PROJECT GROUNDING ===\n");
     Some(truncate(&s, MAX_GROUNDING_CHARS))
 }
+
+#[cfg(test)]
+mod redaction_tests;
 
 #[cfg(test)]
 mod tests {

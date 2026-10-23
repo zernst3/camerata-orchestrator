@@ -115,7 +115,8 @@ pub fn build_l3_prompt(input: &L3ReviewInput<'_>) -> String {
          ## Diff\n\n```diff\n{diff}\n```",
         story = input.story,
         rules = input.rules_prose,
-        diff = input.diff,
+        // The diff is client code going to a model: redact credential values first.
+        diff = camerata_secrets::redact_str(input.diff),
     )
 }
 
@@ -298,6 +299,9 @@ pub async fn check_integration_gate_live(
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod redaction_tests;
 
 #[cfg(test)]
 mod tests {

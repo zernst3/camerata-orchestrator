@@ -32,13 +32,9 @@ fn v1_manifest_json(raw_snippet: &str) -> String {
     serde_json::json!({ "by_project": by_project }).to_string()
 }
 
-#[test]
-fn the_manifest_version_is_past_the_raw_snippet_schema() {
-    assert!(
-        MANIFEST_VERSION >= 2,
-        "version 1 manifests carry raw snippets; the bump is what purges them"
-    );
-}
+// Version 1 manifests carry raw snippets; the bump is what purges them. A compile-time check, so
+// lowering the constant fails the build, not just a test run.
+const _: () = assert!(MANIFEST_VERSION >= 2);
 
 #[test]
 fn scan_cache_manifest_v1_is_dropped_and_the_file_rewritten_on_load() {

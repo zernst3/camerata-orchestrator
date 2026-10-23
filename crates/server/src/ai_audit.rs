@@ -480,6 +480,7 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 }
 If the code genuinely conforms everywhere, return {"findings": [], "proposed_rules": [], "needs_files": []}. Every finding must point at real code at a real line."#
         .to_string()
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// Pull the first balanced-looking JSON object out of a model response (tolerates
@@ -852,6 +853,7 @@ Return ONLY JSON, no prose:
 {"verdicts":[{"index":0,"severity":"critical|high|medium|low","confidence":"high|low","effort":"low|medium|high","category":"authorization|authentication|secret-exposure|injection|transport-security|rls-policy|resource-exposure|input-validation|error-handling|arch-conformance|testing-style|performance","reason":"one line"}]}
 One verdict per finding, addressed by its [index]."#
         .to_string()
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// Remove cross-finding dedup pointers like "same as [6]" / "duplicate of [10]" (and a
@@ -2065,7 +2067,11 @@ pub async fn verify_findings(
         for (i, f) in chunk.iter().enumerate() {
             prompt.push_str(&format!(
                 "[{i}] (severity {}) {}:{} — {} :: {}\n",
-                f.severity, f.path, f.line, f.snippet, f.detail
+                f.severity,
+                f.path,
+                f.line,
+                camerata_secrets::redact_str(&f.snippet),
+                camerata_secrets::redact_str(&f.detail)
             ));
         }
         // Calibration runs on its OWN selected model (the UI exposes it). Build a fresh
@@ -2424,6 +2430,7 @@ option or marking it not applicable. NEVER invent an option id that was not list
 specific rule. NEVER set `"applicable": true` without a real `"evidence"` file:line — an
 unevidenced applicability claim will be discarded and treated as not applicable."#
         .to_string()
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// The per-rule "every option, plus which is currently selected" block the recommendation
@@ -3055,9 +3062,15 @@ fn build_fix_specific_block(
             f.rule_id, f.severity, f.path, f.line
         ));
         if !f.snippet.is_empty() {
-            out.push_str(&format!("Snippet: {}\n", f.snippet));
+            out.push_str(&format!(
+                "Snippet: {}\n",
+                camerata_secrets::redact_str(&f.snippet)
+            ));
         }
-        out.push_str(&format!("Detail: {}\n", f.detail));
+        out.push_str(&format!(
+            "Detail: {}\n",
+            camerata_secrets::redact_str(&f.detail)
+        ));
         if !f.captures.is_empty() {
             let caps = f
                 .captures
@@ -3451,6 +3464,9 @@ pub async fn generate_fix_specifics(
     if indices.is_empty() {
         return (findings, Vec::new());
     }
+    // The fix prompt carries eight raw lines either side of each finding: redact them.
+    let model_files = crate::onboard::redact::files_for_model(files);
+    let files = model_files.as_slice();
 
     let system = fix_specific_system_prompt();
     // The subset of `indices` still needing a valid fix this round; shrinks as findings
@@ -6875,6 +6891,14 @@ pub async fn audit_repo(
     if files.is_empty() {
         return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
+    // Redact BEFORE any code is sent to a model (docs/design/2026-10-23, section 5). Everything
+    // below (the digest, the repo map, the fix context window, line anchoring) reads this model-
+    // facing set: same paths, same line numbers, every credential value replaced by its redacted
+    // form, so a `path:line` the model cites still resolves and a snippet it quotes still anchors.
+    let model_files = crate::onboard::redact::files_for_model(files);
+    let files = model_files.as_slice();
+    let model_map_files = map_files.map(crate::onboard::redact::files_for_model);
+    let map_files = model_map_files.as_deref();
     // W1: this call's own merge/calibration stage samples, returned alongside the normal
     // result (mirroring the EXISTING `Vec<FailedPass>` accumulation pattern already used
     // throughout this function) rather than threading a `&mut ScanLedger` through this
@@ -7702,6 +7726,7 @@ Return ONLY a JSON object, no prose, no markdown fences:
 }
 If you genuinely cannot assess anything, return {"summary":"…","gaps":[]}."#
         .to_string()
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// SYSTEM PROMPT — deep security audit lens.
@@ -7737,6 +7762,7 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 }
 If the code is genuinely clean, return {"findings":[],"proposed_rules":[],"needs_files":[]}."#
         .to_string()
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// SYSTEM PROMPT — threat-model lens.
@@ -7766,6 +7792,7 @@ Return ONLY a JSON object, no prose, no markdown fences:
 `kind` is one of: "entry-point" | "trust-boundary" | "data-store" | "dependency" | "other".
 If you genuinely cannot derive a model, return {"summary":"…","threats":[]}."#
         .to_string()
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// Parse the SOC-2 gap-analysis lens response into `(summary, gaps)`. Robust: malformed
@@ -8130,6 +8157,9 @@ pub async fn run_deep_tier(
     meter: Option<&UsageMeter>,
     soc2_enabled: bool,
 ) -> DeepReport {
+    // The deep tier reads the whole repo: redact before any lens sees it.
+    let model_files = crate::onboard::redact::files_for_model(files);
+    let files = model_files.as_slice();
     let repo_map = build_repo_map(files);
     // One whole-repo digest for the two single-pass prose lenses (capped at MAX_DIGEST_CHARS).
     let digest = build_digest(files);

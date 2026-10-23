@@ -302,3 +302,194 @@ async fn fix_specific_prompt_carries_no_secret_value_and_forbids_repeating_one()
         "the redacted form is what the model sees"
     );
 }
+
+// ---- model-prompt redaction (section 5): every builder, end to end ------------------------
+
+/// A repo whose `.env` holds the planted secret on line 3 and whose source quotes it again.
+fn leaky_repo(p: &Planted) -> Vec<(String, String)> {
+    vec![
+        (".env".to_string(), format!("# production\n\n{}\n", p.text)),
+        (
+            "src/config.ts".to_string(),
+            format!("export const client = make(\"{}\");\n", p.value),
+        ),
+    ]
+}
+
+fn two_options() -> Vec<RuleAlternatives> {
+    let option = |id: &str, violates: bool| RuleOptionView {
+        id: id.to_string(),
+        label: format!("option {id}"),
+        directive: format!("directive {id}"),
+        why: "why".to_string(),
+        violates,
+    };
+    vec![RuleAlternatives {
+        rule_id: "ARCH-X-1".to_string(),
+        options: vec![option("a", false), option("b", false)],
+        selected_option_id: Some("a".to_string()),
+        kind: None,
+    }]
+}
+
+#[test]
+fn build_digest_over_files_for_model_contains_no_secret_value() {
+    let p = secret();
+    let digest = build_digest(&crate::onboard::redact::files_for_model_with(
+        &leaky_repo(&p),
+        true,
+    ));
+    assert!(!digest.contains(&p.value), "the digest carried the value");
+    assert!(
+        digest.contains("sb_secret_\u{2026}"),
+        "the redacted form is in the digest"
+    );
+    assert!(digest.contains(".env"), "the file is still in the digest");
+}
+
+#[test]
+fn fix_context_window_never_contains_a_secret_value() {
+    let p = secret();
+    let files = crate::onboard::redact::files_for_model_with(&leaky_repo(&p), true);
+    let window = fix_context_window(&files, ".env", 3, 8);
+    assert!(!window.is_empty());
+    assert!(
+        !window.contains(&p.value),
+        "the context window carried the value"
+    );
+}
+
+#[tokio::test]
+async fn audit_repo_passes_alternatives_and_calibration_prompts_contain_no_secret_value() {
+    let p = secret();
+    let stub = Stub::new("{}");
+    let selected = vec![("ARCH-X-1".to_string(), "A rule.".to_string())];
+    let _ = audit_repo(
+        &stub,
+        "acme/app",
+        &leaky_repo(&p),
+        &selected,
+        &two_options(),
+        &std::collections::HashMap::new(),
+        None,
+        None,
+        ScanMode::Parallel,
+        false,
+        None,
+        None,
+        None,
+        Some(&leaky_repo(&p)),
+    )
+    .await;
+    let sent = stub.everything_sent();
+    assert!(!sent.is_empty(), "the audit made model calls");
+    assert!(
+        !sent.contains(&p.value),
+        "a model request (audit pass, alternatives pass or repo map) carried the value"
+    );
+    assert!(
+        sent.contains("sb_secret_\u{2026}"),
+        "the model saw the redacted form"
+    );
+}
+
+#[tokio::test]
+async fn deep_lens_prompts_contain_no_secret_value() {
+    let p = secret();
+    let stub = Stub::new("{}");
+    let _ = run_deep_tier(
+        &stub,
+        "acme/app",
+        &leaky_repo(&p),
+        None,
+        ScanMode::Parallel,
+        None,
+        None,
+        true,
+    )
+    .await;
+    let sent = stub.everything_sent();
+    assert!(!sent.is_empty(), "the deep tier made model calls");
+    assert!(
+        !sent.contains(&p.value),
+        "a deep lens prompt carried the value"
+    );
+}
+
+#[tokio::test]
+async fn verify_findings_prompt_contains_only_redacted_snippets() {
+    let p = secret();
+    // Deliberately NOT pre-redacted: a row that bypassed construction must still not reach the
+    // calibration model raw.
+    let findings = vec![raw_finding(&p, 3)];
+    let stub = Stub::new(r#"{"verdicts":[]}"#);
+    let _ = verify_findings(&stub, "acme/app", findings, None, None, None, false, "").await;
+    let sent = stub.everything_sent();
+    assert!(
+        sent.contains("Scrutinize these findings"),
+        "the calibration prompt was built"
+    );
+    assert!(
+        !sent.contains(&p.value),
+        "the calibration prompt carried the value"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn model_prompt_redaction_flag_off_sends_raw_and_warns() {
+    let p = secret();
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_FEATURE_MODEL_PROMPT_REDACTION", "false");
+    let stub = Stub::new("{}");
+    let selected = vec![("ARCH-X-1".to_string(), "A rule.".to_string())];
+    let _ = audit_repo(
+        &stub,
+        "acme/app",
+        &leaky_repo(&p),
+        &selected,
+        &[],
+        &std::collections::HashMap::new(),
+        None,
+        None,
+        ScanMode::Parallel,
+        false,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        stub.everything_sent().contains(&p.value),
+        "with the operator flag OFF the raw code goes to the model"
+    );
+}
+
+#[test]
+fn every_system_prompt_explains_the_redaction_markers() {
+    let prompts = [
+        ("audit", audit_system_prompt()),
+        ("verify", verify_system_prompt()),
+        ("alternatives", alternatives_system_prompt()),
+        ("fix-specific", fix_specific_system_prompt()),
+        ("soc2", soc2_gap_system_prompt()),
+        ("deep-security", deep_security_system_prompt()),
+        ("threat-model", threat_model_system_prompt()),
+        (
+            "clone-judge",
+            crate::onboard::clone_advisory::prompt::system_prompt(
+                camerata_checks::clone_rules::CloneRule::SingleSourceLogic,
+            ),
+        ),
+    ];
+    for (name, prompt) in prompts {
+        assert!(
+            prompt.contains("deliberate redaction, not a bug in the code"),
+            "{name} prompt does not explain redaction markers"
+        );
+        assert!(
+            prompt.contains("Never reproduce a credential value"),
+            "{name} prompt does not forbid reproducing a value"
+        );
+    }
+}
