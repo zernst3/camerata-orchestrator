@@ -54,6 +54,27 @@ single-file tree-sitter/syn extractors now exist.
   shared-constant) runs at Layer 2. Dead-code stays inspection-only (decision 2026-10-21).
 - **Only selected rules run:** the Layer-1 rule subset and Layer-2 checker set derive from the
   project's selected rules (no React lint on a non-React repo).
+- **DRY is the governing principle (Zach, 2026-10-22).** Everything is built first for the
+  inspection; anything development runs that the inspection also runs must call the EXACT same
+  code. No second implementation of any rule, detector, extractor, severity bound or exclusion
+  list. One rule, one implementation, many enforcement points. This is what keeps Camerata
+  maintainable and consistent: a fix to a rule fixes it everywhere at once.
+- **What the V2 audit must establish, per deterministic rule** (the checklist):
+  1. Which function implements it for the inspection (crate, module, entry point).
+  2. Whether it is decidable from one file (Layer-1 candidate) or needs the whole repo (Layer 2).
+  3. Where it runs during development today (L1 arm, L2 checker, L4 CI job, or nowhere).
+  4. Whether that dev-time path calls the SAME function as the inspection, or a separate copy
+     (a separate copy is a DRY defect: delete it and route through the shared function).
+  5. Whether the dev-time path is gated on the project's selected rules (it must be; an unselected
+     rule never runs, and a selected rule always runs).
+  6. Whether exclusions, test-scope policy, severity bounds and the corpus version match between
+     the two paths (they must, by construction, if 4 holds).
+  7. Whether the dev-time result is deny-before-write (L1), bounce-after-task (L2), or CI-only,
+     and whether that placement is right for the rule (e.g. dead-code: inspection only).
+  8. The tests proving parity: the same fixture judged identically by the inspection path and the
+     dev-time path.
+- **V1 is unaffected:** Zach will not develop through Camerata until all of this is checked, so
+  the dev-time gate is not on the V1 critical path.
 - **Check first, possible defect:** `TECHNICAL.md` §2 says the verified runtime default subset is
   `["GOV-1"]` "unless configured". If a dev run can reach the gate without the project's selected
   rules (including the security floor) in its subset, that is a defect to fix, not new scope.
