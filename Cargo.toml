@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/api-types",   # pure-serde wire-contract leaf crate (Phase A of the DTO extraction); no camerata deps
+    "crates/secrets",     # leaf crate: the one secret-shape detector + redactor shared by the gateway, the scan floor, the chat scrubber and the export release gate (no camerata deps)
     "crates/liveness",    # leaf crate: LivenessTracker + mtime probe + HeartbeatFn (no camerata deps)
     "crates/core",        # orchestrator brain: roles, tasks, DAG, coordination (zero model calls)
     "crates/orchestrator", # package `camerata-orchestrator-core`: the confidence-dial engine —
