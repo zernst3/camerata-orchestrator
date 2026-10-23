@@ -29,7 +29,13 @@ use crate::onboard::Finding;
 
 /// Bump if the fingerprint scheme or manifest shape changes in a way that should invalidate
 /// every existing manifest (forcing one clean full scan after an upgrade).
-const MANIFEST_VERSION: u32 = 1;
+///
+/// Version 2: findings are redacted at construction (docs/design/2026-10-23_secret-redaction-
+/// and-release-gate.md). A version 1 manifest holds findings whose snippets were stored BEFORE
+/// that, so a secret value sits in it on disk; [`ScanCacheStore::load_or_new`] drops every
+/// non-current manifest and rewrites the file at once, so the raw content is gone on first
+/// start rather than on the next scan.
+const MANIFEST_VERSION: u32 = 2;
 
 /// Fingerprint a file's EXACT content with the stable FNV-1a hash the suppression baseline uses.
 ///
@@ -291,14 +297,26 @@ impl ScanCacheStore {
 
     /// Load from `path` (or start empty), persisting every change back to it.
     pub fn load_or_new(path: std::path::PathBuf) -> Self {
-        let state = std::fs::read_to_string(&path)
+        let mut state = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str::<CacheState>(&s).ok())
             .unwrap_or_default();
-        Self {
+        // Drop every manifest from an older schema (see MANIFEST_VERSION) and, when any was
+        // dropped, rewrite the file now: serving nothing from it is not enough, the raw
+        // snippets it holds must not stay on disk until some later scan happens to overwrite it.
+        let before = state.by_project.len();
+        state.by_project.retain(|_, manifest| manifest.is_current());
+        let purged = state.by_project.len() != before;
+        let store = Self {
             inner: std::sync::Arc::new(Mutex::new(state)),
             path: Some(std::sync::Arc::new(path)),
+        };
+        if purged {
+            if let Ok(state) = store.inner.lock() {
+                store.save_locked(&state);
+            }
         }
+        store
     }
 
     /// The stored manifest for a project, if any (and only if it's the current schema version).
@@ -362,6 +380,9 @@ impl ScanCacheStore {
         }
     }
 }
+
+#[cfg(test)]
+mod redaction_tests;
 
 #[cfg(test)]
 mod tests {

@@ -306,9 +306,29 @@ fn clean_legacy_repo_file<T: serde::de::DeserializeOwned>(repo: &Path, basename:
 /// Best-effort load: any error (missing file, corrupt JSON, a schema from a future/older
 /// binary version) degrades to `None` — exactly `audit_repos`'s own "no cache" full-scan path,
 /// never a hard failure over a cache file that is, by construction, disposable.
+///
+/// A manifest from an older schema (`ScanManifest::is_current`) is never reused AND is deleted
+/// on the spot: a version 1 manifest holds findings stored before construction-time secret
+/// redaction, so it can hold a raw secret value, and "ignored" is not the same as "gone"
+/// (docs/design/2026-10-23_secret-redaction-and-release-gate.md, path E2).
 fn load_prior_manifest(repo: &Path) -> Option<ScanManifest> {
-    let bytes = std::fs::read(manifest_cache_path(repo)).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let path = manifest_cache_path(repo);
+    let bytes = std::fs::read(&path).ok()?;
+    let manifest: ScanManifest = serde_json::from_slice(&bytes).ok()?;
+    if manifest.is_current() {
+        return Some(manifest);
+    }
+    match std::fs::remove_file(&path) {
+        Ok(()) => eprintln!(
+            "camerata inspect: removed the incremental-scan cache at {} (written by an older              version; the next run does a full scan)",
+            path.display()
+        ),
+        Err(e) => eprintln!(
+            "camerata inspect: could not remove the outdated incremental-scan cache at {}              ({e}); it will not be used, but delete it by hand",
+            path.display()
+        ),
+    }
+    None
 }
 
 /// Best-effort save. Failing to persist the cache never fails the inspection itself — it just
@@ -865,6 +885,9 @@ pub fn format_outcome_report(outcome: &InspectOutcome) -> String {
         outcome.ledger_summary,
     )
 }
+
+#[cfg(test)]
+mod redaction_tests;
 
 #[cfg(test)]
 mod tests {

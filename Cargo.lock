@@ -689,6 +689,7 @@ dependencies = [
  "camerata-intake",
  "camerata-maintenance",
  "camerata-rules",
+ "camerata-secrets",
  "camerata-server",
  "camerata-test-env",
  "camerata-worktracker",

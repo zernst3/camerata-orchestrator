@@ -26,6 +26,8 @@ camerata-worktracker = { path = "../worktracker" }
 camerata-maintenance = { path = "../maintenance" }
 camerata-deploy = { path = "../deploy" }
 camerata-server = { path = "../server" }
+# The shared secret detector: the `release-gate` subcommand audits an export zip with it.
+camerata-secrets = { path = "../secrets" }
 # Phase F (GAP-7): the HTTP-adapter subcommands (stories/run/uows/assign/start-run) go
 # through the same typed client the MCP adapter (Phase E) uses — never in-process calls
 # into camerata-server for these verbs.
