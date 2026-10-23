@@ -21,7 +21,13 @@
 > triage `missed.txt` into "add a test" vs "equivalent mutant". Only the checks crate's own tests
 > run against each mutant (server-level tests that exercise checkers are not counted). Check it is
 > finished (`pgrep -fl cargo-mutants`) before rebuilding in the main checkout.
-> **FIRST, before anything else (Zach, 2026-10-22):** the secret-redaction work order
+> **STATUS 2026-10-23 (paused for the night):** secret redaction + export release gate DONE and
+> pushed (7,273 tests green). The old leaky exports are NOT regenerated separately: the graded
+> accuracy run (item 20) reruns them (Zach). Mutation run done (97.9%; 26 major gaps ledgered for
+> V1). **Next session starts with the delete + re-fetch client source blocker** (decisions below).
+> Then: 26 mutation gaps, W29 Wave D, corpus text, item-21 engine follow-ups, W27 PDF (needs
+> Zach's eye), 19f grader revision, graded run (item 20).
+> (Historical) **FIRST, before anything else (Zach, 2026-10-22):** the secret-redaction work order
 > (`_workspace/brownfield-audits/WORK_ORDER_SECRET_REDACTION.md`) plus the pluggable export release
 > gate; decisions recorded under DECISIONS MADE. Process: Fable spec, Sonnet build, Fable leak hunt.
 > **SECOND (Zach, 2026-10-22):** delete client source after delivery (per-repo destructive action,
