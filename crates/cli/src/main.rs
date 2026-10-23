@@ -340,8 +340,10 @@ async fn run_inspect_cmd(args: InspectArgs) -> anyhow::Result<()> {
             Ok(())
         }
         Err(e) => {
+            // A refused export prints the gate's own block (which never carries a secret value)
+            // and exits 3; any other failure exits 1.
             eprintln!("camerata inspect: {e}");
-            std::process::exit(1);
+            std::process::exit(e.exit_code());
         }
     }
 }

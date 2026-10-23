@@ -15363,17 +15363,13 @@ mod export_invariants_gate {
             ));
         }
 
-        assert_eq!(
-            pdf_ids.len(),
-            findings_json_ids.len(),
-            "the PDF and findings.json must render the SAME NUMBER of rows: pdf={} \
-             findings_json={} (pdf={pdf_ids:#?}, findings_json={findings_json_ids:#?})",
-            pdf_ids.len(),
-            findings_json_ids.len(),
-        );
-        assert_eq!(
-            pdf_ids, findings_json_ids,
-            "the PDF and findings.json must render the IDENTICAL row-identity set"
+        // The comparison is the release gate's own `row_parity` (the identity set, in both
+        // directions): the test and the runtime check call the same function.
+        let problems = crate::release_gate::row_parity(&json, &findings_export);
+        assert!(
+            problems.is_empty(),
+            "the PDF and findings.json must render the IDENTICAL row-identity set: {problems:?} \
+             (pdf={pdf_ids:#?}, findings_json={findings_json_ids:#?})"
         );
         // Both the evidence-gate-synthesized row and the external-tool-preview row must
         // actually be present in BOTH artifacts — not merely equal-sized by coincidence.

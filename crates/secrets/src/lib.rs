@@ -24,7 +24,7 @@ pub use detect::{
     detect_all, detect_for_rule, detect_secrets, detect_shapes, first_secret, match_lines,
     match_lines_for_rule, SecretMatch,
 };
-pub use json::{find_secrets_in_json, redact_json_values};
+pub use json::{find_secret_hits_in_json, find_secrets_in_json, redact_json_values, JsonHit};
 pub use redact::{redact, redact_str, Redacted, Redaction};
 pub use shapes::{is_supabase_dsn, shapes_for_rule, SecretShape, URL_SECRET_PARAMS};
 pub use twins::{Twin, PLACEHOLDER_WORDS};

@@ -16311,11 +16311,23 @@ async fn export_audit_report(
         &req.options,
     );
 
-    let pdf_bytes = match crate::report_export::render_data_json(&json) {
-        Ok(data_json) => crate::report_export::compile_pdf_from_data(&data_json).await,
-        Err(e) => Err(e),
+    let data_json = match crate::report_export::render_data_json(&json) {
+        Ok(data_json) => data_json,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+            )
+                .into_response();
+        }
     };
-    let pdf_bytes = match pdf_bytes {
+    // The release gate's secrets check over the PDF's data, BEFORE it is compiled: this route
+    // ships a PDF outside any zip, and `data.json` is the only data the template reads.
+    let stem = report_filename_stem(&report);
+    if let Err(failure) = crate::release_gate::check_pdf_data(&stem, &data_json) {
+        return release_blocked_response(&failure);
+    }
+    let pdf_bytes = match crate::report_export::compile_pdf_from_data(&data_json).await {
         Ok(bytes) => bytes,
         Err(e) => {
             return (
@@ -16326,7 +16338,7 @@ async fn export_audit_report(
         }
     };
 
-    let filename = format!("{}.pdf", report_filename_stem(&report));
+    let filename = format!("{stem}.pdf");
 
     (
         StatusCode::OK,
@@ -16449,6 +16461,9 @@ async fn export_product(
     };
     let released = match crate::release_gate::release(package) {
         Ok(released) => released,
+        Err(crate::release_gate::ReleaseError::Blocked(failure)) => {
+            return release_blocked_response(&failure);
+        }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -16457,6 +16472,8 @@ async fn export_product(
                 .into_response();
         }
     };
+    // Proof the gate ran, visible to the cockpit without reading the zip.
+    let release_checks = released.report.check_names().join(", ");
     let stem = released.stem;
     let zip_bytes = released.bytes;
 
@@ -16470,8 +16487,32 @@ async fn export_product(
                 header::CONTENT_DISPOSITION,
                 format!("attachment; filename=\"{filename}\""),
             ),
+            (
+                header::HeaderName::from_static("x-camerata-release-checks"),
+                release_checks,
+            ),
         ],
         zip_bytes,
+    )
+        .into_response()
+}
+
+/// The 422 the export routes return when the release gate refuses: `{ ok: false, gate:
+/// "release", stem, message, problems: [{check, file, location, message, evidence}] }`. The
+/// message is the gate's own fail-loud block and every field is already redacted, so the body
+/// can be shown verbatim (and copied by the operator) without ever carrying a secret value.
+fn release_blocked_response(failure: &crate::release_gate::GateFailure) -> Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "ok": false,
+            "gate": "release",
+            "stem": failure.stem_for_display(),
+            "message": failure.to_string(),
+            "problems": failure.report.problems_json(),
+        })),
     )
         .into_response()
 }
@@ -16648,7 +16689,18 @@ impl ManifestProvenance {
             "engine_version": self.engine_version(),
             "corpus_version": self.corpus_version,
             "rules_last_reviewed": self.rules_last_reviewed,
+            "release_checks": Self::release_checks(),
         })
+    }
+
+    /// The release gate's check names, in run order. The README line and the manifest's
+    /// `inspection.release_checks` both render this one list (a package only exists if every
+    /// one of these passed, because `release_gate::release` returns no bytes otherwise).
+    pub fn release_checks() -> Vec<&'static str> {
+        crate::release_gate::CheckId::ALL
+            .iter()
+            .map(|c| c.label())
+            .collect()
     }
 
     /// The README's provenance block: the human rendering of [`Self::inspection_json`] plus
@@ -16680,6 +16732,10 @@ impl ManifestProvenance {
         if let Some(reviewed) = &self.rules_last_reviewed {
             out.push_str(&format!("Rules last reviewed on {reviewed}\n"));
         }
+        out.push_str(&format!(
+            "Release checks: {} (all passed)\n",
+            Self::release_checks().join(", ")
+        ));
         out
     }
 }

@@ -5,7 +5,19 @@
 //! consists of (the PDF's data and the compiled PDF, the workbook, `findings.json`, the CSV and
 //! JSON datasets, the README and the provenance), and [`release`] is the ONLY function the three
 //! real exporters (the HTTP `export_product`, `camerata inspect --export`, the sample generator)
-//! call to obtain zip bytes. A source-grep test pins that.
+//! call to obtain zip bytes. [`release`] zips the package, then runs every check over the
+//! archive it just built, so what is checked is the exact bytes that would ship, and refuses it
+//! if any check finds a problem. A source-grep test pins that no other production code calls
+//! `build_product_zip(` or `compile_pdf_from_data(`.
+//!
+//! The checks, in order: secrets, dataset set, dataset parity, row parity, manifest, provenance
+//! (see [`CheckId`]). The comparison logic lives in [`consistency`]; the export tests call those
+//! same functions, so the test and the runtime check cannot drift.
+
+mod archive;
+mod consistency;
+mod report;
+mod secrets;
 
 use std::collections::HashMap;
 
@@ -13,6 +25,14 @@ use crate::onboard::SealedReport;
 use crate::report_export::{AuditReportJson, DispositionWire, ReportOptions};
 use crate::xlsx_export::FindingsExport;
 use crate::ManifestProvenance;
+
+pub use archive::{read_zip_entries, xlsx_cells, xlsx_sheet_grid, xlsx_strings, XlsxCell};
+pub use consistency::{
+    compare_csv_to_json, dataset_parity_problems, dataset_set_problems, package_stem,
+    parse_readme_provenance, row_parity, verify_manifest, verify_readme_provenance,
+    ReadmeProvenance,
+};
+pub use report::{CheckId, CheckOutcome, GateFailure, GateReport, Problem};
 
 /// Everything one product export consists of, built by [`build_product_package`] and nothing else.
 pub struct ProductPackage {
@@ -69,7 +89,28 @@ pub async fn build_product_package_with_stem(
         crate::report_export::build_report_json(report, dispositions, corpus, options);
     let data_json = crate::report_export::render_data_json(&report_json)?;
     let pdf = crate::report_export::compile_pdf_from_data(&data_json).await?;
+    assemble_package(
+        report,
+        dispositions,
+        corpus,
+        options,
+        stem,
+        (report_json, data_json, pdf),
+    )
+}
 
+/// The rest of the assembly, around an already-compiled PDF. Split out so the gate's own tests
+/// can build a real package (real workbook, real datasets, real provenance) with a stand-in
+/// PDF when Typst is not installed; production reaches it only through
+/// [`build_product_package_with_stem`].
+pub(crate) fn assemble_package(
+    report: &SealedReport,
+    dispositions: &HashMap<String, DispositionWire>,
+    corpus: Option<&camerata_rules::RuleSet>,
+    options: &ReportOptions,
+    stem: &str,
+    (report_json, data_json, pdf): (AuditReportJson, String, Vec<u8>),
+) -> anyhow::Result<ProductPackage> {
     let xlsx = crate::xlsx_export::build_workbook(report, dispositions, corpus, options)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -115,11 +156,13 @@ pub async fn build_product_package_with_stem(
     })
 }
 
-/// A package that cleared release: the zip a client may receive.
+/// A package that cleared release: the zip a client may receive, and the gate's record that it
+/// ran (six checks, no problems).
 #[derive(Debug)]
 pub struct ReleasedZip {
     pub stem: String,
     pub bytes: Vec<u8>,
+    pub report: GateReport,
 }
 
 /// Why [`release`] produced no zip.
@@ -127,6 +170,8 @@ pub struct ReleasedZip {
 pub enum ReleaseError {
     /// The archive could not be assembled (an I/O error writing the in-memory zip).
     Assembly(String),
+    /// The gate refused the package. Nothing was returned.
+    Blocked(GateFailure),
 }
 
 impl std::fmt::Display for ReleaseError {
@@ -135,13 +180,95 @@ impl std::fmt::Display for ReleaseError {
             ReleaseError::Assembly(e) => {
                 write!(f, "could not assemble the product export zip: {e}")
             }
+            ReleaseError::Blocked(failure) => write!(f, "{failure}"),
         }
     }
 }
 
 impl std::error::Error for ReleaseError {}
 
-/// Zip the package. This is the ONLY function the real exporters call to obtain zip bytes.
+/// Run every gate check over an EXISTING zip (the acceptance run and `camerata release-gate`):
+/// secrets over every text member, every workbook cell and string, and `pdf_text` when the
+/// caller extracted it; the dataset set; CSV against JSON; the manifest; the provenance. It
+/// cannot run row parity (that needs the in-memory rows), so that check is absent from the
+/// report.
+pub fn audit_zip(zip_bytes: &[u8], pdf_text: Option<&str>) -> GateReport {
+    let mut report = GateReport::default();
+    let entries = match read_zip_entries(zip_bytes) {
+        Ok(entries) => entries,
+        Err(e) => {
+            report.record(
+                CheckId::DatasetSet,
+                vec![Problem::new("(package)", "archive", e, None)],
+            );
+            return report;
+        }
+    };
+    report.record(
+        CheckId::Secrets,
+        archive_secret_problems(&entries, pdf_text),
+    );
+    report.record(CheckId::DatasetSet, dataset_set_problems(&entries));
+    report.record(CheckId::DatasetParity, dataset_parity_problems(&entries));
+    report.record(CheckId::Manifest, verify_manifest(&entries));
+    report.record(CheckId::Provenance, provenance_problems(&entries));
+    report.sorted()
+}
+
+/// The secrets check over every archive member, by kind, and over the member NAMES.
+fn archive_secret_problems(
+    entries: &std::collections::BTreeMap<String, Vec<u8>>,
+    pdf_text: Option<&str>,
+) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    for (name, bytes) in entries {
+        problems.extend(secrets::text_problems("(archive member name)", name));
+        if name.ends_with(".xlsx") {
+            problems.extend(secrets::xlsx_problems(name, bytes));
+        } else if name.ends_with(".json") {
+            problems.extend(secrets::json_bytes_problems(name, bytes));
+        } else if name.ends_with(".csv") {
+            problems.extend(secrets::csv_problems(name, bytes));
+        } else if name.ends_with(".pdf") {
+            if let Some(text) = pdf_text {
+                problems.extend(secrets::pdf_text_problems(name, text));
+            }
+        } else {
+            problems.extend(secrets::text_problems(
+                name,
+                &String::from_utf8_lossy(bytes),
+            ));
+        }
+    }
+    problems
+}
+
+fn provenance_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<Problem> {
+    let (Some(readme), Some(manifest)) = (entries.get("README.txt"), entries.get("manifest.json"))
+    else {
+        // The dataset-set check reports the missing file.
+        return Vec::new();
+    };
+    match serde_json::from_slice::<serde_json::Value>(manifest) {
+        Ok(manifest) => verify_readme_provenance(&String::from_utf8_lossy(readme), &manifest),
+        Err(_) => vec![Problem::new(
+            "manifest.json",
+            "manifest",
+            "manifest.json does not parse",
+            None,
+        )],
+    }
+}
+
+/// The secrets check over the PDF's data: `data.json` is the only data the Typst template reads,
+/// so every client-visible dynamic string in the PDF is in it.
+fn pdf_data_problems(data_json: &str) -> Vec<Problem> {
+    secrets::json_bytes_problems("PDF data (data.json)", data_json.as_bytes())
+}
+
+/// Zip the package and run every check over the archive it produced. This is the ONLY function
+/// the real exporters call to obtain zip bytes: `Ok` only when every check passed, and on
+/// failure no bytes are returned.
 pub fn release(package: ProductPackage) -> Result<ReleasedZip, ReleaseError> {
     let bytes = crate::build_product_zip(
         &package.stem,
@@ -153,8 +280,43 @@ pub fn release(package: ProductPackage) -> Result<ReleasedZip, ReleaseError> {
         &package.provenance,
     )
     .map_err(|e| ReleaseError::Assembly(e.to_string()))?;
-    Ok(ReleasedZip {
-        stem: package.stem,
-        bytes,
-    })
+
+    let mut report = audit_zip(&bytes, None);
+    report.record(CheckId::Secrets, pdf_data_problems(&package.data_json));
+    report.record(
+        CheckId::RowParity,
+        row_parity(&package.report_json, &package.findings_export),
+    );
+    let report = report.sorted();
+
+    if report.is_clean() {
+        Ok(ReleasedZip {
+            stem: package.stem,
+            bytes,
+            report,
+        })
+    } else {
+        Err(ReleaseError::Blocked(GateFailure {
+            stem: package.stem,
+            report,
+        }))
+    }
 }
+
+/// The PDF-only route's gate: the secrets check over `data.json` alone (that route ships no zip,
+/// so there is no archive to check).
+pub fn check_pdf_data(stem: &str, data_json: &str) -> Result<(), GateFailure> {
+    let mut report = GateReport::default();
+    report.record(CheckId::Secrets, pdf_data_problems(data_json));
+    if report.is_clean() {
+        Ok(())
+    } else {
+        Err(GateFailure {
+            stem: stem.to_string(),
+            report,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -2388,6 +2388,20 @@ pub fn build_findings_export(
 /// an independent walk of the scan - so `json/`, the xlsx, and `findings.json` can never
 /// disagree. Returns `(archive_path, pretty-JSON bytes)` pairs.
 ///
+/// The eight machine-readable datasets every product package ships, as `csv/{name}.csv` and
+/// `json/{name}.json`. The ONE definition: the release gate's dataset-set check and the export
+/// tests both read it, so a dataset added here is demanded of every package.
+pub const DATASETS: [&str; 8] = [
+    "all-findings",
+    "deviations",
+    "conventions",
+    "not-assessed",
+    "dependencies",
+    "false-positives",
+    "coverage",
+    "rules-applied",
+];
+
 /// `json/all-findings.json` is the flat sibling of `findings.json`'s `findings` array (the whole
 /// non-FP set); the other files are the partitioned sheet tables, each its own one-table file.
 pub fn build_json_exports(

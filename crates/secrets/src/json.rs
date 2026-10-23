@@ -58,15 +58,40 @@ fn key_segment(key: &str) -> String {
 /// (`findings[0].also_locations[1].snippet`; the root is `$`). The release gate's JSON check.
 pub fn find_secrets_in_json(value: &Value) -> Vec<(String, SecretMatch)> {
     let mut found = Vec::new();
-    walk(value, "$".to_string(), &mut found);
+    walk(value, "$".to_string(), &mut |path, _text, m| {
+        found.push((path.to_string(), m));
+    });
     found
 }
 
-fn walk(value: &Value, path: String, found: &mut Vec<(String, SecretMatch)>) {
+/// One secret found in a JSON tree, in REDACTED form: where it is, which shape, and what it
+/// looks like once redacted. Never the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonHit {
+    pub path: String,
+    pub shape: crate::SecretShape,
+    pub form: String,
+}
+
+/// [`find_secrets_in_json`] with each match already rendered to its redacted form, so a caller
+/// building a message never has to hold the matched text.
+pub fn find_secret_hits_in_json(value: &Value) -> Vec<JsonHit> {
+    let mut hits = Vec::new();
+    walk(value, "$".to_string(), &mut |path, text, m| {
+        hits.push(JsonHit {
+            path: path.to_string(),
+            shape: m.shape,
+            form: m.redacted_form(text),
+        });
+    });
+    hits
+}
+
+fn walk(value: &Value, path: String, found: &mut dyn FnMut(&str, &str, SecretMatch)) {
     match value {
         Value::String(text) => {
             for m in detect_secrets(text) {
-                found.push((path.clone(), m));
+                found(&path, text, m);
             }
         }
         Value::Array(items) => {
@@ -82,7 +107,7 @@ fn walk(value: &Value, path: String, found: &mut Vec<(String, SecretMatch)>) {
                     format!("{path}.{}", key_segment(key))
                 };
                 for m in detect_secrets(key) {
-                    found.push((child.clone(), m));
+                    found(&child, key, m);
                 }
                 walk(item, child, found);
             }

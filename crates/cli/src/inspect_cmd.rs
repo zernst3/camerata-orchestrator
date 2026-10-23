@@ -107,6 +107,50 @@ pub struct InspectOutcome {
     /// lives in a per-user state directory under a hashed key (see [`ledger_path`]). A path
     /// nobody can derive and nothing prints is a gate nobody runs.
     pub ledger_path: PathBuf,
+    /// The release gate's verdict line (`release gate: passed (6 checks)`): proof, in the
+    /// operator's output, that the gate ran over the zip that was just written.
+    pub release_gate: String,
+}
+
+/// The exit code `camerata inspect` uses when the release gate refuses the export (the
+/// integrity gate's is 2). The zip is never written.
+pub const EXIT_RELEASE_BLOCKED: i32 = 3;
+
+/// Why an inspection produced no export.
+#[derive(Debug)]
+pub enum InspectError {
+    /// A pipeline or argument failure, with its plain-language message.
+    Failed(String),
+    /// The release gate refused the export: a secret value (or an inconsistency) was found in
+    /// the package it just built. Nothing was written.
+    ReleaseBlocked(camerata_server::release_gate::GateFailure),
+}
+
+impl InspectError {
+    /// The process exit code for this failure.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            InspectError::Failed(_) => 1,
+            InspectError::ReleaseBlocked(_) => EXIT_RELEASE_BLOCKED,
+        }
+    }
+}
+
+impl std::fmt::Display for InspectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InspectError::Failed(message) => write!(f, "{message}"),
+            InspectError::ReleaseBlocked(failure) => write!(f, "{failure}"),
+        }
+    }
+}
+
+impl std::error::Error for InspectError {}
+
+impl From<String> for InspectError {
+    fn from(message: String) -> Self {
+        InspectError::Failed(message)
+    }
 }
 
 /// Validate the arguments BEFORE touching the filesystem for real work or resolving a
@@ -407,7 +451,17 @@ fn save_ledger(repo: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
 pub async fn build_product_export_bytes(
     report: &camerata_server::onboard::SealedReport,
     corpus: Option<&camerata_rules::RuleSet>,
-) -> Result<(String, Vec<u8>), String> {
+) -> Result<(String, Vec<u8>), InspectError> {
+    let released = release_product_export(report, corpus).await?;
+    Ok((released.stem, released.bytes))
+}
+
+/// [`build_product_export_bytes`] with the gate's record of what it checked kept, for the
+/// operator-facing summary line.
+async fn release_product_export(
+    report: &camerata_server::onboard::SealedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Result<camerata_server::release_gate::ReleasedZip, InspectError> {
     let dispositions: HashMap<String, camerata_server::report_export::DispositionWire> =
         HashMap::new();
     let mut options = ReportOptions::default();
@@ -420,9 +474,13 @@ pub async fn build_product_export_bytes(
         &options,
     )
     .await
-    .map_err(|e| e.to_string())?;
-    let released = camerata_server::release_gate::release(package).map_err(|e| e.to_string())?;
-    Ok((released.stem, released.bytes))
+    .map_err(|e| InspectError::Failed(e.to_string()))?;
+    camerata_server::release_gate::release(package).map_err(|e| match e {
+        camerata_server::release_gate::ReleaseError::Blocked(failure) => {
+            InspectError::ReleaseBlocked(failure)
+        }
+        other => InspectError::Failed(other.to_string()),
+    })
 }
 
 /// Render the run's actual token usage + cost for the CLI's final stdout line — the number
@@ -469,7 +527,7 @@ pub fn format_usage_report(usage: Option<&ActualUsage>, batch: bool) -> String {
 pub async fn run_inspect_with_key_presence(
     args: InspectArgs,
     has_api_key: bool,
-) -> Result<InspectOutcome, String> {
+) -> Result<InspectOutcome, InspectError> {
     validate_args(&args, has_api_key)?;
 
     // A headless run has no `owner/repo` spec — the scanned directory's own name stands in
@@ -633,7 +691,14 @@ pub async fn run_inspect_with_key_presence(
     let report = report.seal();
 
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
-    let (_stem, zip_bytes) = build_product_export_bytes(&report, corpus.as_ref()).await?;
+    // `release_product_export` is the release gate: it returns bytes only when every check
+    // passed, and `std::fs::write` below runs only on `Ok`, so a blocked export is never on disk.
+    let released = release_product_export(&report, corpus.as_ref()).await?;
+    let zip_bytes = released.bytes;
+    let release_gate = format!(
+        "release gate: passed ({} checks)",
+        released.report.checks.len()
+    );
     std::fs::write(&args.export, &zip_bytes)
         .map_err(|e| format!("could not write {}: {e}", args.export.display()))?;
 
@@ -646,6 +711,7 @@ pub async fn run_inspect_with_key_presence(
         findings_count: report.findings.len(),
         ledger_summary,
         ledger_path: ledger_path(&args.repo),
+        release_gate,
     })
 }
 
@@ -824,7 +890,7 @@ pub fn render_ledger_summary(
 /// Production entry point: reads the real `ANTHROPIC_API_KEY` presence from the environment
 /// and delegates to [`run_inspect_with_key_presence`]. See that function's doc comment, and
 /// [`validate_args`]'s, for why the key check is a separate, injectable parameter.
-pub async fn run_inspect(args: InspectArgs) -> Result<InspectOutcome, String> {
+pub async fn run_inspect(args: InspectArgs) -> Result<InspectOutcome, InspectError> {
     let has_api_key = std::env::var("ANTHROPIC_API_KEY")
         .ok()
         .filter(|k| !k.trim().is_empty())
@@ -840,10 +906,11 @@ pub fn format_outcome_report(outcome: &InspectOutcome) -> String {
     };
     format!(
         "camerata inspect: wrote {} ({} bytes) — backend: {backend_label}, findings: {}\n\
-         integrity ledger: {}\n{}\n\n{}",
+         {}\nintegrity ledger: {}\n{}\n\n{}",
         outcome.export_path.display(),
         outcome.export_zip_bytes,
         outcome.findings_count,
+        outcome.release_gate,
         outcome.ledger_path.display(),
         format_usage_report(outcome.actual_usage.as_ref(), outcome.batch),
         outcome.ledger_summary,
@@ -1131,6 +1198,7 @@ mod tests {
             findings_count: 3,
             ledger_summary: "== PIPELINE STAGES ==\n  (no stages recorded this scan)".to_string(),
             ledger_path: PathBuf::from("/tmp/state/out-deadbeef.ledger.json"),
+            release_gate: "release gate: passed (6 checks)".to_string(),
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("/tmp/out.zip"), "{text}");
