@@ -16,6 +16,8 @@
 > **FIRST, before anything else (Zach, 2026-10-22):** the secret-redaction work order
 > (`_workspace/brownfield-audits/WORK_ORDER_SECRET_REDACTION.md`) plus the pluggable export release
 > gate; decisions recorded under DECISIONS MADE. Process: Fable spec, Sonnet build, Fable leak hunt.
+> **SECOND (Zach, 2026-10-22):** delete client source after delivery (per-repo destructive action,
+> project stays fully usable without the repo); decisions under DECISIONS MADE.
 > **Then, in order (sequential, to conserve tokens):** W29 Wave D (UI-STATE-SHAPE-1,
 > STYLE-NEEDLESS-COMPLEXITY-1: Fable spec, Sonnet build, Fable review); then corpus text work
 > (MASTER-SEQUENCE items 5, 11, 12, 19 corpus sub-items); then the engine follow-ups in item 21
@@ -45,6 +47,21 @@ commit sits on the branch ready for review + push.
   these fields, so (b) as a standalone chore and (b) as sweep output are separate questions.
 
 ## DECISIONS MADE
+
+- 2026-10-22 (Zach): **Delete client source after delivery** is a V1 blocker, built right after
+  secret redaction. A destructive "Delete source code from this machine" action per repo, typed
+  confirmation (the repo's name), styled as a danger action. The project stays fully usable with no
+  repo on disk: findings, history, exports and package regeneration keep working; the repo shows
+  "Source deleted on <date>"; rescans are disabled with an explanation; re-clone restores it.
+  Remove every "repo must exist" block that is not about scanning itself. Deletion purges every
+  on-disk copy of client code (the checkout, scan cache, AI/judge transcripts, any worktree), and
+  KEEPS the code excerpts inside findings (part of the delivered product; Zach confirmed). Safety:
+  delete only a folder that is a git repo whose remote matches the project's recorded GitHub repo;
+  otherwise refuse with the reason. A deletion record (what, where, when, file count) is kept in
+  the project as proof for the client. Exports must never re-read code from disk. Deletion is
+  ordinary removal (FileVault-encrypted SSD), not a forensic wipe; the record says so. Process:
+  Fable spec (incl. locating every repo-must-exist assumption and every place client code lands),
+  Sonnet build, Fable adversarial review.
 
 - 2026-10-22 (Zach): **Secret redaction is the next work, before anything else** (work order
   `_workspace/brownfield-audits/WORK_ORDER_SECRET_REDACTION.md`; blocks the first client; Zach's
