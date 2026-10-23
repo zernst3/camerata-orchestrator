@@ -80,6 +80,21 @@ single-file tree-sitter/syn extractors now exist.
   rules (including the security floor) in its subset, that is a defect to fix, not new scope.
   Verify this first; if confirmed, it may belong before V2.
 
+## 4. Mutation testing (measure whether the tests catch bugs, not how many there are)
+
+Zach, 2026-10-22, "at some point". `cargo-mutants` makes small deliberate changes to production
+code (flip a condition, delete a line, swap an operator), reruns the tests, and reports which
+changes no test caught. On `camerata-checks` that turns "7,000 tests" into "the tests catch N%
+of injected faults", a much stronger claim, and the surviving mutants point at the exact gaps.
+
+- Costs no model tokens: it is a CPU job. Slow, so it runs as an unattended overnight job.
+- Start with `camerata-checks` (the deterministic checkers, where a silent miss is a false
+  negative shipped to a client), then `rules`, then the export path in `server`.
+- Disk: it rebuilds repeatedly; run it with the cargo disk guard installed and a dedicated
+  `CARGO_TARGET_DIR` that is removed afterwards.
+- Output to keep: the caught/missed percentage per crate over time, and the list of surviving
+  mutants triaged into "add a test" or "equivalent mutant, ignore with a reason".
+
 ## Keep V1 forward-compatible (no extra V1 work)
 
 When V1 work touches the project data model (the deletion record, re-fetch, provenance), store
