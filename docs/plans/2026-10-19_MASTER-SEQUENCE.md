@@ -423,6 +423,25 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
   exports/literals/computed_loads/clone tokens). A shared per-file parse cache is a performance
   win; not a defect, ledgered for after V1 unless scan time on a large repo becomes a problem.
 
+- **Mutation-test gaps in `camerata-checks` (overnight run 2026-10-22/23, cargo-mutants v27.1.0,
+  6h, no model tokens).** 6,380 mutants: 2,062 caught, 44 missed, 93 timeouts (effectively
+  caught), 4,181 unviable. Fault-catch rate 97.9% (caught / caught+missed), counting the checks
+  crate's own tests only. Full list: `mutants.out/missed.txt` (gitignored; rerun to regenerate).
+  **MAJOR, V1 (after the two client-trust blockers): 26 misses in client-facing checkers.**
+  query_grammar_injection (10: split_top_level_plus, classify_expr, extract_call_inner,
+  split_top_level_args, find_first_needle, extract_property_value), weak_randomness (7:
+  forward_taint_identifiers, find_word, find_prng_call, assignment_target, strip_comments),
+  handler_no_db contains_ident_call (2), resource_lifecycle is_true_literal + pat_ident Pat::Type
+  arm (2), ui_dates strip_comments (1), one_import_path Model::canonicalize `!` (1),
+  shared_constant call_receiver boundary (1), and interest_globs emptied without detection on 4
+  checkers (python_testing, ui_dates, weak_randomness, query_grammar_injection; a checker could
+  silently stop applying). For each: decide equivalent-vs-real, add a killing test for every real
+  one, rerun `cargo mutants --file <path>` to confirm caught.
+  **MINOR, V2: 18 misses.** Build-runner disk headroom guard (9; no test proves it refuses on low
+  disk), Layer-2 runners (PythonCheckRunner::check -> default, RustCheckRunner ==, FmtCheckRunner
+  heartbeat, diagnostics_for `||`; fold into the V2 dev-time parity audit), cosmetic
+  (LayerConflict Display, describe_path boundary, clone_rules skip_count).
+
 ## 3. Explicitly NOT doing
 
 - `ARCH-OBSERVABILITY-CORRELATION-ID-1` stays `decision` — prior ruling, recorded in the roster.
