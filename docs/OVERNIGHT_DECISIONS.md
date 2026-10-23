@@ -13,6 +13,14 @@
 > Every detector was Fable-reviewed, fixed, and merged. **V1 scope** (Zach, DECISIONS MADE below):
 > everything in `docs/plans/2026-10-19_MASTER-SEQUENCE.md` plus the graded accuracy tests (the
 > outreach go-signal); no new scope except defect fixes; rule `stages` is out of V1.
+> **Overnight mutation run (started 2026-10-22, no model tokens):** `cargo mutants --package
+> camerata-checks --jobs 4` (6,380 mutants, est. 12 to 14 h), detached with `nohup caffeinate -i`.
+> Log: `~/Library/Logs/cargo-mutants-checks.log`. Results (written as it goes):
+> `mutants.out/` in the repo root (gitignored): `caught.txt`, `missed.txt`, `timeout.txt`,
+> `unviable.txt`, `outcomes.json`. Report: caught / (caught + missed) as the fault-catch rate;
+> triage `missed.txt` into "add a test" vs "equivalent mutant". Only the checks crate's own tests
+> run against each mutant (server-level tests that exercise checkers are not counted). Check it is
+> finished (`pgrep -fl cargo-mutants`) before rebuilding in the main checkout.
 > **FIRST, before anything else (Zach, 2026-10-22):** the secret-redaction work order
 > (`_workspace/brownfield-audits/WORK_ORDER_SECRET_REDACTION.md`) plus the pluggable export release
 > gate; decisions recorded under DECISIONS MADE. Process: Fable spec, Sonnet build, Fable leak hunt.
