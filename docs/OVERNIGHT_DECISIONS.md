@@ -62,11 +62,17 @@ commit sits on the branch ready for review + push.
   ordinary removal (FileVault-encrypted SSD), not a forensic wipe; the record says so. Zach
   (2026-10-22): it does not matter how the code got into the project (cloned in the UI or by hand);
   whatever codebase the project points to is what gets deleted, guarded by the remote-match check.
-  **Re-fetch button:** restores the repo from its recorded GitHub origin into the project and checks
-  out the INSPECTED commit (from provenance) so every finding's file/line still matches; clears the
-  deleted state. A separate explicit "Update to latest" pulls newer code and marks the project as
-  needing a rescan. Uses Camerata's existing GitHub token; a revoked/renamed/deleted origin is
-  reported plainly. Process:
+  **Re-fetch (revised by Zach, 2026-10-22):** the real reasons to re-fetch are remediation and the
+  governance layer's monthly delta retest, both of which need the LATEST code. One "Re-fetch
+  source" button opens a dialog: "Latest from <default branch>" (pre-selected) or "The inspected
+  commit <sha>, <date>" (rare: reproduce or dispute). Re-fetch clones FULL history so the inspected
+  commit is always reachable. Afterwards the repo card shows "Source at <sha>, N commits newer than
+  the inspection (<sha>)" with a primary "Rescan changes" action (the delta retest between the
+  inspected commit and now; same flow the monthly retest uses). Finding code views read from the
+  INSPECTED commit via git objects, not the working tree, so old findings stay accurate while the
+  checkout sits at latest; old findings carry a "References commit <sha>; source on disk is newer"
+  note. Clears the deleted state. Uses Camerata's existing GitHub token; a revoked/renamed/deleted
+  origin is reported plainly. Process:
   Fable spec (incl. locating every repo-must-exist assumption and every place client code lands),
   Sonnet build, Fable adversarial review.
 
