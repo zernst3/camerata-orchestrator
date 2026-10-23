@@ -7,6 +7,7 @@ mod redaction;
 mod rules;
 mod source_hygiene;
 mod twins;
+mod vendors;
 
 use crate::{detect_all, SecretMatch, SecretShape};
 

@@ -4,11 +4,22 @@ use super::{count, tail};
 use crate::fixtures::{body, jwt, planted, planted_all};
 use crate::{redact, redact_str, SecretShape};
 
+const LOWER_DIGITS: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
+
 /// The expected redacted value for each fixture, written out by hand per shape (not derived
 /// from the production prefix table) so the two can disagree and fail.
 fn expected_form(shape: SecretShape, value: &str) -> String {
     let n = count(value);
-    let with_prefix = |prefix: &str| format!("{prefix}…{} ({n} chars)", tail(value));
+    // Owner decision (d): a body of 20 chars or fewer shows its length only.
+    let with_prefix = |prefix: &str| {
+        let body = n - count(prefix);
+        let shown = if body > 20 {
+            tail(value)
+        } else {
+            String::new()
+        };
+        format!("{prefix}…{shown} ({n} chars)")
+    };
     match shape {
         SecretShape::SupabaseSecretKey => with_prefix("sb_secret_"),
         SecretShape::SupabaseServiceRoleJwt => {
@@ -24,8 +35,21 @@ fn expected_form(shape: SecretShape, value: &str) -> String {
         SecretShape::GoogleApiKey => with_prefix("AIza"),
         SecretShape::AnthropicKey => with_prefix("sk-ant-"),
         SecretShape::OpenAiKey => with_prefix("sk-proj-"),
-        SecretShape::NamedSecretLiteral
+        SecretShape::SendGridApiKey => with_prefix("SG."),
+        SecretShape::TwilioApiKey => with_prefix("SK"),
+        SecretShape::ShopifyToken => with_prefix("shpat_"),
+        SecretShape::MailgunApiKey => with_prefix("key-"),
+        SecretShape::NpmToken => with_prefix("npm_"),
+        SecretShape::MapboxSecretToken => with_prefix("sk."),
+        SecretShape::DiscordBotToken
+        | SecretShape::AwsSecretAccessKey
+        | SecretShape::TwilioAuthToken
+        | SecretShape::NpmrcAuthToken
+        | SecretShape::DockerAuthEntry
+        | SecretShape::PgPassPassword
+        | SecretShape::NamedSecretLiteral
         | SecretShape::BearerToken
+        | SecretShape::BasicAuthCredential
         | SecretShape::ConnectionStringPassword
         | SecretShape::AzureStorageConnectionString
         | SecretShape::SecretInUrlQuery => with_prefix(""),
@@ -93,35 +117,35 @@ fn surrounding_syntax_survives_for_the_context_shapes() {
 }
 
 #[test]
-fn short_body_shows_length_only_no_tail() {
-    // Vendor shape with a 10-char body: 20 chars total, no tail.
-    let value = format!(
-        "sb_secret_{}",
-        body(10, "abcdefghijklmnopqrstuvwxyz0123456789", 3)
-    );
-    assert_eq!(redact(&value).text, "sb_secret_… (20 chars)");
-    // 12-char body is still short; 13 shows the tail.
-    let twelve = format!("sb_secret_{}", body(12, "QRSTUVWXYZ0123456789", 4));
-    assert_eq!(redact(&twelve).text, "sb_secret_… (22 chars)");
-    let thirteen = format!("sb_secret_{}", body(13, "QRSTUVWXYZ0123456789", 5));
+fn bodies_of_twenty_chars_or_fewer_show_their_length_only() {
+    // Owner decision (d). Vendor shape: the body is what follows the prefix.
+    let twenty = format!("sb_secret_{}", body(20, "QRSTUVWXYZ0123456789", 3));
+    assert_eq!(redact(&twenty).text, "sb_secret_… (30 chars)");
+    let twenty_one = format!("sb_secret_{}", body(21, "QRSTUVWXYZ0123456789", 4));
     assert_eq!(
-        redact(&thirteen).text,
-        format!("sb_secret_…{} (23 chars)", tail(&thirteen))
+        redact(&twenty_one).text,
+        format!("sb_secret_…{} (31 chars)", tail(&twenty_one))
     );
+    // An AWS access key id has a 16-char body: no tail.
+    let aws = planted(SecretShape::AwsAccessKeyId).value;
+    assert_eq!(redact(&aws).text, "AKIA… (20 chars)");
+    // The 10-char minimum body still redacts.
+    let ten = format!("sb_secret_{}", body(10, LOWER_DIGITS, 5));
+    assert_eq!(redact(&ten).text, "sb_secret_… (20 chars)");
 }
 
 #[test]
-fn prefixless_shapes_show_a_tail_only_above_sixteen_chars() {
-    let sixteen = body(16, "QRSTUVWXYZ0123456789", 6);
-    let out = redact(&format!("https://x.test/a?token={sixteen}&b=1")).text;
-    assert_eq!(out, "https://x.test/a?token=… (16 chars)&b=1");
-    let seventeen = body(17, "QRSTUVWXYZ0123456789", 7);
-    let out = redact(&format!("https://x.test/a?token={seventeen}&b=1")).text;
+fn prefixless_shapes_show_a_tail_only_above_twenty_chars() {
+    let twenty = body(20, "QRSTUVWXYZ0123456789", 6);
+    let out = redact(&format!("https://x.test/a?token={twenty}&b=1")).text;
+    assert_eq!(out, "https://x.test/a?token=… (20 chars)&b=1");
+    let twenty_one = body(21, "QRSTUVWXYZ0123456789", 7);
+    let out = redact(&format!("https://x.test/a?token={twenty_one}&b=1")).text;
     assert_eq!(
         out,
         format!(
-            "https://x.test/a?token=…{} (17 chars)&b=1",
-            tail(&seventeen)
+            "https://x.test/a?token=…{} (21 chars)&b=1",
+            tail(&twenty_one)
         )
     );
     let named = body(25, "QRSTUVWXYZ0123456789", 8);

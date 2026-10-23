@@ -4,15 +4,14 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use crate::detect::{detect_secrets, SecretMatch};
+use crate::detect::{detect_secrets, is_decor, SecretMatch};
 use crate::shapes::{self, prefix_of, SecretShape};
 use crate::twins::ELLIPSIS;
 
-/// A body longer than this many chars shows its last four chars; a shorter one shows only the
-/// length (a four-char tail on a ten-char body would reveal 40% of it).
-const TAIL_MIN_BODY_CHARS: usize = 12;
-/// The same rule for prefix-less shapes, measured on the whole value.
-const TAIL_MIN_VALUE_CHARS: usize = 16;
+/// A body longer than this many chars shows its last four chars; a body of this length or less
+/// shows only the total length (a four-char tail on a twenty-char body would reveal 20% of it).
+/// The body is what follows the vendor prefix, or the whole value for a prefix-less shape.
+const TAIL_MIN_BODY_CHARS: usize = 20;
 const TAIL_CHARS: usize = 4;
 
 /// Result of [`redact`].
@@ -41,12 +40,7 @@ fn generic_form(shape: SecretShape, value: &str) -> String {
     let prefix = prefix_of(shape, value);
     let total = value.chars().count();
     let body = total - prefix.chars().count();
-    let show_tail = if prefix.is_empty() {
-        total > TAIL_MIN_VALUE_CHARS
-    } else {
-        body > TAIL_MIN_BODY_CHARS
-    };
-    let tail = if show_tail {
+    let tail = if body > TAIL_MIN_BODY_CHARS {
         last_chars(value, TAIL_CHARS)
     } else {
         String::new()
@@ -79,31 +73,47 @@ fn pem_kind(text: &str, start: usize) -> String {
     }
 }
 
-/// The replacement for a PEM key body: ONE marker line, padded with blank lines so the number of
-/// `\n` in the text is unchanged and every line number downstream stays valid.
+/// The content of one line of a key body: the span between its leading and trailing list
+/// decoration (indentation, `- `, quotes, a trailing comma). `None` for a decoration-only line.
+fn content_span(line: &str) -> Option<Range<usize>> {
+    let start = line.find(|c: char| !is_decor(c))?;
+    let end = line.rfind(|c: char| !is_decor(c))?;
+    let last_len = line[end..].chars().next().map_or(1, char::len_utf8);
+    Some(start..end + last_len)
+}
+
+/// The replacement for a PEM key body: ONE marker in place of the first content line, every other
+/// content line emptied, and each line's own decoration (indentation, `- `, quotes, commas) kept.
+/// The number of `\n` is unchanged, so every line number downstream stays valid, and a JSON or
+/// YAML list keeps its shape.
 fn pem_form(text: &str, m: &SecretMatch) -> String {
     let inner = &text[m.value.clone()];
     if inner.trim().is_empty() {
         return String::new();
     }
-    let newlines = inner.matches('\n').count();
-    let lines = if newlines == 0 {
-        1
-    } else {
-        inner.lines().filter(|line| !line.trim().is_empty()).count()
-    };
-    let noun = if lines == 1 { "line" } else { "lines" };
-    let marker = format!(
-        "[{} private key material: {lines} {noun} redacted]",
+    let lines: Vec<&str> = inner.split('\n').collect();
+    let content = lines
+        .iter()
+        .filter(|line| content_span(line).is_some())
+        .count();
+    let noun = if content == 1 { "line" } else { "lines" };
+    let mut marker = Some(format!(
+        "[{} private key material: {content} {noun} redacted]",
         pem_kind(text, m.start)
-    );
-    if newlines == 0 {
-        marker
-    } else if inner.starts_with('\n') {
-        format!("\n{marker}{}", "\n".repeat(newlines - 1))
-    } else {
-        format!("{marker}{}", "\n".repeat(newlines))
-    }
+    ));
+    let rewritten: Vec<String> = lines
+        .iter()
+        .map(|line| match content_span(line) {
+            None => (*line).to_string(),
+            Some(span) => format!(
+                "{}{}{}",
+                &line[..span.start],
+                marker.take().unwrap_or_default(),
+                &line[span.end..]
+            ),
+        })
+        .collect();
+    rewritten.join("\n")
 }
 
 impl SecretMatch {

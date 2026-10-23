@@ -23,6 +23,13 @@ fn shapes_for_rule_maps_every_sec_rule_and_unknown_is_empty() {
             GoogleApiKey,
             AnthropicKey,
             OpenAiKey,
+            SendGridApiKey,
+            TwilioApiKey,
+            ShopifyToken,
+            MailgunApiKey,
+            NpmToken,
+            MapboxSecretToken,
+            DiscordBotToken,
             ConnectionStringPassword,
             AzureStorageConnectionString,
         ]
@@ -37,6 +44,7 @@ fn shapes_for_rule_maps_every_sec_rule_and_unknown_is_empty() {
             GoogleApiKey,
             OpenAiKey,
             PemPrivateKey,
+            AwsSecretAccessKey,
             NamedSecretLiteral,
         ]
     );

@@ -25,6 +25,12 @@ pub enum Twin {
     RedactionMarker,
     /// Extension: a PEM header with no key material after it (a one-line snippet).
     NoKeyMaterial,
+    /// Extension: a value made only of words joined by `_`, `-` or `.`
+    /// (`app_preferences_sidebar_collapsed_v2`, `process.env.SERVICE_ROLE_KEY`): an identifier
+    /// or a key name, not a credential.
+    ReadableName,
+    /// Extension: a key that is public by design (`sb_publishable_`, `pk_live_`, `pk_test_`).
+    PublishableKey,
 }
 
 impl Twin {
@@ -34,7 +40,11 @@ impl Twin {
     pub fn counts_as_line(&self) -> bool {
         !matches!(
             self,
-            Twin::PublicKeyRole(_) | Twin::RedactionMarker | Twin::PathLike
+            Twin::PublicKeyRole(_)
+                | Twin::RedactionMarker
+                | Twin::PathLike
+                | Twin::ReadableName
+                | Twin::PublishableKey
         )
     }
 }
@@ -75,12 +85,42 @@ pub(crate) fn sha256_hex(value: &str) -> String {
     out
 }
 
-fn placeholder_word(body: &str) -> Option<&'static str> {
+/// The case class of a body byte: a boundary lies between two bytes of different classes
+/// (`_`, `-`, a case change, a digit next to a letter).
+fn byte_class(byte: u8) -> u8 {
+    match byte {
+        b'a'..=b'z' => 0,
+        b'A'..=b'Z' => 1,
+        b'0'..=b'9' => 2,
+        _ => 3,
+    }
+}
+
+/// Whether `body[start..end]` (a placeholder word) stands apart from its neighbours: at the
+/// start or end of the body, next to `_` or `-` (or carrying one itself), or at a case change.
+fn is_delimited(body: &str, start: usize, end: usize, word: &str) -> bool {
+    let bytes = body.as_bytes();
+    let left = start == 0
+        || word.starts_with(['_', '-'])
+        || byte_class(bytes[start - 1]) != byte_class(bytes[start]);
+    let right = end == bytes.len()
+        || word.ends_with(['_', '-'])
+        || byte_class(bytes[end - 1]) != byte_class(bytes[end]);
+    left && right
+}
+
+/// T1. A VENDOR body is a random run, so a short word inside it is coincidence unless it is
+/// delimited or the whole body is single-case (`sb_secret_yourkeyhere`, `FAKE_DO_NOT_USE`); a
+/// context-shaped value is human-written, so any substring counts.
+fn placeholder_word(body: &str, delimited_only: bool) -> Option<&'static str> {
     let lower = body.to_ascii_lowercase();
-    PLACEHOLDER_WORDS
-        .iter()
-        .copied()
-        .find(|word| lower.contains(word))
+    let single_case = !body.bytes().any(|b| b.is_ascii_lowercase())
+        || !body.bytes().any(|b| b.is_ascii_uppercase());
+    PLACEHOLDER_WORDS.iter().copied().find(|word| {
+        lower.match_indices(word).any(|(start, _)| {
+            !delimited_only || single_case || is_delimited(body, start, start + word.len(), word)
+        })
+    })
 }
 
 /// T2: `^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$`.
@@ -98,15 +138,78 @@ fn is_env_name(value: &str) -> bool {
     value.contains('_') && !value.ends_with('_') && !value.contains("__")
 }
 
-/// T5.
+/// `value` opens with `open` and closes with `close` (and is longer than the two together).
+fn is_closed(value: &str, open: &str, close: char) -> bool {
+    value.len() > open.len() && value.starts_with(open) && value.ends_with(close)
+}
+
+fn is_identifier(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
+/// A format-string placeholder: `%s`, `%(name)s`, or a `{name}` field (a Python or Rust format
+/// string; `postgres://user:{password}@host` is code, not a password).
+fn is_format_placeholder(value: &str) -> bool {
+    value == "%s"
+        || value
+            .strip_prefix("%(")
+            .and_then(|rest| rest.strip_suffix(")s"))
+            .is_some_and(is_identifier)
+        || value
+            .strip_prefix('{')
+            .and_then(|rest| rest.strip_suffix('}'))
+            .is_some_and(is_identifier)
+}
+
+/// T5. Only a CLOSED template is one: a real password may start with `$`, `%`, `[`, `<` or `{`.
 fn is_template(value: &str) -> bool {
-    const OPENERS: &[&str] = &["{", "<", "[", "%", "$"];
-    if OPENERS.iter().any(|opener| value.starts_with(opener)) {
-        return true;
-    }
-    ["password", "secret", "token", "changeme"]
+    is_closed(value, "${", '}')
+        || is_closed(value, "{{", '}')
+        || is_closed(value, "<", '>')
+        || is_closed(value, "[", ']')
+        || is_format_placeholder(value)
+        || ["password", "secret", "token", "changeme"]
+            .iter()
+            .any(|word| value.eq_ignore_ascii_case(word))
+}
+
+/// A key that is public by design.
+fn is_publishable_key(value: &str) -> bool {
+    ["sb_publishable_", "pk_live_", "pk_test_"]
         .iter()
-        .any(|word| value.eq_ignore_ascii_case(word))
+        .any(|prefix| value.starts_with(prefix))
+}
+
+fn is_name_separator(c: char) -> bool {
+    matches!(c, '_' | '-' | '.')
+}
+
+/// One word of a readable name: all lowercase, all uppercase or Capitalized (digits tolerated).
+fn is_name_word(segment: &str) -> bool {
+    let mut letters = segment.chars().filter(char::is_ascii_alphabetic);
+    let Some(first) = letters.next() else {
+        return !segment.is_empty();
+    };
+    let rest: Vec<char> = letters.collect();
+    rest.iter().all(char::is_ascii_lowercase)
+        || (first.is_ascii_uppercase() && rest.iter().all(char::is_ascii_uppercase))
+}
+
+/// A readable name (owner decision 2026-10-23): at least three words joined by `_`, `-` or `.`,
+/// at most two digits in all (`app_preferences_sidebar_collapsed_v2`,
+/// `process.env.SERVICE_ROLE_KEY`). A random token has digits and mixed case.
+fn is_readable_name(value: &str) -> bool {
+    value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || is_name_separator(c))
+        && value.chars().filter(char::is_ascii_digit).count() <= 2
+        && value.split(is_name_separator).count() >= 3
+        && value.split(is_name_separator).all(is_name_word)
 }
 
 fn is_path_like(value: &str) -> bool {
@@ -136,6 +239,9 @@ pub(crate) fn classify(shape: SecretShape, value: &str, role: Option<&str>) -> O
             return Some(Twin::PublicKeyRole(role.to_string()));
         }
     }
+    if is_context_shaped(shape) && is_publishable_key(value) {
+        return Some(Twin::PublishableKey);
+    }
     if shape == SecretShape::NamedSecretLiteral && is_env_name(value) {
         return Some(Twin::EnvNameLiteral);
     }
@@ -147,7 +253,7 @@ pub(crate) fn classify(shape: SecretShape, value: &str, role: Option<&str>) -> O
     );
     if word_rule_applies {
         let body = &value[prefix_of(shape, value).len()..];
-        if let Some(word) = placeholder_word(body) {
+        if let Some(word) = placeholder_word(body, shape.is_vendor_shaped()) {
             return Some(Twin::PlaceholderWord(word));
         }
     }
@@ -156,6 +262,13 @@ pub(crate) fn classify(shape: SecretShape, value: &str, role: Option<&str>) -> O
     }
     if shape == SecretShape::NamedSecretLiteral && is_path_like(value) {
         return Some(Twin::PathLike);
+    }
+    if shape == SecretShape::NamedSecretLiteral && is_readable_name(value) {
+        return Some(Twin::ReadableName);
+    }
+    if shape == SecretShape::BasicAuthCredential && value.bytes().all(|b| b.is_ascii_lowercase()) {
+        // `Authorization: Basic authentication ...` is prose; a real credential is not one word.
+        return Some(Twin::ReadableName);
     }
     None
 }

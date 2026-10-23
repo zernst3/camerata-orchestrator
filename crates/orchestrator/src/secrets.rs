@@ -77,8 +77,13 @@ pub enum SecretKind {
     ConnectionStringPassword,
     /// A secret-named URL query parameter's value (`?token=...`).
     UrlQuerySecret,
-    /// A long quoted literal assigned to a credential-named identifier.
+    /// A long literal (quoted or an unquoted `.env`/YAML value) assigned to a credential-named
+    /// identifier, or a credential file entry (`.npmrc`, docker `config.json`, `.pgpass`, a
+    /// `Basic` header).
     HardcodedCredential,
+    /// A token from a vendor not named above (SendGrid, Twilio, Shopify, Mailgun, npm, Mapbox,
+    /// Discord).
+    VendorToken,
 }
 
 impl SecretKind {
@@ -102,6 +107,7 @@ impl SecretKind {
             SecretKind::ConnectionStringPassword => "connection_string_password",
             SecretKind::UrlQuerySecret => "url_query_secret",
             SecretKind::HardcodedCredential => "hardcoded_credential",
+            SecretKind::VendorToken => "vendor_token",
         }
     }
 }
@@ -124,7 +130,20 @@ impl From<SecretShape> for SecretKind {
             SecretShape::AnthropicKey => SecretKind::AnthropicKey,
             SecretShape::OpenAiKey => SecretKind::OpenAiKey,
             SecretShape::PemPrivateKey => SecretKind::PemPrivateKey,
-            SecretShape::NamedSecretLiteral => SecretKind::HardcodedCredential,
+            SecretShape::SendGridApiKey
+            | SecretShape::TwilioApiKey
+            | SecretShape::ShopifyToken
+            | SecretShape::MailgunApiKey
+            | SecretShape::NpmToken
+            | SecretShape::MapboxSecretToken
+            | SecretShape::DiscordBotToken => SecretKind::VendorToken,
+            SecretShape::NamedSecretLiteral
+            | SecretShape::AwsSecretAccessKey
+            | SecretShape::TwilioAuthToken
+            | SecretShape::NpmrcAuthToken
+            | SecretShape::DockerAuthEntry
+            | SecretShape::PgPassPassword
+            | SecretShape::BasicAuthCredential => SecretKind::HardcodedCredential,
             SecretShape::BearerToken => SecretKind::BearerToken,
             SecretShape::ConnectionStringPassword => SecretKind::ConnectionStringPassword,
             SecretShape::AzureStorageConnectionString => SecretKind::AzureStorageConnectionString,
@@ -420,11 +439,12 @@ mod tests {
     }
 
     #[test]
-    fn azure_account_key_clause_alone_without_the_protocol_clause_is_not_flagged() {
-        assert!(detect_secrets(
-            "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq=="
-        )
-        .is_empty());
+    fn azure_account_key_clause_alone_is_a_hardcoded_credential_not_the_azure_shape() {
+        // Without the protocol clause it is a credential-named assignment.
+        let key = format!("{}==", camerata_secrets::fixtures::body(64, ALNUM, 52));
+        let found = detect_secrets(&format!("AccountKey={key}"));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, SecretKind::HardcodedCredential);
     }
 
     #[test]
@@ -533,6 +553,11 @@ mod tests {
                 SecretShape::NamedSecretLiteral,
                 SecretKind::HardcodedCredential,
             ),
+            (SecretShape::SendGridApiKey, SecretKind::VendorToken),
+            (
+                SecretShape::AwsSecretAccessKey,
+                SecretKind::HardcodedCredential,
+            ),
         ] {
             let p = planted(shape);
             let result = scrub(&p.text);
@@ -567,6 +592,7 @@ mod tests {
         for (kind, expected) in [
             (SecretKind::StripeKey, "stripe_key"),
             (SecretKind::PemPrivateKey, "pem_private_key"),
+            (SecretKind::VendorToken, "vendor_token"),
             (SecretKind::AwsAccessKey, "aws_access_key"),
             (SecretKind::GitHubToken, "github_token"),
             (

@@ -14,6 +14,12 @@ pub const PUBLISHED_EXAMPLES: &[(&str, &str)] = &[
         "3543c50b0cb9cea8e55eb1f529b79f043cb250d485fde7b66cabbb5183add7da",
         "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/about-authentication-to-github",
     ),
+    (
+        // The Azure Storage emulator (Azurite) well-known development account key, which every
+        // local-development connection string uses.
+        "8b5130ead464e35d5743246136340bfe7e022bfaf8bb42ff07000e2acc5994ee",
+        "https://learn.microsoft.com/azure/storage/common/storage-use-emulator",
+    ),
     // AWS's two documented example access key ids contain the word EXAMPLE, so the T1
     // placeholder rule already keeps them readable; no digest is needed.
 ];

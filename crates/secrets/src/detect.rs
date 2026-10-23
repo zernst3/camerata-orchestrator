@@ -90,6 +90,8 @@ fn collect_group(
 }
 
 fn decode_segment(segment: &str) -> Option<Vec<u8>> {
+    // A padded segment (`=`) decodes the same once the padding is dropped.
+    let segment = segment.trim_end_matches('=');
     if segment.len() > JWT_PAYLOAD_DECODE_CAP {
         return None;
     }
@@ -145,13 +147,29 @@ fn collect_jwt(out: &mut Vec<SecretMatch>, text: &str, wanted: &[SecretShape]) {
 fn re_pem_inline_body() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\A[ \t]*([A-Za-z0-9+/=\\]{16,})").expect("re_pem_inline_body must compile")
+        // An inline run, optionally behind list decoration (`","`) and optionally followed by
+        // further quoted runs on the same line (a minified JSON array).
+        Regex::new(
+            r#"\A[ \t]*["',-]*[ \t]*([A-Za-z0-9+/=\\]{16,}(?:[ \t]*["',-]+[ \t]*[A-Za-z0-9+/=]{4,})*)"#,
+        )
+        .expect("re_pem_inline_body must compile")
     })
 }
 
+/// One body line of a key: a base64 run, optionally behind list decoration (`- `, `"`) and
+/// followed by a quote or comma (a YAML list item, a JSON array element). Group 1 is the run.
 fn re_pem_body_line() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\A[A-Za-z0-9+/=]{4,}\z").expect("re_pem_body_line must compile"))
+    RE.get_or_init(|| {
+        Regex::new(r#"\A[ \t]*["'-]*[ \t]*([A-Za-z0-9+/=]{4,})["',]*[ \t]*\z"#)
+            .expect("re_pem_body_line must compile")
+    })
+}
+
+/// Characters around a key body that are list syntax, not key material: whitespace, quotes,
+/// commas and the YAML list dash.
+pub(crate) fn is_decor(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '-')
 }
 
 /// The largest index `<= index` that is a char boundary of `text`.
@@ -163,27 +181,33 @@ fn floor_boundary(text: &str, index: usize) -> usize {
     index
 }
 
-/// True when `inner` is exactly the redaction marker line our own redactor writes (plus blank
-/// lines), so a redacted PEM block re-scans as a twin.
-pub(crate) fn is_pem_marker(inner: &str) -> bool {
-    let trimmed = inner.trim();
-    trimmed.starts_with('[')
-        && trimmed.ends_with(']')
-        && trimmed.contains("private key material:")
-        && !trimmed.contains('\n')
+/// True when `core` (the text between header and footer, list decoration trimmed) is exactly the
+/// redaction marker line our own redactor writes, so a redacted PEM block re-scans as a twin.
+pub(crate) fn is_pem_marker(core: &str) -> bool {
+    core.starts_with('[')
+        && core.ends_with(']')
+        && core.contains("private key material:")
+        && !core.contains('\n')
 }
 
 /// True when `inner` can be PEM body text: base64 characters, whitespace, literal `\n`/`\r`
 /// escapes and the RFC 1421 header characters (`Proc-Type: 4,ENCRYPTED`). Code between a header
-/// literal and a footer literal (a detector's own source) is not key material.
+/// literal and a footer literal (a detector's own source) is not key material. Quotes are allowed
+/// only around a real base64 run (a quoted line list), never between two bare markers.
 fn looks_like_pem_body(inner: &str) -> bool {
-    inner
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c.is_whitespace() || "+/=\\:,.-".contains(c))
+    let base = |c: char| c.is_ascii_alphanumeric() || c.is_whitespace() || "+/=\\:,.-".contains(c);
+    if inner.chars().all(base) {
+        return true;
+    }
+    inner.chars().all(|c| base(c) || c == '"' || c == '\'')
+        && inner
+            .split(|c: char| !(c.is_ascii_alphanumeric() || "+/=".contains(c)))
+            .any(|run| run.len() >= 16)
 }
 
 /// The key-body range after a header whose footer was not found: an inline run (a JSON string
-/// cut off by a cap) or the base64 lines directly below the header. Empty when there is none.
+/// cut off by a cap) or the base64 lines directly below the header (plain, or a quoted/dashed
+/// list). Empty when there is none.
 fn unfooted_body(text: &str, header_end: usize) -> Range<usize> {
     let rest = &text[header_end..];
     if let Some(group) = re_pem_inline_body()
@@ -193,7 +217,7 @@ fn unfooted_body(text: &str, header_end: usize) -> Range<usize> {
         return header_end + group.start()..header_end + group.end();
     }
     let line_end = rest.find('\n').unwrap_or(rest.len());
-    if !rest[..line_end].trim().is_empty() {
+    if !rest[..line_end].chars().all(is_decor) {
         return header_end..header_end;
     }
     let mut body_start: Option<usize> = None;
@@ -208,12 +232,17 @@ fn unfooted_body(text: &str, header_end: usize) -> Range<usize> {
             .find('\n')
             .unwrap_or(text.len() - line_start);
         let line = text[line_start..line_start + line_len].trim_end_matches('\r');
-        let long_enough = line.len() >= 16 || body_start.is_some();
-        if !(long_enough && re_pem_body_line().is_match(line)) {
+        let Some(run) = re_pem_body_line()
+            .captures(line)
+            .and_then(|caps| caps.get(1))
+        else {
+            break;
+        };
+        if run.len() < 16 && body_start.is_none() {
             break;
         }
-        body_start.get_or_insert(line_start);
-        body_end = line_start + line.len();
+        body_start.get_or_insert(line_start + run.start());
+        body_end = line_start + run.end();
         offset = line_start + line_len;
     }
     body_start.map_or(header_end..header_end, |start| start..body_end)
@@ -231,7 +260,7 @@ fn collect_pem(out: &mut Vec<SecretMatch>, text: &str) {
             .map(|footer| (header_end + footer.start(), header_end + footer.end()))
             .filter(|(inner_end, _)| {
                 let inner = &text[header_end..*inner_end];
-                is_pem_marker(inner) || looks_like_pem_body(inner)
+                is_pem_marker(inner.trim_matches(is_decor)) || looks_like_pem_body(inner)
             });
         let (end, value) = match footed {
             Some((inner_end, footer_end)) => (footer_end, header_end..inner_end),
@@ -240,10 +269,10 @@ fn collect_pem(out: &mut Vec<SecretMatch>, text: &str) {
                 (body.end.max(header_end), body)
             }
         };
-        let inner = &text[value.clone()];
-        let twin = if inner.trim().is_empty() {
+        let core = text[value.clone()].trim_matches(is_decor);
+        let twin = if core.is_empty() {
             Some(Twin::NoKeyMaterial)
-        } else if is_pem_marker(inner) {
+        } else if is_pem_marker(core) {
             Some(Twin::RedactionMarker)
         } else {
             None
@@ -290,11 +319,39 @@ fn collect(out: &mut Vec<SecretMatch>, text: &str, shapes: &[SecretShape]) {
             SecretShape::GoogleApiKey => collect_whole(out, text, shape, shapes::re_google()),
             SecretShape::AnthropicKey => collect_whole(out, text, shape, shapes::re_anthropic()),
             SecretShape::OpenAiKey => collect_openai(out, text),
+            SecretShape::SendGridApiKey => collect_whole(out, text, shape, shapes::re_sendgrid()),
+            SecretShape::TwilioApiKey => {
+                collect_whole(out, text, shape, shapes::re_twilio_api_key())
+            }
+            SecretShape::ShopifyToken => collect_whole(out, text, shape, shapes::re_shopify()),
+            SecretShape::MailgunApiKey => collect_whole(out, text, shape, shapes::re_mailgun()),
+            SecretShape::NpmToken => collect_whole(out, text, shape, shapes::re_npm()),
+            SecretShape::MapboxSecretToken => collect_whole(out, text, shape, shapes::re_mapbox()),
+            SecretShape::DiscordBotToken => collect_whole(out, text, shape, shapes::re_discord()),
             SecretShape::PemPrivateKey => collect_pem(out, text),
+            SecretShape::AwsSecretAccessKey => {
+                collect_group(out, text, shape, shapes::re_aws_secret_key(), false)
+            }
+            SecretShape::TwilioAuthToken => {
+                collect_group(out, text, shape, shapes::re_twilio_auth_token(), false)
+            }
+            SecretShape::NpmrcAuthToken => {
+                collect_group(out, text, shape, shapes::re_npmrc_auth(), false)
+            }
+            SecretShape::DockerAuthEntry => {
+                collect_group(out, text, shape, shapes::re_docker_auth(), false)
+            }
+            SecretShape::PgPassPassword => {
+                collect_group(out, text, shape, shapes::re_pgpass(), false)
+            }
             SecretShape::NamedSecretLiteral => {
-                collect_group(out, text, shape, shapes::re_named_literal(), false)
+                collect_group(out, text, shape, shapes::re_named_literal(), false);
+                collect_group(out, text, shape, shapes::re_named_literal_unquoted(), false);
             }
             SecretShape::BearerToken => collect_group(out, text, shape, shapes::re_bearer(), true),
+            SecretShape::BasicAuthCredential => {
+                collect_group(out, text, shape, shapes::re_basic_auth(), false)
+            }
             SecretShape::ConnectionStringPassword => {
                 collect_group(out, text, shape, shapes::re_connection_string(), false)
             }

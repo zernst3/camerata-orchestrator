@@ -1,8 +1,11 @@
 //! One positive test per shape S1..S17 and the JWT role decisions.
 
 use super::{all_shapes, only_match};
-use crate::fixtures::{jwt, planted, planted_all};
-use crate::{detect_secrets, SecretShape};
+use crate::fixtures::{body, jwt, planted, planted_all};
+use crate::{detect_secrets, redact, SecretShape};
+
+const ALNUM: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const HEX: &str = "0123456789abcdef";
 
 #[test]
 fn detects_every_shape_with_the_right_span_and_no_twin() {
@@ -214,4 +217,268 @@ fn code_between_a_header_literal_and_a_footer_literal_is_not_key_material() {
     let text = "let start = \"-----BEGIN PRIVATE KEY-----\";\nfn work() { run(); }\nlet end = \"-----END PRIVATE KEY-----\";";
     assert!(detect_secrets(text).is_empty());
     assert_eq!(crate::redact(text).text, text);
+}
+
+// ---- leak hunt: S17, S13, S1, S2 ------------------------------------------------------------
+
+#[test]
+fn url_query_value_is_redacted_in_full_when_percent_encoded() {
+    // Azure SAS: the `sig=` value is base64 with `+ / =` percent-encoded.
+    let sig = format!(
+        "{}%2B{}%2F{}%3D",
+        body(20, ALNUM, 71),
+        body(12, ALNUM, 72),
+        body(8, ALNUM, 73)
+    );
+    let url =
+        format!("https://acct.blob.core.windows.net/c/b.txt?sv=2022-11-02&sig={sig}&se=2026-10-23");
+    let found = detect_secrets(&url);
+    assert_eq!(found.len(), 1);
+    assert_eq!(&url[found[0].value.clone()], sig);
+    let out = redact(&url).text;
+    assert!(!out.contains(&sig));
+    assert!(!out.contains("%2B") && !out.contains("%2F"), "{out}");
+    assert!(out.ends_with("&se=2026-10-23"), "{out}");
+}
+
+#[test]
+fn url_query_value_starting_with_percent_is_a_secret_not_a_template() {
+    let value = format!("%21{}", body(20, ALNUM, 74));
+    let url = format!("https://x.test/cb?token={value}&a=1");
+    assert_eq!(detect_secrets(&url).len(), 1);
+    assert!(!redact(&url).text.contains(&value));
+}
+
+#[test]
+fn unquoted_credential_assignments_in_env_yaml_and_ini_are_secrets() {
+    let value = body(36, ALNUM, 81);
+    for text in [
+        format!("SERVICE_API_KEY={value}\n"),
+        format!("export CLIENT_SECRET={value}"),
+        format!("  client_secret: {value}  "),
+        format!("- api_token: {value}"),
+        format!("[db]\npassword = {value}\n"),
+        format!("db-password:{value}\r\n"),
+    ] {
+        let found = detect_secrets(&text);
+        assert_eq!(found.len(), 1, "{}", text.replace(&value, "<v>"));
+        assert_eq!(found[0].shape, SecretShape::NamedSecretLiteral);
+        assert_eq!(&text[found[0].value.clone()], value);
+        assert!(!redact(&text).text.contains(&value));
+    }
+}
+
+#[test]
+fn unquoted_assignment_value_may_carry_base64_and_dotted_characters() {
+    let value = format!(
+        "{}+{}/{}==",
+        body(14, ALNUM, 82),
+        body(10, ALNUM, 83),
+        body(8, ALNUM, 84)
+    );
+    let text = format!("AWS_SESSION_TOKEN={value}");
+    assert!(!redact(&text).text.contains(&value));
+}
+
+#[test]
+fn unquoted_assignment_does_not_span_lines_or_match_short_or_non_credential_names() {
+    let value = body(40, ALNUM, 85);
+    // Not credential-named.
+    assert!(detect_secrets(&format!("SERVICE_NAME={value}")).is_empty());
+    // Too short.
+    assert!(detect_secrets("API_KEY=short_value").is_empty());
+    // Code, not a bare value: a call, a trailing comment, a semicolon.
+    assert!(detect_secrets("const token = getTokenFromTheSessionStore(request);").is_empty());
+    assert!(detect_secrets(&format!("API_KEY={value} # rotate me")).is_empty());
+    // The value never starts on a later line, so reported lines stay valid.
+    let text = format!("# header\n\n\nAPI_KEY={value}\n");
+    let found = detect_secrets(&text);
+    assert_eq!(crate::match_lines(&text, SecretShape::ALL, false), vec![4]);
+    assert_eq!(found.len(), 1);
+}
+
+#[test]
+fn unquoted_assignment_of_a_template_or_placeholder_is_a_twin() {
+    for line in [
+        "API_KEY=your_api_key_goes_here_please",
+        "SECRET_TOKEN=changeme_changeme_changeme",
+        "client_secret: example-client-secret-value",
+    ] {
+        assert!(detect_secrets(line).is_empty(), "{line}");
+        assert!(
+            !crate::detect_all(line).is_empty(),
+            "{line} is still seen as a twin"
+        );
+    }
+}
+
+#[test]
+fn json_escaped_named_literal_is_a_secret() {
+    // A snippet field carrying JSON source: the quotes are `\"` inside the outer string.
+    let value = body(40, ALNUM, 86);
+    let inner = format!("{{\"apiKey\": \"{value}\"}}");
+    let escaped = inner.replace('"', "\\\"");
+    let tree = serde_json::json!({"snippet": inner});
+    assert_eq!(crate::find_secrets_in_json(&tree).len(), 1);
+    let found = detect_secrets(&escaped);
+    assert_eq!(
+        found.len(),
+        1,
+        "escaped form: {}",
+        escaped.replace(&value, "<v>")
+    );
+    assert!(!redact(&escaped).text.contains(&value));
+}
+
+#[test]
+fn hyphenated_uuid_shaped_token_on_a_credential_named_identifier_is_a_secret() {
+    let uuid = format!(
+        "{}-{}-{}-{}-{}",
+        body(8, HEX, 91),
+        body(4, HEX, 92),
+        body(4, HEX, 93),
+        body(4, HEX, 94),
+        body(12, HEX, 95)
+    );
+    assert!(
+        uuid.chars().filter(char::is_ascii_digit).count() > 2,
+        "fixture guard"
+    );
+    for text in [
+        format!("const apiToken = \"{uuid}\";"),
+        format!("{{\"api_token\": \"{uuid}\"}}"),
+        format!("API_TOKEN={uuid}"),
+        format!("service.credential: {uuid}"),
+    ] {
+        let found = detect_secrets(&text);
+        assert_eq!(found.len(), 1, "{}", text.replace(&uuid, "<v>"));
+        assert!(!redact(&text).text.contains(&uuid));
+    }
+}
+
+#[test]
+fn supabase_secret_body_may_contain_hyphens_but_not_start_with_one() {
+    let hyphenated = format!(
+        "sb_secret_{}-{}-{}",
+        body(12, ALNUM, 96),
+        body(10, ALNUM, 97),
+        body(10, ALNUM, 98)
+    );
+    let found = detect_secrets(&format!("KEY={hyphenated}"));
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].shape, SecretShape::SupabaseSecretKey);
+    assert_eq!(
+        &hyphenated,
+        &format!("KEY={hyphenated}")[found[0].value.clone()],
+        "whole body"
+    );
+    assert!(!redact(&hyphenated).text.contains(&hyphenated));
+    // Prose seen in the portal export: a hyphen right after the prefix is not a key.
+    assert!(crate::detect_all("a key with the sb_secret_-prefixed shape").is_empty());
+}
+
+#[test]
+fn padded_jwt_segments_match() {
+    let token = jwt(Some("service_role"));
+    let mut parts: Vec<String> = token.split('.').map(str::to_string).collect();
+    parts[0].push('=');
+    parts[1].push_str("==");
+    parts[2].push('=');
+    let padded = parts.join(".");
+    let found = detect_secrets(&padded);
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        &padded[found[0].value.clone()],
+        padded,
+        "whole token, padding included"
+    );
+    assert_eq!(
+        found[0].shape,
+        SecretShape::SupabaseServiceRoleJwt,
+        "role still decoded"
+    );
+}
+
+// ---- leak hunt: PEM as quoted line lists -----------------------------------------------------
+
+fn pem_lines(qualifier: &str, body_lines: usize) -> Vec<String> {
+    crate::fixtures::pem_block(qualifier, body_lines)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn assert_pem_redacted_cleanly(text: &str, lines: &[String]) {
+    let out = redact(text);
+    assert_eq!(out.redactions.len(), 1, "one PEM redaction");
+    for line in &lines[1..lines.len() - 1] {
+        assert!(!out.text.contains(line.as_str()), "a key line survived");
+    }
+    assert!(out.text.contains(&lines[0]) && out.text.contains(&lines[lines.len() - 1]));
+    assert!(out.text.contains("private key material"));
+    assert_eq!(out.text.matches('\n').count(), text.matches('\n').count());
+    let again = redact(&out.text);
+    assert_eq!(again.text, out.text, "idempotent");
+    assert!(again.redactions.is_empty());
+    assert!(detect_secrets(&out.text).is_empty());
+}
+
+#[test]
+fn pem_as_a_json_string_array_is_one_secret() {
+    let lines = pem_lines("RSA ", 3);
+    let items: Vec<String> = lines.iter().map(|l| format!("    \"{l}\"")).collect();
+    let text = format!("{{\n  \"private_key\": [\n{}\n  ]\n}}", items.join(",\n"));
+    assert_eq!(detect_secrets(&text).len(), 1);
+    assert_pem_redacted_cleanly(&text, &lines);
+}
+
+#[test]
+fn pem_as_a_minified_json_array_is_one_secret() {
+    let lines = pem_lines("", 2);
+    let items: Vec<String> = lines.iter().map(|l| format!("\"{l}\"")).collect();
+    let text = format!("{{\"private_key\":[{}]}}", items.join(","));
+    assert_eq!(detect_secrets(&text).len(), 1);
+    assert_pem_redacted_cleanly(&text, &lines);
+}
+
+#[test]
+fn pem_as_a_yaml_list_is_one_secret() {
+    let lines = pem_lines("EC ", 3);
+    let items: Vec<String> = lines.iter().map(|l| format!("  - {l}")).collect();
+    let text = format!("private_key:\n{}\nafter: true", items.join("\n"));
+    assert_eq!(detect_secrets(&text).len(), 1);
+    assert_pem_redacted_cleanly(&text, &lines);
+}
+
+#[test]
+fn pem_list_without_a_footer_is_still_key_material() {
+    // Truncated by a cap: the footer line is missing.
+    let lines = pem_lines("", 3);
+    for (open, close) in [("    \"", "\","), ("  - ", "")] {
+        let body_lines: Vec<String> = lines[..lines.len() - 1]
+            .iter()
+            .map(|l| format!("{open}{l}{close}"))
+            .collect();
+        let text = body_lines.join("\n");
+        assert_eq!(detect_secrets(&text).len(), 1, "unfooted list {open:?}");
+        assert_pem_redacted_cleanly_unfooted(&text, &lines);
+    }
+}
+
+fn assert_pem_redacted_cleanly_unfooted(text: &str, lines: &[String]) {
+    let out = redact(text);
+    for line in &lines[1..lines.len() - 1] {
+        assert!(!out.text.contains(line.as_str()), "a key line survived");
+    }
+    assert_eq!(out.text.matches('\n').count(), text.matches('\n').count());
+    assert_eq!(redact(&out.text).text, out.text, "idempotent");
+}
+
+#[test]
+fn string_concatenation_of_the_markers_is_not_key_material() {
+    let text = "let both = \"-----BEGIN PRIVATE KEY-----\" + \"-----END PRIVATE KEY-----\";";
+    assert!(detect_secrets(text).is_empty());
+    assert_eq!(redact(text).text, text);
+    let list = "[\"-----BEGIN PRIVATE KEY-----\", \"-----END PRIVATE KEY-----\"]";
+    assert!(detect_secrets(list).is_empty());
 }

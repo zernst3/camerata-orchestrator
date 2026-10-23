@@ -15,6 +15,7 @@ use crate::shapes::SecretShape;
 const ALNUM: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const UPPER_DIGITS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 const URL_SAFE: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+const HEX: &str = "0123456789abcdef";
 const BASE64: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// A fixture: `text` is a snippet containing the secret, `value` is the exact substring that must
@@ -121,11 +122,73 @@ pub fn planted(shape: SecretShape) -> Planted {
             let v = format!("sk-proj-{}", body(48, URL_SAFE, 12));
             (format!("OPENAI_API_KEY={v}"), v)
         }
+        SecretShape::SendGridApiKey => {
+            let v = format!("SG.{}.{}", body(22, URL_SAFE, 18), body(43, URL_SAFE, 19));
+            (format!("SENDGRID_API_KEY={v}"), v)
+        }
+        SecretShape::TwilioApiKey => {
+            let v = format!("SK{}", body(32, HEX, 20));
+            (format!("TWILIO_API_KEY_SID={v}"), v)
+        }
+        SecretShape::ShopifyToken => {
+            let v = format!("shpat_{}", body(32, HEX, 21));
+            (format!("SHOPIFY_ACCESS_TOKEN={v}"), v)
+        }
+        SecretShape::MailgunApiKey => {
+            let v = format!("key-{}", body(32, HEX, 22));
+            (format!("MAILGUN_API_KEY={v}"), v)
+        }
+        SecretShape::NpmToken => {
+            let v = format!("npm_{}", body(36, ALNUM, 23));
+            (format!("NPM_TOKEN={v}"), v)
+        }
+        SecretShape::MapboxSecretToken => {
+            let v = format!(
+                "sk.eyJ{}.{}",
+                body(80, URL_SAFE, 24),
+                body(22, URL_SAFE, 25)
+            );
+            (format!("MAPBOX_SECRET_TOKEN={v}"), v)
+        }
         SecretShape::PemPrivateKey => {
             let block = pem_block("RSA ", 3);
             let lines: Vec<&str> = block.lines().collect();
             let value = lines[1..lines.len() - 1].join("\n");
             (block, value)
+        }
+        SecretShape::DiscordBotToken => {
+            let v = format!(
+                "M{}.{}.{}",
+                body(23, URL_SAFE, 26),
+                body(6, URL_SAFE, 27),
+                body(27, URL_SAFE, 28)
+            );
+            (format!("DISCORD_TOKEN={v}"), v)
+        }
+        SecretShape::AwsSecretAccessKey => {
+            let v = body(40, BASE64, 29);
+            (format!("aws_secret_access_key = {v}"), v)
+        }
+        SecretShape::TwilioAuthToken => {
+            let v = body(32, HEX, 30);
+            (format!("TWILIO_AUTH_TOKEN={v}"), v)
+        }
+        SecretShape::NpmrcAuthToken => {
+            let v = body(36, ALNUM, 31);
+            (format!("//registry.npmjs.org/:_authToken={v}"), v)
+        }
+        SecretShape::DockerAuthEntry => {
+            let v = body(36, BASE64, 32);
+            (
+                format!(
+                    "{{\"auths\": {{\"https://index.docker.io/v1/\": {{\"auth\": \"{v}\"}}}}}}"
+                ),
+                v,
+            )
+        }
+        SecretShape::PgPassPassword => {
+            let v = body(24, ALNUM, 33);
+            (format!("db.internal.test:5432:appdb:appuser:{v}"), v)
         }
         SecretShape::NamedSecretLiteral => {
             let v = body(40, ALNUM, 13);
@@ -134,6 +197,10 @@ pub fn planted(shape: SecretShape) -> Planted {
         SecretShape::BearerToken => {
             let v = body(40, ALNUM, 14);
             (format!("Authorization: Bearer {v}"), v)
+        }
+        SecretShape::BasicAuthCredential => {
+            let v = format!("{}==", body(30, ALNUM, 34));
+            (format!("Authorization: Basic {v}"), v)
         }
         SecretShape::ConnectionStringPassword => {
             let v = body(24, ALNUM, 15);
