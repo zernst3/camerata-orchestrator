@@ -56,6 +56,13 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-23 (Opus, secret-redaction spec questions; asymmetric risk: over-redaction costs only
+  readability, under-redaction leaks): Q1 real Stripe TEST-mode keys (`sk_test_`/`rk_test_`) are
+  redacted like live keys; only Stripe's published documentation key stays readable via the
+  published-key allowlist. Q2 placeholder values (all-caps DO_NOT/FAKE bodies, `your...here`
+  style) stay readable per the work order's safe-twin rule, so the portal fixture's acceptance
+  result is "clean, placeholders readable". Spec: `docs/design/2026-10-23_secret-redaction-and-release-gate.md`.
+
 - 2026-10-22 (Zach): **Delete client source after delivery** is a V1 blocker, built right after
   secret redaction. A destructive "Delete source code from this machine" action per repo, typed
   confirmation (the repo's name), styled as a danger action. The project stays fully usable with no
