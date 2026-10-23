@@ -478,3 +478,60 @@ fn twin_published_azure_emulator_account_key() {
         Twin::PublishedExampleKey
     );
 }
+
+#[test]
+fn a_passphrase_on_a_password_like_identifier_is_never_a_readable_name() {
+    // Diceware-style passphrases are words joined by `-` or `.`: they look exactly like a
+    // readable name, but on a password-like identifier they are real secrets.
+    let phrases = [
+        "correct-horse-battery-staple",
+        "correct.horse.battery.staple",
+        "Correct-Horse-Battery-Staple",
+    ];
+    for word in [
+        "password",
+        "passwd",
+        "pwd",
+        "passphrase",
+        "secret",
+        "credential",
+    ] {
+        for ident in [
+            word.to_string(),
+            word.to_ascii_uppercase(),
+            format!("db_{word}_value"),
+        ] {
+            for phrase in phrases {
+                for text in [
+                    format!("{ident}={phrase}"),
+                    format!("{ident}: {phrase}"),
+                    format!("const {ident} = \"{phrase}\";"),
+                    format!("{{\"{ident}\": \"{phrase}\"}}"),
+                ] {
+                    let found = detect_secrets(&text);
+                    assert_eq!(found.len(), 1, "not flagged: {text}");
+                    assert!(!redact(&text).text.contains(phrase), "leaked: {text}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_readable_name_on_a_code_constant_identifier_stays_readable() {
+    for text in [
+        "STORAGE_KEY = \"app-preferences-sidebar-state\"".to_string(),
+        "STORAGE_KEY=app-preferences-sidebar-state".to_string(),
+        "const queryKey = \"user.profile.settings.sidebar\";".to_string(),
+        "key=app-preferences-sidebar-state".to_string(),
+        "api_key_header: x-app-preferences-sidebar".to_string(),
+    ] {
+        assert_eq!(
+            assert_twin(&text, SecretShape::NamedSecretLiteral),
+            Twin::ReadableName,
+            "{text}"
+        );
+    }
+    // The owner's example is below the 24-char literal minimum, so it is not even a candidate.
+    assert!(detect_secrets("STORAGE_KEY = \"app-preferences-sidebar\"").is_empty());
+}

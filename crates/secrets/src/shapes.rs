@@ -326,10 +326,10 @@ pub(crate) const S12_PEM_FOOTER: &str =
     r"-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----";
 /// S13, quoted form. The literal admits `-` and `.` (UUID-shaped tokens) and an escaped closing
 /// quote (`\"`, JSON source inside a JSON string).
-pub(crate) const S13_NAMED_LITERAL: &str = r#"(?i:[A-Za-z0-9_]*(?:key|secret|token|password|passwd|pwd|credential)[A-Za-z0-9_]*)[^\n]{0,40}?(?:"([A-Za-z0-9+/_.-]{24,}=*)\\?"|'([A-Za-z0-9+/_.-]{24,}=*)\\?')"#;
+pub(crate) const S13_NAMED_LITERAL: &str = r#"(?i:[A-Za-z0-9_]*(?:key|secret|token|password|passwd|pwd|passphrase|credential)[A-Za-z0-9_]*)[^\n]{0,40}?(?:"([A-Za-z0-9+/_.-]{24,}=*)\\?"|'([A-Za-z0-9+/_.-]{24,}=*)\\?')"#;
 /// S13, unquoted form: a `.env`, YAML or ini line whose whole value is a bare run. `[ \t]`
 /// rather than `\s`, so a match never starts on an earlier blank line.
-pub(crate) const S13_UNQUOTED: &str = r"(?im)^[ \t]*(?:export[ \t]+|-[ \t]+)?[A-Za-z0-9_.-]*(?:key|secret|token|password|passwd|pwd|credential)[A-Za-z0-9_]*[ \t]*[:=][ \t]*([A-Za-z0-9+/_=.-]{20,})[ \t\r]*$";
+pub(crate) const S13_UNQUOTED: &str = r"(?im)^[ \t]*(?:export[ \t]+|-[ \t]+)?[A-Za-z0-9_.-]*(?:key|secret|token|password|passwd|pwd|passphrase|credential)[A-Za-z0-9_]*[ \t]*[:=][ \t]*([A-Za-z0-9+/_=.-]{20,})[ \t\r]*$";
 // `[ \t]+` rather than `\s+`: a match never spans a newline, so line numbers stay valid.
 pub(crate) const S14_BEARER: &str = r"(?i)\bbearer[ \t]+([A-Za-z0-9_.=-]{20,})";
 pub(crate) const S15_CONNECTION_STRING: &str =

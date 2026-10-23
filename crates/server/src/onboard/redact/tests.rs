@@ -368,39 +368,65 @@ fn unredacted_count_at_seal_is_reported_so_a_missing_producer_is_visible() {
     );
 }
 
-/// Captures `tracing` output so a test can read what `seal` logged.
-#[derive(Clone, Default)]
-struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+// Log capture. The first version installed a scoped subscriber per call, which raced with every
+// other test thread: `tracing` caches whether a callsite is enabled in a process-global table, so
+// a callsite another test hit while this test's subscriber was not yet (or no longer) registered
+// could stay cached as "disabled", and the warning was silently dropped. Here ONE subscriber is
+// installed for the whole test binary, once, so the callsite interest never changes; each
+// `logged_while` records only the events emitted on its own thread, into a thread-local buffer.
 
-impl std::io::Write for LogBuf {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("log lock").extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+thread_local! {
+    /// The events being captured on this thread, or `None` when no `logged_while` is running.
+    static CAPTURED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Appends an event's fields (`message` first) to the current thread's capture buffer.
+struct CaptureLayer;
+
+struct FieldText<'a>(&'a mut String);
+
+impl tracing::field::Visit for FieldText<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write as _;
+        let _ = write!(self.0, "{}={value:?} ", field.name());
     }
 }
 
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
-    type Writer = LogBuf;
-    fn make_writer(&'a self) -> LogBuf {
-        self.clone()
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        CAPTURED.with(|captured| {
+            if let Some(buffer) = captured.borrow_mut().as_mut() {
+                event.record(&mut FieldText(buffer));
+                buffer.push('\n');
+            }
+        });
     }
 }
 
+fn install_capture_once() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let subscriber = tracing_subscriber::registry()
+            .with(CaptureLayer)
+            .with(tracing::level_filters::LevelFilter::WARN);
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other test in this binary installs a global tracing subscriber");
+    });
+}
+
+/// Run `f` and return its result with the WARN-and-above events it emitted on this thread.
 fn logged_while<T>(f: impl FnOnce() -> T) -> (T, String) {
-    let buf = LogBuf::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(buf.clone())
-        .with_ansi(false)
-        .finish();
-    // The callsite interest cache is process-global: a callsite another test already hit with
-    // no subscriber can stay cached as "never", so rebuild it before and after this scope.
-    tracing::callsite::rebuild_interest_cache();
-    let out = tracing::subscriber::with_default(subscriber, f);
-    tracing::callsite::rebuild_interest_cache();
-    let text = String::from_utf8(buf.0.lock().expect("log lock").clone()).expect("utf8 log");
+    install_capture_once();
+    CAPTURED.with(|captured| *captured.borrow_mut() = Some(String::new()));
+    let out = f();
+    let text = CAPTURED
+        .with(|captured| captured.borrow_mut().take())
+        .unwrap_or_default();
     (out, text)
 }
 

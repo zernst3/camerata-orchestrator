@@ -50,7 +50,14 @@ fn push(
     value: Range<usize>,
     jwt_role: Option<String>,
 ) {
-    let twin = classify(shape, &text[value.clone()], jwt_role.as_deref());
+    // The text of the match before the value: for a context shape it holds the identifier.
+    let before_value = &text[span.start..value.start];
+    let twin = classify(
+        shape,
+        &text[value.clone()],
+        before_value,
+        jwt_role.as_deref(),
+    );
     out.push(SecretMatch {
         start: span.start,
         end: span.end,

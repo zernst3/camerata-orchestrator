@@ -226,9 +226,35 @@ fn is_context_shaped(shape: SecretShape) -> bool {
     !shape.is_vendor_shaped()
 }
 
-/// Classify a candidate. `role` is the decoded JWT role for the JWT shapes. Order (spec 3.2):
+/// Identifier words whose value is a secret even when it reads like a name: a diceware-style
+/// passphrase (`correct-horse-battery-staple`) is words joined by `-` or `.`.
+const SECRET_IDENTIFIER_WORDS: &[&str] = &[
+    "password",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "secret",
+    "credential",
+];
+
+/// Whether `before_value` (the identifier and what sits between it and the value) names a
+/// password-like thing.
+fn names_a_secret(before_value: &str) -> bool {
+    let lower = before_value.to_ascii_lowercase();
+    SECRET_IDENTIFIER_WORDS
+        .iter()
+        .any(|word| lower.contains(word))
+}
+
+/// Classify a candidate. `before_value` is the matched text before the value (the identifier, for
+/// a context shape). `role` is the decoded JWT role for the JWT shapes. Order (spec 3.2):
 /// redaction marker, T3 digest, T4 role, T2, T1, T5, then the path-like extension.
-pub(crate) fn classify(shape: SecretShape, value: &str, role: Option<&str>) -> Option<Twin> {
+pub(crate) fn classify(
+    shape: SecretShape,
+    value: &str,
+    before_value: &str,
+    role: Option<&str>,
+) -> Option<Twin> {
     if value.contains(ELLIPSIS) {
         return Some(Twin::RedactionMarker);
     }
@@ -264,7 +290,12 @@ pub(crate) fn classify(shape: SecretShape, value: &str, role: Option<&str>) -> O
     if shape == SecretShape::NamedSecretLiteral && is_path_like(value) {
         return Some(Twin::PathLike);
     }
-    if shape == SecretShape::NamedSecretLiteral && is_readable_name(value) {
+    // A readable name is code (`STORAGE_KEY`, `queryKey`); on a password-like identifier the same
+    // shape is a passphrase.
+    if shape == SecretShape::NamedSecretLiteral
+        && !names_a_secret(before_value)
+        && is_readable_name(value)
+    {
         return Some(Twin::ReadableName);
     }
     if shape == SecretShape::BasicAuthCredential && value.bytes().all(|b| b.is_ascii_lowercase()) {
