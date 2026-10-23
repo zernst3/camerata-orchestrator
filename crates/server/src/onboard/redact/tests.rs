@@ -439,3 +439,154 @@ fn flag_off_logs_a_warning_that_raw_code_is_leaving() {
     let (_, quiet) = logged_while(|| files_for_model_with(&files, true));
     assert!(quiet.is_empty(), "{quiet}");
 }
+
+// ---- leak hunt: zero-width, the ledger, the deep report ---------------------------------------
+
+/// `value` with a zero-width space inserted inside its prefix, so the raw string no longer
+/// matches any shape while a reader still sees the key.
+fn with_zero_width_inside(value: &str) -> String {
+    format!("{}\u{200B}{}", &value[..2], &value[2..])
+}
+
+#[test]
+fn redact_finding_strips_zero_width_so_an_inserted_one_cannot_hide_a_key() {
+    let p = planted(SecretShape::StripeLiveSecretKey);
+    let hidden = with_zero_width_inside(&p.value);
+    assert!(
+        detect_secrets(&hidden).is_empty(),
+        "precondition: the zero-width char hides the key from the detector"
+    );
+    let mut f = Finding {
+        snippet: format!("KEY={hidden}"),
+        detail: format!("The line `KEY={hidden}` holds a credential."),
+        fix_specific: Some(format!("Move {hidden} to an env var.")),
+        ..Finding::default()
+    };
+    let count = redact_finding(&mut f);
+    assert!(count >= 3, "all three fields redacted, got {count}");
+    let json = serde_json::to_string(&f).expect("serializes");
+    assert!(!leaked(&json, &p), "{json}");
+    assert!(
+        !json.contains('\u{200B}'),
+        "the invisible character is gone"
+    );
+    assert!(f.snippet.contains("sk_live_…"), "{}", f.snippet);
+}
+
+#[test]
+fn files_for_model_strips_zero_width_so_an_inserted_one_cannot_hide_a_key() {
+    let p = planted(SecretShape::GitHubToken);
+    let files = vec![(
+        "a.env".to_string(),
+        format!("GITHUB_TOKEN={}\n", with_zero_width_inside(&p.value)),
+    )];
+    let model = files_for_model_with(&files, true);
+    assert!(!leaked(&model[0].1, &p), "{}", model[0].1);
+    assert!(!model[0].1.contains('\u{200B}'));
+    assert_eq!(model[0].1.matches('\n').count(), 1, "line count unchanged");
+}
+
+#[test]
+fn snippet_from_line_strips_zero_width() {
+    let p = planted(SecretShape::GitHubToken);
+    let line = format!("token = {}", with_zero_width_inside(&p.value));
+    let snippet = snippet_from_line(&line, 160);
+    assert!(!leaked(&snippet, &p), "{snippet}");
+}
+
+#[test]
+fn redact_report_text_redacts_the_scan_ledger_notes_before_they_are_persisted() {
+    let p = planted(SecretShape::StripeLiveSecretKey);
+    let entry = serde_json::json!({
+        "rule_id": "ARCH-X-1",
+        "tier": "semantic",
+        "ran": false,
+        "skip_reason": format!("tool said: {}", p.text),
+        "files_evaluated": 0,
+        "findings_emitted": 0,
+        "coverage_note": format!("coverage: {}", p.text),
+    });
+    let mut report = ScanReport::gated(&["acme/app".to_string()]);
+    report.ledger = serde_json::from_value(serde_json::json!({
+        "rules": {"ARCH-X-1": entry},
+        "stages": [],
+    }))
+    .expect("a ledger deserializes");
+    let count = redact_report_text(&mut report);
+    assert_eq!(count, 2, "the skip reason and the coverage note");
+    let persisted = serde_json::to_string(&report.ledger).expect("serializes");
+    assert!(!leaked(&persisted, &p), "{persisted}");
+    let note = report
+        .ledger
+        .rule("ARCH-X-1")
+        .and_then(|e| e.coverage_note.clone())
+        .unwrap_or_default();
+    assert!(note.contains("sk_live_…"), "{note}");
+    assert_eq!(redact_report_text(&mut report), 0, "idempotent");
+}
+
+fn deep_report_carrying(p: &Planted) -> crate::ai_audit::DeepReport {
+    use crate::ai_audit::{DeepLensResult, DeepReport, Soc2Gap, Threat};
+    let text = p.text.clone();
+    let lens = |id: &str| DeepLensResult {
+        lens: id.to_string(),
+        title: id.to_string(),
+        advisory: true,
+        disclaimer: "advisory".to_string(),
+        soc2_gaps: vec![Soc2Gap {
+            control: "CC6.1".to_string(),
+            title: format!("Access control {text}"),
+            status: "gap".to_string(),
+            observed: format!("found {text}"),
+            gap: format!("remove {text}"),
+        }],
+        security_findings: Vec::new(),
+        threats: vec![Threat {
+            component: format!("handler {text}"),
+            kind: "entry-point".to_string(),
+            threat: format!("leak of {text}"),
+            category: "info-disclosure".to_string(),
+            mitigation: format!("rotate {text}"),
+            severity: "high".to_string(),
+        }],
+        summary: format!("The repo commits {text}."),
+        error: Some(format!("lens failed near {text}")),
+    };
+    DeepReport {
+        lenses: vec![
+            lens("soc2-gap"),
+            lens("deep-security"),
+            lens("threat-model"),
+        ],
+        advisory: true,
+        disclaimer: format!("advisory {text}"),
+    }
+}
+
+#[test]
+fn the_deep_report_export_redacts_the_lens_prose_it_reads_from_the_job_store() {
+    for shape in WIRE_SHAPES {
+        let p = planted(*shape);
+        let markdown = crate::deep_report_markdown(deep_report_carrying(&p), true);
+        assert!(markdown.contains("Deep Compliance"), "it still renders");
+        assert!(!leaked(&markdown, &p), "{shape:?} leaked in the export");
+        assert!(
+            detect_secrets(&markdown).is_empty(),
+            "{shape:?} still matches a shape"
+        );
+    }
+}
+
+#[test]
+fn redact_deep_report_covers_every_model_written_string_and_is_idempotent() {
+    let p = planted(SecretShape::SupabaseSecretKey);
+    let mut deep = deep_report_carrying(&p);
+    let count = redact_deep_report(&mut deep);
+    assert!(count > 0);
+    let json = serde_json::to_string(&serde_json::json!({
+        "lenses": deep.lenses.iter().map(|l| (&l.summary, &l.error, &l.soc2_gaps, &l.threats)).collect::<Vec<_>>(),
+    }))
+    .expect("serializes");
+    assert!(!leaked(&json, &p), "{json}");
+    assert_eq!(redact_deep_report(&mut deep), 0, "idempotent");
+}

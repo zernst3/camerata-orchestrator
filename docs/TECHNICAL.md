@@ -2871,7 +2871,9 @@ producer missed and warns when it had to; `report_export::sanitize_finding_text`
 through). Fingerprints and finding keys therefore hash the redacted snippet, and
 `scan_cache::MANIFEST_VERSION` is 2 so every raw cache is purged on first load.
 
-**Model prompts.** `files_for_model` (flag `model_prompt_redaction`, default ON, operator-only)
+**Model prompts.** `files_for_model` (flag `model_prompt_redaction`, default ON, operator-only,
+read from the environment variable `CAMERATA_FEATURE_MODEL_PROMPT_REDACTION` only, never from
+`.camerata/features.toml` or a `.env` in a client repo; the CLI warns on stderr when it is off)
 redacts the file set every model tier reads, with line numbers preserved. `audit_repo`,
 `generate_fix_specifics` and `run_deep_tier` apply it at entry; the clone judge input redacts
 itself inside `camerata-checks`; the governed-dev repo digest and the L3 diff are redacted. Every

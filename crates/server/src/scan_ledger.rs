@@ -821,6 +821,21 @@ impl ScanLedger {
         self.rules.values()
     }
 
+    /// Run `redact` over the free text of every rule entry (`skip_reason`, `coverage_note`) so no
+    /// secret value is persisted in the ledger; `redact` returns how many values it replaced.
+    pub(crate) fn redact_text(&mut self, redact: &mut dyn FnMut(&mut String) -> usize) -> usize {
+        let mut count = 0;
+        for entry in self.rules.values_mut() {
+            if let Some(reason) = entry.skip_reason.as_mut() {
+                count += redact(reason);
+            }
+            if let Some(note) = entry.coverage_note.as_mut() {
+                count += redact(note);
+            }
+        }
+        count
+    }
+
     /// Forcibly OVERWRITE a rule's `ran`/`skip_reason`/`findings_emitted` facts — unlike
     /// [`record_rule`](Self::record_rule) (which OR-accumulates `ran` across repos within a
     /// scan, appropriate for a multi-repo run), this REPLACES whatever was recorded.

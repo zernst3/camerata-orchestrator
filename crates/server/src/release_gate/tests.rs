@@ -956,3 +956,147 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
         Some("secrets, dataset set, dataset parity, row parity, manifest, provenance")
     );
 }
+
+// ---- the secrets check runs BEFORE the PDF compile --------------------------------------------
+
+/// A `typst` on PATH that records that it ran and fails, so a test can prove the compiler was
+/// (or was not) reached. Returns the directory to put on PATH and the marker file it touches.
+#[cfg(unix)]
+fn recording_typst() -> (tempfile::TempDir, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("typst-was-run");
+    let script = dir.path().join("typst");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+    )
+    .expect("write the fake typst");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    (dir, marker)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_secret_in_the_pdf_data_blocks_the_package_before_typst_is_ever_run() {
+    let (fake_bin, marker) = recording_typst();
+    let _path = camerata_test_env::EnvGuard::set("PATH", fake_bin.path());
+    let p = planted(SecretShape::StripeLiveSecretKey);
+    // The report options are free text the operator or the export dialog supplies; they reach
+    // `data.json` without passing through the finding redactor.
+    let options = ReportOptions {
+        prepared_by: format!("Prepared with {}", p.value),
+        ..ReportOptions::default()
+    };
+    let error =
+        build_product_package_with_stem(&sealed_report(), &HashMap::new(), None, &options, STEM)
+            .await
+            .err()
+            .expect("the package must be refused");
+    let failure = gate_failure_of(&error).expect("the refusal is the gate's, not a compile error");
+    assert!(
+        !failure.to_string().contains(&p.value),
+        "the block never carries the value"
+    );
+    assert!(
+        failure.to_string().contains("sk_live_\u{2026}"),
+        "{failure}"
+    );
+    assert!(
+        !marker.exists(),
+        "typst ran: the raw data.json reached a compile tempdir"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_clean_package_still_reaches_the_compiler() {
+    let (fake_bin, marker) = recording_typst();
+    let _path = camerata_test_env::EnvGuard::set("PATH", fake_bin.path());
+    let error = build_product_package_with_stem(
+        &sealed_report(),
+        &HashMap::new(),
+        None,
+        &ReportOptions::default(),
+        STEM,
+    )
+    .await
+    .err()
+    .expect("the fake typst fails the compile");
+    assert!(gate_failure_of(&error).is_none(), "{error}");
+    assert!(marker.exists(), "a clean package is compiled");
+}
+
+// ---- regression guard: the seed text a client reads must never false-block the gate ------------
+
+/// The corpus fields that can reach a client (the set the W25 client-surface test walks): the
+/// rule title, every source title, and per option the directive, remediation, label, finding
+/// headline and detail, plus a `violates` option's `why` (interpolated into the defect detail).
+/// Each is `(location, text)`.
+fn client_facing_corpus_text(corpus: &camerata_rules::RuleSet) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for rule in corpus.iter() {
+        let id = &rule.id.0;
+        out.push((format!("{id} title"), rule.title.clone()));
+        for source in &rule.sources {
+            out.push((format!("{id} source title"), source.title.clone()));
+        }
+        for option in &rule.options {
+            let oid = &option.id;
+            out.push((format!("{id} {oid}.directive"), option.directive.clone()));
+            out.push((format!("{id} {oid}.label"), option.label.clone()));
+            for (field, text) in [
+                ("remediation", option.remediation.as_ref()),
+                ("finding_headline", option.finding_headline.as_ref()),
+                ("finding_detail", option.finding_detail.as_ref()),
+            ] {
+                if let Some(text) = text {
+                    out.push((format!("{id} {oid}.{field}"), text.clone()));
+                }
+            }
+            if option.violates {
+                out.push((format!("{id} {oid}.why"), option.why.clone()));
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn the_gate_raises_no_problem_on_the_seed_text_every_package_ships() {
+    let (corpus, errors) =
+        camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+    assert!(
+        errors.is_empty(),
+        "the corpus must load cleanly: {errors:?}"
+    );
+    let seed = client_facing_corpus_text(&corpus);
+    assert!(
+        seed.len() > 500,
+        "the walk must actually see the corpus ({})",
+        seed.len()
+    );
+
+    let mut problems = Vec::new();
+    for (location, text) in &seed {
+        problems.extend(secrets::text_problems(location, text));
+    }
+    // The Typst template ships in every PDF's pipeline and is read into every package.
+    problems.extend(secrets::text_problems(
+        "templates/audit_report.typ",
+        include_str!("../../templates/audit_report.typ"),
+    ));
+    // Report only where and which shape (the evidence is already the redacted form).
+    let shown: Vec<String> = problems
+        .iter()
+        .map(|p| format!("{} [{}] {} {:?}", p.file, p.location, p.message, p.evidence))
+        .collect();
+    assert!(
+        problems.is_empty(),
+        "seed text false-blocks the release gate ({}):\n  {}",
+        problems.len(),
+        shown.join("\n  ")
+    );
+}

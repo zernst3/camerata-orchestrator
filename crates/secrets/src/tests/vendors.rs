@@ -270,7 +270,7 @@ fn pgpass_line_password_is_a_secret_and_other_colon_lines_are_not() {
     let value = body(20, ALNUM, 25);
     for text in [
         format!("localhost:5432:*:postgres:{value}"),
-        format!("*:*:appdb:appuser:{value}\n"),
+        ["*:*:appdb:appuser:", value.as_str(), "\n"].concat(),
         format!("  10.0.0.5:6432:analytics:etl:{value}"),
     ] {
         assert!(

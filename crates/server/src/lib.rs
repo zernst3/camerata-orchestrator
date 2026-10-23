@@ -16177,13 +16177,20 @@ async fn export_deep_report(State(state): State<AppState>, Path(id): Path<String
             .into_response();
     };
 
-    let markdown = render_deep_report_markdown(&deep, state.feature_flags.soc2);
+    let markdown = deep_report_markdown(deep, state.feature_flags.soc2);
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
         markdown,
     )
         .into_response()
+}
+
+/// The deep report as the Markdown a client receives: the lens prose is model-written text read
+/// back from the job store, so it is redacted here, at the export, whatever path stored it.
+fn deep_report_markdown(mut deep: crate::ai_audit::DeepReport, soc2_enabled: bool) -> String {
+    crate::onboard::redact::redact_deep_report(&mut deep);
+    render_deep_report_markdown(&deep, soc2_enabled)
 }
 
 /// Render a [`crate::ai_audit::DeepReport`] as Markdown, including only the
@@ -16452,6 +16459,11 @@ async fn export_product(
     {
         Ok(package) => package,
         Err(e) => {
+            // The assembly checks the PDF's data before it compiles it; a refusal there is the
+            // same blocked response as one from `release`.
+            if let Some(failure) = crate::release_gate::gate_failure_of(&e) {
+                return release_blocked_response(failure);
+            }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "ok": false, "message": e.to_string() })),

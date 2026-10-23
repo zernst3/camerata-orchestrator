@@ -474,7 +474,16 @@ async fn release_product_export(
         &options,
     )
     .await
-    .map_err(|e| InspectError::Failed(e.to_string()))?;
+    .map_err(
+        |e| match e.downcast::<camerata_server::release_gate::ReleaseError>() {
+            // The assembly checks the PDF's data before it compiles it.
+            Ok(camerata_server::release_gate::ReleaseError::Blocked(failure)) => {
+                InspectError::ReleaseBlocked(failure)
+            }
+            Ok(other) => InspectError::Failed(other.to_string()),
+            Err(e) => InspectError::Failed(e.to_string()),
+        },
+    )?;
     camerata_server::release_gate::release(package).map_err(|e| match e {
         camerata_server::release_gate::ReleaseError::Blocked(failure) => {
             InspectError::ReleaseBlocked(failure)

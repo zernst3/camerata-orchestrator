@@ -231,8 +231,15 @@ fn parse_backend(s: &str) -> Result<ProjectBackend, String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Record the operator's redaction switch BEFORE the .env loader runs: the .env is resolved
+    // against the working directory, which may be a client repository, and must not be able to
+    // send that repo's code to a model unredacted.
+    camerata_server::feature_flags::pin_operator_redaction_setting();
     // Auto-load the gitignored .env (so the live commands pick up the token).
     let _ = dotenvy::dotenv();
+    if let Some(warning) = camerata_server::feature_flags::redaction_disabled_warning() {
+        eprintln!("{warning}");
+    }
     let cli = Cli::parse();
     let bff_url = cli.bff_url;
 

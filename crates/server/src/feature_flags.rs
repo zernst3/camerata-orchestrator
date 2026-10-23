@@ -25,8 +25,11 @@
 //!
 //! - `model_prompt_redaction` (`CAMERATA_FEATURE_MODEL_PROMPT_REDACTION`) — Redact secret
 //!   values from code before any model sees it (`onboard::redact::files_for_model`). ON by
-//!   default; operator-only, no UI. Turning it OFF sends raw client code to the model and logs
-//!   a warning on every call. See docs/design/2026-10-23_secret-redaction-and-release-gate.md.
+//!   default; operator-only, no UI. **Environment variable ONLY**: no config file can turn it
+//!   off, because the file would sit in (or be resolved against) a client repository, and a
+//!   client repo must never decide that its own code reaches a model unredacted. Turning it OFF
+//!   prints a warning on the CLI's stderr and logs one on every call. See
+//!   docs/design/2026-10-23_secret-redaction-and-release-gate.md.
 //!
 //! # Adding a new flag
 //!
@@ -35,12 +38,49 @@
 //! 2. Add the env-override arm in [`FeatureFlags::apply_env_overrides`].
 //! 3. Document it in this module comment.
 
+use std::sync::OnceLock;
+
 use serde::{Deserialize, Serialize};
 
 /// serde default helper — returns `true`, which is the absence-default for
 /// every flag in this struct.
 fn default_true() -> bool {
     true
+}
+
+/// The one switch for `model_prompt_redaction`: set to `false` to send raw code to the model.
+pub const MODEL_PROMPT_REDACTION_ENV: &str = "CAMERATA_FEATURE_MODEL_PROMPT_REDACTION";
+
+/// The operator's value of [`MODEL_PROMPT_REDACTION_ENV`] as it was before any `.env` loader ran.
+static OPERATOR_VALUE: OnceLock<Option<String>> = OnceLock::new();
+
+/// Record the operator's real environment value for the redaction switch. A binary calls this
+/// FIRST in `main`, before it loads a `.env` file: a `.env` is resolved against the working
+/// directory, which may be a client repository, and must not be able to switch redaction off.
+/// Idempotent; without a call the live environment is read.
+pub fn pin_operator_redaction_setting() {
+    OPERATOR_VALUE.get_or_init(|| std::env::var(MODEL_PROMPT_REDACTION_ENV).ok());
+}
+
+/// Whether code is redacted before any model sees it. Reads the environment ONLY (never a file in
+/// the working directory or a client repository); ON unless the variable is explicitly `false`.
+pub fn model_prompt_redaction_enabled() -> bool {
+    let value = match OPERATOR_VALUE.get() {
+        Some(pinned) => pinned.clone(),
+        None => std::env::var(MODEL_PROMPT_REDACTION_ENV).ok(),
+    };
+    !value.is_some_and(|v| is_false(&v))
+}
+
+/// The operator-facing warning when redaction is switched OFF, or `None` when it is on. The CLI
+/// prints it on stderr at startup.
+pub fn redaction_disabled_warning() -> Option<String> {
+    (!model_prompt_redaction_enabled()).then(|| {
+        format!(
+            "WARNING: model-prompt redaction is OFF ({MODEL_PROMPT_REDACTION_ENV}=false). \
+             Raw client code, secret values included, will be sent to the model."
+        )
+    })
 }
 
 /// All runtime feature flags. Every field defaults to `true`; a flag is OFF
@@ -65,7 +105,8 @@ pub struct FeatureFlags {
     /// of the key, line numbers unchanged. ON by default (owner decision, 2026-10-22: "redact
     /// BEFORE any code is sent to a model"). Operator-only: no UI affordance. When `false`,
     /// `onboard::redact::files_for_model` sends raw code and logs a warning once per call.
-    #[serde(default = "default_true")]
+    /// Set from the ENVIRONMENT only (`skip_deserializing`: a config file cannot touch it).
+    #[serde(default = "default_true", skip_deserializing)]
     pub model_prompt_redaction: bool,
 }
 
@@ -91,19 +132,22 @@ impl FeatureFlags {
     /// config file falls back to defaults rather than erroring, so the server
     /// always starts.
     pub fn load() -> Self {
-        let mut flags = Self::load_from_config_file();
+        let mut flags = Self::load_from(std::path::Path::new(".camerata/features.toml"));
         flags.apply_env_overrides();
         flags
     }
 
-    /// Load from `.camerata/features.toml` (relative to CWD). Falls back to
-    /// [`Default`] on any error (file not found, parse error, etc.).
-    fn load_from_config_file() -> Self {
-        let path = std::path::Path::new(".camerata/features.toml");
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return Self::default();
-        };
-        toml::from_str::<Self>(&text).unwrap_or_default()
+    /// Load from the config file at `path`. Falls back to [`Default`] on any error (file not
+    /// found, parse error, etc.).
+    fn load_from(path: &std::path::Path) -> Self {
+        std::fs::read_to_string(path)
+            .map(|text| Self::from_config_text(&text))
+            .unwrap_or_default()
+    }
+
+    /// Parse config-file text. `model_prompt_redaction` is never read from it (environment only).
+    fn from_config_text(text: &str) -> Self {
+        toml::from_str::<Self>(text).unwrap_or_default()
     }
 
     /// Apply `CAMERATA_FEATURE_<UPPER_NAME>=false` env overrides on top of the
@@ -113,9 +157,7 @@ impl FeatureFlags {
         if env_is_false("CAMERATA_FEATURE_SOC2") {
             self.soc2 = false;
         }
-        if env_is_false("CAMERATA_FEATURE_MODEL_PROMPT_REDACTION") {
-            self.model_prompt_redaction = false;
-        }
+        self.model_prompt_redaction = model_prompt_redaction_enabled();
     }
 }
 
@@ -123,10 +165,11 @@ impl FeatureFlags {
 /// insensitive). An absent, empty, or non-`"false"` value returns `false` (the
 /// feature stays at its configured value).
 fn env_is_false(var: &str) -> bool {
-    std::env::var(var)
-        .ok()
-        .map(|v| v.trim().eq_ignore_ascii_case("false"))
-        .unwrap_or(false)
+    std::env::var(var).is_ok_and(|v| is_false(&v))
+}
+
+fn is_false(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("false")
 }
 
 #[cfg(test)]
@@ -144,10 +187,35 @@ mod tests {
     }
 
     #[test]
-    fn model_prompt_redaction_can_be_switched_off_in_config() {
-        let flags: FeatureFlags = toml::from_str("model_prompt_redaction = false").expect("parses");
-        assert!(!flags.model_prompt_redaction);
-        assert!(flags.soc2, "other flags are unaffected");
+    fn model_prompt_redaction_cannot_be_switched_off_by_a_config_file() {
+        // A client repo can carry `.camerata/features.toml`; it must never be able to send that
+        // client's own code to a model unredacted.
+        let flags = FeatureFlags::from_config_text("model_prompt_redaction = false\nsoc2 = false");
+        assert!(flags.model_prompt_redaction, "the file has no say");
+        assert!(!flags.soc2, "other flags still come from the file");
+    }
+
+    #[test]
+    fn a_features_toml_in_a_client_repo_has_no_effect_on_model_prompt_redaction() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(repo.path().join(".camerata")).expect("mkdir");
+        let file = repo.path().join(".camerata/features.toml");
+        std::fs::write(&file, "model_prompt_redaction = false\n").expect("write");
+        assert!(FeatureFlags::load_from(&file).model_prompt_redaction);
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn model_prompt_redaction_is_on_unless_the_environment_says_false() {
+        let _unset = camerata_test_env::EnvGuard::remove(MODEL_PROMPT_REDACTION_ENV);
+        assert!(model_prompt_redaction_enabled());
+        assert_eq!(redaction_disabled_warning(), None);
+        drop(_unset);
+        let _off = camerata_test_env::EnvGuard::set(MODEL_PROMPT_REDACTION_ENV, "false");
+        assert!(!model_prompt_redaction_enabled());
+        let warning = redaction_disabled_warning().expect("a warning when it is off");
+        assert!(warning.contains("redaction is OFF"), "{warning}");
+        assert!(warning.contains(MODEL_PROMPT_REDACTION_ENV), "{warning}");
     }
 
     #[test]
@@ -187,9 +255,9 @@ mod tests {
         assert!(!env_is_false_str("0"));
     }
 
-    /// Mirror of `env_is_false` without the env-var lookup, so tests don't
-    /// need to touch the real environment.
+    /// `env_is_false` without the env-var lookup, so tests don't need to touch the real
+    /// environment.
     fn env_is_false_str(val: &str) -> bool {
-        val.trim().eq_ignore_ascii_case("false")
+        is_false(val)
     }
 }

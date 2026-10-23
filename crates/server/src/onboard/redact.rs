@@ -12,11 +12,30 @@
 //! [`files_for_model`] is the model-side half: the code a model reads is redacted too, with every
 //! line number preserved, so a `path:line` the model cites still resolves.
 
+use std::borrow::Cow;
+
 use super::{Finding, ScanReport};
+use crate::report_export::strip_zero_width;
 use camerata_api_types::audit::FindingKind;
 
-/// Redact `text` in place. Returns the number of values replaced.
+/// `text` with zero-width characters stripped, then with every secret value replaced by its
+/// redacted form. Stripping FIRST means a zero-width character inserted inside a key cannot hide
+/// it from the detector while a reader still sees the key. Borrows when nothing changed.
+pub(crate) fn redact_visible(text: &str) -> Cow<'_, str> {
+    let clean = strip_zero_width(text);
+    let redacted = match camerata_secrets::redact_str(&clean) {
+        Cow::Owned(redacted) => Some(redacted),
+        Cow::Borrowed(_) => None,
+    };
+    redacted.map_or(clean, Cow::Owned)
+}
+
+/// Redact `text` in place. Returns the number of values replaced. Zero-width characters are
+/// stripped first (see [`redact_visible`]).
 pub(crate) fn redact_string(text: &mut String) -> usize {
+    if let Cow::Owned(clean) = strip_zero_width(text) {
+        *text = clean;
+    }
     let redacted = camerata_secrets::redact(text);
     let count = redacted.redactions.len();
     if count > 0 {
@@ -67,10 +86,35 @@ pub(crate) fn redact_findings(findings: &mut [Finding]) -> usize {
 /// before the cap means a cap can never cut a secret in half and leave a prefix plus a partial
 /// body that neither the redactor nor the release gate could recognise.
 pub(crate) fn snippet_from_line(line: &str, max: usize) -> String {
-    camerata_secrets::redact_str(line.trim())
-        .chars()
-        .take(max)
-        .collect()
+    redact_visible(line.trim()).chars().take(max).collect()
+}
+
+/// Redact every model-written string of a deep-tier report: the lens prose and error, the SOC-2
+/// gap rows, the threat rows and the deep-security findings. Used on the way into a stored
+/// [`ScanReport`] and again by the deep-report export, which reads the report back from the job
+/// store. Returns the number of values replaced. Idempotent.
+pub(crate) fn redact_deep_report(deep: &mut crate::ai_audit::DeepReport) -> usize {
+    let mut count = redact_string(&mut deep.disclaimer);
+    for lens in &mut deep.lenses {
+        count += redact_string(&mut lens.summary);
+        count += redact_option(&mut lens.error);
+        count += redact_findings(&mut lens.security_findings);
+        for gap in &mut lens.soc2_gaps {
+            count += redact_string(&mut gap.control);
+            count += redact_string(&mut gap.title);
+            count += redact_string(&mut gap.status);
+            count += redact_string(&mut gap.observed);
+            count += redact_string(&mut gap.gap);
+        }
+        for threat in &mut lens.threats {
+            count += redact_string(&mut threat.component);
+            count += redact_string(&mut threat.kind);
+            count += redact_string(&mut threat.threat);
+            count += redact_string(&mut threat.category);
+            count += redact_string(&mut threat.mitigation);
+        }
+    }
+    count
 }
 
 /// Redact ScanReport-level text that bypasses `Finding`: the per-rule recommendations
@@ -106,21 +150,9 @@ pub(crate) fn redact_report_text(report: &mut ScanReport) -> usize {
         }
     }
     if let Some(deep) = &mut report.deep {
-        for lens in &mut deep.lenses {
-            count += redact_string(&mut lens.summary);
-            count += redact_option(&mut lens.error);
-            count += redact_findings(&mut lens.security_findings);
-            for gap in &mut lens.soc2_gaps {
-                count += redact_string(&mut gap.observed);
-                count += redact_string(&mut gap.gap);
-            }
-            for threat in &mut lens.threats {
-                count += redact_string(&mut threat.component);
-                count += redact_string(&mut threat.threat);
-                count += redact_string(&mut threat.mitigation);
-            }
-        }
+        count += redact_deep_report(deep);
     }
+    count += report.ledger.redact_text(&mut redact_string);
     count
 }
 
@@ -133,12 +165,13 @@ a credential value; refer to it by its variable name and line.";
 /// The file set the MODEL tiers read. Same paths, same line count, every secret value replaced by
 /// its redacted form (`sb_secret_…WvXy (51 chars)`). The deterministic floor and the
 /// architectural checkers keep reading the RAW set (they must still FIND the secret); only what
-/// leaves the machine is redacted. Honors the `model_prompt_redaction` feature flag (default ON).
+/// leaves the machine is redacted. Honors the `model_prompt_redaction` flag (default ON), which is
+/// read from the environment only, never from a config file in a client repo.
 #[allow(dead_code)] // wired into the model entry points in the next commit
 pub(crate) fn files_for_model(files: &[(String, String)]) -> Vec<(String, String)> {
     files_for_model_with(
         files,
-        crate::feature_flags::FeatureFlags::load().model_prompt_redaction,
+        crate::feature_flags::model_prompt_redaction_enabled(),
     )
 }
 
@@ -160,12 +193,7 @@ pub(crate) fn files_for_model_with(
     }
     files
         .iter()
-        .map(|(path, content)| {
-            (
-                path.clone(),
-                camerata_secrets::redact_str(content).into_owned(),
-            )
-        })
+        .map(|(path, content)| (path.clone(), redact_visible(content).into_owned()))
         .collect()
 }
 

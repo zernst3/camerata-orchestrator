@@ -88,6 +88,9 @@ pub async fn build_product_package_with_stem(
     let report_json =
         crate::report_export::build_report_json(report, dispositions, corpus, options);
     let data_json = crate::report_export::render_data_json(&report_json)?;
+    // The secrets check over the PDF's data runs BEFORE the compile: Typst gets a temp dir, and
+    // a value that would be refused must never be written to disk, let alone compiled.
+    check_pdf_data(stem, &data_json).map_err(ReleaseError::Blocked)?;
     let pdf = crate::report_export::compile_pdf_from_data(&data_json).await?;
     assemble_package(
         report,
@@ -186,6 +189,16 @@ impl std::fmt::Display for ReleaseError {
 }
 
 impl std::error::Error for ReleaseError {}
+
+/// The gate's refusal, when `error` (from [`build_product_package`]) is one. The assembly runs the
+/// secrets check over the PDF's data before the PDF is compiled, so a refusal can surface there
+/// as well as from [`release`]; callers map it to the same blocked response.
+pub fn gate_failure_of(error: &anyhow::Error) -> Option<&GateFailure> {
+    match error.downcast_ref::<ReleaseError>() {
+        Some(ReleaseError::Blocked(failure)) => Some(failure),
+        _ => None,
+    }
+}
 
 /// Run every gate check over an EXISTING zip (the acceptance run and `camerata release-gate`):
 /// secrets over every text member, every workbook cell and string, and `pdf_text` when the

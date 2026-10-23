@@ -352,8 +352,10 @@ pub(crate) const S27_NPMRC_AUTH: &str =
     r#"(?i)\b_(?:authToken|auth|password)[ \t]*=[ \t]*["']?([A-Za-z0-9+/_=.-]{8,})"#;
 pub(crate) const S28_DOCKER_AUTH: &str =
     r#"(?i)\\?"(?:auth|identitytoken|registrytoken)\\?"[ \t]*:[ \t]*\\?"([A-Za-z0-9+/=]{12,})"#;
-pub(crate) const S29_PGPASS: &str =
-    r"(?m)^[ \t]*[A-Za-z0-9_.*-]+:(?:[0-9]{1,5}|\*):[^:\s]+:[^:\s]+:([^\s:]{4,})[ \t\r]*$";
+// `host:port:database:user:password`. Not anchored to a whole line (a finding's prose quotes the
+// line inline) but to a delimiter before the host and a delimiter after the password, so a
+// `/etc/passwd` line (more colon-separated fields after the fifth) does not match.
+pub(crate) const S29_PGPASS: &str = r#"(?m)(?:^|[\s"'`(\[,;=>])[A-Za-z0-9_.*-]+:(?:[0-9]{1,5}|\*):[^:\s]+:[^:\s]+:([^\s:"'`]{4,})(?:[\s"'`]|\z)"#;
 pub(crate) const S30_BASIC_AUTH: &str =
     r#"(?i)\bauthorization\\?["']?[ \t]*[:=,][ \t]*\\?["']?basic[ \t]+([A-Za-z0-9+/]{8,}={0,2})"#;
 
