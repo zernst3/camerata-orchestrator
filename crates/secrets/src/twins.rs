@@ -18,8 +18,9 @@ pub enum Twin {
     PublicKeyRole(String),
     /// T5: a template token (`${...}`, `{{...}}`, `<...>`, `[YOUR-PASSWORD]`, `%s`).
     TemplateToken,
-    /// Extension: a path-like quoted literal (`app/api/auth/token/refresh`) on a credential-named
-    /// identifier. Real base64 secrets are not all-lowercase with several slashes.
+    /// Extension: a path-like quoted literal (`app/api/auth/token/refresh`, `src/some/path.rs`) on
+    /// a credential-named identifier. Real base64 secrets are not all-lowercase with several
+    /// slashes.
     PathLike,
     /// T6: the value already carries the redaction ellipsis, so it is a redacted form.
     RedactionMarker,
@@ -215,9 +216,9 @@ fn is_readable_name(value: &str) -> bool {
 fn is_path_like(value: &str) -> bool {
     value.matches('/').count() >= 2
         && value.split('/').all(|segment| {
-            segment
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            segment.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | '.')
+            })
         })
 }
 

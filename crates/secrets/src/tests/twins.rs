@@ -221,6 +221,22 @@ fn twin_path_like_literal_on_a_credential_named_identifier_stays_readable() {
 }
 
 #[test]
+fn twin_path_like_literal_may_carry_an_extension_and_hyphens() {
+    // The literal class admits `.` and `-` (UUID-shaped tokens), so file paths with an
+    // extension or a hyphenated directory are in it; they are still paths.
+    for value in [
+        "src/some/very/long/path.rs",
+        "app/api/auth-token/refresh.route.ts",
+    ] {
+        let text = format!("let token_path = \"{value}\";");
+        assert_eq!(
+            assert_twin(&text, SecretShape::NamedSecretLiteral),
+            Twin::PathLike
+        );
+    }
+}
+
+#[test]
 fn twin_prose_secret_hyphen_prefixed_does_not_match() {
     // Seen in the portal export: "sb_secret_-prefixed" is prose, not a value.
     assert!(detect_all("a key with the sb_secret_-prefixed shape").is_empty());

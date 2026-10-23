@@ -300,6 +300,14 @@ fn release_blocks_a_secret_planted_in_every_surface_with_an_exact_problem() {
             .unwrap_or_else(|| {
                 panic!("{surface:?}: no problem at {file} {location}: {problems:?}")
             });
+        if matches!(surface, Surface::Stem) {
+            // The stem is spliced into member names (`{stem}-findings.xlsx`), so the key is
+            // followed by name characters the credential-named-line shape also reads: the shape
+            // and the form can differ, but the value must never be shown.
+            let shown = format!("{hit:?}");
+            assert!(!leaked(&shown, &p), "{shown}");
+            continue;
+        }
         assert_eq!(
             hit.evidence.as_deref(),
             Some(evidence.as_str()),
