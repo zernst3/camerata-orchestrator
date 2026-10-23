@@ -696,6 +696,7 @@ dependencies = [
  "chrono",
  "clap",
  "dotenvy",
+ "pdf-extract",
  "regex",
  "serde",
  "serde_json",

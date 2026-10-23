@@ -20,5 +20,7 @@ pub mod live_demo;
 pub mod maintenance_demo;
 pub mod po_demo;
 pub mod projects_live;
+/// `camerata release-gate <zip>`: the export release gate over an existing product zip.
+pub mod release_gate_cmd;
 pub mod worktracker_demo;
 pub mod worktracker_live;

@@ -14,6 +14,12 @@ path = "src/lib.rs"
 name = "camerata"
 path = "src/main.rs"
 
+# `pdf-text`: `camerata release-gate <zip>` also extracts the PDF's rendered text (pdf-extract,
+# the same crate camerata-server's tests use) and runs the secrets check over it. Off by default:
+# without it the PDF is checked through the data.json check that ran when the export was made.
+[features]
+pdf-text = ["dep:pdf-extract"]
+
 [dependencies]
 camerata-core = { path = "../core" }
 camerata-intake = { path = "../intake" }
@@ -26,13 +32,12 @@ camerata-worktracker = { path = "../worktracker" }
 camerata-maintenance = { path = "../maintenance" }
 camerata-deploy = { path = "../deploy" }
 camerata-server = { path = "../server" }
-# The shared secret detector: the `release-gate` subcommand audits an export zip with it.
-camerata-secrets = { path = "../secrets" }
 # Phase F (GAP-7): the HTTP-adapter subcommands (stories/run/uows/assign/start-run) go
 # through the same typed client the MCP adapter (Phase E) uses — never in-process calls
 # into camerata-server for these verbs.
 camerata-client = { path = "../client" }
 camerata-api-types = { path = "../api-types" }
+pdf-extract = { version = "0.12", optional = true }
 anyhow.workspace = true
 tokio = { workspace = true }
 async-trait = { workspace = true }
@@ -47,6 +52,8 @@ clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# Synthetic secret-shaped fixtures (built at runtime) for the redaction and release-gate tests.
+camerata-secrets = { path = "../secrets" }
 # `tests/inspect_e2e.rs` mutates process env (the dep-audit / semgrep opt-outs): EnvGuard restores
 # on drop and `#[serial_test::serial(process_env)]` is the workspace-wide key (crates/test-env).
 serial_test = "3"
