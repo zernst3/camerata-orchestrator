@@ -56,6 +56,17 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-23 (Opus, Fable leak-hunt owner calls; asymmetric risk favours redaction): (a) T1
+  placeholder words in VENDOR bodies must be delimited (`_`/`-`/start/end/case change) or the body
+  single-case, so a random key containing "mock"/"fake"/"your" is still redacted; substring
+  matching stays for context shapes. (b) Supabase secret bodies may contain `-` (first char
+  alnum). (c) `model_prompt_redaction` comes from an environment variable only, never from any
+  file in a client repository; the CLI prints the warning on stderr. (d) Bodies of 20 chars or
+  fewer show length only, no tail. (e) Readability twins: lowercase snake_case values with 2+
+  underscores and at most 2 digits are not secrets; public keys (`sb_publishable_`, `pk_live_`,
+  `pk_test_`) after `Bearer` stay readable. (f) Common vendor shapes added now: SendGrid, Twilio,
+  Slack `xapp-`, Shopify, Mailgun, npm, Discord, Mapbox.
+
 - 2026-10-23 (Opus, secret-redaction spec questions; asymmetric risk: over-redaction costs only
   readability, under-redaction leaks): Q1 real Stripe TEST-mode keys (`sk_test_`/`rk_test_`) are
   redacted like live keys; only Stripe's published documentation key stays readable via the
