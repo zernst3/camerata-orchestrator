@@ -57,7 +57,8 @@ THE AGENT / GOVERNANCE SIDE
 
 THE UI + CLI
   ui, ui-core   the Dioxus "Enterprise Cockpit" desktop app + its framework-agnostic core
-  cli           `camerata` - headless inspect/export, demos, `corpus check/confirm/lock`, integrity-gate
+  cli           `camerata` - headless inspect/export, demos, `corpus check/confirm/lock`, integrity-gate,
+                release-gate (the export secret/consistency gate over any product zip)
 ```
 
 ## The inspection pipeline (end to end)
