@@ -43,6 +43,21 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-22 (Zach): **Secret redaction is the next work, before anything else** (work order
+  `_workspace/brownfield-audits/WORK_ORDER_SECRET_REDACTION.md`; blocks the first client; Zach's
+  go on the protected export/template area). Secrets are redacted BEFORE any code is sent to a
+  model, by default. Review additions adopted: redact once at finding construction (every
+  surface inherits), one shared secret detector for scan + redactor + release check, JWT role
+  claim separates service_role from anon, short secrets show length only, the release check reads
+  the Typst input data plus a PDF text smoke test, failure messages never print the secret,
+  fingerprints computed from redacted text (no clients yet), acceptance = flag the known leaks in
+  the existing faktura/hearth/portal exports, then regenerate clean.
+- 2026-10-22 (Zach, V1 scope): the secret release check is built as a pluggable **export release
+  gate** that runs on every real export, and reuses the existing export invariants (cross-format
+  parity, manifest hashes, provenance agreement, no missing datasets) as runtime checks. That is
+  enough QC for V1. An AI reviewer that reads each package after generation is V2:
+  `docs/design/2026-10-22_ai-package-qc-target-design.md`.
+
 - 2026-10-22 (Opus, Wave C review, all false-positive-safe narrowings): (1) the three clone
   rules (SINGLE-SOURCE-LOGIC, NAMING-ONE-CONCEPT, SHARED-PRIMITIVE) emit NO convention/"clean"
   row in V1; the detector cannot prove absence. (2) SINGLE-SOURCE escalates to HIGH only on
