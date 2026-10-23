@@ -279,9 +279,12 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
             continue;
         }
         for line_no in content_lines {
+            // Trim, REDACT, then cap: the floor reads the RAW line (it must find the secret),
+            // but the snippet it records is the client-visible text, so a secret value never
+            // lands in it (and a cap can never cut a secret in half).
             let snippet: String = lines
                 .get(line_no.saturating_sub(1))
-                .map(|l| l.trim().chars().take(160).collect())
+                .map(|l| super::redact::snippet_from_line(l, 160))
                 .unwrap_or_default();
             // Per-finding classification: in_test_path covers whole test-path files;
             // is_in_test_scope covers inline #[cfg(test)] blocks in production-path files.
@@ -335,6 +338,9 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
             });
         }
     }
+    // Construction-time redaction (docs/design/2026-10-23): every row this function built is
+    // complete here, so this is the one place the floor's rows stop being able to carry a value.
+    super::redact::redact_findings(&mut findings);
     findings
 }
 

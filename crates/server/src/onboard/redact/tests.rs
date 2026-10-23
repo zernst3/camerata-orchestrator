@@ -1,0 +1,437 @@
+//! Tests for construction-time redaction (docs/design/2026-10-23_secret-redaction-and-release-
+//! gate.md section 8.3 and 8.4). Every secret is built at runtime by
+//! `camerata_secrets::fixtures`; no secret-shaped literal appears here.
+
+use camerata_api_types::audit::{
+    ConventionObservedKind, DeviationKind, FindingKind, NoConventionKind, NotAssessedKind,
+    NotAssessedReason, ObservedOptionUsage,
+};
+use camerata_secrets::fixtures::{planted, planted_all, Planted};
+use camerata_secrets::{detect_secrets, SecretShape};
+
+use super::*;
+use crate::onboard::{Finding, MergedLocation, ScanReport};
+
+/// The shapes the sweep exports and the work order name.
+const WIRE_SHAPES: &[SecretShape] = &[
+    SecretShape::SupabaseSecretKey,
+    SecretShape::SupabaseServiceRoleJwt,
+    SecretShape::StripeLiveSecretKey,
+    SecretShape::StripeWebhookSecret,
+    SecretShape::PemPrivateKey,
+    SecretShape::NamedSecretLiteral,
+    SecretShape::ConnectionStringPassword,
+];
+
+/// Whether any line of the planted value appears in `haystack` (a multi-line PEM body leaks if
+/// any one of its lines does).
+fn leaked(haystack: &str, p: &Planted) -> bool {
+    p.value.lines().any(|line| haystack.contains(line))
+}
+
+fn kinds_carrying(text: &str) -> Vec<FindingKind> {
+    vec![
+        FindingKind::Defect,
+        FindingKind::Deviation(DeviationKind {
+            deviating_sites: 2,
+            assessed_sites: Some(9),
+            convention_option_id: None,
+            convention_label: text.to_string(),
+        }),
+        FindingKind::ConventionObserved(ConventionObservedKind {
+            convention_option_id: "opt".to_string(),
+            convention_label: text.to_string(),
+        }),
+        FindingKind::NoConvention(NoConventionKind {
+            observed_options: vec![ObservedOptionUsage {
+                option_id: "opt".to_string(),
+                label: text.to_string(),
+                sites: Some(1),
+            }],
+        }),
+        FindingKind::NotAssessed(NotAssessedKind {
+            reason: NotAssessedReason::ToolFailed,
+            reason_detail: text.to_string(),
+        }),
+    ]
+}
+
+fn finding_carrying(p: &Planted, kind: FindingKind) -> Finding {
+    let mut captures = std::collections::BTreeMap::new();
+    captures.insert("object".to_string(), p.text.clone());
+    Finding {
+        repo: "acme/app".to_string(),
+        path: ".env".to_string(),
+        line: 3,
+        rule_id: "SEC-NO-VENDOR-TOKEN-1".to_string(),
+        severity: "critical".to_string(),
+        snippet: p.text.clone(),
+        detail: format!("The line `{}` holds a credential.", p.text),
+        fix_specific: Some(format!(
+            "Replace `{}` with an environment variable.",
+            p.text
+        )),
+        calibration_rationale: Some(format!("Floored: {}", p.text)),
+        captures,
+        also_locations: vec![MergedLocation {
+            repo: "acme/app".to_string(),
+            path: ".env.local".to_string(),
+            line: 5,
+            rule_id: "SEC-NO-VENDOR-TOKEN-1".to_string(),
+            snippet: p.text.clone(),
+            consequence: false,
+        }],
+        kind: Some(kind),
+        ..Finding::default()
+    }
+}
+
+#[test]
+fn redact_finding_covers_every_client_visible_text_field_for_each_shape() {
+    for shape in WIRE_SHAPES {
+        let p = planted(*shape);
+        for kind in kinds_carrying(&p.text) {
+            let mut f = finding_carrying(&p, kind);
+            let count = redact_finding(&mut f);
+            let json = serde_json::to_string(&f).expect("a finding serializes");
+            assert!(count > 0, "{shape:?} must be reported as redacted");
+            assert!(
+                !leaked(&json, &p),
+                "{shape:?} leaked in {}",
+                f.kind.as_ref().map_or("none", |k| k.tag())
+            );
+            assert!(detect_secrets(&f.snippet).is_empty());
+            assert!(detect_secrets(&f.detail).is_empty());
+            assert!(f
+                .fix_specific
+                .as_deref()
+                .is_some_and(|t| detect_secrets(t).is_empty()));
+            assert!(f
+                .calibration_rationale
+                .as_deref()
+                .is_some_and(|t| detect_secrets(t).is_empty()));
+            assert!(f.captures.values().all(|v| detect_secrets(v).is_empty()));
+            assert!(f
+                .also_locations
+                .iter()
+                .all(|l| detect_secrets(&l.snippet).is_empty()));
+        }
+    }
+}
+
+#[test]
+fn redact_finding_leaves_the_redacted_form_in_place_of_the_value() {
+    let p = planted(SecretShape::SupabaseSecretKey);
+    let mut f = finding_carrying(&p, FindingKind::Defect);
+    redact_finding(&mut f);
+    assert!(f.snippet.contains("sb_secret_…"), "snippet: {}", f.snippet);
+    assert!(
+        f.snippet.starts_with("SUPABASE_KEY="),
+        "the surrounding syntax stays"
+    );
+    assert!(f.detail.contains("sb_secret_…"));
+    assert!(f.also_locations[0].snippet.contains("(51 chars)"));
+}
+
+#[test]
+fn redact_finding_is_idempotent() {
+    for p in planted_all() {
+        let mut f = finding_carrying(&p, FindingKind::Defect);
+        redact_finding(&mut f);
+        let once = f.clone();
+        assert_eq!(
+            redact_finding(&mut f),
+            0,
+            "{:?} re-redacted its own form",
+            p.shape
+        );
+        assert_eq!(f, once);
+    }
+}
+
+#[test]
+fn redact_finding_leaves_a_clean_finding_untouched_and_counts_zero() {
+    let mut f = Finding {
+        snippet: "let x = compute(y);".to_string(),
+        detail: "An ordinary finding.".to_string(),
+        ..Finding::default()
+    };
+    let before = f.clone();
+    assert_eq!(redact_finding(&mut f), 0);
+    assert_eq!(f, before);
+}
+
+#[test]
+fn redact_findings_covers_a_whole_slice_and_sums_the_count() {
+    let a = planted(SecretShape::StripeLiveSecretKey);
+    let b = planted(SecretShape::GitHubToken);
+    let mut fs = vec![
+        finding_carrying(&a, FindingKind::Defect),
+        Finding::default(),
+        finding_carrying(&b, FindingKind::Defect),
+    ];
+    let count = redact_findings(&mut fs);
+    assert!(count >= 2);
+    for f in &fs {
+        let json = serde_json::to_string(f).expect("serializes");
+        assert!(!leaked(&json, &a) && !leaked(&json, &b));
+    }
+}
+
+#[test]
+fn snippet_from_line_redacts_before_the_cap() {
+    // The secret starts at char 141, so a 160-char cap applied FIRST would keep its first 19
+    // chars: a prefix plus a partial body the detector cannot recognise.
+    let p = planted(SecretShape::StripeLiveSecretKey);
+    let line = format!("  {} {}", "z".repeat(138), p.value);
+    let capped_first: String = line.trim().chars().take(160).collect();
+    assert!(
+        capped_first.contains(&p.value[..19]),
+        "precondition: capping first would leave a secret fragment"
+    );
+    let snippet = snippet_from_line(&line, 160);
+    assert!(snippet.chars().count() <= 160);
+    assert!(
+        !snippet.contains(&p.value[..19]),
+        "a fragment of the key survived: {snippet}"
+    );
+    assert!(detect_secrets(&snippet).is_empty());
+    assert!(
+        snippet.contains("sk_live_"),
+        "the redacted form carries the prefix"
+    );
+}
+
+#[test]
+fn snippet_from_line_trims_and_leaves_a_clean_line_alone() {
+    assert_eq!(snippet_from_line("    let x = 1;   ", 160), "let x = 1;");
+    let long = "y".repeat(300);
+    assert_eq!(snippet_from_line(&long, 160).chars().count(), 160);
+}
+
+fn report_with_text(p: &Planted) -> ScanReport {
+    let mut report = ScanReport::gated(&["acme/app".to_string()]);
+    let rec = crate::ai_audit::RuleRecommendation {
+        rule_id: "ARCH-X-1".to_string(),
+        recommended_option_id: "a".to_string(),
+        recommendation_reasoning: format!("because {}", p.text),
+        evidence: Some(format!("src/a.ts:3 {}", p.text)),
+        observed_options: vec![ObservedOptionUsage {
+            option_id: "a".to_string(),
+            label: p.text.clone(),
+            sites: None,
+        }],
+        ..crate::ai_audit::RuleRecommendation::default()
+    };
+    report.recommendations.insert("ARCH-X-1".to_string(), rec);
+    report.coverage_notes.push(crate::onboard::CoverageNote {
+        tool: "eslint".to_string(),
+        message: format!("tool output: {}", p.text),
+    });
+    report.failed_passes.push(crate::ai_audit::FailedPass {
+        repo: "acme/app".to_string(),
+        pass: "alternatives".to_string(),
+        reason: format!("error: {}", p.text),
+    });
+    report.ai_error = Some(format!("auth failed {}", p.text));
+    report.ai_blocked_reason = Some(p.text.clone());
+    report.message = Some(p.text.clone());
+    report
+}
+
+#[test]
+fn redact_report_text_covers_every_report_level_string() {
+    for shape in WIRE_SHAPES {
+        let p = planted(*shape);
+        let mut report = report_with_text(&p);
+        let count = redact_report_text(&mut report);
+        assert!(count > 0, "{shape:?}");
+        let json = serde_json::to_string(&report).expect("serializes");
+        assert!(!leaked(&json, &p), "{shape:?} leaked in report-level text");
+        assert_eq!(redact_report_text(&mut report), 0, "idempotent");
+    }
+}
+
+#[test]
+fn files_for_model_redacts_every_shape_and_keeps_line_counts() {
+    let mut files = vec![("src/clean.rs".to_string(), "fn main() {}\n".to_string())];
+    for p in planted_all() {
+        files.push((
+            format!("src/{:?}.txt", p.shape),
+            format!("line one\n{}\nline three\n", p.text),
+        ));
+    }
+    let model = files_for_model_with(&files, true);
+    assert_eq!(model.len(), files.len());
+    for ((raw_path, raw), (path, content)) in files.iter().zip(&model) {
+        assert_eq!(raw_path, path, "paths are unchanged");
+        assert_eq!(
+            raw.matches('\n').count(),
+            content.matches('\n').count(),
+            "line count changed for {path}"
+        );
+        assert!(
+            detect_secrets(content).is_empty(),
+            "{path} still holds a secret"
+        );
+    }
+    assert_eq!(model[0].1, files[0].1, "a clean file is returned unchanged");
+    for (p, (_, content)) in planted_all().iter().zip(model.iter().skip(1)) {
+        assert!(
+            !leaked(content, p),
+            "{:?} reached the model prompt",
+            p.shape
+        );
+    }
+}
+
+#[test]
+fn model_prompt_redaction_flag_off_sends_raw() {
+    let p = planted(SecretShape::GitHubToken);
+    let files = vec![("a.env".to_string(), p.text.clone())];
+    let raw = files_for_model_with(&files, false);
+    assert_eq!(raw, files, "flag off: the raw set goes to the model");
+    let redacted = files_for_model_with(&files, true);
+    assert_ne!(redacted, files);
+}
+
+#[test]
+#[serial_test::serial(process_env)]
+fn files_for_model_reads_the_feature_flag_from_the_environment() {
+    let p = planted(SecretShape::GitHubToken);
+    let files = vec![("a.env".to_string(), p.text.clone())];
+    assert_ne!(files_for_model(&files), files, "default ON");
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_FEATURE_MODEL_PROMPT_REDACTION", "false");
+    assert_eq!(files_for_model(&files), files, "operator switched it off");
+}
+
+#[test]
+fn fingerprint_and_finding_key_are_computed_from_the_redacted_snippet_and_stable() {
+    let p = planted(SecretShape::SupabaseSecretKey);
+    let content = format!("# config\n{}\n", p.text);
+    let first = crate::onboard::audit_content("acme/app", ".env.production", &content);
+    let second = crate::onboard::audit_content("acme/app", ".env.production", &content);
+    assert!(!first.is_empty(), "the floor must still find the secret");
+    for (a, b) in first.iter().zip(&second) {
+        assert_eq!(
+            crate::suppression::fingerprint(&a.rule_id, &a.snippet),
+            crate::suppression::fingerprint(&b.rule_id, &b.snippet),
+            "stable across two scans of the same file"
+        );
+        assert_eq!(
+            crate::report_export::finding_key(a),
+            crate::report_export::finding_key(b)
+        );
+        assert!(
+            !a.snippet.contains(&p.value),
+            "the key hashes the REDACTED snippet"
+        );
+        assert_ne!(
+            crate::suppression::fingerprint(&a.rule_id, &a.snippet),
+            crate::suppression::fingerprint(&a.rule_id, &p.text),
+            "the fingerprint is not the raw line's"
+        );
+    }
+}
+
+#[test]
+fn seal_redacts_any_finding_a_producer_missed() {
+    let p = planted(SecretShape::StripeLiveSecretKey);
+    let mut report = report_with_text(&p);
+    report
+        .findings
+        .push(finding_carrying(&p, FindingKind::Defect));
+    let sealed = report.seal();
+    let json = serde_json::to_string(&*sealed).expect("serializes");
+    assert!(
+        !leaked(&json, &p),
+        "the seal sweep is the belt-and-braces catch"
+    );
+}
+
+#[test]
+fn unredacted_count_at_seal_is_reported_so_a_missing_producer_is_visible() {
+    let p = planted(SecretShape::StripeLiveSecretKey);
+    let mut report = report_with_text(&p);
+    report
+        .findings
+        .push(finding_carrying(&p, FindingKind::Defect));
+    let missed = report.redact_before_seal();
+    assert!(
+        missed > 0,
+        "the sweep reports how many values reached the seal raw"
+    );
+    assert_eq!(
+        report.redact_before_seal(),
+        0,
+        "a clean report reports zero"
+    );
+}
+
+/// Captures `tracing` output so a test can read what `seal` logged.
+#[derive(Clone, Default)]
+struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+    type Writer = LogBuf;
+    fn make_writer(&'a self) -> LogBuf {
+        self.clone()
+    }
+}
+
+fn logged_while<T>(f: impl FnOnce() -> T) -> (T, String) {
+    let buf = LogBuf::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(buf.clone())
+        .with_ansi(false)
+        .finish();
+    let out = tracing::subscriber::with_default(subscriber, f);
+    let text = String::from_utf8(buf.0.lock().expect("log lock").clone()).expect("utf8 log");
+    (out, text)
+}
+
+#[test]
+fn seal_warns_once_when_it_had_to_redact_and_never_logs_the_value() {
+    let p = planted(SecretShape::StripeLiveSecretKey);
+    let mut report = ScanReport::gated(&["acme/app".to_string()]);
+    report
+        .findings
+        .push(finding_carrying(&p, FindingKind::Defect));
+    let (_, log) = logged_while(|| report.seal());
+    assert_eq!(
+        log.matches("reached seal unredacted").count(),
+        1,
+        "exactly one warning per seal: {log}"
+    );
+    assert!(!leaked(&log, &p), "the warning must not echo the value");
+}
+
+#[test]
+fn seal_is_silent_when_every_producer_redacted() {
+    let p = planted(SecretShape::StripeLiveSecretKey);
+    let mut f = finding_carrying(&p, FindingKind::Defect);
+    redact_finding(&mut f);
+    let mut report = ScanReport::gated(&["acme/app".to_string()]);
+    report.findings.push(f);
+    let (_, log) = logged_while(|| report.seal());
+    assert!(!log.contains("reached seal unredacted"), "{log}");
+}
+
+#[test]
+fn flag_off_logs_a_warning_that_raw_code_is_leaving() {
+    let files = vec![("a.txt".to_string(), "x".to_string())];
+    let (_, log) = logged_while(|| files_for_model_with(&files, false));
+    assert!(log.contains("model_prompt_redaction is OFF"), "{log}");
+    let (_, quiet) = logged_while(|| files_for_model_with(&files, true));
+    assert!(quiet.is_empty(), "{quiet}");
+}

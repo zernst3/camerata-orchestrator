@@ -198,7 +198,7 @@ pub(crate) fn strip_zero_width(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Apply [`strip_zero_width`] to the handful of a [`Finding`]'s free-text fields that flow,
+/// Apply [`strip_zero_width`] (then secret redaction) to the [`Finding`]'s free-text fields that flow,
 /// verbatim or near-verbatim, into every report artifact: `path` (the PDF's `raw()` path
 /// rendering, the xlsx "Location" column, `findings.json`'s `path` field), `snippet` (the PDF's
 /// code block, and — for a dependency-advisory finding — the package name), `detail` (the
@@ -215,6 +215,22 @@ pub(crate) fn sanitize_finding_text(finding: &Finding) -> Finding {
     for v in f.captures.values_mut() {
         *v = strip_zero_width(v).into_owned();
     }
+    // The three free-text fields this sanitizer used to miss, all of which reach the client:
+    // the model-written fix (`fix_specific`), every absorbed evidence site's snippet, and the
+    // severity rationale. This gap is exactly where the sweep exports' leaked keys sat.
+    if let Some(fix) = f.fix_specific.as_mut() {
+        *fix = strip_zero_width(fix).into_owned();
+    }
+    if let Some(rationale) = f.calibration_rationale.as_mut() {
+        *rationale = strip_zero_width(rationale).into_owned();
+    }
+    for site in &mut f.also_locations {
+        site.snippet = strip_zero_width(&site.snippet).into_owned();
+    }
+    // Zero-width characters are stripped FIRST so one inserted inside a key cannot hide it from
+    // the detector; then the secret redaction (belt and braces: every producer already redacted
+    // at construction, see `onboard::redact`). Idempotent.
+    crate::onboard::redact::redact_finding(&mut f);
     f
 }
 

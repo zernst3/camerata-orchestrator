@@ -189,8 +189,10 @@ pub fn fixtures() -> Vec<Fixture> {
         Fixture {
             name: "secret_openai_sk_key",
             path: "src/llm.ts",
+            // An OpenAI key is also a vendor credential token (the shared detector lists it
+            // under SEC-NO-VENDOR-TOKEN-1 as well).
             content: "const apiKey = \"sk-abcdefghijklmnopqrstuvwxyz0123456789\";\n",
-            expected: &["SEC-NO-HARDCODED-SECRETS-1"],
+            expected: &["SEC-NO-HARDCODED-SECRETS-1", "SEC-NO-VENDOR-TOKEN-1"],
         },
         Fixture {
             name: "secret_named_opaque_literal",

@@ -27,6 +27,9 @@ camerata-api-types = { path = "../api-types" }
 # `model_registry`, `rate_limit`, and `usage_ledger` modules are now re-export shims
 # over this crate so every existing `crate::X` call site keeps resolving unchanged.
 camerata-llm = { path = "../llm" }
+# The one secret-shape detector + redactor (construction-time finding redaction, the model-prompt
+# choke point, the export release gate). Leaf crate, no camerata deps.
+camerata-secrets = { path = "../secrets" }
 axum = { version = "0.7", features = ["ws"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "process", "io-util"] }
 tower = "0.5"

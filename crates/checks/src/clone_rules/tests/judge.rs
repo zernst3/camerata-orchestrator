@@ -93,6 +93,40 @@ fn judge_input_shows_at_most_three_members_and_thirty_lines_each() {
 const MAX_JUDGE_LINES_FOR_TESTS: usize = 30;
 
 #[test]
+fn clone_judge_input_code_and_differing_strings_are_redacted() {
+    use camerata_secrets::fixtures::planted;
+    use camerata_secrets::SecretShape;
+    // Two copies of one decision whose constants are credential literals: the code excerpt, the
+    // disagreement pair and the decision tokens all carry them unless the input is redacted.
+    let a = planted(SecretShape::StripeLiveSecretKey).value;
+    let b = planted(SecretShape::GitHubToken).value;
+    let first = ts_discount_default(&format!("'{a}'"));
+    let second = ts_discount("quoteTotal", "o", "u", "b", &format!("'{b}'"));
+    let all = files(&[("src/cart.ts", &first), ("src/quote.ts", &second)]);
+    let c = found(CloneRule::SingleSourceLogic, &all).remove(0);
+    let json = serde_json::to_string(&judge_input(&c, &all)).unwrap();
+    assert!(
+        !json.contains(&a),
+        "the first literal reached the judge input"
+    );
+    assert!(
+        !json.contains(&b),
+        "the second literal reached the judge input"
+    );
+    assert!(
+        json.contains("sk_live_\u{2026}") && json.contains("ghp_\u{2026}"),
+        "the redacted forms stand in: {json}"
+    );
+}
+
+#[test]
+fn clone_judge_input_with_no_secrets_is_unchanged_by_redaction() {
+    let (all, c) = long_family(3);
+    let json = serde_json::to_string(&judge_input(&c, &all)).unwrap();
+    assert!(!json.contains('\u{2026}'));
+}
+
+#[test]
 fn judge_input_serializes_to_bounded_json_without_whole_files() {
     let (all, c) = long_family(4);
     let json = serde_json::to_string(&judge_input(&c, &all)).unwrap();

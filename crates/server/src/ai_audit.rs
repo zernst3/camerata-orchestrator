@@ -650,7 +650,7 @@ pub fn parse_ai_findings(
                 (false, true) => title.clone(),
                 _ => detail,
             };
-            findings.push(Finding {
+            let mut finding = Finding {
                 could_be_intentional: false,
                 repo: repo.to_string(),
                 path: f["path"].as_str().unwrap_or("(repo)").to_string(),
@@ -699,7 +699,11 @@ pub fn parse_ai_findings(
                 // option into `Deviation` once the per-rule recommendation is known — the
                 // parser itself cannot know a rule's kind, and must never guess from prose.
                 kind: Some(camerata_api_types::audit::FindingKind::Defect),
-            });
+            };
+            // The model's `code` is its verbatim quote and its prose can repeat a value: redact
+            // before the row exists anywhere else (docs/design/2026-10-23, leak path A8).
+            crate::onboard::redact::redact_finding(&mut finding);
+            findings.push(finding);
         }
     }
 
@@ -1099,6 +1103,8 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
             // is already encoded structurally (rule_id + path + line + also_matches), and a
             // wrong English pointer in a data cell is worse than none — it ships in the CSV.
             let reason = strip_dedup_pointers(verdict["reason"].as_str().unwrap_or("").trim());
+            // The calibration model's reason is appended to `detail`; redact it first.
+            let reason = camerata_secrets::redact_str(&reason).into_owned();
             let reason = reason.trim();
             if low_conf || !reason.is_empty() {
                 let tag = if low_conf {
@@ -2974,6 +2980,8 @@ Rules, every fix:
   detail (e.g. do not tell the client to enable/turn on something the detail already says is
   enabled/on/configured) — if the detail says a mitigation already exists, your fix must
   address what's actually still missing or broken, not redo what's already there.
+- NEVER repeat a credential value in a fix, not even partly. Name the variable and the line
+  ("move the key on line 3 of `.env` into your secrets manager"), not the key itself.
 - If you cannot write a grounded, non-contradictory fix for a finding from the evidence given,
   omit it from your response entirely rather than guessing.
 
@@ -2982,6 +2990,7 @@ Return ONLY JSON, no prose:
 One entry per finding you could ground a fix for, addressed by its [index]. Omit any index you
 could not confidently ground — an omitted fix is far better than an invented one."#
         .to_string()
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// A short, line-numbered excerpt of `path`'s content in `files`, centered on `line`
@@ -3347,6 +3356,10 @@ async fn run_fix_specifics_round(
                 still_pending.push(orig_idx);
                 continue;
             };
+            // The model's fix text is client-visible and often repeats the offending value:
+            // redact it BEFORE the self-check, so grounding compares redacted to redacted.
+            let redacted_text = camerata_secrets::redact_str(text).into_owned();
+            let text = &redacted_text;
             let evidence = fix_evidence_blob(&findings[orig_idx], files);
             if let Some(bad) = find_ungrounded_identifier(text, &evidence) {
                 feedback.insert(
@@ -3512,7 +3525,8 @@ pub async fn generate_fix_specifics(
                 &findings[idx],
                 None,
             ) {
-                findings[idx].fix_specific = Some(fallback);
+                findings[idx].fix_specific =
+                    Some(camerata_secrets::redact_str(&fallback).into_owned());
                 instantiated += 1;
             }
         }
@@ -4650,6 +4664,9 @@ fn merge_location_group(group: Vec<Finding>) -> Finding {
         primary.fix_specific = group.iter().find_map(|f| f.fix_specific.clone());
     }
     primary.also_matches = also;
+    // Belt and braces: the members are already redacted at construction; a carried-forward
+    // member from an older cache would not be.
+    crate::onboard::redact::redact_finding(&mut primary);
     primary
 }
 
@@ -5689,6 +5706,7 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     if primary.fix_specific.is_none() {
         primary.fix_specific = inherited_fix_specific;
     }
+    crate::onboard::redact::redact_finding(&mut primary);
     primary
 }
 
@@ -5859,7 +5877,7 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
     also_locations.retain(|l| {
         location_seen.insert((l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone()))
     });
-    Finding {
+    let mut group_finding = Finding {
         could_be_intentional: false,
         repo: primary.repo.clone(),
         path: primary.path.clone(),
@@ -5886,7 +5904,9 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
         // A5.6: a structural group row keeps the kind of the primary occurrence it
         // represents (its members all share one rule, hence one kind).
         kind: primary.kind.clone(),
-    }
+    };
+    crate::onboard::redact::redact_finding(&mut group_finding);
+    group_finding
 }
 
 /// The SECOND merge pass (design §1, extended by P1 — see
@@ -6446,7 +6466,7 @@ fn apply_alternative_decision(
         .filter(|e| !e.trim().is_empty())
         .map(|e| e.chars().take(200).collect::<String>())
         .unwrap_or_else(|| option.label.clone());
-    Some(Finding {
+    let mut finding = Finding {
         repo: repo.to_string(),
         path,
         line,
@@ -6470,7 +6490,10 @@ fn apply_alternative_decision(
         // consistency deviation.
         kind: Some(camerata_api_types::audit::FindingKind::Defect),
         ..Finding::default()
-    })
+    };
+    // `evidence` and the reasoning are model text.
+    crate::onboard::redact::redact_finding(&mut finding);
+    Some(finding)
 }
 
 /// Pass-1 W3 (A5.6/A5.2): reclassify every finding judged under a multi-option rule's
@@ -6642,7 +6665,7 @@ pub(crate) fn conventions_observed_findings(
             .chars()
             .take(200)
             .collect();
-        out.push(Finding {
+        let mut finding = Finding {
             repo: repo.to_string(),
             path,
             line,
@@ -6662,7 +6685,9 @@ pub(crate) fn conventions_observed_findings(
                 convention_label: opt.label.clone(),
             })),
             ..Finding::default()
-        });
+        };
+        crate::onboard::redact::redact_finding(&mut finding);
+        out.push(finding);
     }
     out
 }
@@ -6699,7 +6724,7 @@ pub(crate) fn no_convention_findings(
             })
             .collect::<Vec<_>>()
             .join(" / ");
-        out.push(Finding {
+        let mut finding = Finding {
             repo: repo.to_string(),
             path: String::new(),
             line: 0,
@@ -6722,7 +6747,9 @@ pub(crate) fn no_convention_findings(
                 observed_options: rec.observed_options.clone(),
             })),
             ..Finding::default()
-        });
+        };
+        crate::onboard::redact::redact_finding(&mut finding);
+        out.push(finding);
     }
     out
 }
@@ -6739,7 +6766,7 @@ pub(crate) fn not_assessed_findings(repo: &str, skipped: &[(String, String)]) ->
         if !seen.insert(rule_id.to_ascii_uppercase()) {
             continue;
         }
-        out.push(Finding {
+        let mut finding = Finding {
             repo: repo.to_string(),
             path: String::new(),
             line: 0,
@@ -6756,7 +6783,9 @@ pub(crate) fn not_assessed_findings(repo: &str, skipped: &[(String, String)]) ->
                 reason_detail: note.clone(),
             })),
             ..Finding::default()
-        });
+        };
+        crate::onboard::redact::redact_finding(&mut finding);
+        out.push(finding);
     }
     out
 }
@@ -8168,6 +8197,9 @@ pub async fn run_deep_tier(
         }
     }
 }
+
+#[cfg(test)]
+mod redaction_tests;
 
 #[cfg(test)]
 mod tests {

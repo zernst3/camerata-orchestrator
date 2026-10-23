@@ -1850,10 +1850,7 @@ mod mcp_gated_write_boundary_tests {
         let jail = make_jail("vendor-token");
         let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
-        // ISOLATED subset: since the SEC rules share one detector, an `sk-ant-` key is also an
-        // OpenAI-shaped `sk-` run, so under the full floor SEC-NO-HARDCODED-SECRETS-1 (earlier in
-        // registry order) denies it first. Isolating proves the vendor arm itself denies it.
-        let gw = Gateway::with_rules(vec![RuleId("SEC-NO-VENDOR-TOKEN-1".to_string())]);
+        let gw = Gateway::with_rules(enforced_gate_rules());
         let out = call_gated_write(
             &gw,
             "sub/vendor.rs",

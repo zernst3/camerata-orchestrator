@@ -16,7 +16,10 @@ fn finds_a_secret_in_a_field_nobody_listed_with_its_path() {
         "a_field_added_tomorrow": {"nested": [format!("x {key} y")]},
     });
     let found = find_secrets_in_json(&value);
-    let paths: Vec<&str> = found.iter().map(|(path, _)| path.as_str()).collect();
+    // Object key order depends on whether serde_json's `preserve_order` feature is unified in by
+    // another crate of the build, so compare as a sorted set.
+    let mut paths: Vec<&str> = found.iter().map(|(path, _)| path.as_str()).collect();
+    paths.sort_unstable();
     assert_eq!(
         paths,
         vec![

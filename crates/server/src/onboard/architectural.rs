@@ -173,7 +173,7 @@ pub fn arch_violation_to_finding(repo: &str, violation: &ArchViolation) -> Findi
     ) {
         captures.insert(token.to_string(), bare_object_name(object));
     }
-    Finding {
+    let mut finding = Finding {
         repo: repo.to_string(),
         path: violation.file.clone(),
         line: violation.line,
@@ -187,7 +187,10 @@ pub fn arch_violation_to_finding(repo: &str, violation: &ArchViolation) -> Findi
         // A5.6: a deterministic architectural-checker violation is an objective fault.
         kind: Some(camerata_api_types::audit::FindingKind::Defect),
         ..Finding::default()
-    }
+    };
+    // A checker's message or object can quote a literal from the client's code.
+    crate::onboard::redact::redact_finding(&mut finding);
+    finding
 }
 
 #[cfg(test)]

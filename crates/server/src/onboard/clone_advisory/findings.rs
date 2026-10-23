@@ -109,7 +109,7 @@ fn first_line(site: &Site, files: &[(String, String)]) -> String {
                 .lines()
                 .nth((site.start_line as usize).saturating_sub(1))
         })
-        .map(|line| line.trim().chars().take(200).collect())
+        .map(|line| crate::onboard::redact::snippet_from_line(line, 200))
         .unwrap_or_default()
 }
 
@@ -341,7 +341,7 @@ pub fn confirmed_finding(
             consequence: false,
         })
         .collect();
-    Finding {
+    let mut finding = Finding {
         repo: repo.to_string(),
         path,
         line,
@@ -363,7 +363,10 @@ pub fn confirmed_finding(
         evaluated_option_id: None,
         kind: Some(FindingKind::Defect),
         ..Finding::default()
-    }
+    };
+    // The detail can quote the string literals the copies differ in, which may be secrets.
+    crate::onboard::redact::redact_finding(&mut finding);
+    finding
 }
 
 /// One `not_assessed` row for a rule that was armed and found candidates but could not decide
@@ -375,13 +378,13 @@ pub fn not_assessed_row(
     reason_detail: String,
     detail: String,
 ) -> Finding {
-    Finding {
+    let mut finding = Finding {
         repo: repo.to_string(),
         path: String::new(),
         line: 0,
         rule_id: rule.id().to_string(),
         severity: "info".to_string(),
-        snippet: reason_detail.chars().take(200).collect(),
+        snippet: crate::onboard::redact::snippet_from_line(&reason_detail, 200),
         detail,
         located: false,
         preview: true,
@@ -391,5 +394,7 @@ pub fn not_assessed_row(
             reason_detail,
         })),
         ..Finding::default()
-    }
+    };
+    crate::onboard::redact::redact_finding(&mut finding);
+    finding
 }

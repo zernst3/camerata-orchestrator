@@ -137,6 +137,26 @@ fn match_lines_attributes_each_match_to_its_starting_line_and_dedupes() {
 }
 
 #[test]
+fn an_anthropic_key_is_never_reported_as_an_openai_key() {
+    let key = planted(SecretShape::AnthropicKey).value;
+    // A rule that governs OpenAI keys but not Anthropic ones must not fire on it.
+    let found = crate::detect_shapes(&key, &[SecretShape::OpenAiKey]);
+    assert!(
+        found.is_empty(),
+        "sk-ant- belongs to the Anthropic shape only"
+    );
+    let both = crate::detect_shapes(&key, &[SecretShape::OpenAiKey, SecretShape::AnthropicKey]);
+    assert_eq!(both.len(), 1);
+    assert_eq!(both[0].shape, SecretShape::AnthropicKey);
+    // And a real OpenAI key still is one.
+    let openai = planted(SecretShape::OpenAiKey).value;
+    assert_eq!(
+        crate::detect_shapes(&openai, &[SecretShape::OpenAiKey]).len(),
+        1
+    );
+}
+
+#[test]
 fn pem_block_is_one_match_spanning_header_to_footer() {
     let p = planted(SecretShape::PemPrivateKey);
     let m = only_match(&p.text);

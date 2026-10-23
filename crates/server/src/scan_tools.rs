@@ -399,7 +399,7 @@ pub fn keep_selected_eslint_findings(findings: Vec<Finding>, selected: &[String]
 
 pub fn note_finding(repo: &str, tool: &str, message: impl Into<String>) -> Finding {
     let message = message.into();
-    Finding {
+    let mut finding = Finding {
         repo: repo.to_string(),
         path: "(scan preview)".to_string(),
         line: 0,
@@ -420,7 +420,10 @@ pub fn note_finding(repo: &str, tool: &str, message: impl Into<String>) -> Findi
             },
         )),
         ..Finding::default()
-    }
+    };
+    // Tool stderr can echo the client's code, secrets included.
+    crate::onboard::redact::redact_finding(&mut finding);
+    finding
 }
 
 // ─── stack-aware language gating ─────────────────────────────────────────────
@@ -981,13 +984,13 @@ fn preview_finding(
              pipeline)."
         )
     };
-    Finding {
+    let mut finding = Finding {
         repo: repo.to_string(),
         path: path.to_string(),
         line,
         rule_id: rule_id.to_string(),
         severity: severity.to_string(),
-        snippet: message.chars().take(160).collect(),
+        snippet: crate::onboard::redact::snippet_from_line(message, 160),
         detail,
         // A preview is advisory, not an enforced/active gate hit. See this function's own
         // doc comment above for why this is NOT a baseline-acceptance claim.
@@ -997,7 +1000,10 @@ fn preview_finding(
         // A5.6: an external tool's reported violation is an objective fault.
         kind: Some(camerata_api_types::audit::FindingKind::Defect),
         ..Finding::default()
-    }
+    };
+    // semgrep and eslint messages interpolate the matched text, which can be a secret literal.
+    crate::onboard::redact::redact_finding(&mut finding);
+    finding
 }
 
 // ─── repo-scope filter ───────────────────────────────────────────────────────
@@ -1681,6 +1687,9 @@ async fn run_one_tool<'r>(
         (findings, gaps)
     })
 }
+
+#[cfg(test)]
+mod redaction_tests;
 
 #[cfg(test)]
 mod tests {

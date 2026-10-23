@@ -15,6 +15,7 @@ use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 mod cache;
 mod ledger;
 mod other_rules;
+mod redaction;
 mod repros;
 mod seam;
 

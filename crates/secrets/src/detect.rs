@@ -107,6 +107,25 @@ fn jwt_role(token: &str) -> Option<String> {
     claims.get("role")?.as_str().map(str::to_string)
 }
 
+/// `sk-` keys. An `sk-ant-` run also matches the OpenAI pattern, but it is an Anthropic key
+/// whichever shapes the caller asked for, so it is never reported as an OpenAI one (a rule that
+/// governs OpenAI keys but not Anthropic ones must not fire on it).
+fn collect_openai(out: &mut Vec<SecretMatch>, text: &str) {
+    for m in shapes::re_openai().find_iter(text) {
+        if m.as_str().starts_with("sk-ant-") {
+            continue;
+        }
+        push(
+            out,
+            text,
+            SecretShape::OpenAiKey,
+            m.range(),
+            m.range(),
+            None,
+        );
+    }
+}
+
 fn collect_jwt(out: &mut Vec<SecretMatch>, text: &str, wanted: &[SecretShape]) {
     for m in shapes::re_jwt().find_iter(text) {
         let role = jwt_role(m.as_str());
@@ -270,7 +289,7 @@ fn collect(out: &mut Vec<SecretMatch>, text: &str, shapes: &[SecretShape]) {
             SecretShape::SlackToken => collect_whole(out, text, shape, shapes::re_slack()),
             SecretShape::GoogleApiKey => collect_whole(out, text, shape, shapes::re_google()),
             SecretShape::AnthropicKey => collect_whole(out, text, shape, shapes::re_anthropic()),
-            SecretShape::OpenAiKey => collect_whole(out, text, shape, shapes::re_openai()),
+            SecretShape::OpenAiKey => collect_openai(out, text),
             SecretShape::PemPrivateKey => collect_pem(out, text),
             SecretShape::NamedSecretLiteral => {
                 collect_group(out, text, shape, shapes::re_named_literal(), false)

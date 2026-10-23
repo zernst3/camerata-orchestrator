@@ -12,6 +12,8 @@ workspace = true
 camerata-core = { path = "../core" }
 camerata-liveness = { path = "../liveness" }
 camerata-rules = { path = "../rules" }
+# The clone judge's input is redacted here, so it is safe whichever host assembled the files.
+camerata-secrets = { path = "../secrets" }
 # `io-util` for AsyncBufReadExt / BufReader in the streaming subprocess path.
 tokio = { workspace = true, features = ["io-util"] }
 anyhow.workspace = true

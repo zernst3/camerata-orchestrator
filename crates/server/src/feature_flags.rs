@@ -23,6 +23,11 @@
 //!   lens is retained; only the runtime execution is gated. Disable, do NOT
 //!   remove the SOC-2 code.
 //!
+//! - `model_prompt_redaction` (`CAMERATA_FEATURE_MODEL_PROMPT_REDACTION`) — Redact secret
+//!   values from code before any model sees it (`onboard::redact::files_for_model`). ON by
+//!   default; operator-only, no UI. Turning it OFF sends raw client code to the model and logs
+//!   a warning on every call. See docs/design/2026-10-23_secret-redaction-and-release-gate.md.
+//!
 //! # Adding a new flag
 //!
 //! 1. Add a `pub <name>: bool` field to [`FeatureFlags`] with
@@ -55,12 +60,22 @@ pub struct FeatureFlags {
     /// Shipped disabled; set to `true` in `.camerata/features.toml` to enable.
     #[serde(default = "default_true")]
     pub soc2: bool,
+    /// Redact secret values from the code before it is sent to ANY model (the audit passes, the
+    /// fix-specific pass, the deep tier, the clone judge): `sb_secret_…WvXy (51 chars)` instead
+    /// of the key, line numbers unchanged. ON by default (owner decision, 2026-10-22: "redact
+    /// BEFORE any code is sent to a model"). Operator-only: no UI affordance. When `false`,
+    /// `onboard::redact::files_for_model` sends raw code and logs a warning once per call.
+    #[serde(default = "default_true")]
+    pub model_prompt_redaction: bool,
 }
 
 impl Default for FeatureFlags {
     /// All flags on by default.
     fn default() -> Self {
-        Self { soc2: true }
+        Self {
+            soc2: true,
+            model_prompt_redaction: true,
+        }
     }
 }
 
@@ -98,6 +113,9 @@ impl FeatureFlags {
         if env_is_false("CAMERATA_FEATURE_SOC2") {
             self.soc2 = false;
         }
+        if env_is_false("CAMERATA_FEATURE_MODEL_PROMPT_REDACTION") {
+            self.model_prompt_redaction = false;
+        }
     }
 }
 
@@ -119,6 +137,27 @@ mod tests {
     fn default_flags_are_all_true() {
         let flags = FeatureFlags::default();
         assert!(flags.soc2, "soc2 defaults to true");
+        assert!(
+            flags.model_prompt_redaction,
+            "model_prompt_redaction defaults to ON: secrets are redacted before any model sees code"
+        );
+    }
+
+    #[test]
+    fn model_prompt_redaction_can_be_switched_off_in_config() {
+        let flags: FeatureFlags = toml::from_str("model_prompt_redaction = false").expect("parses");
+        assert!(!flags.model_prompt_redaction);
+        assert!(flags.soc2, "other flags are unaffected");
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn model_prompt_redaction_env_override_switches_it_off() {
+        let _env =
+            camerata_test_env::EnvGuard::set("CAMERATA_FEATURE_MODEL_PROMPT_REDACTION", "false");
+        let mut flags = FeatureFlags::default();
+        flags.apply_env_overrides();
+        assert!(!flags.model_prompt_redaction);
     }
 
     #[test]
