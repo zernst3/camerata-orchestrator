@@ -955,8 +955,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "camerata-gateway",
+ "camerata-secrets",
  "chrono",
- "regex",
  "tempfile",
  "tokio",
 ]

@@ -4,24 +4,19 @@
 //!
 //! A secret pasted into a chat (or captured in a deployed app's own logs) must
 //! never land in the transcript, session memory, or the governance audit trail.
-//! This module is the pure substrate: [`detect_secrets`] finds high-confidence
-//! secret matches in free text; [`scrub`] replaces each match with a stable
-//! placeholder token and returns the extracted values so a caller can store them
-//! in a vault BY NAME instead of just discarding them.
+//! This module is the pure substrate: [`detect_secrets`] finds secret matches in
+//! free text; [`scrub`] replaces each match with a stable placeholder token and
+//! returns the extracted values so a caller can store them in a vault BY NAME
+//! instead of just discarding them.
 //!
-//! # Precision over recall, deliberately
-//! Every pattern below is a well-known, low-ambiguity secret shape (a vendor's own
-//! fixed prefix, or a PEM header, or an env-var-style connection string). A shape
-//! that would also flag ordinary non-secret text (e.g. the bare word "Bearer" with
-//! nothing token-shaped after it, or a short "AKIA"-prefixed word) is deliberately
-//! rejected by a length/character-class gate. This mirrors `camerata_gateway`'s own
-//! SEC-* write-time-gate arms (see `crates/gateway/src/lib.rs`'s
-//! `sec_secrets_regex`/`sec_vendor_token_regex`/`sec_private_key_regex`), which use
-//! the same `regex` + `OnceLock`-cached-compiled-pattern style — a DIFFERENT
-//! use case (denying a write vs. scrubbing free text before it's ever stored), so
-//! the two are independent modules rather than a shared dependency, but grounded in
-//! the same well-known prefixes so they don't silently diverge on what counts as
-//! "obviously a secret."
+//! # A thin adapter over `camerata-secrets`
+//! The patterns, the safe twins (a placeholder such as `sb_secret_your_key_here` is not a
+//! secret) and the overlap rules all live in the shared leaf crate
+//! [`camerata_secrets`] (docs/design/2026-10-23_secret-redaction-and-release-gate.md), the same
+//! detector the gateway SEC arms, the scan floor and the export release gate read. This module
+//! owns only the vault-flow shape: the [`SecretKind`] labels, the `{{SECRET:<kind>_<n>}}`
+//! placeholders and the extracted values. (It replaced seven private regexes that had drifted
+//! from the gateway's.)
 //!
 //! # Applied today
 //! The one live free-text ingest path this module is wired into now is
@@ -38,9 +33,8 @@
 //! already, not just an ingest-time filter.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
-use regex::Regex;
+use camerata_secrets::{SecretShape, Twin};
 
 // ─── kinds ──────────────────────────────────────────────────────────────────────
 
@@ -49,15 +43,27 @@ use regex::Regex;
 /// vault-entry-name hint for the (future) chat-head "store this by name" flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SecretKind {
-    /// Stripe secret/restricted key (`sk_live_`, `sk_test_`, `rk_live_`).
+    /// Stripe secret/restricted key (`sk_live_`, `sk_test_`, `rk_live_`, `rk_test_`).
     StripeKey,
+    /// A Stripe webhook signing secret (`whsec_`).
+    StripeWebhookSecret,
+    /// A Supabase secret key (`sb_secret_`) or service-role JWT.
+    SupabaseKey,
+    /// Any other JWT (an opaque bearer credential).
+    JwtToken,
     /// A PEM/armored private-key block (`-----BEGIN ... PRIVATE KEY-----`).
     PemPrivateKey,
-    /// An AWS access key ID (`AKIA` + 16 uppercase alphanumeric chars).
+    /// An AWS access key ID (`AKIA`/`ASIA` + 16 uppercase alphanumeric chars).
     AwsAccessKey,
     /// A GitHub personal access token (`ghp_...`) or fine-grained token
     /// (`github_pat_...`).
     GitHubToken,
+    /// A Slack token (`xoxb-...`).
+    SlackToken,
+    /// A Google API key (`AIza...`).
+    GoogleApiKey,
+    /// An Anthropic API key (`sk-ant-...`).
+    AnthropicKey,
     /// An Azure Storage connection string (`DefaultEndpointsProtocol=...;
     /// AccountKey=...`).
     AzureStorageConnectionString,
@@ -67,6 +73,12 @@ pub enum SecretKind {
     /// long/opaque enough to be confident it's a real credential, not a stray
     /// word after "Bearer").
     BearerToken,
+    /// The password inside a `scheme://user:password@host` connection string.
+    ConnectionStringPassword,
+    /// A secret-named URL query parameter's value (`?token=...`).
+    UrlQuerySecret,
+    /// A long quoted literal assigned to a credential-named identifier.
+    HardcodedCredential,
 }
 
 impl SecretKind {
@@ -75,20 +87,58 @@ impl SecretKind {
     pub fn label(self) -> &'static str {
         match self {
             SecretKind::StripeKey => "stripe_key",
+            SecretKind::StripeWebhookSecret => "stripe_webhook_secret",
+            SecretKind::SupabaseKey => "supabase_key",
+            SecretKind::JwtToken => "jwt_token",
             SecretKind::PemPrivateKey => "pem_private_key",
             SecretKind::AwsAccessKey => "aws_access_key",
             SecretKind::GitHubToken => "github_token",
+            SecretKind::SlackToken => "slack_token",
+            SecretKind::GoogleApiKey => "google_api_key",
+            SecretKind::AnthropicKey => "anthropic_key",
             SecretKind::AzureStorageConnectionString => "azure_storage_connection_string",
             SecretKind::OpenAiKey => "openai_key",
             SecretKind::BearerToken => "bearer_token",
+            SecretKind::ConnectionStringPassword => "connection_string_password",
+            SecretKind::UrlQuerySecret => "url_query_secret",
+            SecretKind::HardcodedCredential => "hardcoded_credential",
+        }
+    }
+}
+
+impl From<SecretShape> for SecretKind {
+    fn from(shape: SecretShape) -> Self {
+        match shape {
+            SecretShape::SupabaseSecretKey | SecretShape::SupabaseServiceRoleJwt => {
+                SecretKind::SupabaseKey
+            }
+            SecretShape::OpaqueJwt => SecretKind::JwtToken,
+            SecretShape::StripeLiveSecretKey | SecretShape::StripeTestSecretKey => {
+                SecretKind::StripeKey
+            }
+            SecretShape::StripeWebhookSecret => SecretKind::StripeWebhookSecret,
+            SecretShape::AwsAccessKeyId => SecretKind::AwsAccessKey,
+            SecretShape::GitHubToken => SecretKind::GitHubToken,
+            SecretShape::SlackToken => SecretKind::SlackToken,
+            SecretShape::GoogleApiKey => SecretKind::GoogleApiKey,
+            SecretShape::AnthropicKey => SecretKind::AnthropicKey,
+            SecretShape::OpenAiKey => SecretKind::OpenAiKey,
+            SecretShape::PemPrivateKey => SecretKind::PemPrivateKey,
+            SecretShape::NamedSecretLiteral => SecretKind::HardcodedCredential,
+            SecretShape::BearerToken => SecretKind::BearerToken,
+            SecretShape::ConnectionStringPassword => SecretKind::ConnectionStringPassword,
+            SecretShape::AzureStorageConnectionString => SecretKind::AzureStorageConnectionString,
+            SecretShape::SecretInUrlQuery => SecretKind::UrlQuerySecret,
         }
     }
 }
 
 // ─── detect_secrets ─────────────────────────────────────────────────────────────
 
-/// One high-confidence secret match found by [`detect_secrets`]: `text[start..end]`
-/// is the matched substring, `kind` says which pattern matched.
+/// One secret match found by [`detect_secrets`]: `text[start..end]` is the span
+/// [`scrub`] replaces (the secret VALUE: for a connection string only the password, for a
+/// `Bearer` header only the token; a PEM block is replaced whole, header to footer), `kind`
+/// says which shape matched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretMatch {
     pub start: usize,
@@ -96,111 +146,33 @@ pub struct SecretMatch {
     pub kind: SecretKind,
 }
 
-macro_rules! cached_regex {
-    ($name:ident, $pattern:expr) => {
-        fn $name() -> &'static Regex {
-            static RE: OnceLock<Regex> = OnceLock::new();
-            RE.get_or_init(|| {
-                Regex::new($pattern).expect(concat!(stringify!($name), " must compile"))
-            })
-        }
-    };
+/// Whether a shared-detector match is something the chat scrubber removes: a secret, or a bare
+/// PEM header (a truncated paste still carries the header and the user is about to paste the body).
+fn is_scrubbable(m: &camerata_secrets::SecretMatch) -> bool {
+    m.is_secret() || matches!(m.twin, Some(Twin::NoKeyMaterial))
 }
 
-// Stripe secret/restricted keys: `sk_live_`, `sk_test_`, `rk_live_`, followed by a
-// long opaque run (real Stripe keys are 24-99+ chars; 10+ is a generous precision
-// floor that still rejects a bare `sk_live_` with nothing after it).
-cached_regex!(
-    stripe_key_regex,
-    r"(?:sk_live_|sk_test_|rk_live_)[A-Za-z0-9]{10,}"
-);
-
-// PEM / armored private-key block. Matches the BEGIN header alone (a truncated
-// paste still carries the header), and — when an END footer follows within a
-// bounded window (4000 chars comfortably covers an RSA/EC key body) — the whole
-// block, so `scrub` removes the actual key material too, not just the header
-// line. Mirrors `camerata_gateway::sec_private_key_regex`'s header alternation.
-cached_regex!(
-    pem_private_key_regex,
-    r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?:\s+BLOCK)?-----(?:[\s\S]{0,4000}?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?:\s+BLOCK)?-----)?"
-);
-
-// AWS access key ID: 4-letter prefix + 16 uppercase alphanumeric chars.
-cached_regex!(aws_access_key_regex, r"AKIA[0-9A-Z]{16}");
-
-// GitHub personal access token / fine-grained token.
-cached_regex!(
-    github_token_regex,
-    r"(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"
-);
-
-// Azure Storage connection string: the `DefaultEndpointsProtocol=` clause,
-// followed (anywhere within a bounded same-ish-line window) by `AccountKey=` and
-// its base64-shaped value. The bounded, non-greedy middle (`[^\n]{0,300}?`) lets
-// an `AccountName=...;` segment sit in between without requiring a fixed shape,
-// while staying on one line (real connection strings are single-line) and
-// avoiding a runaway match across unrelated text.
-cached_regex!(
-    azure_storage_conn_regex,
-    r"DefaultEndpointsProtocol=https?;[^\n]{0,300}?AccountKey=[A-Za-z0-9+/=]{20,}"
-);
-
-// OpenAI API key: `sk-` + a long alphanumeric run (no underscore/hyphen inside the
-// class, so it does not collide with Stripe's `sk_live_`/`sk_test_` underscore
-// prefix, and a hyphenated non-key word like `sk-ant-...` breaks the required
-// run early and is not matched).
-cached_regex!(openai_key_regex, r"sk-[A-Za-z0-9]{20,}");
-
-// Generic `Bearer <token>` in an obvious auth context: the literal word `Bearer`
-// (case-insensitive), then a token-shaped run of 20+ chars (alnum plus the
-// separators a JWT/opaque token commonly uses). The 20+ length floor is the
-// precision guard — "Bearer of good news" has no run anywhere near that long.
-cached_regex!(bearer_token_regex, r"(?i:bearer)\s+[A-Za-z0-9\-_.]{20,}");
-
-/// Find every high-confidence secret in `text`, in left-to-right order.
-///
-/// The generic [`SecretKind::BearerToken`] pattern is the LEAST specific of the
-/// seven and only contributes a match when it does not overlap a match a more
-/// specific pattern already found (so `Authorization: Bearer ghp_...` is reported
-/// once, as [`SecretKind::GitHubToken`], not twice).
+/// Find every secret in `text`, in left-to-right order. Safe twins (placeholders, the public
+/// anon key, Stripe's published documentation key) are not secrets and are left readable.
 pub fn detect_secrets(text: &str) -> Vec<SecretMatch> {
-    let mut matches: Vec<SecretMatch> = Vec::new();
-
-    for (kind, re) in [
-        (SecretKind::StripeKey, stripe_key_regex()),
-        (SecretKind::PemPrivateKey, pem_private_key_regex()),
-        (SecretKind::AwsAccessKey, aws_access_key_regex()),
-        (SecretKind::GitHubToken, github_token_regex()),
-        (
-            SecretKind::AzureStorageConnectionString,
-            azure_storage_conn_regex(),
-        ),
-        (SecretKind::OpenAiKey, openai_key_regex()),
-    ] {
-        for m in re.find_iter(text) {
-            matches.push(SecretMatch {
-                start: m.start(),
-                end: m.end(),
-                kind,
-            });
-        }
-    }
-
-    for m in bearer_token_regex().find_iter(text) {
-        let overlaps_more_specific = matches
-            .iter()
-            .any(|existing| m.start() < existing.end && existing.start < m.end());
-        if !overlaps_more_specific {
-            matches.push(SecretMatch {
-                start: m.start(),
-                end: m.end(),
-                kind: SecretKind::BearerToken,
-            });
-        }
-    }
-
-    matches.sort_by_key(|m| m.start);
-    matches
+    camerata_secrets::detect_all(text)
+        .into_iter()
+        .filter(is_scrubbable)
+        .map(|m| {
+            // A PEM block is scrubbed whole (header, body and footer), as before; every other
+            // shape replaces just its value.
+            let span = if m.shape == SecretShape::PemPrivateKey {
+                m.start..m.end
+            } else {
+                m.value.clone()
+            };
+            SecretMatch {
+                start: span.start,
+                end: span.end,
+                kind: m.shape.into(),
+            }
+        })
+        .collect()
 }
 
 // ─── scrub ──────────────────────────────────────────────────────────────────────
@@ -219,8 +191,8 @@ pub struct ExtractedSecret {
     pub kind: SecretKind,
 }
 
-/// The result of [`scrub`]: `text` with every high-confidence secret replaced by a
-/// stable placeholder, plus the extracted values.
+/// The result of [`scrub`]: `text` with every secret replaced by a stable
+/// placeholder, plus the extracted values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScrubResult {
     pub scrubbed: String,
@@ -232,7 +204,7 @@ pub struct ScrubResult {
 /// raw values so a caller can store them in a vault by name rather than just
 /// discarding them.
 ///
-/// Idempotent: a placeholder token itself matches none of the patterns above, so
+/// Idempotent: a placeholder token itself matches none of the patterns, so
 /// scrubbing already-scrubbed text is a no-op (`scrub(&scrub(text).scrubbed)`
 /// yields the same text back with an empty `extracted`).
 pub fn scrub(text: &str) -> ScrubResult {
@@ -285,8 +257,20 @@ mod tests {
     // de-literalized construction is the only way to keep the detector's own tests
     // from tripping them. `prefix` is e.g. "sk_live" (no trailing `_<body>`, so the
     // literal fragment is itself not secret-shaped); the `_` + body are appended here.
+    //
+    // The body comes from the shared fixtures: it must NOT be a placeholder word (a body
+    // containing `EXAMPLE` is a safe twin the detector deliberately leaves readable).
     fn stripe(prefix: &str) -> String {
-        format!("{prefix}_EXAMPLE0123456789ABCDEF")
+        format!(
+            "{prefix}_{}",
+            camerata_secrets::fixtures::body(28, ALNUM, 41)
+        )
+    }
+
+    const ALNUM: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+    fn fixture(shape: camerata_secrets::SecretShape) -> String {
+        camerata_secrets::fixtures::planted(shape).value
     }
 
     #[test]
@@ -323,20 +307,21 @@ mod tests {
 
     #[test]
     fn detects_aws_access_key() {
-        let sample = "aws_access_key_id = AKIAIOSFODNN7EXAMPLE";
-        let matches = detect_secrets(sample);
+        let key = fixture(camerata_secrets::SecretShape::AwsAccessKeyId);
+        let sample = format!("aws_access_key_id = {key}");
+        let matches = detect_secrets(&sample);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].kind, SecretKind::AwsAccessKey);
-        assert_eq!(
-            &sample[matches[0].start..matches[0].end],
-            "AKIAIOSFODNN7EXAMPLE"
-        );
+        assert_eq!(&sample[matches[0].start..matches[0].end], key);
     }
 
     #[test]
     fn detects_github_personal_access_token_and_fine_grained_token() {
-        let ghp = "token: ghp_16C7e42F292c6912E7710c838347Ae178B4a";
-        let matches = detect_secrets(ghp);
+        let ghp = format!(
+            "token: {}",
+            fixture(camerata_secrets::SecretShape::GitHubToken)
+        );
+        let matches = detect_secrets(&ghp);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].kind, SecretKind::GitHubToken);
 
@@ -352,9 +337,10 @@ mod tests {
         let matches = detect_secrets(sample);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].kind, SecretKind::AzureStorageConnectionString);
+        // Only the account KEY is replaced; the protocol and account name stay readable.
         let matched = &sample[matches[0].start..matches[0].end];
-        assert!(matched.starts_with("DefaultEndpointsProtocol=https;"));
-        assert!(matched.contains("AccountKey="));
+        assert!(matched.starts_with("Eby8vdM02xNO"));
+        assert!(sample[..matches[0].start].ends_with("AccountKey="));
     }
 
     #[test]
@@ -367,16 +353,31 @@ mod tests {
 
     #[test]
     fn detects_generic_bearer_token_in_auth_context() {
-        let sample = "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturepart";
-        let matches = detect_secrets(sample);
+        let token = fixture(camerata_secrets::SecretShape::BearerToken);
+        let sample = format!("Authorization: Bearer {token}");
+        let matches = detect_secrets(&sample);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].kind, SecretKind::BearerToken);
+        // Only the token is replaced, not the word `Bearer`.
+        assert_eq!(&sample[matches[0].start..matches[0].end], token);
+    }
+
+    #[test]
+    fn a_bearer_jwt_is_reported_once_as_the_jwt() {
+        let jwt = camerata_secrets::fixtures::jwt(None);
+        let sample = format!("Authorization: Bearer {jwt}");
+        let matches = detect_secrets(&sample);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].kind, SecretKind::JwtToken);
     }
 
     #[test]
     fn bearer_wrapping_a_specific_token_is_reported_once_as_the_specific_kind() {
-        let sample = "Authorization: Bearer ghp_16C7e42F292c6912E7710c838347Ae178B4a";
-        let matches = detect_secrets(sample);
+        let sample = format!(
+            "Authorization: Bearer {}",
+            fixture(camerata_secrets::SecretShape::GitHubToken)
+        );
+        let matches = detect_secrets(&sample);
         assert_eq!(matches.len(), 1, "matches: {matches:?}");
         assert_eq!(matches[0].kind, SecretKind::GitHubToken);
     }
@@ -454,14 +455,14 @@ mod tests {
 
     #[test]
     fn scrub_handles_multiple_secrets_of_different_kinds() {
-        let text = "aws=AKIAIOSFODNN7EXAMPLE github=ghp_16C7e42F292c6912E7710c838347Ae178B4a";
-        let result = scrub(text);
+        let aws = fixture(camerata_secrets::SecretShape::AwsAccessKeyId);
+        let ghp = fixture(camerata_secrets::SecretShape::GitHubToken);
+        let text = format!("aws={aws} github={ghp}");
+        let result = scrub(&text);
 
         assert_eq!(result.extracted.len(), 2);
-        assert!(!result.scrubbed.contains("AKIAIOSFODNN7EXAMPLE"));
-        assert!(!result
-            .scrubbed
-            .contains("ghp_16C7e42F292c6912E7710c838347Ae178B4a"));
+        assert!(!result.scrubbed.contains(&aws));
+        assert!(!result.scrubbed.contains(&ghp));
         assert!(result.scrubbed.contains("{{SECRET:aws_access_key_1}}"));
         assert!(result.scrubbed.contains("{{SECRET:github_token_1}}"));
     }
@@ -505,6 +506,58 @@ mod tests {
             twice.extracted.is_empty(),
             "re-scrubbing already-placeholdered text must find nothing new"
         );
+    }
+
+    // ── the shared detector's wider shapes (docs/design/2026-10-23) ─────────
+
+    #[test]
+    fn scrub_covers_the_shapes_the_old_seven_regexes_lacked() {
+        use camerata_secrets::fixtures::planted;
+        use camerata_secrets::SecretShape;
+        for (shape, kind) in [
+            (SecretShape::SupabaseSecretKey, SecretKind::SupabaseKey),
+            (SecretShape::SupabaseServiceRoleJwt, SecretKind::SupabaseKey),
+            (SecretShape::SlackToken, SecretKind::SlackToken),
+            (SecretShape::GoogleApiKey, SecretKind::GoogleApiKey),
+            (SecretShape::AnthropicKey, SecretKind::AnthropicKey),
+            (
+                SecretShape::StripeWebhookSecret,
+                SecretKind::StripeWebhookSecret,
+            ),
+            (
+                SecretShape::ConnectionStringPassword,
+                SecretKind::ConnectionStringPassword,
+            ),
+            (SecretShape::SecretInUrlQuery, SecretKind::UrlQuerySecret),
+            (
+                SecretShape::NamedSecretLiteral,
+                SecretKind::HardcodedCredential,
+            ),
+        ] {
+            let p = planted(shape);
+            let result = scrub(&p.text);
+            assert_eq!(result.extracted.len(), 1, "{shape:?}");
+            assert_eq!(result.extracted[0].kind, kind, "{shape:?}");
+            assert_eq!(result.extracted[0].value, p.value, "{shape:?}");
+            assert!(!result.scrubbed.contains(&p.value), "{shape:?}");
+        }
+    }
+
+    #[test]
+    fn scrub_replaces_only_the_value_of_a_context_shape() {
+        use camerata_secrets::fixtures::planted;
+        use camerata_secrets::SecretShape;
+        let p = planted(SecretShape::ConnectionStringPassword);
+        let result = scrub(&p.text);
+        assert!(result
+            .scrubbed
+            .contains("postgres://postgres:{{SECRET:connection_string_password_1}}@db."));
+    }
+
+    #[test]
+    fn scrub_leaves_a_placeholder_alone() {
+        let text = "SUPABASE_KEY=sb_secret_your_key_here and AKIAIOSFODNN7EXAMPLE";
+        assert_eq!(scrub(text).scrubbed, text);
     }
 
     // ── SecretKind::label ────────────────────────────────────────────────────
