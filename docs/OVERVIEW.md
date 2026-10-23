@@ -26,6 +26,8 @@ Both rest on the **rule corpus** (~423 rules) and **deterministic gates**.
 CONTRACTS / CORE
   api-types     the pure serde wire contract (FindingKind, Ownership, KindOnWire, …) under everything
   core          shared primitives (RuleId, …)
+  secrets       leaf crate: the ONE secret-shape detector + redactor (`prefix…tail (N chars)`), shared by
+                the gateway SEC arms, the scan floor, the chat scrubber and the export release gate
   app-core      framework-agnostic application core (projects, readiness)
 
 THE CORPUS + ITS ENFORCEMENT
@@ -55,7 +57,8 @@ THE AGENT / GOVERNANCE SIDE
 
 THE UI + CLI
   ui, ui-core   the Dioxus "Enterprise Cockpit" desktop app + its framework-agnostic core
-  cli           `camerata` - headless inspect/export, demos, `corpus check/confirm/lock`, integrity-gate
+  cli           `camerata` - headless inspect/export, demos, `corpus check/confirm/lock`, integrity-gate,
+                release-gate (the export secret/consistency gate over any product zip)
 ```
 
 ## The inspection pipeline (end to end)

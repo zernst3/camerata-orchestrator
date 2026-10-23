@@ -137,14 +137,21 @@ pub async fn lookup(
         return FindingContextOutcome::LineGone;
     };
 
-    let lines = slice_lines(&source, block.start_line, block.end_line);
+    // The block goes to the operator's screen (and screen shares), so it is redacted like every
+    // other surface that shows client code: the whole block at once (a multi-line key body is
+    // only recognisable as a block), then re-split. The `\n` count is preserved, so line
+    // numbers hold.
+    let lines = redact_block(&slice_lines(&source, block.start_line, block.end_line));
     let matches_snippet = match expect.map(str::trim).filter(|e| !e.is_empty()) {
         None => true, // nothing to compare against — don't flag stale
         Some(exp) => source
             .lines()
             .nth(line.saturating_sub(1))
             .map(|actual| {
-                let actual = actual.trim();
+                // `expect` is the STORED snippet, which was redacted at construction, so the
+                // current line is compared in its redacted form.
+                let actual = camerata_secrets::redact_str(actual.trim());
+                let actual = actual.as_ref();
                 actual.contains(exp) || exp.contains(actual)
             })
             .unwrap_or(false),
@@ -158,6 +165,15 @@ pub async fn lookup(
         kind: block.kind.label(),
         language: language_label(rel_path),
         matches_snippet,
+    }
+}
+
+/// Redact a block of lines as one text, returning the same number of lines.
+fn redact_block(lines: &[String]) -> Vec<String> {
+    let joined = lines.join("\n");
+    match camerata_secrets::redact_str(&joined) {
+        std::borrow::Cow::Borrowed(_) => lines.to_vec(),
+        std::borrow::Cow::Owned(redacted) => redacted.split('\n').map(str::to_string).collect(),
     }
 }
 

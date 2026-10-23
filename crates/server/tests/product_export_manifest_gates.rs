@@ -3,6 +3,10 @@
 //! REAL product ZIP assembly (`product_export_readme` + `build_product_zip`), the single
 //! assembly point both `export_product` (HTTP) and `camerata inspect --export` route through.
 //!
+//! The comparison logic is PRODUCTION code (`camerata_server::release_gate`: `verify_manifest`,
+//! `verify_readme_provenance`), the same functions the export release gate runs over every
+//! package; these tests call them, so the test and the runtime check cannot drift.
+//!
 //! - **Gate 6, the corruption clause.** The coverage clause ("every `files[]` sha256 equals the
 //!   actual hash; `files[]` covers every member but `manifest.json`") is pinned in
 //!   `camerata_server`'s own unit tests. What it cannot show is that the check is capable of
@@ -22,9 +26,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 
 use camerata_server::onboard::{AuditedRef, Finding, LanguageVolume, ScanProvenance, ScanReport};
+use camerata_server::release_gate::{
+    parse_readme_provenance, read_zip_entries, verify_manifest, verify_readme_provenance,
+};
 use camerata_server::report_export::{build_report_json, AuditReportJson, ReportOptions};
-use camerata_server::{build_product_zip, product_export_readme, ManifestProvenance};
-use sha2::{Digest, Sha256};
+use camerata_server::{
+    assemble_unreleased_zip as build_product_zip, product_export_readme, ManifestProvenance,
+};
 
 const STEM: &str = "acme-inspection";
 
@@ -160,38 +168,17 @@ fn rezip(entries: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
     writer.finish().unwrap().into_inner()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-/// The package verifier a recipient would run: every `files[]` entry's claimed sha256 against
-/// the archive member's actual hash. Returns the paths that FAIL, covering all three ways it can:
-/// a hash mismatch, a listed file that is absent, and a member the manifest does not list.
+/// The package verifier a recipient would run (`release_gate::verify_manifest`): the paths that
+/// FAIL, covering a hash mismatch, a listed file that is absent, and a member the manifest does
+/// not list.
 fn manifest_failures(zip_bytes: &[u8]) -> Vec<String> {
-    let entries = read_entries(zip_bytes);
-    let manifest: serde_json::Value =
-        serde_json::from_slice(entries.get("manifest.json").expect("manifest.json present"))
-            .expect("manifest.json parses");
-    let mut failures = Vec::new();
-    let mut listed = Vec::new();
-    for file in manifest["files"].as_array().unwrap() {
-        let path = file["path"].as_str().unwrap().to_string();
-        let claimed = file["sha256"].as_str().unwrap();
-        match entries.get(&path) {
-            Some(bytes) if sha256_hex(bytes) == claimed => {}
-            _ => failures.push(path.clone()),
-        }
-        listed.push(path);
-    }
-    for name in entries.keys() {
-        if name != "manifest.json" && !listed.contains(name) {
-            failures.push(name.clone());
-        }
-    }
+    let entries = read_zip_entries(zip_bytes).expect("valid zip");
+    let mut failures: Vec<String> = verify_manifest(&entries)
+        .into_iter()
+        .map(|problem| problem.file)
+        .collect();
     failures.sort();
+    failures.dedup();
     failures
 }
 
@@ -250,46 +237,6 @@ fn gate6_a_file_swapped_without_updating_the_manifest_is_caught() {
 }
 
 // ── Gate 7 ────────────────────────────────────────────────────────────────────────────────
-
-/// What the README prints for each provenance line, parsed back out of the text. Parsed by
-/// label so this test fails if the README omits, renames or mangles a line, and does not depend
-/// on how `ManifestProvenance` renders it.
-#[derive(Debug, Default, PartialEq)]
-struct ReadmeProvenance {
-    repos: Option<String>,
-    generated: Option<String>,
-    /// repo name -> (commit, "uncommitted changes" note present), from `Commit (repo): sha`.
-    commits: BTreeMap<String, (String, bool)>,
-    engine_version: Option<String>,
-    corpus_version: Option<String>,
-    rules_last_reviewed: Option<String>,
-}
-
-fn parse_readme_provenance(readme: &str) -> ReadmeProvenance {
-    let mut p = ReadmeProvenance::default();
-    for line in readme.lines() {
-        if let Some(v) = line.strip_prefix("Repos inspected: ") {
-            p.repos = Some(v.to_string());
-        } else if let Some(v) = line.strip_prefix("Generated: ") {
-            p.generated = Some(v.to_string());
-        } else if let Some(v) = line.strip_prefix("Commit (") {
-            let (repo, rest) = v.split_once("): ").expect("a `Commit (repo): sha` line");
-            let note = " (the working tree had uncommitted changes)";
-            let (sha, dirty) = match rest.strip_suffix(note) {
-                Some(sha) => (sha, true),
-                None => (rest, false),
-            };
-            p.commits.insert(repo.to_string(), (sha.to_string(), dirty));
-        } else if let Some(v) = line.strip_prefix("Engine version: ") {
-            p.engine_version = Some(v.to_string());
-        } else if let Some(v) = line.strip_prefix("Corpus version: ") {
-            p.corpus_version = Some(v.to_string());
-        } else if let Some(v) = line.strip_prefix("Rules last reviewed on ") {
-            p.rules_last_reviewed = Some(v.to_string());
-        }
-    }
-    p
-}
 
 fn readme_and_manifest(zip_bytes: &[u8]) -> (String, serde_json::Value) {
     let entries = read_entries(zip_bytes);
@@ -376,39 +323,35 @@ fn gate7_readme_provenance_lines_equal_the_manifest_provenance() {
 /// The README must carry EVERY non-null value the manifest's `inspection` block carries, found
 /// generically rather than by a hand-kept field list. A field added to the manifest but not to
 /// the README (the drift a hand-maintained pair would eventually produce) fails here without
-/// this test being edited.
+/// this test being edited. The comparison is `release_gate::verify_readme_provenance`, the
+/// function the release gate runs on every package.
 #[test]
 fn gate7_every_value_in_the_manifest_inspection_block_appears_in_the_readme() {
     let (readme, manifest) = readme_and_manifest(&build_zip(&full_provenance()));
-    let inspection = manifest["inspection"].as_object().unwrap();
-    assert!(inspection.len() >= 4, "{inspection:?}");
-    for (key, value) in inspection {
-        let rendered: Vec<String> = match value {
-            serde_json::Value::Null => continue,
-            serde_json::Value::String(s) => vec![s.clone()],
-            // `repos`: each entry is `{ name, commit, dirty }`; name and commit are printed.
-            serde_json::Value::Array(items) => items
-                .iter()
-                .flat_map(|i| {
-                    let repo = i.as_object().expect("repos are objects");
-                    ["name", "commit"]
-                        .into_iter()
-                        .filter_map(|k| repo[k].as_str().map(str::to_string))
-                        .collect::<Vec<_>>()
-                })
-                .collect(),
-            other => panic!("inspection.{key} has an unrendered shape: {other}"),
-        };
-        for text in rendered {
-            assert!(
-                readme.contains(&text),
-                "manifest inspection.{key} = {text:?} is not in the README:\n{readme}"
-            );
-        }
-    }
+    assert!(
+        manifest["inspection"].as_object().unwrap().len() >= 4,
+        "{manifest}"
+    );
+    assert_eq!(
+        verify_readme_provenance(&readme, &manifest),
+        Vec::new(),
+        "README and manifest disagree:\n{readme}"
+    );
     assert!(
         readme.contains(manifest["generated_at"].as_str().unwrap()),
         "generated_at must appear in the README too:\n{readme}"
+    );
+
+    // The check must be able to FAIL: a README that drops a value the manifest carries is
+    // flagged, found generically.
+    let without_commit: String = readme
+        .lines()
+        .filter(|l| !l.starts_with("Commit ("))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !verify_readme_provenance(&without_commit, &manifest).is_empty(),
+        "a README missing the commit lines must not verify"
     );
 }
 

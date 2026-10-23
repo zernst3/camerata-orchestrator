@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use camerata::acceptance::{run_acceptance, AcceptanceResult};
 use camerata::inspect_cmd::{self, InspectArgs};
 use camerata::integrity_gate_cmd::{self, GateProfile, IntegrityGateArgs, EXIT_GATE_UNAVAILABLE};
+use camerata::release_gate_cmd::{self, ReleaseGateArgs};
 use camerata_client::{Client, ClientError};
 use camerata_core::Decision;
 use camerata_server::llm::ProjectBackend;
@@ -176,6 +177,17 @@ enum Command {
         profile: GateProfile,
     },
 
+    /// The EXPORT RELEASE GATE over an existing product zip: secrets in every file and workbook
+    /// cell, the dataset set, CSV against JSON, manifest hashes, README against manifest. The
+    /// same checks `inspect --export` runs before it writes a zip. Exit 0 clean, 3 blocked,
+    /// 2 the gate could not run. Never prints a secret value (redacted forms only). Build with
+    /// `--features pdf-text` to check the PDF's rendered text too. See
+    /// `camerata::release_gate_cmd`'s module doc comment.
+    ReleaseGate {
+        /// The product-export zip to audit.
+        zip: PathBuf,
+    },
+
     /// Corpus staleness watermark (see docs/design/2026-10-20_corpus-staleness-check.md).
     Corpus {
         #[command(subcommand)]
@@ -219,8 +231,15 @@ fn parse_backend(s: &str) -> Result<ProjectBackend, String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Record the operator's redaction switch BEFORE the .env loader runs: the .env is resolved
+    // against the working directory, which may be a client repository, and must not be able to
+    // send that repo's code to a model unredacted.
+    camerata_server::feature_flags::pin_operator_redaction_setting();
     // Auto-load the gitignored .env (so the live commands pick up the token).
     let _ = dotenvy::dotenv();
+    if let Some(warning) = camerata_server::feature_flags::redaction_disabled_warning() {
+        eprintln!("{warning}");
+    }
     let cli = Cli::parse();
     let bff_url = cli.bff_url;
 
@@ -303,6 +322,7 @@ async fn main() -> anyhow::Result<()> {
         Command::IntegrityGate { ledger, profile } => {
             run_integrity_gate_cmd(IntegrityGateArgs { ledger, profile })
         }
+        Command::ReleaseGate { zip } => run_release_gate_cmd(&ReleaseGateArgs { zip }),
         Command::Corpus { action } => match action {
             CorpusAction::Check => camerata::corpus_cmd::run_corpus_check().await,
             CorpusAction::Confirm { domain, date } => {
@@ -310,6 +330,21 @@ async fn main() -> anyhow::Result<()> {
             }
             CorpusAction::Lock => camerata::corpus_cmd::run_corpus_lock().await,
         },
+    }
+}
+
+/// `release-gate`'s handler: the verdict to stdout (a refusal is the gate's own block, redacted),
+/// exit 0 clean / 3 blocked / 2 the gate could not run.
+fn run_release_gate_cmd(args: &ReleaseGateArgs) -> anyhow::Result<()> {
+    match release_gate_cmd::run_release_gate(args) {
+        Ok(verdict) => {
+            println!("{}", release_gate_cmd::format_verdict(&verdict));
+            std::process::exit(verdict.exit_code());
+        }
+        Err(e) => {
+            eprintln!("camerata release-gate: {e}");
+            std::process::exit(release_gate_cmd::EXIT_GATE_UNAVAILABLE);
+        }
     }
 }
 
@@ -340,8 +375,10 @@ async fn run_inspect_cmd(args: InspectArgs) -> anyhow::Result<()> {
             Ok(())
         }
         Err(e) => {
+            // A refused export prints the gate's own block (which never carries a secret value)
+            // and exits 3; any other failure exits 1.
             eprintln!("camerata inspect: {e}");
-            std::process::exit(1);
+            std::process::exit(e.exit_code());
         }
     }
 }

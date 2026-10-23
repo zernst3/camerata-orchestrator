@@ -6,9 +6,9 @@
 //! module doc comment).
 //!
 //! `server_path_export` below is NOT a shortcut that calls `build_product_export_bytes` a
-//! second time — it independently re-states `export_product`'s own handler body (same
-//! sequence of `report_export`/`xlsx_export`/zip-assembly calls, written out here so a future
-//! edit to either side that silently diverges from the other fails this test).
+//! second time — it calls the pair `export_product`'s own handler body calls
+//! (`release_gate::build_product_package` then `release_gate::release`), so a future edit that
+//! makes the CLI wrapper do anything of its own fails this test.
 //!
 //! No live model call: the `ScanReport` here is a hand-built fixture (the same style as
 //! `report_export.rs`'s own unit tests and `crates/server/tests/generate_sample_report.rs`),
@@ -57,7 +57,6 @@ use std::collections::{BTreeMap, HashMap};
 use camerata::inspect_cmd::build_product_export_bytes;
 use camerata_server::onboard::{AuditedRef, Finding, ScanProvenance, ScanReport};
 use camerata_server::report_export::{self, ReportOptions};
-use camerata_server::xlsx_export;
 
 fn typst_on_path() -> bool {
     std::process::Command::new("typst")
@@ -132,8 +131,8 @@ fn fixture_report() -> ScanReport {
     report
 }
 
-/// Independently re-states `export_product`'s HTTP handler body (`crates/server/src/lib.rs`):
-/// the same `report_export`/`xlsx_export`/zip-assembly call sequence, over the SAME report +
+/// The server path: `export_product`'s HTTP handler body (`crates/server/src/lib.rs`) is
+/// `release_gate::build_product_package` then `release_gate::release`, over the SAME report +
 /// `None` corpus + default options `build_product_export_bytes` uses. Deliberately NOT a call
 /// to `build_product_export_bytes` itself — see this file's module doc comment.
 async fn server_path_export(report: &ScanReport) -> (String, Vec<u8>) {
@@ -141,51 +140,26 @@ async fn server_path_export(report: &ScanReport) -> (String, Vec<u8>) {
     let mut options = ReportOptions::default();
     options.apply_env_defaults();
 
-    // Pass-1 W1 seal fix: `report_export::build_report_json`/`xlsx_export::build_workbook`/
-    // `build_findings_export` now take `&SealedReport` — seal the fixture here (a cheap clone;
-    // this hand-built test fixture has no row-adding passes of its own left to run).
+    // Pass-1 W1 seal fix: the exporters take `&SealedReport` — seal the fixture here (a cheap
+    // clone; this hand-built test fixture has no row-adding passes of its own left to run).
     let sealed = report.clone().seal();
 
-    let json = report_export::build_report_json(&sealed, &dispositions, None, &options);
-    let pdf_bytes = report_export::compile_pdf(&json)
-        .await
-        .expect("compile_pdf must succeed with typst on PATH");
-    let xlsx_bytes = xlsx_export::build_workbook(&sealed, &dispositions, None, &options)
-        .expect("build_workbook must succeed");
-    let findings_export = xlsx_export::build_findings_export(
+    // The server's `export_product` handler assembles through `release_gate::
+    // build_product_package` and obtains its zip bytes through `release_gate::release`; this
+    // calls that same pair directly rather than through `build_product_export_bytes`, so the
+    // test still proves the CLI wrapper adds nothing of its own.
+    let package = camerata_server::release_gate::build_product_package(
         &sealed,
         &dispositions,
         None,
-        &json,
-        &options.chosen_options,
-    );
-    let findings_json_bytes =
-        serde_json::to_vec_pretty(&findings_export).expect("findings.json must serialize");
-
-    let mut extra_files: Vec<(String, Vec<u8>)> =
-        xlsx_export::build_csv_exports(&sealed, &dispositions, None, &options)
-            .expect("csv exports must build");
-    extra_files.extend(
-        xlsx_export::build_json_exports(&sealed, &dispositions, None, &options)
-            .expect("json exports must build"),
-    );
-    let provenance =
-        camerata_server::client_provenance::export_provenance(&sealed, &json.cover, None);
-
-    let stem = camerata_server::report_filename_stem(report);
-    let readme = camerata_server::product_export_readme(&stem, &provenance);
-    let zip_bytes = camerata_server::build_product_zip(
-        &stem,
-        &pdf_bytes,
-        &xlsx_bytes,
-        &findings_json_bytes,
-        &readme,
-        &extra_files,
-        &provenance,
+        &options,
     )
-    .expect("build_product_zip must succeed");
+    .await
+    .expect("the package must assemble with typst on PATH");
+    let released = camerata_server::release_gate::release(package)
+        .expect("the release gate must pass a clean fixture");
 
-    (stem, zip_bytes)
+    (released.stem, released.bytes)
 }
 
 /// The ONE known wall-clock literal `xlsx_export::build_workbook` writes into a worksheet

@@ -242,7 +242,7 @@ pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Res
                     format!("{advisory_id}{aliases_str}: {title} (affects {coord}){fixed_clause}")
                 };
 
-                out.push(Finding {
+                let mut finding = Finding {
                     could_be_intentional: false,
                     repo: repo.to_string(),
                     path: lockfile_rel.clone(),
@@ -286,7 +286,9 @@ pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Res
                         .map(|v| format!("Upgrade {pkg_name} to >= {v} (the patched version).")),
                     // Dependency findings never flow through calibration either.
                     calibration_rationale: None,
-                });
+                };
+                crate::onboard::redact::redact_finding(&mut finding);
+                out.push(finding);
             }
         }
     }

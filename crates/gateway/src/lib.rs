@@ -441,12 +441,16 @@ pub fn content_match_lines(rule_id: &str, content: &str) -> Vec<usize> {
         return lines;
     }
 
+    // The shape-driven secret rules read the shared detector (one definition of "secret-shaped"
+    // for the gate, the scan floor and the export release gate). Twins still count as rows: a
+    // committed placeholder key is worth a finding; the redactor, not the floor, keeps it readable.
+    if SHAPE_DRIVEN_SECRET_RULES.contains(&rule_id) {
+        return camerata_secrets::match_lines_for_rule(content, rule_id, true);
+    }
+
     let re = match rule_id {
-        "SEC-NO-HARDCODED-SECRETS-1" => sec_secrets_regex(),
         "SEC-NO-RAW-SQL-CONCAT-1" => sec_sql_concat_regex(),
         "ARCH-NO-SECRETS-IN-URL-1" => arch_url_secret_regex(),
-        "SEC-NO-PRIVATE-KEY-1" => sec_private_key_regex(),
-        "SEC-NO-VENDOR-TOKEN-1" => sec_vendor_token_regex(),
         "SEC-NO-DISABLED-TLS-1" => sec_disabled_tls_regex(),
         _ => return Vec::new(),
     };
@@ -919,104 +923,67 @@ fn arm_sec_no_secret_files_1(path: &str, _content: &str) -> Result<(), String> {
     }
 }
 
-// ── SEC-NO-HARDCODED-SECRETS-1 ────────────────────────────────────────────────
+// ── Shape-driven secret rules (SEC-NO-HARDCODED-SECRETS-1, SEC-NO-PRIVATE-KEY-1, ──────────
+// ── SEC-NO-VENDOR-TOKEN-1) ────────────────────────────────────────────────────────────────
+//
+// The patterns live in `camerata-secrets` (the one detector shared with the scan floor, the chat
+// scrubber and the export release gate). These arms own only the policy: test-scope waiving and
+// the denial message. A denial message names the shape and carries the REDACTED form
+// (`prefix…tail (N chars)`), never the value.
 
-/// Compiled patterns for `SEC-NO-HARDCODED-SECRETS-1`.
-///
-/// Uses `OnceLock` so the regex objects are compiled once at first use and
-/// then reused for every subsequent call (avoids per-call allocation + compile).
-///
-/// Patterns covered (all case-sensitive unless noted):
-/// - GitHub tokens:   `ghp_`, `gho_`, `ghu_`, `ghs_`, `github_pat_`
-/// - Slack tokens:    `xox[baprs]-` (xoxb-, xoxa-, xoxp-, xoxr-, xoxs-)
-/// - AWS access keys: `AKIA` followed by 16 uppercase alphanumeric chars
-/// - OpenAI / Stripe: `sk-` followed by 20+ alphanumeric chars (both use
-///   the `sk-` prefix; Stripe also uses `sk-live_`, `sk-test_`)
-/// - Google API key:  `AIza` followed by 35 alphanumeric / `_` / `-` chars
-/// - PEM private key: `-----BEGIN` ... `PRIVATE KEY-----` (covers RSA, EC, etc.)
-static SEC_SECRETS_REGEX: OnceLock<Regex> = OnceLock::new();
+/// The corpus rules whose detection is `camerata_secrets::shapes_for_rule`.
+const SHAPE_DRIVEN_SECRET_RULES: &[&str] = &[
+    "SEC-NO-HARDCODED-SECRETS-1",
+    "SEC-NO-PRIVATE-KEY-1",
+    "SEC-NO-VENDOR-TOKEN-1",
+];
 
-fn sec_secrets_regex() -> &'static Regex {
-    SEC_SECRETS_REGEX.get_or_init(|| {
-        // One alternation — first match wins; scanning the content once is
-        // cheaper than N separate regex passes.
-        // Note: Rust's regex crate strips unescaped spaces inside character
-        // classes when (?x) verbose mode is active — unlike PCRE/Python which
-        // preserve them. Use \x20 for a literal space inside [...] in (?x) mode.
-        Regex::new(
-            r"(?x)
-            # GitHub personal / oauth / user / server / refresh / fine-grained tokens.
-            # `ghr_` (refresh) was an evasion gap — a leaked refresh token is as
-            # dangerous as an access token, so it is now covered alongside the rest.
-            (gh[pours]_[A-Za-z0-9_]{10,})
-            | (github_pat_[A-Za-z0-9_]{10,})
-            # Slack tokens (bot, app, legacy, refresh, socket, AND `xoxe` rotating /
-            # `xoxc` client tokens — adversarial cases that previously slipped the
-            # original `[baprs]`-only class).
-            | (xox[baceprs]-[A-Za-z0-9\-]{10,})
-            # AWS access key IDs. `AKIA` is the long-term form; `ASIA` is the
-            # temporary STS session form and was an evasion gap — both are a 4-letter
-            # prefix + 16 uppercase-alphanumeric chars.
-            | ((?:AKIA|ASIA)[0-9A-Z]{16})
-            # OpenAI / Stripe-style secret keys (sk- prefix, 20+ chars)
-            # Stripe also uses sk-live_ and sk-test_ sub-prefixes; those
-            # start with sk- so this pattern covers them.
-            | (sk-[A-Za-z0-9]{20,})
-            # Google API keys
-            | (AIza[0-9A-Za-z_\-]{35})
-            # PEM / armored private key header. Covers RSA / EC / DSA / OPENSSH /
-            # ENCRYPTED ... PRIVATE KEY (the `[A-Z\x20]*` middle), AND the PGP variant
-            # `-----BEGIN PGP PRIVATE KEY BLOCK-----` whose tail is `KEY BLOCK-----`
-            # rather than `KEY-----` (the `(?:\x20BLOCK)?` clause). The trailing ` BLOCK`
-            # gap was an evasion: a real exported GPG private key was being allowed.
-            # \x20 = literal space: Rust regex (?x) strips bare spaces inside [...].
-            | (-----BEGIN\s[A-Z\x20]*PRIVATE\s+KEY(?:\x20BLOCK)?-----)
-            # Heuristic: a long opaque literal assigned to a SECRET-named identifier —
-            # catches provider-agnostic keys (e.g. a Finnhub key) that match no known
-            # prefix. The identifier carries key/secret/token/password/credential, then
-            # within a short window a quoted 24+ char CONTIGUOUS-alphanumeric literal.
-            # Two branches (double- vs single-quoted) because the regex crate has no
-            # backreferences; single-quoted values were an evasion gap. A trailing run of
-            # base64 padding `=` is permitted INSIDE the closing quote (`[A-Za-z0-9+_]{24,}=*`)
-            # so a base64 secret like QUJD...WXYZ= no longer slips on its `=` padding,
-            # while `=` is still excluded from the 24+ contiguous-char count.
-            # Precision guards (unchanged): the literal class excludes / and - (so a file
-            # PATH or a hyphenated secret-NAME like plaid-access-token-item-1 does not match),
-            # and 24+ chars drops short env-var names. This is a heuristic, not entropy/AST;
-            # the name-vs-value precision limit is the gitleaks/semgrep path (see BACKLOG).
-            | ((?i:[A-Za-z0-9_]*(?:key|secret|token|password|passwd|credential)[A-Za-z0-9_]*)
-               [^\n]{0,40}?
-               (?: \x22[A-Za-z0-9+_]{24,}=*\x22 | '[A-Za-z0-9+_]{24,}=*' ))
-            ",
-        )
-        .expect("SEC-NO-HARDCODED-SECRETS-1 regex must compile")
-    })
+/// The noun and redacted form of a match, for a denial message (`Stripe live secret key
+/// sk_live_…ab12 (77 chars)`). Empty form (a bare PEM header) leaves just the noun.
+fn describe_secret_match(m: &camerata_secrets::SecretMatch, content: &str) -> String {
+    let form = m.redacted_form(content);
+    if form.is_empty() {
+        m.shape.display_name().to_string()
+    } else {
+        format!("{} {}", m.shape.display_name(), form.trim())
+    }
+}
+
+/// The shared body of the three shape-driven arms: find the first listed match for `rule_id`,
+/// apply the test-scope policy, and build the denial with `message`.
+fn deny_on_secret_shape(
+    rule_id: &str,
+    path: &str,
+    content: &str,
+    message: impl FnOnce(&camerata_secrets::SecretMatch) -> String,
+) -> Result<(), String> {
+    let Some(m) = camerata_secrets::detect_for_rule(content, rule_id)
+        .into_iter()
+        .find(camerata_secrets::SecretMatch::counts_as_finding)
+    else {
+        return Ok(());
+    };
+    let match_line = content[..m.start].bytes().filter(|&b| b == b'\n').count() + 1;
+    let in_test = is_test_or_fixture_path(path)
+        || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
+    if in_test {
+        match test_scope_policy(rule_id) {
+            TestScopePolicy::Waive => return Ok(()),
+            TestScopePolicy::Downgrade => {}
+        }
+    }
+    Err(message(&m))
 }
 
 /// SEC-NO-HARDCODED-SECRETS-1: deny content containing a credential literal.
 fn arm_sec_no_hardcoded_secrets_1(path: &str, content: &str) -> Result<(), String> {
-    if let Some(m) = sec_secrets_regex().find(content) {
-        let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
-        let in_test = is_test_or_fixture_path(path)
-            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
-        if in_test {
-            match test_scope_policy("SEC-NO-HARDCODED-SECRETS-1") {
-                TestScopePolicy::Waive => return Ok(()),
-                TestScopePolicy::Downgrade => {}
-            }
-        }
-        // Redact all but the first 6 chars so the denial message is useful
-        // without echoing the full secret.
-        let matched = m.as_str();
-        let preview: String = matched.chars().take(6).collect();
-        Err(format!(
-            "SEC-NO-HARDCODED-SECRETS-1: content appears to contain a hardcoded \
-             credential (matched prefix `{preview}...`); move secrets to env vars or \
-             a secrets manager"
-        ))
-    } else {
-        Ok(())
-    }
+    deny_on_secret_shape("SEC-NO-HARDCODED-SECRETS-1", path, content, |m| {
+        format!(
+            "SEC-NO-HARDCODED-SECRETS-1: content appears to contain a hardcoded credential \
+             ({}); move secrets to env vars or a secrets manager",
+            describe_secret_match(m, content)
+        )
+    })
 }
 
 // ── SEC-NO-RAW-SQL-CONCAT-1 ──────────────────────────────────────────────────
@@ -1159,22 +1126,20 @@ fn arch_url_secret_regex() -> &'static Regex {
         // `client_secret`, `private_key`, `signature`/`sig`, `pwd`/`passwd`, and a bare
         // `key` / `apikey`. Ordered longest-first within shared stems so the engine
         // does not stop on a shorter prefix and leave a trailing `=`-less tail.
-        const SECRET_PARAM: &str = r"(?:
-            access_token | refresh_token | auth_token | client_secret | private_key
-          | api_?key | passwd | password | pwd | secret | signature | sig | token | key
-        )";
+        // The param list is shared with the redactor (`camerata_secrets::URL_SECRET_PARAMS`).
+        let secret_param = format!("(?:{})", camerata_secrets::URL_SECRET_PARAMS);
         Regex::new(&format!(
             r"(?ix)
             (?:
                 # Case A: a literal HTTP/HTTPS URL carrying a secret param.
-                https?://\S+ [?&] {SECRET_PARAM} =
+                https?://\S+ [?&] {secret_param} =
                   [^\s&]+
               |
                 # Case B: a query-string SHAPE even without a literal scheme — a `?`
                 # query start, then a secret param, e.g. a templated URL like
                 # `{{base}}?symbol={{symbol}}&token={{token}}`. Requires the `?` so it
                 # stays URL-shaped (not any stray `&token=`).
-                \? [^\s\x22]* [?&] {SECRET_PARAM} =
+                \? [^\s\x22]* [?&] {secret_param} =
             )
             "
         ))
@@ -1208,87 +1173,26 @@ fn arm_arch_no_secrets_in_url_1(path: &str, content: &str) -> Result<(), String>
 
 // ── SEC-NO-PRIVATE-KEY-1 ─────────────────────────────────────────────────────
 
-static SEC_PRIVATE_KEY_REGEX: OnceLock<Regex> = OnceLock::new();
-
-fn sec_private_key_regex() -> &'static Regex {
-    SEC_PRIVATE_KEY_REGEX.get_or_init(|| {
-        Regex::new(
-            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?:\s+BLOCK)?-----",
-        )
-        .expect("SEC-NO-PRIVATE-KEY-1 regex must compile")
-    })
-}
-
 fn arm_sec_no_private_key_1(path: &str, content: &str) -> Result<(), String> {
-    if let Some(m) = sec_private_key_regex().find(content) {
-        let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
-        let in_test = is_test_or_fixture_path(path)
-            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
-        if in_test {
-            match test_scope_policy("SEC-NO-PRIVATE-KEY-1") {
-                TestScopePolicy::Waive => return Ok(()),
-                TestScopePolicy::Downgrade => {}
-            }
-        }
-        Err(
-            "SEC-NO-PRIVATE-KEY-1: content contains a PEM private-key block; \
-             private keys must never be committed to the repo — use a secrets manager \
-             or generate ephemeral keys at test runtime"
-                .to_string(),
-        )
-    } else {
-        Ok(())
-    }
+    deny_on_secret_shape("SEC-NO-PRIVATE-KEY-1", path, content, |_| {
+        "SEC-NO-PRIVATE-KEY-1: content contains a PEM private-key block; \
+         private keys must never be committed to the repo — use a secrets manager \
+         or generate ephemeral keys at test runtime"
+            .to_string()
+    })
 }
 
 // ── SEC-NO-VENDOR-TOKEN-1 ────────────────────────────────────────────────────
 
-static SEC_VENDOR_TOKEN_REGEX: OnceLock<Regex> = OnceLock::new();
-
-fn sec_vendor_token_regex() -> &'static Regex {
-    SEC_VENDOR_TOKEN_REGEX.get_or_init(|| {
-        Regex::new(
-            r"(?x)
-            (?:AKIA|ASIA)[0-9A-Z]{16}
-            | gh[poursh]_[A-Za-z0-9_]{36}
-            | github_pat_[A-Za-z0-9_]{82}
-            | xox[baprs]-[A-Za-z0-9\-]{10,}
-            | sk_live_[A-Za-z0-9]{24,}
-            | AIza[0-9A-Za-z_\-]{35}
-            | sk-ant-[A-Za-z0-9_\-]{20,}
-            # Supabase new-format secret key: a fixed literal prefix (sb_secret_) followed by
-            # an opaque body — same near-zero-FP shape as the other vendor prefixes above (see
-            # crates/rules/principles/universal/sec-no-vendor-token-1.toml item (a)). The
-            # sibling sb_publishable_ (anon/publishable) prefix is deliberately NOT matched
-            # here — that key is designed to be public; see the same principle doc's rationale.
-            | sb_secret_[A-Za-z0-9_\-]{6,}
-            ",
-        )
-        .expect("SEC-NO-VENDOR-TOKEN-1 regex must compile")
-    })
-}
-
 fn arm_sec_no_vendor_token_1(path: &str, content: &str) -> Result<(), String> {
-    if let Some(m) = sec_vendor_token_regex().find(content) {
-        let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
-        let in_test = is_test_or_fixture_path(path)
-            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
-        if in_test {
-            match test_scope_policy("SEC-NO-VENDOR-TOKEN-1") {
-                TestScopePolicy::Waive => return Ok(()),
-                TestScopePolicy::Downgrade => {}
-            }
-        }
-        let matched = m.as_str();
-        let preview: String = matched.chars().take(8).collect();
-        Err(format!(
-            "SEC-NO-VENDOR-TOKEN-1: content contains a vendor credential token \
-             (matched `{preview}...`); tokens must live in a secrets manager or \
-             environment variables, never in source code"
-        ))
-    } else {
-        Ok(())
-    }
+    deny_on_secret_shape("SEC-NO-VENDOR-TOKEN-1", path, content, |m| {
+        format!(
+            "SEC-NO-VENDOR-TOKEN-1: content contains a vendor credential token ({}); \
+             tokens must live in a secrets manager or environment variables, never in \
+             source code",
+            describe_secret_match(m, content)
+        )
+    })
 }
 
 // ── SEC-NO-SECRET-FILE-1 ─────────────────────────────────────────────────────
@@ -1661,6 +1565,9 @@ impl GovernanceGateway for GovernedGateway {
 }
 
 // ─── tests (ORCH-NEW-PATH-TESTS-1) ───────────────────────────────────────────
+
+#[cfg(test)]
+mod secret_arm_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2618,11 +2525,13 @@ mod tests {
     }
 
     #[test]
-    fn vendor_token_ignores_stripe_test_key() {
-        // sk_test_ is excluded (not a production credential). Prefix split across
-        // concat! so the fixture isn't a contiguous literal (GitHub push protection).
+    fn vendor_token_denies_stripe_test_key() {
+        // Owner decision (2026-10-23): a real-looking test-mode secret key is redacted like a
+        // live key, so the arm denies it too (only Stripe's published documentation key is a
+        // readable twin). Prefix split across concat! so the fixture isn't a contiguous literal
+        // (GitHub push protection).
         let content = concat!("key = \"sk_te", "st_ABCDEFGHIJKLMNOPQRSTUVWX\"");
-        assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_ok());
+        assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_err());
     }
 
     #[test]

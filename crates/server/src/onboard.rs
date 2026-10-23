@@ -23,6 +23,7 @@ pub mod files;
 pub mod finding_context;
 pub mod greenfield;
 pub mod propose;
+pub(crate) mod redact;
 pub mod report;
 pub mod self_ref;
 
@@ -785,6 +786,13 @@ pub struct ScanReport {
 }
 
 impl ScanReport {
+    /// Redact every finding and every report-level string in place; returns how many secret
+    /// values had to be replaced. Zero on a healthy pipeline (every producer redacts at
+    /// construction), so a non-zero count is a missed producer. Idempotent.
+    pub(crate) fn redact_before_seal(&mut self) -> usize {
+        redact::redact_findings(&mut self.findings) + redact::redact_report_text(self)
+    }
+
     /// The connect-GitHub gate result: no scan performed.
     pub fn gated(repos: &[String]) -> Self {
         Self {
@@ -874,6 +882,18 @@ impl ScanReport {
     /// read the un-injected original) fails to compile instead of silently reintroducing the
     /// row-set divergence.
     pub fn seal(mut self) -> SealedReport {
+        // Belt and braces for secret redaction (docs/design/2026-10-23_secret-redaction-and-
+        // release-gate.md section 4.1): every producer redacts its own rows at construction, so a
+        // non-zero count here means a producer is missing `redact_finding`. Redact anyway (the
+        // row set is final and every exporter reads it), and say so loudly, never silently.
+        let missed = self.redact_before_seal();
+        if missed > 0 {
+            tracing::warn!(
+                missed,
+                "{missed} secret value(s) reached seal unredacted; a producer is missing \
+                 redact_finding (see docs/design/2026-10-23_secret-redaction-and-release-gate.md)"
+            );
+        }
         // W21: audit every row's `path` HERE, because this is the one moment "every row" is
         // a complete and stable statement, and it is upstream of all three exporters — so
         // one audit covers the PDF, the workbook and the JSON rather than needing a check

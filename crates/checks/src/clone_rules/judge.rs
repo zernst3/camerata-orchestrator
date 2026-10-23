@@ -80,10 +80,17 @@ pub struct JudgeInput {
     pub differing_strings: Vec<JudgeDisagreement>,
 }
 
+/// Redact any secret value in text that is about to be handed to a model. Idempotent, so a host
+/// that already redacted the file set (the server does) is unaffected; a host that did not
+/// (`camerata-check`, or any other caller) still never sends a credential to the judge.
+fn safe(text: &str) -> String {
+    camerata_secrets::redact_str(text).into_owned()
+}
+
 fn disagreement(d: &NamedDisagreement) -> JudgeDisagreement {
     JudgeDisagreement {
-        a: d.a.clone(),
-        b: d.b.clone(),
+        a: safe(&d.a),
+        b: safe(&d.b),
         line_a: d.line_a,
         line_b: d.line_b,
     }
@@ -159,15 +166,19 @@ fn enclosing_function(path: &str, source: &str, start: u32, end: u32) -> Option<
 }
 
 fn member_of(site: &Site, files: &[(String, String)]) -> JudgeMember {
-    let source = files
+    let raw = files
         .iter()
         .find(|(path, _)| *path == site.path)
         .map_or("", |(_, content)| content.as_str());
-    let (code, truncated) = excerpt(source, site.start_line, site.end_line);
+    // Redact the WHOLE file before excerpting: the excerpt cuts lines at a width, and a cut
+    // through a key would leave a fragment no detector can recognise. Line numbers are
+    // preserved by redaction, so the site's `start_line..end_line` still resolve.
+    let source = camerata_secrets::redact_str(raw);
+    let (code, truncated) = excerpt(&source, site.start_line, site.end_line);
     JudgeMember {
         path: site.path.clone(),
         lines: site.lines(),
-        enclosing: enclosing_function(&site.path, source, site.start_line, site.end_line),
+        enclosing: enclosing_function(&site.path, &source, site.start_line, site.end_line),
         code,
         truncated,
     }
@@ -206,7 +217,7 @@ pub fn judge_input(c: &Candidate, files: &[(String, String)]) -> JudgeInput {
             input.decision_tokens = decision_tokens
                 .iter()
                 .take(MAX_DECISION_TOKENS)
-                .cloned()
+                .map(|t| safe(t))
                 .collect();
         }
         RuleFacts::Naming { names, module } => {

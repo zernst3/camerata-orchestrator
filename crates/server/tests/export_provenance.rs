@@ -20,7 +20,7 @@ use camerata_rules::{bare_rule, CorpusFreshness, RuleSet, OPERATOR_ONLY_MARKERS}
 use camerata_server::client_provenance::export_provenance_with;
 use camerata_server::onboard::{AuditedRef, Finding, LanguageVolume, ScanProvenance, ScanReport};
 use camerata_server::report_export::{build_report_json, AuditReportJson, ReportOptions};
-use camerata_server::{build_product_zip, product_export_readme};
+use camerata_server::{assemble_unreleased_zip as build_product_zip, product_export_readme};
 
 const RULE_A: &str = "SEC-NO-RAW-SQL-CONCAT-1";
 const RULE_B: &str = "RUST-DOMAIN-2";

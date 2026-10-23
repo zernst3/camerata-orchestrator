@@ -2842,6 +2842,69 @@ fail-before-the-fix discipline, not by this gate.
 
 ---
 
+## 6c. Secret redaction and the export release gate
+
+Spec: `docs/design/2026-10-23_secret-redaction-and-release-gate.md`. The governing law: a value
+that matches a secret shape never appears in full in anything a client receives, and never
+reaches a model when we can avoid it. Redaction happens once, where a finding is built; the
+release gate proves it, at export time, over the exact bytes being shipped, and refuses the
+export otherwise.
+
+**One detector.** `crates/secrets` (`camerata-secrets`, a leaf crate with no camerata
+dependencies) owns the shape catalogue (`SecretShape`: Supabase secret key and service-role JWT,
+Stripe live/test/webhook, AWS, GitHub, Slack, Google, Anthropic, OpenAI, PEM blocks, named
+literals, Bearer tokens, connection-string passwords, Azure keys, secrets in URL queries), the
+safe twins that stay readable (`Twin`: placeholder words, env-name literals, Stripe's published
+documentation key by SHA-256 digest, the public anon JWT, template tokens, path-like literals),
+and the redacted form `prefix...tail (N chars)` (a short body shows only its length). The
+gateway SEC arms, the scan floor, `orchestrator::secrets::scrub` (now a thin adapter) and the
+release gate all read it, so "secret-shaped" has one definition. Tests build every secret value
+at runtime (`camerata_secrets::fixtures`); the crate asserts it holds no secret-shaped literal.
+Real Stripe test-mode keys are redacted like live ones (owner decision, 2026-10-23).
+
+**Construction-time redaction** (`server/src/onboard/redact.rs`). Every producer calls
+`redact_finding` the moment a row is complete: the floor (a snippet is trimmed, REDACTED, then
+capped, so a cap cannot cut a key in half), the architectural checkers, the scan-tool previews,
+the dependency audit, the clone advisory, and every AI-tier row. `ScanReport::seal` sweeps what a
+producer missed and warns when it had to; `report_export::sanitize_finding_text` now also covers
+`fix_specific`, `also_locations` and `calibration_rationale` (the gap the sweep exports leaked
+through). Fingerprints and finding keys therefore hash the redacted snippet, and
+`scan_cache::MANIFEST_VERSION` is 2 so every raw cache is purged on first load.
+
+**Model prompts.** `files_for_model` (flag `model_prompt_redaction`, default ON, operator-only,
+read from the environment variable `CAMERATA_FEATURE_MODEL_PROMPT_REDACTION` only, never from
+`.camerata/features.toml` or a `.env` in a client repo; the CLI warns on stderr when it is off)
+redacts the file set every model tier reads, with line numbers preserved. `audit_repo`,
+`generate_fix_specifics` and `run_deep_tier` apply it at entry; the clone judge input redacts
+itself inside `camerata-checks`; the governed-dev repo digest and the L3 diff are redacted. Every
+system prompt that carries code says redacted values are deliberate and must never be reproduced.
+The deterministic floor and checkers still read RAW code (they must find the secret).
+
+**The gate** (`server/src/release_gate.rs`). `build_product_package` is the one assembly of a
+product export and `release` is the ONLY function that returns zip bytes (HTTP `export_product`,
+`camerata inspect --export` and the sample generator all use it; source-grep tests pin
+`build_product_zip(` and `compile_pdf_from_data(`). `release` zips, then runs six checks over the
+archive it built: **secrets** (every string of every file: `data.json`, `findings.json`, each
+dataset in both formats, every workbook cell and shared string, the README, the manifest, member
+names; zero-width characters stripped; never a field list), **dataset set**, **dataset parity**
+(CSV against JSON, `findings.json` against `all-findings`), **row parity** (PDF rows against
+`findings.json` rows), **manifest** hashes, **provenance** (README against manifest). The
+comparison logic is production code the export tests call. A refusal is a `GateFailure`: its
+`Display` is the fail-loud block (every field redacted by `Problem::new`), the HTTP route returns
+422 `{ok:false, gate:"release", message, problems}`, and `camerata inspect` exits 3 and writes
+nothing. The PDF-only route checks `data.json` before Typst runs.
+
+`camerata release-gate <zip>` runs the same checks over a zip on disk (exit 0 clean, 3 blocked, 2
+could not run); build with `--features pdf-text` to check the PDF's rendered text too.
+
+**Known limits.** A finding's `path` and `repo` are not rewritten (a file named after a key is
+caught by the gate, not redacted). Calls that pass `repo_read_dir` give the model on-demand read
+access to the raw checkout; the inspection passes do not use it, the governed-dev flows do. The
+joined-lines PDF text scan can glue a prose word onto a wrapped key (it still reports the real
+key). Row parity does not re-run `req_d2`'s count reconciliation at runtime.
+
+---
+
 ## 7. Persistence
 
 Camerata is local-first. All state lives on the user's machine.

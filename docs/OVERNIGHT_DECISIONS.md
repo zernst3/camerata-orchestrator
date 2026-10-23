@@ -65,7 +65,26 @@ commit sits on the branch ready for review + push.
   fewer show length only, no tail. (e) Readability twins: lowercase snake_case values with 2+
   underscores and at most 2 digits are not secrets; public keys (`sb_publishable_`, `pk_live_`,
   `pk_test_`) after `Bearer` stay readable. (f) Common vendor shapes added now: SendGrid, Twilio,
-  Slack `xapp-`, Shopify, Mailgun, npm, Discord, Mapbox.
+  Slack `xapp-`, Shopify, Mailgun, npm, Discord, Mapbox. Follow-up (Opus): the ReadableName twin
+  never applies to identifiers containing password/passwd/pwd/passphrase/secret/credential
+  (passphrases are real secrets); `passphrase` added to the S13 credential names.
+- 2026-10-23 (Sonnet build of the secret redaction + release gate, branch from `0ef7065`):
+  built per `docs/design/2026-10-23_secret-redaction-and-release-gate.md`; see the commit series
+  and `docs/TECHNICAL.md` section 6c. ACCEPTANCE (`camerata release-gate` over the sweep5b
+  exports, which predate the gate; redacted forms only): faktura FLAGGED, one Supabase secret key
+  (51 chars) at `findings[0].snippet`, `findings[0].fix_specific`,
+  `findings[0].also_locations[1].snippet`, `findings[43].fix_specific`, workbook `All Findings`
+  T2/V2/V45 and `Universal` T2/V2/V8, and the PDF text; hearth FLAGGED, Supabase (42 chars) plus
+  two Stripe live keys (77 chars) and a webhook secret (38 chars) on `findings[1]`; portal CLEAN
+  (placeholders readable, no secrets problem); lumen and tutorly also flagged (a Supabase key,
+  a real-looking `sk_test_` key, webhook secrets). The old zips also report the CSV/JSON datasets
+  and manifest as missing (they predate those exports). STILL OWED (needs a live model run, so
+  not done here): regenerate the three exports with the new build and run
+  `camerata release-gate` on them, expecting zero problems and the redacted forms present in
+  `findings.json`. Steps: delete the stale `.camerata-scan-cache.json` and
+  `.camerata-scan-ledger.json` from the hearth fixture checkout, then for each fixture
+  `camerata inspect --repo <fixture> --full --export <out>/<name>.zip` (this spends model tokens),
+  then `cargo run -p camerata --features pdf-text -- release-gate <out>/<name>.zip` (exit 0).
 
 - 2026-10-23 (Opus, secret-redaction spec questions; asymmetric risk: over-redaction costs only
   readability, under-redaction leaks): Q1 real Stripe TEST-mode keys (`sk_test_`/`rk_test_`) are

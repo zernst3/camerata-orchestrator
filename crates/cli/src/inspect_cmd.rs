@@ -107,6 +107,50 @@ pub struct InspectOutcome {
     /// lives in a per-user state directory under a hashed key (see [`ledger_path`]). A path
     /// nobody can derive and nothing prints is a gate nobody runs.
     pub ledger_path: PathBuf,
+    /// The release gate's verdict line (`release gate: passed (6 checks)`): proof, in the
+    /// operator's output, that the gate ran over the zip that was just written.
+    pub release_gate: String,
+}
+
+/// The exit code `camerata inspect` uses when the release gate refuses the export (the
+/// integrity gate's is 2). The zip is never written.
+pub const EXIT_RELEASE_BLOCKED: i32 = 3;
+
+/// Why an inspection produced no export.
+#[derive(Debug)]
+pub enum InspectError {
+    /// A pipeline or argument failure, with its plain-language message.
+    Failed(String),
+    /// The release gate refused the export: a secret value (or an inconsistency) was found in
+    /// the package it just built. Nothing was written.
+    ReleaseBlocked(camerata_server::release_gate::GateFailure),
+}
+
+impl InspectError {
+    /// The process exit code for this failure.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            InspectError::Failed(_) => 1,
+            InspectError::ReleaseBlocked(_) => EXIT_RELEASE_BLOCKED,
+        }
+    }
+}
+
+impl std::fmt::Display for InspectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InspectError::Failed(message) => write!(f, "{message}"),
+            InspectError::ReleaseBlocked(failure) => write!(f, "{failure}"),
+        }
+    }
+}
+
+impl std::error::Error for InspectError {}
+
+impl From<String> for InspectError {
+    fn from(message: String) -> Self {
+        InspectError::Failed(message)
+    }
 }
 
 /// Validate the arguments BEFORE touching the filesystem for real work or resolving a
@@ -306,9 +350,29 @@ fn clean_legacy_repo_file<T: serde::de::DeserializeOwned>(repo: &Path, basename:
 /// Best-effort load: any error (missing file, corrupt JSON, a schema from a future/older
 /// binary version) degrades to `None` — exactly `audit_repos`'s own "no cache" full-scan path,
 /// never a hard failure over a cache file that is, by construction, disposable.
+///
+/// A manifest from an older schema (`ScanManifest::is_current`) is never reused AND is deleted
+/// on the spot: a version 1 manifest holds findings stored before construction-time secret
+/// redaction, so it can hold a raw secret value, and "ignored" is not the same as "gone"
+/// (docs/design/2026-10-23_secret-redaction-and-release-gate.md, path E2).
 fn load_prior_manifest(repo: &Path) -> Option<ScanManifest> {
-    let bytes = std::fs::read(manifest_cache_path(repo)).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let path = manifest_cache_path(repo);
+    let bytes = std::fs::read(&path).ok()?;
+    let manifest: ScanManifest = serde_json::from_slice(&bytes).ok()?;
+    if manifest.is_current() {
+        return Some(manifest);
+    }
+    match std::fs::remove_file(&path) {
+        Ok(()) => eprintln!(
+            "camerata inspect: removed the incremental-scan cache at {} (written by an older              version; the next run does a full scan)",
+            path.display()
+        ),
+        Err(e) => eprintln!(
+            "camerata inspect: could not remove the outdated incremental-scan cache at {}              ({e}); it will not be used, but delete it by hand",
+            path.display()
+        ),
+    }
+    None
 }
 
 /// Best-effort save. Failing to persist the cache never fails the inspection itself — it just
@@ -387,58 +451,45 @@ fn save_ledger(repo: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
 pub async fn build_product_export_bytes(
     report: &camerata_server::onboard::SealedReport,
     corpus: Option<&camerata_rules::RuleSet>,
-) -> Result<(String, Vec<u8>), String> {
+) -> Result<(String, Vec<u8>), InspectError> {
+    let released = release_product_export(report, corpus).await?;
+    Ok((released.stem, released.bytes))
+}
+
+/// [`build_product_export_bytes`] with the gate's record of what it checked kept, for the
+/// operator-facing summary line.
+async fn release_product_export(
+    report: &camerata_server::onboard::SealedReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Result<camerata_server::release_gate::ReleasedZip, InspectError> {
     let dispositions: HashMap<String, camerata_server::report_export::DispositionWire> =
         HashMap::new();
     let mut options = ReportOptions::default();
     options.apply_env_defaults();
 
-    let json =
-        camerata_server::report_export::build_report_json(report, &dispositions, corpus, &options);
-    let pdf_bytes = camerata_server::report_export::compile_pdf(&json)
-        .await
-        .map_err(|e| e.to_string())?;
-    let xlsx_bytes =
-        camerata_server::xlsx_export::build_workbook(report, &dispositions, corpus, &options)
-            .map_err(|e| e.to_string())?;
-    let findings_export = camerata_server::xlsx_export::build_findings_export(
+    let package = camerata_server::release_gate::build_product_package(
         report,
         &dispositions,
         corpus,
-        &json,
-        &options.chosen_options,
-    );
-    let findings_json_bytes = serde_json::to_vec_pretty(&findings_export)
-        .map_err(|e| format!("could not serialize findings.json: {e}"))?;
-
-    // The per-dataset machine-readable tables (csv/*, json/*): same partition_rows pass as the
-    // xlsx + findings.json, so the artifacts agree.
-    let csv_exports =
-        camerata_server::xlsx_export::build_csv_exports(report, &dispositions, corpus, &options)
-            .map_err(|e| format!("could not build CSV exports: {e}"))?;
-    let json_exports =
-        camerata_server::xlsx_export::build_json_exports(report, &dispositions, corpus, &options)
-            .map_err(|e| format!("could not build JSON exports: {e}"))?;
-    let mut extra_files: Vec<(String, Vec<u8>)> = csv_exports;
-    extra_files.extend(json_exports);
-
-    let provenance =
-        camerata_server::client_provenance::export_provenance(report, &json.cover, corpus);
-
-    let stem = camerata_server::report_filename_stem(report);
-    let readme = camerata_server::product_export_readme(&stem, &provenance);
-    let zip_bytes = camerata_server::build_product_zip(
-        &stem,
-        &pdf_bytes,
-        &xlsx_bytes,
-        &findings_json_bytes,
-        &readme,
-        &extra_files,
-        &provenance,
+        &options,
     )
-    .map_err(|e| format!("could not assemble the product export zip: {e}"))?;
-
-    Ok((stem, zip_bytes))
+    .await
+    .map_err(
+        |e| match e.downcast::<camerata_server::release_gate::ReleaseError>() {
+            // The assembly checks the PDF's data before it compiles it.
+            Ok(camerata_server::release_gate::ReleaseError::Blocked(failure)) => {
+                InspectError::ReleaseBlocked(failure)
+            }
+            Ok(other) => InspectError::Failed(other.to_string()),
+            Err(e) => InspectError::Failed(e.to_string()),
+        },
+    )?;
+    camerata_server::release_gate::release(package).map_err(|e| match e {
+        camerata_server::release_gate::ReleaseError::Blocked(failure) => {
+            InspectError::ReleaseBlocked(failure)
+        }
+        other => InspectError::Failed(other.to_string()),
+    })
 }
 
 /// Render the run's actual token usage + cost for the CLI's final stdout line — the number
@@ -485,7 +536,7 @@ pub fn format_usage_report(usage: Option<&ActualUsage>, batch: bool) -> String {
 pub async fn run_inspect_with_key_presence(
     args: InspectArgs,
     has_api_key: bool,
-) -> Result<InspectOutcome, String> {
+) -> Result<InspectOutcome, InspectError> {
     validate_args(&args, has_api_key)?;
 
     // A headless run has no `owner/repo` spec — the scanned directory's own name stands in
@@ -649,7 +700,14 @@ pub async fn run_inspect_with_key_presence(
     let report = report.seal();
 
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
-    let (_stem, zip_bytes) = build_product_export_bytes(&report, corpus.as_ref()).await?;
+    // `release_product_export` is the release gate: it returns bytes only when every check
+    // passed, and `std::fs::write` below runs only on `Ok`, so a blocked export is never on disk.
+    let released = release_product_export(&report, corpus.as_ref()).await?;
+    let zip_bytes = released.bytes;
+    let release_gate = format!(
+        "release gate: passed ({} checks)",
+        released.report.checks.len()
+    );
     std::fs::write(&args.export, &zip_bytes)
         .map_err(|e| format!("could not write {}: {e}", args.export.display()))?;
 
@@ -662,6 +720,7 @@ pub async fn run_inspect_with_key_presence(
         findings_count: report.findings.len(),
         ledger_summary,
         ledger_path: ledger_path(&args.repo),
+        release_gate,
     })
 }
 
@@ -840,7 +899,7 @@ pub fn render_ledger_summary(
 /// Production entry point: reads the real `ANTHROPIC_API_KEY` presence from the environment
 /// and delegates to [`run_inspect_with_key_presence`]. See that function's doc comment, and
 /// [`validate_args`]'s, for why the key check is a separate, injectable parameter.
-pub async fn run_inspect(args: InspectArgs) -> Result<InspectOutcome, String> {
+pub async fn run_inspect(args: InspectArgs) -> Result<InspectOutcome, InspectError> {
     let has_api_key = std::env::var("ANTHROPIC_API_KEY")
         .ok()
         .filter(|k| !k.trim().is_empty())
@@ -856,15 +915,19 @@ pub fn format_outcome_report(outcome: &InspectOutcome) -> String {
     };
     format!(
         "camerata inspect: wrote {} ({} bytes) — backend: {backend_label}, findings: {}\n\
-         integrity ledger: {}\n{}\n\n{}",
+         {}\nintegrity ledger: {}\n{}\n\n{}",
         outcome.export_path.display(),
         outcome.export_zip_bytes,
         outcome.findings_count,
+        outcome.release_gate,
         outcome.ledger_path.display(),
         format_usage_report(outcome.actual_usage.as_ref(), outcome.batch),
         outcome.ledger_summary,
     )
 }
+
+#[cfg(test)]
+mod redaction_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1144,6 +1207,7 @@ mod tests {
             findings_count: 3,
             ledger_summary: "== PIPELINE STAGES ==\n  (no stages recorded this scan)".to_string(),
             ledger_path: PathBuf::from("/tmp/state/out-deadbeef.ledger.json"),
+            release_gate: "release gate: passed (6 checks)".to_string(),
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("/tmp/out.zip"), "{text}");

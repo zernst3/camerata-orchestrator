@@ -480,6 +480,7 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 }
 If the code genuinely conforms everywhere, return {"findings": [], "proposed_rules": [], "needs_files": []}. Every finding must point at real code at a real line."#
         .to_string()
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// Pull the first balanced-looking JSON object out of a model response (tolerates
@@ -650,7 +651,7 @@ pub fn parse_ai_findings(
                 (false, true) => title.clone(),
                 _ => detail,
             };
-            findings.push(Finding {
+            let mut finding = Finding {
                 could_be_intentional: false,
                 repo: repo.to_string(),
                 path: f["path"].as_str().unwrap_or("(repo)").to_string(),
@@ -699,7 +700,11 @@ pub fn parse_ai_findings(
                 // option into `Deviation` once the per-rule recommendation is known — the
                 // parser itself cannot know a rule's kind, and must never guess from prose.
                 kind: Some(camerata_api_types::audit::FindingKind::Defect),
-            });
+            };
+            // The model's `code` is its verbatim quote and its prose can repeat a value: redact
+            // before the row exists anywhere else (docs/design/2026-10-23, leak path A8).
+            crate::onboard::redact::redact_finding(&mut finding);
+            findings.push(finding);
         }
     }
 
@@ -848,6 +853,7 @@ Return ONLY JSON, no prose:
 {"verdicts":[{"index":0,"severity":"critical|high|medium|low","confidence":"high|low","effort":"low|medium|high","category":"authorization|authentication|secret-exposure|injection|transport-security|rls-policy|resource-exposure|input-validation|error-handling|arch-conformance|testing-style|performance","reason":"one line"}]}
 One verdict per finding, addressed by its [index]."#
         .to_string()
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// Remove cross-finding dedup pointers like "same as [6]" / "duplicate of [10]" (and a
@@ -1099,6 +1105,8 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
             // is already encoded structurally (rule_id + path + line + also_matches), and a
             // wrong English pointer in a data cell is worse than none — it ships in the CSV.
             let reason = strip_dedup_pointers(verdict["reason"].as_str().unwrap_or("").trim());
+            // The calibration model's reason is appended to `detail`; redact it first.
+            let reason = camerata_secrets::redact_str(&reason).into_owned();
             let reason = reason.trim();
             if low_conf || !reason.is_empty() {
                 let tag = if low_conf {
@@ -2059,7 +2067,11 @@ pub async fn verify_findings(
         for (i, f) in chunk.iter().enumerate() {
             prompt.push_str(&format!(
                 "[{i}] (severity {}) {}:{} — {} :: {}\n",
-                f.severity, f.path, f.line, f.snippet, f.detail
+                f.severity,
+                f.path,
+                f.line,
+                camerata_secrets::redact_str(&f.snippet),
+                camerata_secrets::redact_str(&f.detail)
             ));
         }
         // Calibration runs on its OWN selected model (the UI exposes it). Build a fresh
@@ -2418,6 +2430,7 @@ option or marking it not applicable. NEVER invent an option id that was not list
 specific rule. NEVER set `"applicable": true` without a real `"evidence"` file:line — an
 unevidenced applicability claim will be discarded and treated as not applicable."#
         .to_string()
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// The per-rule "every option, plus which is currently selected" block the recommendation
@@ -2974,6 +2987,8 @@ Rules, every fix:
   detail (e.g. do not tell the client to enable/turn on something the detail already says is
   enabled/on/configured) — if the detail says a mitigation already exists, your fix must
   address what's actually still missing or broken, not redo what's already there.
+- NEVER repeat a credential value in a fix, not even partly. Name the variable and the line
+  ("move the key on line 3 of `.env` into your secrets manager"), not the key itself.
 - If you cannot write a grounded, non-contradictory fix for a finding from the evidence given,
   omit it from your response entirely rather than guessing.
 
@@ -2982,6 +2997,7 @@ Return ONLY JSON, no prose:
 One entry per finding you could ground a fix for, addressed by its [index]. Omit any index you
 could not confidently ground — an omitted fix is far better than an invented one."#
         .to_string()
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// A short, line-numbered excerpt of `path`'s content in `files`, centered on `line`
@@ -3046,9 +3062,15 @@ fn build_fix_specific_block(
             f.rule_id, f.severity, f.path, f.line
         ));
         if !f.snippet.is_empty() {
-            out.push_str(&format!("Snippet: {}\n", f.snippet));
+            out.push_str(&format!(
+                "Snippet: {}\n",
+                camerata_secrets::redact_str(&f.snippet)
+            ));
         }
-        out.push_str(&format!("Detail: {}\n", f.detail));
+        out.push_str(&format!(
+            "Detail: {}\n",
+            camerata_secrets::redact_str(&f.detail)
+        ));
         if !f.captures.is_empty() {
             let caps = f
                 .captures
@@ -3347,6 +3369,10 @@ async fn run_fix_specifics_round(
                 still_pending.push(orig_idx);
                 continue;
             };
+            // The model's fix text is client-visible and often repeats the offending value:
+            // redact it BEFORE the self-check, so grounding compares redacted to redacted.
+            let redacted_text = camerata_secrets::redact_str(text).into_owned();
+            let text = &redacted_text;
             let evidence = fix_evidence_blob(&findings[orig_idx], files);
             if let Some(bad) = find_ungrounded_identifier(text, &evidence) {
                 feedback.insert(
@@ -3438,6 +3464,9 @@ pub async fn generate_fix_specifics(
     if indices.is_empty() {
         return (findings, Vec::new());
     }
+    // The fix prompt carries eight raw lines either side of each finding: redact them.
+    let model_files = crate::onboard::redact::files_for_model(files);
+    let files = model_files.as_slice();
 
     let system = fix_specific_system_prompt();
     // The subset of `indices` still needing a valid fix this round; shrinks as findings
@@ -3512,7 +3541,8 @@ pub async fn generate_fix_specifics(
                 &findings[idx],
                 None,
             ) {
-                findings[idx].fix_specific = Some(fallback);
+                findings[idx].fix_specific =
+                    Some(camerata_secrets::redact_str(&fallback).into_owned());
                 instantiated += 1;
             }
         }
@@ -4650,6 +4680,9 @@ fn merge_location_group(group: Vec<Finding>) -> Finding {
         primary.fix_specific = group.iter().find_map(|f| f.fix_specific.clone());
     }
     primary.also_matches = also;
+    // Belt and braces: the members are already redacted at construction; a carried-forward
+    // member from an older cache would not be.
+    crate::onboard::redact::redact_finding(&mut primary);
     primary
 }
 
@@ -5689,6 +5722,7 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     if primary.fix_specific.is_none() {
         primary.fix_specific = inherited_fix_specific;
     }
+    crate::onboard::redact::redact_finding(&mut primary);
     primary
 }
 
@@ -5859,7 +5893,7 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
     also_locations.retain(|l| {
         location_seen.insert((l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone()))
     });
-    Finding {
+    let mut group_finding = Finding {
         could_be_intentional: false,
         repo: primary.repo.clone(),
         path: primary.path.clone(),
@@ -5886,7 +5920,9 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
         // A5.6: a structural group row keeps the kind of the primary occurrence it
         // represents (its members all share one rule, hence one kind).
         kind: primary.kind.clone(),
-    }
+    };
+    crate::onboard::redact::redact_finding(&mut group_finding);
+    group_finding
 }
 
 /// The SECOND merge pass (design §1, extended by P1 — see
@@ -6446,7 +6482,7 @@ fn apply_alternative_decision(
         .filter(|e| !e.trim().is_empty())
         .map(|e| e.chars().take(200).collect::<String>())
         .unwrap_or_else(|| option.label.clone());
-    Some(Finding {
+    let mut finding = Finding {
         repo: repo.to_string(),
         path,
         line,
@@ -6470,7 +6506,10 @@ fn apply_alternative_decision(
         // consistency deviation.
         kind: Some(camerata_api_types::audit::FindingKind::Defect),
         ..Finding::default()
-    })
+    };
+    // `evidence` and the reasoning are model text.
+    crate::onboard::redact::redact_finding(&mut finding);
+    Some(finding)
 }
 
 /// Pass-1 W3 (A5.6/A5.2): reclassify every finding judged under a multi-option rule's
@@ -6642,7 +6681,7 @@ pub(crate) fn conventions_observed_findings(
             .chars()
             .take(200)
             .collect();
-        out.push(Finding {
+        let mut finding = Finding {
             repo: repo.to_string(),
             path,
             line,
@@ -6662,7 +6701,9 @@ pub(crate) fn conventions_observed_findings(
                 convention_label: opt.label.clone(),
             })),
             ..Finding::default()
-        });
+        };
+        crate::onboard::redact::redact_finding(&mut finding);
+        out.push(finding);
     }
     out
 }
@@ -6699,7 +6740,7 @@ pub(crate) fn no_convention_findings(
             })
             .collect::<Vec<_>>()
             .join(" / ");
-        out.push(Finding {
+        let mut finding = Finding {
             repo: repo.to_string(),
             path: String::new(),
             line: 0,
@@ -6722,7 +6763,9 @@ pub(crate) fn no_convention_findings(
                 observed_options: rec.observed_options.clone(),
             })),
             ..Finding::default()
-        });
+        };
+        crate::onboard::redact::redact_finding(&mut finding);
+        out.push(finding);
     }
     out
 }
@@ -6739,7 +6782,7 @@ pub(crate) fn not_assessed_findings(repo: &str, skipped: &[(String, String)]) ->
         if !seen.insert(rule_id.to_ascii_uppercase()) {
             continue;
         }
-        out.push(Finding {
+        let mut finding = Finding {
             repo: repo.to_string(),
             path: String::new(),
             line: 0,
@@ -6756,7 +6799,9 @@ pub(crate) fn not_assessed_findings(repo: &str, skipped: &[(String, String)]) ->
                 reason_detail: note.clone(),
             })),
             ..Finding::default()
-        });
+        };
+        crate::onboard::redact::redact_finding(&mut finding);
+        out.push(finding);
     }
     out
 }
@@ -6846,6 +6891,14 @@ pub async fn audit_repo(
     if files.is_empty() {
         return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
+    // Redact BEFORE any code is sent to a model (docs/design/2026-10-23, section 5). Everything
+    // below (the digest, the repo map, the fix context window, line anchoring) reads this model-
+    // facing set: same paths, same line numbers, every credential value replaced by its redacted
+    // form, so a `path:line` the model cites still resolves and a snippet it quotes still anchors.
+    let model_files = crate::onboard::redact::files_for_model(files);
+    let files = model_files.as_slice();
+    let model_map_files = map_files.map(crate::onboard::redact::files_for_model);
+    let map_files = model_map_files.as_deref();
     // W1: this call's own merge/calibration stage samples, returned alongside the normal
     // result (mirroring the EXISTING `Vec<FailedPass>` accumulation pattern already used
     // throughout this function) rather than threading a `&mut ScanLedger` through this
@@ -7673,6 +7726,7 @@ Return ONLY a JSON object, no prose, no markdown fences:
 }
 If you genuinely cannot assess anything, return {"summary":"…","gaps":[]}."#
         .to_string()
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// SYSTEM PROMPT — deep security audit lens.
@@ -7708,6 +7762,7 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 }
 If the code is genuinely clean, return {"findings":[],"proposed_rules":[],"needs_files":[]}."#
         .to_string()
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// SYSTEM PROMPT — threat-model lens.
@@ -7737,6 +7792,7 @@ Return ONLY a JSON object, no prose, no markdown fences:
 `kind` is one of: "entry-point" | "trust-boundary" | "data-store" | "dependency" | "other".
 If you genuinely cannot derive a model, return {"summary":"…","threats":[]}."#
         .to_string()
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// Parse the SOC-2 gap-analysis lens response into `(summary, gaps)`. Robust: malformed
@@ -8101,6 +8157,9 @@ pub async fn run_deep_tier(
     meter: Option<&UsageMeter>,
     soc2_enabled: bool,
 ) -> DeepReport {
+    // The deep tier reads the whole repo: redact before any lens sees it.
+    let model_files = crate::onboard::redact::files_for_model(files);
+    let files = model_files.as_slice();
     let repo_map = build_repo_map(files);
     // One whole-repo digest for the two single-pass prose lenses (capped at MAX_DIGEST_CHARS).
     let digest = build_digest(files);
@@ -8168,6 +8227,9 @@ pub async fn run_deep_tier(
         }
     }
 }
+
+#[cfg(test)]
+mod redaction_tests;
 
 #[cfg(test)]
 mod tests {

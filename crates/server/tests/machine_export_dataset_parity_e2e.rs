@@ -43,7 +43,6 @@
 //! changes titles, categories, fixes and which citations are "grounded".
 
 use std::collections::{BTreeSet, HashMap};
-use std::io::Read;
 
 use camerata_api_types::audit::{
     ConventionObservedKind, DeviationKind, FindingKind, NoConventionKind, NotAssessedKind,
@@ -53,20 +52,12 @@ use camerata_server::ai_audit::RuleRecommendation;
 use camerata_server::onboard::{
     AuditedRef, Finding, LanguageVolume, MergedLocation, ScanProvenance, ScanReport, SealedReport,
 };
+use camerata_server::release_gate::{compare_csv_to_json, xlsx_sheet_grid};
 use camerata_server::report_export::{finding_key, DispositionWire, ReportOptions};
-use camerata_server::xlsx_export::{build_csv_exports, build_json_exports, build_workbook};
+use camerata_server::xlsx_export::{
+    build_csv_exports, build_json_exports, build_workbook, DATASETS,
+};
 use serde_json::Value;
-
-const DATASETS: [&str; 8] = [
-    "all-findings",
-    "deviations",
-    "conventions",
-    "not-assessed",
-    "dependencies",
-    "false-positives",
-    "coverage",
-    "rules-applied",
-];
 
 // ── Fixture ───────────────────────────────────────────────────────────────────────────────
 
@@ -357,121 +348,11 @@ async fn real_corpus() -> Option<camerata_rules::RuleSet> {
 
 // ── A real xlsx reader (cells out of the .xlsx bytes) ─────────────────────────────────────
 
-fn read_zip_text(xlsx: &[u8], name: &str) -> String {
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(xlsx)).expect("xlsx is a zip");
-    let mut file = archive
-        .by_name(name)
-        .unwrap_or_else(|_| panic!("missing xlsx part {name}"));
-    let mut s = String::new();
-    file.read_to_string(&mut s).expect("xlsx part is UTF-8");
-    s
-}
-
-fn unescape(s: &str) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&#39;", "'")
-        .replace("&amp;", "&")
-}
-
-/// Every `<t>` text run inside each `<si>` of `xl/sharedStrings.xml`, concatenated per string.
-fn shared_strings(xlsx: &[u8]) -> Vec<String> {
-    let xml = read_zip_text(xlsx, "xl/sharedStrings.xml");
-    xml.split("<si>")
-        .skip(1)
-        .map(|si| {
-            let si = si.split("</si>").next().unwrap_or("");
-            let mut text = String::new();
-            let mut rest = si;
-            while let Some(open) = rest.find("<t") {
-                let after = &rest[open..];
-                let Some(gt) = after.find('>') else { break };
-                let body = &after[gt + 1..];
-                let Some(close) = body.find("</t>") else {
-                    break;
-                };
-                text.push_str(&unescape(&body[..close]));
-                rest = &body[close + 4..];
-            }
-            text
-        })
-        .collect()
-}
-
-/// A worksheet as a dense grid of cell TEXT (`grid[row][col]`, blank cells as `""`). Numbers
-/// are their literal XML value, which for the integer counts written here is the integer.
+/// A worksheet as a dense grid of cell TEXT (`grid[row][col]`, blank cells as `""`), read out of
+/// the real `.xlsx` bytes by the release gate's own reader (`release_gate::xlsx_sheet_grid`), so
+/// the gate and this test cannot disagree about what a cell says.
 fn read_sheet(xlsx: &[u8], sheet_name: &str) -> Vec<Vec<String>> {
-    let workbook = read_zip_text(xlsx, "xl/workbook.xml");
-    let names: Vec<String> = workbook
-        .split("<sheet name=\"")
-        .skip(1)
-        .map(|c| unescape(&c[..c.find('"').expect("a sheet name is quoted")]))
-        .collect();
-    let idx = names
-        .iter()
-        .position(|n| n == sheet_name)
-        .unwrap_or_else(|| panic!("no worksheet {sheet_name:?}; have {names:?}"));
-    let xml = read_zip_text(xlsx, &format!("xl/worksheets/sheet{}.xml", idx + 1));
-    let strings = shared_strings(xlsx);
-
-    let mut cells: Vec<(usize, usize, String)> = Vec::new();
-    for chunk in xml.split("<c ").skip(1) {
-        let Some(tag_end) = chunk.find('>') else {
-            continue;
-        };
-        let tag = &chunk[..tag_end];
-        let attr = |name: &str| -> Option<String> {
-            let key = format!("{name}=\"");
-            let at = tag.find(&key)? + key.len();
-            Some(tag[at..at + tag[at..].find('"')?].to_string())
-        };
-        let Some(reference) = attr("r") else { continue };
-        let (col, row) = split_ref(&reference);
-        let text = if tag.ends_with('/') {
-            String::new()
-        } else {
-            let body = &chunk[tag_end + 1..];
-            let body = &body[..body.find("</c>").unwrap_or(body.len())];
-            let v = body
-                .find("<v>")
-                .and_then(|s| body[s + 3..].find("</v>").map(|e| &body[s + 3..s + 3 + e]));
-            match (attr("t").as_deref(), v) {
-                (Some("s"), Some(v)) => strings[v.parse::<usize>().unwrap()].clone(),
-                (Some("inlineStr"), _) => {
-                    let s = body.find("<t").unwrap();
-                    let b = &body[s..];
-                    let gt = b.find('>').unwrap();
-                    unescape(&b[gt + 1..b.find("</t>").unwrap()])
-                }
-                (_, Some(v)) => unescape(v),
-                (_, None) => String::new(),
-            }
-        };
-        cells.push((row, col, text));
-    }
-    let rows = cells.iter().map(|c| c.0).max().map_or(0, |m| m + 1);
-    let cols = cells.iter().map(|c| c.1).max().map_or(0, |m| m + 1);
-    let mut grid = vec![vec![String::new(); cols]; rows];
-    for (r, c, t) in cells {
-        grid[r][c] = t;
-    }
-    grid
-}
-
-/// `"AB12"` -> (col 27, row 11), both zero-based.
-fn split_ref(reference: &str) -> (usize, usize) {
-    let letters: String = reference
-        .chars()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .collect();
-    let digits: String = reference.chars().skip(letters.len()).collect();
-    let col = letters
-        .bytes()
-        .fold(0usize, |acc, b| acc * 26 + (b - b'A' + 1) as usize)
-        - 1;
-    (col, digits.parse::<usize>().unwrap() - 1)
+    xlsx_sheet_grid(xlsx, sheet_name).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// The data rows of the table whose header row is exactly `headers`: the rows after it up to
@@ -522,49 +403,12 @@ fn keys_of(rows: &[Value]) -> BTreeSet<String> {
         .collect()
 }
 
+/// CSV against JSON for one dataset: the comparison is `release_gate::compare_csv_to_json` (row
+/// count, header set, every cell), the same function the release gate runs on every package.
 fn assert_csv_matches_json(dataset: &str, csv_bytes: &[u8], rows: &[Value]) {
-    let mut reader = csv::ReaderBuilder::new()
-        .flexible(false)
-        .from_reader(csv_bytes);
-    let headers: Vec<String> = reader
-        .headers()
-        .unwrap_or_else(|e| panic!("{dataset}: csv header unreadable: {e}"))
-        .iter()
-        .map(String::from)
-        .collect();
-    let records: Vec<csv::StringRecord> = reader
-        .records()
-        .map(|r| r.unwrap_or_else(|e| panic!("{dataset}: csv row unreadable: {e}")))
-        .collect();
-
-    assert_eq!(
-        records.len(),
-        rows.len(),
-        "{dataset}: CSV and JSON disagree on the row count"
-    );
-    if rows.is_empty() {
-        return;
-    }
-    let json_keys = keys_of(rows);
-    let csv_keys: BTreeSet<String> = headers.iter().cloned().collect();
-    assert_eq!(
-        csv_keys, json_keys,
-        "{dataset}: CSV columns must be exactly the union of the JSON row keys"
-    );
-    assert_eq!(
-        headers.len(),
-        csv_keys.len(),
-        "{dataset}: a CSV column name repeats: {headers:?}"
-    );
-    for (i, (record, row)) in records.iter().zip(rows).enumerate() {
-        for (c, header) in headers.iter().enumerate() {
-            assert_eq!(
-                &record[c],
-                text(row, header).as_str(),
-                "{dataset}: row {i}, column {header:?} differs between CSV and JSON"
-            );
-        }
-    }
+    let json_bytes = serde_json::to_vec(rows).unwrap();
+    let problems = compare_csv_to_json(dataset, csv_bytes, &json_bytes);
+    assert!(problems.is_empty(), "{dataset}: {problems:?}");
 }
 
 /// Every key in the JSON rows is either rendered by a worksheet column (`rendered`) or named in
