@@ -13,7 +13,10 @@
 > Every detector was Fable-reviewed, fixed, and merged. **V1 scope** (Zach, DECISIONS MADE below):
 > everything in `docs/plans/2026-10-19_MASTER-SEQUENCE.md` plus the graded accuracy tests (the
 > outreach go-signal); no new scope except defect fixes; rule `stages` is out of V1.
-> **Next, in order (sequential, to conserve tokens):** W29 Wave D (UI-STATE-SHAPE-1,
+> **FIRST, before anything else (Zach, 2026-10-22):** the secret-redaction work order
+> (`_workspace/brownfield-audits/WORK_ORDER_SECRET_REDACTION.md`) plus the pluggable export release
+> gate; decisions recorded under DECISIONS MADE. Process: Fable spec, Sonnet build, Fable leak hunt.
+> **Then, in order (sequential, to conserve tokens):** W29 Wave D (UI-STATE-SHAPE-1,
 > STYLE-NEEDLESS-COMPLEXITY-1: Fable spec, Sonnet build, Fable review); then corpus text work
 > (MASTER-SEQUENCE items 5, 11, 12, 19 corpus sub-items); then the engine follow-ups in item 21
 > (CI-gate severity bounds, stale model registry with prices verified from Anthropic's pricing page,
