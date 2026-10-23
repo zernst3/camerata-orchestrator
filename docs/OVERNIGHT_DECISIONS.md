@@ -59,7 +59,14 @@ commit sits on the branch ready for review + push.
   delete only a folder that is a git repo whose remote matches the project's recorded GitHub repo;
   otherwise refuse with the reason. A deletion record (what, where, when, file count) is kept in
   the project as proof for the client. Exports must never re-read code from disk. Deletion is
-  ordinary removal (FileVault-encrypted SSD), not a forensic wipe; the record says so. Process:
+  ordinary removal (FileVault-encrypted SSD), not a forensic wipe; the record says so. Zach
+  (2026-10-22): it does not matter how the code got into the project (cloned in the UI or by hand);
+  whatever codebase the project points to is what gets deleted, guarded by the remote-match check.
+  **Re-fetch button:** restores the repo from its recorded GitHub origin into the project and checks
+  out the INSPECTED commit (from provenance) so every finding's file/line still matches; clears the
+  deleted state. A separate explicit "Update to latest" pulls newer code and marks the project as
+  needing a rescan. Uses Camerata's existing GitHub token; a revoked/renamed/deleted origin is
+  reported plainly. Process:
   Fable spec (incl. locating every repo-must-exist assumption and every place client code lands),
   Sonnet build, Fable adversarial review.
 
