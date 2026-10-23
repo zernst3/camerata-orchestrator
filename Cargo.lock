@@ -859,6 +859,7 @@ dependencies = [
  "camerata-agent",
  "camerata-core",
  "camerata-rules",
+ "camerata-secrets",
  "camerata-test-env",
  "regex",
  "rmcp",

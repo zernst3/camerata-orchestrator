@@ -29,10 +29,13 @@ pub enum Twin {
 
 impl Twin {
     /// Whether the scan floor still lists a twin match as a finding row when asked to count
-    /// twins (a committed placeholder `sb_secret_` is still worth a row; a public anon key or an
-    /// already-redacted form never is).
+    /// twins (a committed placeholder `sb_secret_` is still worth a row; a public anon key, an
+    /// already-redacted form, or a file path on a credential-named variable never is).
     pub fn counts_as_line(&self) -> bool {
-        !matches!(self, Twin::PublicKeyRole(_) | Twin::RedactionMarker)
+        !matches!(
+            self,
+            Twin::PublicKeyRole(_) | Twin::RedactionMarker | Twin::PathLike
+        )
     }
 }
 
