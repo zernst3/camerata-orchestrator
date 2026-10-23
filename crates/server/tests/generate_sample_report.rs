@@ -517,48 +517,29 @@ async fn regenerate_sample_report() {
         );
         return;
     }
-    let pdf = report_export::compile_pdf(&json)
-        .await
-        .expect("compile_pdf must succeed for the sample fixture");
+    // The sample ships through the SAME assembly and the SAME release path as a real export
+    // (`build_product_package` then `release`), so the fixture mirrors the deliverable exactly:
+    // csv/*, json/*, manifest.json, and the release gate's checks. Only the filename stem differs.
+    let sealed_for_zip = report.clone().seal();
+    let package = camerata_server::release_gate::build_product_package_with_stem(
+        &sealed_for_zip,
+        &dispositions,
+        Some(&corpus),
+        &opts,
+        "camerata-sample-audit",
+    )
+    .await
+    .expect("the sample package must assemble (typst is on PATH)");
+    let pdf = package.pdf.clone();
     std::fs::write(repo_root.join("camerata-sample-audit.pdf"), &pdf)
         .expect("write sample-report/camerata-sample-audit.pdf");
     eprintln!(
         "regenerate_sample_report: wrote {} bytes to sample-report/camerata-sample-audit.pdf",
         pdf.len()
     );
-
-    // ═══ Zip PDF + xlsx + findings.json + README.txt — mirrors ═══
-    // POST /api/projects/:id/product-export's assembly (that handler's own zip-building
-    // helpers are private to camerata-server, so this builds the same package through the
-    // public `product_export_readme` + `build_product_zip` pair over the REAL pdf/xlsx/json
-    // bytes built above; nothing here re-derives report content, and the README text is the
-    // shipping one rather than a second copy that can drift).
-    // Assemble the sample ZIP through the SAME build_product_zip the real product export uses,
-    // so the fixture mirrors the deliverable exactly — now including csv/*, json/*, manifest.json.
-    let sealed_for_zip = report.clone().seal();
-    let mut extra_files: Vec<(String, Vec<u8>)> =
-        xlsx_export::build_csv_exports(&sealed_for_zip, &dispositions, Some(&corpus), &opts)
-            .expect("sample csv exports");
-    extra_files.extend(
-        xlsx_export::build_json_exports(&sealed_for_zip, &dispositions, Some(&corpus), &opts)
-            .expect("sample json exports"),
-    );
-    let provenance = camerata_server::client_provenance::export_provenance(
-        &sealed_for_zip,
-        &json.cover,
-        Some(&corpus),
-    );
-    let readme = camerata_server::product_export_readme("camerata-sample-audit", &provenance);
-    let zip_bytes = camerata_server::build_product_zip(
-        "camerata-sample-audit",
-        &pdf,
-        &xlsx,
-        &findings_json_bytes,
-        &readme,
-        &extra_files,
-        &provenance,
-    )
-    .expect("build the sample product zip");
+    let zip_bytes = camerata_server::release_gate::release(package)
+        .unwrap_or_else(|e| panic!("the sample product zip was refused: {e}"))
+        .bytes;
     assert_eq!(
         &zip_bytes[0..2],
         b"PK",

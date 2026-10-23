@@ -413,52 +413,16 @@ pub async fn build_product_export_bytes(
     let mut options = ReportOptions::default();
     options.apply_env_defaults();
 
-    let json =
-        camerata_server::report_export::build_report_json(report, &dispositions, corpus, &options);
-    let pdf_bytes = camerata_server::report_export::compile_pdf(&json)
-        .await
-        .map_err(|e| e.to_string())?;
-    let xlsx_bytes =
-        camerata_server::xlsx_export::build_workbook(report, &dispositions, corpus, &options)
-            .map_err(|e| e.to_string())?;
-    let findings_export = camerata_server::xlsx_export::build_findings_export(
+    let package = camerata_server::release_gate::build_product_package(
         report,
         &dispositions,
         corpus,
-        &json,
-        &options.chosen_options,
-    );
-    let findings_json_bytes = serde_json::to_vec_pretty(&findings_export)
-        .map_err(|e| format!("could not serialize findings.json: {e}"))?;
-
-    // The per-dataset machine-readable tables (csv/*, json/*): same partition_rows pass as the
-    // xlsx + findings.json, so the artifacts agree.
-    let csv_exports =
-        camerata_server::xlsx_export::build_csv_exports(report, &dispositions, corpus, &options)
-            .map_err(|e| format!("could not build CSV exports: {e}"))?;
-    let json_exports =
-        camerata_server::xlsx_export::build_json_exports(report, &dispositions, corpus, &options)
-            .map_err(|e| format!("could not build JSON exports: {e}"))?;
-    let mut extra_files: Vec<(String, Vec<u8>)> = csv_exports;
-    extra_files.extend(json_exports);
-
-    let provenance =
-        camerata_server::client_provenance::export_provenance(report, &json.cover, corpus);
-
-    let stem = camerata_server::report_filename_stem(report);
-    let readme = camerata_server::product_export_readme(&stem, &provenance);
-    let zip_bytes = camerata_server::build_product_zip(
-        &stem,
-        &pdf_bytes,
-        &xlsx_bytes,
-        &findings_json_bytes,
-        &readme,
-        &extra_files,
-        &provenance,
+        &options,
     )
-    .map_err(|e| format!("could not assemble the product export zip: {e}"))?;
-
-    Ok((stem, zip_bytes))
+    .await
+    .map_err(|e| e.to_string())?;
+    let released = camerata_server::release_gate::release(package).map_err(|e| e.to_string())?;
+    Ok((released.stem, released.bytes))
 }
 
 /// Render the run's actual token usage + cost for the CLI's final stdout line — the number

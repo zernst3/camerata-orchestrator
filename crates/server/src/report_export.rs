@@ -4938,13 +4938,29 @@ pub fn build_report_json(
 /// construction, so they cannot disagree. The string was written in [`GENERATED_AT_FORMAT`],
 /// so the round-trip is exact; `None` only if a caller hand-built an `AuditReportJson` with
 /// some other string in that field.
-fn creation_epoch(json: &AuditReportJson) -> Option<i64> {
-    chrono::NaiveDateTime::parse_from_str(json.cover.generated_at.trim(), GENERATED_AT_FORMAT)
+fn creation_epoch(data_json: &str) -> Option<i64> {
+    let data: serde_json::Value = serde_json::from_str(data_json).ok()?;
+    let generated_at = data.get("cover")?.get("generated_at")?.as_str()?;
+    chrono::NaiveDateTime::parse_from_str(generated_at.trim(), GENERATED_AT_FORMAT)
         .ok()
         .map(|naive| naive.and_utc().timestamp())
 }
 
-/// Compile `json` into a PDF via a bundled Typst template. Self-contained: the template
+/// Serialize the PDF's data: the ONE `data.json` the Typst template reads. The release gate
+/// inspects these exact bytes, so what it checks is byte-identical to what Typst renders.
+pub fn render_data_json(json: &AuditReportJson) -> anyhow::Result<String> {
+    serde_json::to_string(json).context("could not serialize the report to JSON")
+}
+
+/// [`compile_pdf_from_data`] over a structured report. For tests and diagnostics: production
+/// exports go through `release_gate::build_product_package`, which keeps the `data.json` bytes
+/// so the release gate can inspect them (a source-grep test pins that).
+pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
+    compile_pdf_from_data(&render_data_json(json)?).await
+}
+
+/// Compile `data_json` (from [`render_data_json`]) into a PDF via a bundled Typst template.
+/// Self-contained: the template
 /// text is embedded in the binary (`include_str!`), so no external file needs to ship
 /// alongside the server. Fails soft with an actionable message when `typst` isn't on PATH
 /// (matches the dep-audit coverage-note tone: name the tool, name the fix).
@@ -4953,14 +4969,12 @@ fn creation_epoch(json: &AuditReportJson) -> Option<i64> {
 /// cleanup on drop) with a 30s timeout, with `SOURCE_DATE_EPOCH` pinned to the report's own
 /// generation time (see [`creation_epoch`]). The template reads `data.json` via Typst's own
 /// `json()` builtin — no `--input` plumbing needed.
-pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
+pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
     let tmp = tempfile::tempdir().context("could not create a temp dir for the PDF export")?;
     let data_path = tmp.path().join("data.json");
     let template_path = tmp.path().join("report.typ");
     let pdf_path = tmp.path().join("report.pdf");
 
-    let data_json =
-        serde_json::to_string(json).context("could not serialize the report to JSON")?;
     tokio::fs::write(&data_path, data_json)
         .await
         .context("could not write data.json")?;
@@ -5001,7 +5015,7 @@ pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
     // an explicit `now` is still better than leaving the variable unset, because the server
     // process could otherwise inherit an unrelated `SOURCE_DATE_EPOCH` from its environment and
     // silently stamp a client deliverable with a build timestamp from somewhere else entirely.
-    let epoch = creation_epoch(json).unwrap_or_else(|| chrono::Utc::now().timestamp());
+    let epoch = creation_epoch(data_json).unwrap_or_else(|| chrono::Utc::now().timestamp());
     cmd.env("SOURCE_DATE_EPOCH", epoch.to_string());
 
     let output = match tokio::time::timeout(Duration::from_secs(30), cmd.output()).await {

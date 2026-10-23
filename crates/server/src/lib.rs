@@ -113,6 +113,7 @@ pub mod model_registry;
 pub mod model_tier;
 pub mod provider_policy;
 pub mod rate_limit;
+pub mod release_gate;
 /// W1: the pipeline-integrity ledger — per-rule "did it actually run" tracking and
 /// per-stage row-accounting, so a rule that never ran can never be reported as
 /// "verified clean" and a row that vanishes between pipeline stages can never go
@@ -16310,7 +16311,11 @@ async fn export_audit_report(
         &req.options,
     );
 
-    let pdf_bytes = match crate::report_export::compile_pdf(&json).await {
+    let pdf_bytes = match crate::report_export::render_data_json(&json) {
+        Ok(data_json) => crate::report_export::compile_pdf_from_data(&data_json).await,
+        Err(e) => Err(e),
+    };
+    let pdf_bytes = match pdf_bytes {
         Ok(bytes) => bytes,
         Err(e) => {
             return (
@@ -16422,131 +16427,38 @@ async fn export_product(
     // populated, never client-supplied. Covers all three artifacts built below.
     req.options.chosen_options = project_chosen_options(&project);
 
-    let json = crate::report_export::build_report_json(
-        &report,
-        &req.dispositions,
-        corpus.as_ref(),
-        &req.options,
-    );
-
-    let pdf_bytes = match crate::report_export::compile_pdf(&json).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
-
-    let xlsx_bytes = match crate::xlsx_export::build_workbook(
-        &report,
-        &req.dispositions,
-        corpus.as_ref(),
-        &req.options,
-    ) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
-
-    // `findings.json`: the machine-readable sibling of the workbook's "All Findings" sheet.
-    // Built from the SAME `report`/`dispositions`/`corpus` pass as `xlsx_bytes` above (and
-    // reuses `json`'s already-computed cover/executive-summary for provenance/summary), so
-    // the JSON can never disagree with either the PDF or the xlsx — see
-    // `xlsx_export::build_findings_export`'s doc comment.
-    let findings_export = crate::xlsx_export::build_findings_export(
-        &report,
-        &req.dispositions,
-        corpus.as_ref(),
-        &json,
-        &req.options.chosen_options,
-    );
-    let findings_json_bytes = match serde_json::to_vec_pretty(&findings_export) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "message": format!("could not serialize findings.json: {e}")
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    // The per-dataset machine-readable tables (csv/*, json/*) — the SAME partition_rows pass as
-    // the xlsx and findings.json, so every artifact agrees. csv first, then json.
-    let mut extra_files: Vec<(String, Vec<u8>)> = Vec::new();
-    match crate::xlsx_export::build_csv_exports(
+    // ONE assembly (`release_gate::build_product_package`) and ONE path to zip bytes
+    // (`release_gate::release`), shared by this handler, `camerata inspect --export` and the
+    // sample generator.
+    let package = match crate::release_gate::build_product_package(
         &report,
         &req.dispositions,
         corpus.as_ref(),
         &req.options,
     )
-    .and_then(|csv| {
-        crate::xlsx_export::build_json_exports(
-            &report,
-            &req.dispositions,
-            corpus.as_ref(),
-            &req.options,
-        )
-        .map(|json_files| (csv, json_files))
-    }) {
-        Ok((csv, json_files)) => {
-            extra_files.extend(csv);
-            extra_files.extend(json_files);
-        }
+    .await
+    {
+        Ok(package) => package,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "message": format!("could not build the machine-readable exports: {e}")
-                })),
-            )
-                .into_response();
-        }
-    }
-
-    // Commit per repo, the corpus digest and the rules-last-reviewed date all come from the one
-    // sanctioned provenance bridge (`client_provenance`); `rules_last_reviewed` is honestly
-    // None until every rule a scan used has been reviewed. No maintenance text is sourced here:
-    // see the client-artifact gate in the lib.rs tests.
-    let provenance =
-        crate::client_provenance::export_provenance(&report, &json.cover, corpus.as_ref());
-
-    let stem = report_filename_stem(&report);
-    let readme = product_export_readme(&stem, &provenance);
-
-    let zip_bytes = match build_product_zip(
-        &stem,
-        &pdf_bytes,
-        &xlsx_bytes,
-        &findings_json_bytes,
-        &readme,
-        &extra_files,
-        &provenance,
-    ) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "message": format!("could not assemble the product export zip: {e}")
-                })),
+                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
             )
                 .into_response();
         }
     };
+    let released = match crate::release_gate::release(package) {
+        Ok(released) => released,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let stem = released.stem;
+    let zip_bytes = released.bytes;
 
     let filename = format!("{stem}.zip");
 
@@ -16858,11 +16770,11 @@ pub fn build_manifest(
 /// `Cursor<Vec<u8>>` — no temp files, matching `report_export`'s own "tiny, no persistence"
 /// contract.
 ///
-/// `pub`: this is the ONE zip-assembly function — both `export_product` (HTTP) and
-/// `camerata inspect --export` (headless CLI) call it directly over their own
-/// pdf/xlsx/findings.json/README bytes, so the two entry points can never produce
-/// different zip layouts. See `crates/cli/src/inspect_cmd.rs`.
-pub fn build_product_zip(
+/// `pub(crate)`: this is the ONE zip-assembly function, and `release_gate::release` is its ONLY
+/// production caller (a source-grep test pins that), so no exporter can obtain zip bytes that
+/// did not pass the release gate. Integration tests that need an archive to tamper with go
+/// through [`assemble_unreleased_zip`].
+pub(crate) fn build_product_zip(
     stem: &str,
     pdf_bytes: &[u8],
     xlsx_bytes: &[u8],
@@ -16915,6 +16827,30 @@ pub fn build_product_zip(
 
     let cursor = writer.finish()?;
     Ok(cursor.into_inner())
+}
+
+/// [`build_product_zip`] for TESTS: an archive that did NOT pass the release gate, so the gate's
+/// own corruption tests (manifest hashes, provenance) can build a tampered one. Production code
+/// must never call this; a source-grep test fails the build if it does.
+#[doc(hidden)]
+pub fn assemble_unreleased_zip(
+    stem: &str,
+    pdf_bytes: &[u8],
+    xlsx_bytes: &[u8],
+    findings_json_bytes: &[u8],
+    readme: &str,
+    extra_files: &[(String, Vec<u8>)],
+    provenance: &ManifestProvenance,
+) -> zip::result::ZipResult<Vec<u8>> {
+    build_product_zip(
+        stem,
+        pdf_bytes,
+        xlsx_bytes,
+        findings_json_bytes,
+        readme,
+        extra_files,
+        provenance,
+    )
 }
 
 // ── error type ──────────────────────────────────────────────────────────────

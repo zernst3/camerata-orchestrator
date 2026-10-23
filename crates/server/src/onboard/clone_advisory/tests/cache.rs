@@ -212,8 +212,14 @@ fn the_cache_round_trips_through_json_and_an_older_manifest_loads_empty() {
     let back: crate::scan_cache::ScanManifest =
         serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
     assert_eq!(back.clone_verdicts, cache);
-    let old = r#"{"version":1,"rules_fingerprint":"x","files":{},"findings":[],"ai_covered":true}"#;
-    let loaded: crate::scan_cache::ScanManifest = serde_json::from_str(old).unwrap();
+    // A manifest written at the CURRENT schema version before the verdict cache existed: the
+    // version is read off a freshly built manifest, so a deliberate bump elsewhere (the v2 bump
+    // that purged raw-snippet caches) does not turn this into a different test.
+    let old = format!(
+        r#"{{"version":{},"rules_fingerprint":"x","files":{{}},"findings":[],"ai_covered":true}}"#,
+        manifest.version
+    );
+    let loaded: crate::scan_cache::ScanManifest = serde_json::from_str(&old).unwrap();
     assert!(loaded.clone_verdicts.is_empty());
     assert!(
         loaded.is_current(),

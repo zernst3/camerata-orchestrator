@@ -395,7 +395,11 @@ fn logged_while<T>(f: impl FnOnce() -> T) -> (T, String) {
         .with_writer(buf.clone())
         .with_ansi(false)
         .finish();
+    // The callsite interest cache is process-global: a callsite another test already hit with
+    // no subscriber can stay cached as "never", so rebuild it before and after this scope.
+    tracing::callsite::rebuild_interest_cache();
     let out = tracing::subscriber::with_default(subscriber, f);
+    tracing::callsite::rebuild_interest_cache();
     let text = String::from_utf8(buf.0.lock().expect("log lock").clone()).expect("utf8 log");
     (out, text)
 }

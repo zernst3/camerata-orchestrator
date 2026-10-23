@@ -23,7 +23,9 @@ use std::io::{Read, Write};
 
 use camerata_server::onboard::{AuditedRef, Finding, LanguageVolume, ScanProvenance, ScanReport};
 use camerata_server::report_export::{build_report_json, AuditReportJson, ReportOptions};
-use camerata_server::{build_product_zip, product_export_readme, ManifestProvenance};
+use camerata_server::{
+    assemble_unreleased_zip as build_product_zip, product_export_readme, ManifestProvenance,
+};
 use sha2::{Digest, Sha256};
 
 const STEM: &str = "acme-inspection";
