@@ -110,6 +110,21 @@ of injected faults", a much stronger claim, and the surviving mutants point at t
 - Output to keep: the caught/missed percentage per crate over time, and the list of surviving
   mutants triaged into "add a test" or "equivalent mutant, ignore with a reason".
 
+## 5. Themes (for fun; Zach, 2026-10-24)
+
+Not needed for V1 or for clients; wanted because developer tools do not have to be boring. The
+current look is deliberate: the WWII Bombe (Turing's codebreaking machine), mechanical and
+distinctive. Add a theme picker and a second theme: **Windows XP** (Luna-style blue gradient
+title bars, Tahoma-style type, bevelled buttons, green accents).
+
+- Precondition: audit `crates/ui/src/style.rs` and components for hard-coded colours, fonts and
+  borders, and route every one through theme variables (`--ink`, `--ink-soft`, `--accent`, and
+  so on). Then a theme is one set of variable overrides plus a picker in settings, persisted per
+  user. Dark mode (UI_BACKLOG) falls out of the same mechanism.
+- Recreate the XP look in CSS. Do NOT ship Microsoft assets (the Bliss wallpaper, Windows logos,
+  icon sets): they are copyrighted and trademarked.
+- Bombe stays the default.
+
 ## Keep V1 forward-compatible (no extra V1 work)
 
 When V1 work touches the project data model (the deletion record, re-fetch, provenance), store
