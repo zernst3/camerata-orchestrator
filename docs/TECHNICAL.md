@@ -2970,7 +2970,7 @@ repo, no path, not a directory, a symlinked path, a protected path (home, worksp
 of either, Camerata's own stores or program, another checkout), not a git repo, no or unreadable or
 non-GitHub `origin`, an `origin` that is a different repo, a typed name that is not the repo's name
 byte for byte, uncommitted work and unpushed commits without the second tick, a scan or other source
-operation running (per-(project, repo) claims in `ops.rs`; the synchronous scan handlers and the
+operation running or an unfinished governed run on the repo (per-(project, repo) claims in `ops.rs`; the synchronous scan handlers and the
 alternatives rescan register as running scans), and a registered worktree that is itself a symlink or
 a protected location. A target whose `.git` is a FILE is a linked worktree and is refused
 (`linked_worktree`, naming the clone it belongs to), so deleting never leaves the main clone behind
@@ -2999,8 +2999,12 @@ found safe because they require an existing git checkout before writing: `create
 `ensure_uow_worktree` (so every `resolve_uow_worktree` caller), `ship_repo`, the `git_*` handlers.
 Still possible by the operator's own act: greenfield scaffolds a NEW directory at a path the operator
 chooses (it can be a deleted checkout's old path, which then blocks re-fetch, but it brings back no
-client code). Not covered: a governed run already in flight when its checkout is deleted keeps its
-process; the jail denies its writes, but the guard does not wait for it.
+client code). A governed run in flight when its checkout is deleted is prevented, not just contained: the
+guard refuses (`governed_run_in_progress`) while any unfinished run in `AppState::runs` (governed
+development, investigation, update-branch, PR-resolve, routine-driven ones included; a run paused
+on a question or review still counts) is attributed to the repo by its story id, a linked work
+item, or the repos in its UoW's intake scope. The gated-write jail's denial of a vanished worktree
+stays as defense in depth.
 
 **Residual sentences.** Every record carries what deletion cannot cover: backups and the kept
 excerpts always; recorded sessions removed; on the Cli backend, a sentence for inspections whose

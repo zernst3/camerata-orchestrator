@@ -17,7 +17,7 @@
 //! | R9 | `confirmation_mismatch` | the typed name is not the repo's name, byte for byte |
 //! | R10 | `dirty_tree` | uncommitted work and the operator did not tick "Delete uncommitted work too" |
 //! | R11 | `unpushed_commits` | commits not on GitHub, same tick |
-//! | R12 | `scan_in_progress` | a scan, re-fetch or delete is running for the project or repo |
+//! | R12 | `scan_in_progress` / `governed_run_in_progress` | a scan, re-fetch or delete is running for the project or repo, or an unfinished governed, investigation, update-branch or PR-resolve run is working on the repo |
 //! | R13 | `worktree_outside_refused` | a registered worktree is itself a symlink or a protected location, or a listed folder is not really a worktree of this clone |
 //!
 //! A preview ([`Intent::Preview`]) runs the same checks except R9 (nothing was typed yet) and
@@ -235,6 +235,14 @@ pub async fn guard(
             "A scan is running for this project. Wait for it to finish or cancel it first.",
         ));
     }
+    if governed_run_active_on(state, &repo) {
+        return Err(Refusal::conflict(
+            "governed_run_in_progress",
+            format!(
+                "A governed run is in progress on {repo}; wait for it to finish or stop it first."
+            ),
+        ));
+    }
     let Some(claim) = state.source_ops.try_begin(&project.id, &repo) else {
         return Err(Refusal::conflict(
             "scan_in_progress",
@@ -280,6 +288,31 @@ pub async fn guard(
         worktrees,
         _claim: claim,
     })
+}
+
+/// Whether a run that has not finished is working on `repo`. Every governed development,
+/// investigation, update-branch and PR-resolve run (routine-driven ones too) is created in
+/// `AppState::runs` and stays there, not `done`, until it ends or is cancelled, so that store is
+/// the registry; a run parked on a question or a review is still open and counts.
+///
+/// A run is attributed to a repo by its story id (`owner/repo#n`), the work item a draft story
+/// links to, and the repos a UoW put in scope at intake. A story that names no repo (a scripted
+/// demo story) is attributed to none.
+fn governed_run_active_on(state: &AppState, repo: &str) -> bool {
+    state
+        .runs
+        .snapshot_active()
+        .iter()
+        .any(|run| story_touches_repo(state, &run.story_id, repo))
+}
+
+fn story_touches_repo(state: &AppState, story_id: &str, repo: &str) -> bool {
+    let mut repos: Vec<String> = crate::repo_from_story_id(story_id).into_iter().collect();
+    if let Some(uow) = state.uow.get(story_id) {
+        repos.extend(uow.intake.repos.iter().map(|scope| scope.repo.clone()));
+        repos.extend(uow.work_item.as_deref().and_then(crate::repo_from_story_id));
+    }
+    repos.iter().any(|r| r.eq_ignore_ascii_case(repo.trim()))
 }
 
 /// R13 for ONE registered worktree: why it must not be removed along with the checkout, or

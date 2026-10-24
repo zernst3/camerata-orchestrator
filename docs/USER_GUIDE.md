@@ -673,7 +673,7 @@ remove: the checkout, any worktrees, its scan caches, the command-line cache, an
 session files that hold the code it sent to the model. If you have uncommitted changes, or commits
 that are not on GitHub, it says so in amber and the button stays off until you also tick **Delete
 uncommitted work too**. Type the repo name exactly (`acme/app`) to enable **Delete source code**.
-Nothing is removed until then, and nothing is removed from any folder that is not this repo's clone
+Nothing is removed until then (and not while a scan or a governed run is still working on the repo: wait for it or stop it), and nothing is removed from any folder that is not this repo's clone
 (a symlinked path, your home folder, a different repo, or Camerata's own folder are all refused with
 the reason).
 

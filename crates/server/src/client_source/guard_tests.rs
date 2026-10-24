@@ -417,6 +417,92 @@ async fn guard_refuses_while_scan_job_is_running() {
     assert!(fx.checkout.exists());
 }
 
+/// A governed, investigation, update-branch or PR-resolve run that has not finished is working
+/// in the repo's worktrees; deleting the checkout under it would strand it (and its writes would
+/// recreate the folder). Refused the same way a running scan is.
+#[tokio::test]
+async fn guard_refuses_while_a_governed_run_is_active_on_the_repo() {
+    let fx = fixture();
+    let run = fx
+        .state
+        .runs
+        .create("acme/app#7", "live", crate::run::RunKind::Watched);
+
+    for intent in [delete_intent(false), Intent::Preview] {
+        let refusal = guard(&fx.state, &fx.project_id, REPO, intent)
+            .await
+            .err()
+            .expect("an active run blocks deletion");
+        assert_eq!(refusal.code, "governed_run_in_progress");
+        assert_eq!(
+            refusal.message,
+            "A governed run is in progress on acme/app; wait for it to finish or stop it first."
+        );
+    }
+    assert!(fx.checkout.exists());
+
+    // Finished (here: cancelled) it no longer blocks.
+    fx.state.runs.cancel(&run);
+    assert_eq!(code(&fx, delete_intent(false)).await, "ok");
+}
+
+#[tokio::test]
+async fn a_paused_run_still_counts_and_a_marked_done_run_does_not() {
+    let fx = fixture();
+    let run = fx
+        .state
+        .runs
+        .create("acme/app#8", "live", crate::run::RunKind::Watched);
+    fx.state.runs.set_status(
+        &run,
+        camerata_app_core::run::RunStatus::AwaitingClarification,
+        false,
+    );
+    assert_eq!(
+        code(&fx, delete_intent(false)).await,
+        "governed_run_in_progress",
+        "a run paused on a question is still open"
+    );
+    fx.state.runs.mark_done(&run);
+    assert_eq!(code(&fx, delete_intent(false)).await, "ok");
+}
+
+/// A run is attributed to a repo by its story id (`owner/repo#n`) and by the repos a UoW put in
+/// scope at intake; a run on another repo, or on a story that resolves to no repo, is no reason
+/// to keep this one.
+#[tokio::test]
+async fn a_run_blocks_only_the_repos_it_is_working_on() {
+    let fx = fixture();
+    // Another repo's story id.
+    fx.state
+        .runs
+        .create("acme/lib#1", "live", crate::run::RunKind::Watched);
+    // A story that names no repo at all.
+    fx.state
+        .runs
+        .create("CAM-99", "live", crate::run::RunKind::Watched);
+    assert_eq!(code(&fx, delete_intent(false)).await, "ok");
+
+    // A multi-repo UoW whose story id names a different repo but whose intake scope includes ours.
+    fx.state.uow.set_intake_repos(
+        "acme/other#3",
+        vec![crate::uow::RepoScope {
+            repo: REPO.to_string(),
+            branch: crate::uow::BranchMode::NewFromBase {
+                base: "main".into(),
+                new_name: String::new(),
+            },
+        }],
+    );
+    fx.state
+        .runs
+        .create("acme/other#3", "live", crate::run::RunKind::Watched);
+    assert_eq!(
+        code(&fx, delete_intent(false)).await,
+        "governed_run_in_progress"
+    );
+}
+
 #[tokio::test]
 async fn guard_refuses_worktree_in_protected_location() {
     let fx = fixture();
