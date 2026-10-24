@@ -62,6 +62,15 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-24 (Opus, delete/re-fetch review calls): (a) a `repo_path` override may aim deletion at
+  any clone whose origin matches the project repo, by design ("it IS that client's code"); the
+  dirty/unpushed refusals still apply; USER_GUIDE says so plainly. (b) The deletion record
+  discloses generically what it cannot cover: Claude Code sessions from the chat assistant and
+  governed-dev agents that read client code, sessions from inspections run before session ids
+  were recorded, and CLI caches left under an old path if the checkout was moved. Honest residual
+  sentences, never silent. (c) The source gate covers a deleted repo named in a request even when
+  it belongs to a project other than the active one.
+
 - 2026-10-24 (Zach): the untracked IMPLEMENTER_HANDOFF items join V1 as MASTER-SEQUENCE item 22
   (22a API backend for client inspections and 22b `camerata count` are blocking and go right after
   the delete/re-fetch blocker; 22c manifest fields; 22d reconciliation by severity and kind; 22e
