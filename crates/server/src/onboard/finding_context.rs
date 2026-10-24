@@ -54,6 +54,32 @@ pub enum FindingContextOutcome {
     LineGone,
     /// The requested `path` resolves outside the repo directory — refused before any read.
     PathTraversal,
+    /// The inspected commit is not in this clone (history was rewritten, or the clone is
+    /// shallow). The working tree is read instead and the response says so.
+    CommitUnavailable,
+    /// The repo's source was deleted on purpose and not fetched back. Nothing on disk is read.
+    SourceDeleted {
+        deleted_at: String,
+        record_id: String,
+    },
+}
+
+/// Where a lookup reads the file from.
+#[derive(Debug, Clone, Copy)]
+pub enum FileSource<'a> {
+    /// The file as it is in the working tree now (the scan ran on a folder with no git history).
+    WorkingTree(&'a Path),
+    /// The file as it was at commit `sha`, through git's object store, so a finding keeps
+    /// showing the code the inspection saw even after the checkout moved on.
+    Git { dir: &'a Path, sha: &'a str },
+}
+
+impl FileSource<'_> {
+    fn dir(&self) -> &Path {
+        match self {
+            FileSource::WorkingTree(dir) | FileSource::Git { dir, .. } => dir,
+        }
+    }
 }
 
 impl FindingContextOutcome {
@@ -99,6 +125,22 @@ impl FindingContextOutcome {
                 "status": "path_traversal",
                 "reason": "requested path escapes the repo directory",
             }),
+            FindingContextOutcome::CommitUnavailable => serde_json::json!({
+                "status": "commit_unavailable",
+                "reason": "Inspected commit not available in this clone; showing the working tree",
+            }),
+            FindingContextOutcome::SourceDeleted {
+                deleted_at,
+                record_id,
+            } => serde_json::json!({
+                "status": "source_deleted",
+                "reason": format!(
+                    "Source deleted on {}, re-fetch to view",
+                    crate::client_source::records::long_date(deleted_at)
+                ),
+                "deleted_at": deleted_at,
+                "record_id": record_id,
+            }),
         }
     }
 }
@@ -117,14 +159,123 @@ pub async fn lookup(
     line: usize,
     expect: Option<&str>,
 ) -> FindingContextOutcome {
-    let Some(abs_path) = resolve_contained_path(repo_dir, rel_path) else {
+    lookup_at(FileSource::WorkingTree(repo_dir), rel_path, line, expect).await
+}
+
+/// [`lookup`] over an explicit [`FileSource`]: the working tree, or a commit read through git
+/// objects. Path containment runs BEFORE either read; the git form additionally refuses a path
+/// that is absolute, has a `..` segment or contains a NUL (git would resolve `sha:../x` against
+/// the tree, but a request for one is a traversal attempt, not a typo).
+pub async fn lookup_at(
+    source: FileSource<'_>,
+    rel_path: &str,
+    line: usize,
+    expect: Option<&str>,
+) -> FindingContextOutcome {
+    let Some(abs_path) = resolve_contained_path(source.dir(), rel_path) else {
         return FindingContextOutcome::PathTraversal;
     };
 
-    let bytes = match tokio::fs::read(&abs_path).await {
-        Ok(b) => b,
-        Err(_) => return FindingContextOutcome::FileMissing,
+    let bytes = match source {
+        FileSource::WorkingTree(_) => match read_working_tree_file(&abs_path).await {
+            Ok(b) => b,
+            Err(_) => return FindingContextOutcome::FileMissing,
+        },
+        FileSource::Git { dir, sha } => {
+            if !is_plain_relative_path(rel_path) {
+                return FindingContextOutcome::PathTraversal;
+            }
+            match read_git_blob(dir, sha, rel_path).await {
+                Ok(b) => b,
+                Err(GitReadError::CommitUnavailable) => {
+                    return FindingContextOutcome::CommitUnavailable
+                }
+                Err(GitReadError::NotFound) => return FindingContextOutcome::FileMissing,
+                Err(GitReadError::TooLarge) => return FindingContextOutcome::TooLarge,
+            }
+        }
     };
+    describe(bytes, rel_path, line, expect)
+}
+
+thread_local! {
+    /// Test seam: how many working-tree files this thread's lookups have read. Lets a test prove
+    /// that a deleted or unresolved repo never reaches the filesystem.
+    #[cfg(test)]
+    pub(crate) static WORKING_TREE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Read one file from the working tree. The single place the working tree is read.
+async fn read_working_tree_file(abs_path: &Path) -> std::io::Result<Vec<u8>> {
+    #[cfg(test)]
+    WORKING_TREE_READS.with(|c| c.set(c.get() + 1));
+    tokio::fs::read(abs_path).await
+}
+
+/// A repo-relative path that is safe to put after `<sha>:` — no leading `/`, no `..` segment, no
+/// NUL.
+fn is_plain_relative_path(rel_path: &str) -> bool {
+    !rel_path.starts_with('/')
+        && !rel_path.contains('\0')
+        && !rel_path.split(['/', '\\']).any(|seg| seg == "..")
+}
+
+/// Why a git object read did not return a file.
+#[derive(Debug, PartialEq, Eq)]
+enum GitReadError {
+    /// The commit is not in this clone.
+    CommitUnavailable,
+    /// The commit exists but has no such file (or the path is a directory).
+    NotFound,
+    /// The blob is larger than [`MAX_FILE_BYTES`].
+    TooLarge,
+}
+
+/// `git cat-file blob <sha>:<path>`: the file as it was at `sha`, never the working tree. The
+/// output is read only up to `MAX_FILE_BYTES + 1` bytes, so an oversized blob is detected (and
+/// the process killed) without buffering it.
+async fn read_git_blob(dir: &Path, sha: &str, rel_path: &str) -> Result<Vec<u8>, GitReadError> {
+    use tokio::io::AsyncReadExt;
+
+    if !crate::client_source::git::commit_exists(dir, sha).await {
+        return Err(GitReadError::CommitUnavailable);
+    }
+    // `sha:` makes the argument an object name; nothing in `rel_path` can be read as an option.
+    let spec = format!("{sha}:{rel_path}");
+    let mut child = tokio::process::Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "core.quotepath=off", "cat-file", "blob", &spec])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| GitReadError::NotFound)?;
+    let Some(stdout) = child.stdout.take() else {
+        return Err(GitReadError::NotFound);
+    };
+    let mut bytes = Vec::new();
+    let cap = MAX_FILE_BYTES as u64 + 1;
+    if stdout.take(cap).read_to_end(&mut bytes).await.is_err() {
+        return Err(GitReadError::NotFound);
+    }
+    if bytes.len() > MAX_FILE_BYTES {
+        // Dropping the child kills it; the rest of the blob is never read.
+        return Err(GitReadError::TooLarge);
+    }
+    match child.wait().await {
+        Ok(status) if status.success() => Ok(bytes),
+        _ => Err(GitReadError::NotFound),
+    }
+}
+
+/// The shared tail of a lookup: size cap, UTF-8, enclosing block, redaction.
+fn describe(
+    bytes: Vec<u8>,
+    rel_path: &str,
+    line: usize,
+    expect: Option<&str>,
+) -> FindingContextOutcome {
     if bytes.len() > MAX_FILE_BYTES {
         return FindingContextOutcome::TooLarge;
     }

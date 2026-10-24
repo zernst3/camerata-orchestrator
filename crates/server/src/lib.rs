@@ -7142,67 +7142,23 @@ async fn cancel_audit_job(
     StatusCode::NO_CONTENT
 }
 
-/// Query parameters for `GET /api/onboard/finding-context`.
-#[derive(serde::Deserialize)]
-struct FindingContextQuery {
-    /// `owner/repo` — resolved to a local checkout via `settings.repo_path` /
-    /// `settings.workspace_root`, same as the git-status endpoints.
-    repo: String,
-    /// Repo-relative file path (as stored on `FindingView::path`).
-    path: String,
-    /// 1-based violation line (as stored on `FindingView::line`).
-    line: usize,
-    /// Optional first line of the scan-time stored `snippet`, for a cheap staleness check
-    /// (`matches_snippet` in the response). Absent = no comparison, never flagged stale.
-    #[serde(default)]
-    expect: Option<String>,
-}
-
 /// `GET /api/onboard/finding-context` — the enclosing-code-block lookup for the scan-review
 /// finding modal (`docs/design/2026-07-27_finding-code-context.md`). ON-DEMAND, not scan-time
 /// cached (see `onboard::finding_context` module docs for why): a handful of reads per triage
-/// session, always reflects the file as it exists now, zero LLM tokens (a pure local file
-/// read + deterministic parse).
+/// session, zero LLM tokens (a local read + deterministic parse).
 ///
-/// Resolves the repo dir exactly like the git-status endpoints (`resolve_git_dir`'s sibling
-/// here, inlined so the "unlinked repo" case maps to `file_missing` rather than a distinct
-/// error shape); an unresolved repo is indistinguishable from "file missing" to the UI, which
-/// is the correct degradation per the design's table. All other failure modes (missing file,
-/// non-UTF8, oversized, the line no longer existing, or a path-traversal refusal) are computed
-/// by `onboard::finding_context::lookup` and returned as `{ "status": "...", "reason": "..." }`
-/// — see that module for the floor guarantee. Path traversal is the only case that gets a
-/// non-200: everything else is 200 with a `status` field, exactly like every other onboard
-/// endpoint, so the UI's normal JSON-parsing path handles every case uniformly.
+/// The code is read from the INSPECTED COMMIT through git objects (so old findings stay accurate
+/// while the checkout sits at the latest commit), from the working tree only when the scan had
+/// no commit, and not at all when the repo's source was deleted (`status: "source_deleted"`).
+/// Where it may be read from is decided by `client_source::read::source_for_read`, the one
+/// resolver the code viewer will share. Every failure degrades to a `status` + `reason` the UI
+/// shows beside the stored snippet; path traversal is the only non-200. The response is never
+/// cached by the webview (`Cache-Control: no-store`).
 async fn onboard_finding_context(
     State(state): State<AppState>,
-    axum::extract::Query(q): axum::extract::Query<FindingContextQuery>,
-) -> impl IntoResponse {
-    let override_path = state.settings.repo_path(&q.repo);
-    let workspace_root = state.settings.workspace_root();
-    let Some(repo_dir) = crate::workspace::resolve_repo_dir(
-        override_path.as_deref(),
-        workspace_root.as_deref(),
-        &q.repo,
-    ) else {
-        // Unlinked project / repo path unresolved — treated as file_missing (design §5).
-        return (
-            StatusCode::OK,
-            Json(crate::onboard::finding_context::FindingContextOutcome::FileMissing.to_json()),
-        );
-    };
-
-    let outcome =
-        crate::onboard::finding_context::lookup(&repo_dir, &q.path, q.line, q.expect.as_deref())
-            .await;
-    let status = if matches!(
-        outcome,
-        crate::onboard::finding_context::FindingContextOutcome::PathTraversal
-    ) {
-        StatusCode::BAD_REQUEST
-    } else {
-        StatusCode::OK
-    };
-    (status, Json(outcome.to_json()))
+    axum::extract::Query(q): axum::extract::Query<crate::client_source::read::FindingContextParams>,
+) -> Response {
+    crate::client_source::read::finding_context(&state, q).await
 }
 
 /// Query parameters for `GET /api/onboard/finding-fix`.

@@ -24,6 +24,7 @@ pub mod guard;
 pub mod handlers;
 pub mod ops;
 pub mod purge;
+pub mod read;
 pub mod records;
 pub mod resolution;
 pub mod status;
@@ -33,6 +34,8 @@ pub mod storage;
 mod delete_tests;
 #[cfg(test)]
 mod guard_tests;
+#[cfg(test)]
+mod read_tests;
 #[cfg(test)]
 mod readiness_tests;
 #[cfg(test)]
