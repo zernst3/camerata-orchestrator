@@ -8183,12 +8183,10 @@ async fn project_suppressions(
         .collect();
     // Local-first: the waiver registry reads each repo's local working tree, not GitHub.
     let (sources, _notes) = resolve_local_sources(&state, &project.repos);
-    // Refresh = best-effort fast-forward pull of each local repo so the listing reflects the
-    // latest remote state, THEN read. A pull failure (diverged/offline/dirty) is non-fatal: we
-    // still read whatever is on disk. This endpoint is informational and read-only.
-    for (_spec, dir) in &sources {
-        let _ = crate::workspace::pull_local_ff(dir).await;
-    }
+    // Read-only, as a GET must be: this used to fast-forward `git pull` every repo first, which
+    // moved a checkout past the inspected commit just by opening a screen (and cannot work on a
+    // detached HEAD, where a re-fetch at the inspected commit leaves the tree). The Workspace
+    // tab's "Clone / update all repos" is the deliberate way to refresh.
     let entries = crate::onboard::suppression_registry(&sources).await;
     Ok(Json(serde_json::json!({
         "ok": true,

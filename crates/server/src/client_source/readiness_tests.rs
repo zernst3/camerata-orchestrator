@@ -281,6 +281,38 @@ async fn suppressions_report_source_deleted_with_empty_entries() {
     assert_eq!(json["deleted_repos"][0]["repo"], REPO);
 }
 
+/// D3: a GET must not change the checkout. The suppressions listing used to run a fast-forward
+/// `git pull` on every read, which moves a tree past the inspected commit just by looking at a
+/// screen. (The Workspace "Clone / update" button is the deliberate refresh.)
+#[tokio::test]
+async fn suppressions_get_does_not_touch_the_checkout() {
+    let fx = fixture();
+    // Make the pull possible: origin is the local bare remote, which gains a newer commit.
+    crate::test_git::git(
+        &fx.checkout,
+        &["remote", "set-url", "origin", &fx.remote_url],
+    );
+    let newer =
+        crate::test_git::push_commit(&fx.remote_base, "b.txt", "2\n", "newer on the remote");
+    assert_ne!(newer, fx.head);
+
+    let (status, _) = call(
+        &fx,
+        "GET",
+        &format!("/api/projects/{}/suppressions", fx.project_id),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        crate::test_git::git(&fx.checkout, &["rev-parse", "HEAD"]),
+        fx.head,
+        "reading the suppressions moved the checkout"
+    );
+    assert!(!fx.checkout.join("b.txt").exists());
+}
+
 #[tokio::test]
 async fn suppressions_for_a_present_repo_are_an_envelope_without_the_flag() {
     let fx = fixture();

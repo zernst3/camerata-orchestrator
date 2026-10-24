@@ -1180,6 +1180,46 @@ pub fn is_in_repo_scope(repo_root: &Path, finding_path: &str) -> bool {
 /// When `on_progress` is `None` the function falls back to `.output().await`
 /// (buffered, no heartbeat) — identical to the previous behaviour. This is the
 /// path taken by the no-job synchronous callers.
+/// The `ruff check` command line for a scan of the directory it runs in.
+///
+/// `--no-cache`: ruff otherwise writes `.ruff_cache/` INTO the directory it runs in, and that
+/// directory is the client's checkout. The client never opted in, and it is one more copy of
+/// their tree's fingerprints on disk after "delete source" (the same class of defect as the old
+/// in-repo scan cache; docs/design/2026-10-24_delete-and-refetch-client-source.md, D1).
+fn ruff_args(select: &str) -> Vec<String> {
+    [
+        "check",
+        "--no-cache",
+        "--output-format",
+        "json",
+        "--select",
+        select,
+        ".",
+    ]
+    .iter()
+    .map(|a| (*a).to_string())
+    .collect()
+}
+
+/// The `semgrep` command line for a scan of the directory it runs in, against the bundled
+/// offline ruleset at `rules_dir`.
+///
+/// `--metrics=off`: semgrep's default sends anonymous usage metrics (rule ids and hashes, no
+/// code) to its vendor, which a client engagement must not do (D2).
+fn semgrep_args(rules_dir: &str) -> Vec<String> {
+    [
+        "--sarif",
+        "--metrics=off",
+        "--config",
+        rules_dir,
+        "--quiet",
+        ".",
+    ]
+    .iter()
+    .map(|a| (*a).to_string())
+    .collect()
+}
+
 async fn run_capture_stdout(
     dir: &Path,
     program: &str,
@@ -1513,13 +1553,10 @@ async fn run_one_tool<'r>(
             let rules_dir = tool_provisioning::bundled_semgrep_rules_dir();
             let rules_str = rules_dir.to_string_lossy().into_owned();
             let bin_str = semgrep_bin.to_string_lossy().into_owned();
-            let (stdout, _ok, stderr) = run_capture_stdout(
-                dir,
-                &bin_str,
-                &["--sarif", "--config", &rules_str, "--quiet", "."],
-                on_progress.as_ref(),
-            )
-            .await?;
+            let args = semgrep_args(&rules_str);
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let (stdout, _ok, stderr) =
+                run_capture_stdout(dir, &bin_str, &arg_refs, on_progress.as_ref()).await?;
             match parse_sarif(repo, ScanTool::Semgrep, &stdout) {
                 Ok(fs) => Ok((fs, Vec::new())),
                 Err(e) => Err(tool_output_error(
@@ -1535,13 +1572,10 @@ async fn run_one_tool<'r>(
                 anyhow::bail!("no ruff rule codes derived from the selection");
             }
             let select = selectors.join(",");
-            let (stdout, _ok, stderr) = run_capture_stdout(
-                dir,
-                "ruff",
-                &["check", "--output-format", "json", "--select", &select, "."],
-                on_progress.as_ref(),
-            )
-            .await?;
+            let args = ruff_args(&select);
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let (stdout, _ok, stderr) =
+                run_capture_stdout(dir, "ruff", &arg_refs, on_progress.as_ref()).await?;
             match parse_ruff_json(repo, &stdout) {
                 Ok(fs) => Ok((fs, Vec::new())),
                 Err(e) => Err(tool_output_error(
@@ -1696,6 +1730,59 @@ mod tests {
     use super::*;
     use camerata_core::RuleId;
     use camerata_rules::{EnforcementKind, RuleSource, Verification};
+
+    /// D1 (docs/design/2026-10-24_delete-and-refetch-client-source.md, section 11): ruff keeps a
+    /// `.ruff_cache/` in the directory it runs in, which here is the CLIENT's checkout, so a
+    /// scan left an unexplained vendor-named folder in their tree (the same class of defect as
+    /// the old in-repo scan cache). `--no-cache` stops ruff writing it.
+    #[test]
+    fn ruff_args_pass_no_cache() {
+        let args = ruff_args("E501,F401");
+        assert!(args.iter().any(|a| a == "--no-cache"), "{args:?}");
+        // The rest of the command is unchanged.
+        assert_eq!(args[0], "check");
+        assert!(args.windows(2).any(|w| w == ["--select", "E501,F401"]));
+        assert!(args.windows(2).any(|w| w == ["--output-format", "json"]));
+        assert_eq!(args.last().map(String::as_str), Some("."));
+    }
+
+    /// D2: semgrep's default sends anonymous usage metrics (rule ids, hashes, no code) to its
+    /// vendor from a client engagement. `--metrics=off` is passed on every run.
+    #[test]
+    fn semgrep_args_disable_metrics() {
+        let args = semgrep_args("/rules");
+        assert!(args.iter().any(|a| a == "--metrics=off"), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["--config", "/rules"]));
+        assert!(args.iter().any(|a| a == "--sarif"));
+        assert_eq!(args.last().map(String::as_str), Some("."));
+    }
+
+    /// The behavioural proof for D1, when ruff is installed: a real run leaves no cache folder
+    /// in the scanned directory.
+    #[tokio::test]
+    async fn ruff_run_leaves_no_cache_directory_in_the_scanned_repo() {
+        let Ok(probe) = tokio::process::Command::new("ruff")
+            .arg("--version")
+            .output()
+            .await
+        else {
+            return; // ruff is not installed here; the argument test above still pins the flag.
+        };
+        if !probe.status.success() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.py"), "import os\n").unwrap();
+        let args = ruff_args("F401");
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (_out, _ok, _err) = run_capture_stdout(dir.path(), "ruff", &refs, None)
+            .await
+            .unwrap();
+        assert!(
+            !dir.path().join(".ruff_cache").exists(),
+            "ruff wrote a cache into the client's tree"
+        );
+    }
 
     /// Build a `lookup` closure over a slice of hand-built rules (the real caller
     /// passes `|id| set.get_by_id(id)`; tests avoid the private `RuleSet` ctor).

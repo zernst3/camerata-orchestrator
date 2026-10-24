@@ -335,7 +335,7 @@ pub(super) async fn fetch_suppressions(project_id: &str) -> Option<SuppressionsL
 
 /// The central suppression audit view: an INFORMATIONAL, read-only listing of everything waived
 /// across the project's repos (inline waivers + baseline), with stale ones flagged. Hidden until
-/// the user hits Refresh, which fast-forward-pulls each repo and then lists.
+/// the user hits Refresh, which re-reads each repo's code on this machine and lists (read-only).
 #[component]
 pub(super) fn SuppressionsPanel(project_id: String) -> Element {
     let pid = project_id.clone();
@@ -370,13 +370,13 @@ pub(super) fn SuppressionsPanel(project_id: String) -> Element {
                 }
             }
             p { class: "section-hint",
-                "Informational and read-only. Findings the team has waived across this project's repos — inline waivers (// camerata:allow) and baseline entries. Refresh fast-forward-pulls each repo, then lists what's waived. \"stale\" = the waiver no longer matches any live finding (a dead waiver, safe to remove)."
+                "Informational and read-only. Findings the team has waived across this project's repos — inline waivers (// camerata:allow) and baseline entries. Refresh re-reads each repo's code on this machine (it never changes it; use Clone / update on the Workspace tab to refresh the code itself). \"stale\" = the waiver no longer matches any live finding (a dead waiver, safe to remove)."
             }
             if !requested() {
-                p { class: "section-hint", "Press Refresh to pull the repos and list their waivers." }
+                p { class: "section-hint", "Press Refresh to list the waivers in the code on this machine." }
             } else {
                 match state {
-                    None => rsx! { p { class: "section-hint", "Refreshing… (pulling repos)" } },
+                    None => rsx! { p { class: "section-hint", "Refreshing… (reading the repos)" } },
                     Some(None) => rsx! { p { class: "section-hint", "Couldn't read suppressions (no local clones, or repos unreadable)." } },
                     Some(Some(listing)) if listing.entries.is_empty() => rsx! {
                         if let Some(at) = &listing.deleted_at {
@@ -7077,7 +7077,7 @@ mod render_tests {
         );
         // Before Refresh is pressed the panel shows the press-Refresh hint, not a table.
         assert!(
-            html.contains("Press Refresh to pull the repos"),
+            html.contains("Press Refresh to list the waivers"),
             "the hidden-until-refresh hint; html=\n{html}"
         );
         assert!(
