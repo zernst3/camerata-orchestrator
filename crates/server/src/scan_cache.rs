@@ -381,6 +381,8 @@ impl ScanCacheStore {
     }
 }
 
+pub mod state_dir;
+
 #[cfg(test)]
 mod redaction_tests;
 

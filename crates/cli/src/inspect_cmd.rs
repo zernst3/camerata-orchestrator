@@ -43,6 +43,14 @@ use camerata_server::llm::{resolve_backend, ProjectBackend};
 use camerata_server::onboard::{ProposedRule, SelectedRule};
 use camerata_server::report_export::ReportOptions;
 use camerata_server::scan_cache::ScanManifest;
+// The per-user bookkeeping location and the per-repo key live in `camerata_server` (ONE
+// implementation, shared with source deletion, which must find exactly the files this command
+// wrote). See `camerata_server::scan_cache::state_dir` for the account of why they are kept
+// out of the scanned repository.
+pub use camerata_server::scan_cache::state_dir::ledger_path;
+#[cfg(test)]
+use camerata_server::scan_cache::state_dir::repo_state_key;
+use camerata_server::scan_cache::state_dir::{dir as camerata_state_dir, manifest_cache_path};
 use camerata_server::scan_ledger::{RuleLedgerEntry, RuleTier, ScanLedger};
 use camerata_server::usage_ledger::UsageLedger;
 
@@ -237,78 +245,6 @@ fn resolve_default_directive(r: &ProposedRule) -> String {
         .unwrap_or_else(|| r.title.clone())
 }
 
-/// Where the incremental-scan manifest is cached BETWEEN headless runs against the same repo,
-/// absent any project/database to key it to. A single dotfile inside the scanned repo,
-/// mirroring `.eslintcache`/`.turbo`-style tool caches: disposable, not meant to be committed
-/// (callers should `.gitignore` it), and read only as input to `audit_repos`'s own
-/// `incremental_prior` parameter — never consulted by anything else.
-fn manifest_cache_path(repo: &Path) -> PathBuf {
-    camerata_state_dir().join(format!("{}.cache.json", repo_state_key(repo)))
-}
-
-/// The per-user directory where Camerata keeps its own bookkeeping for headless runs.
-///
-/// # Why these files are no longer written into the scanned repository
-///
-/// They were, until 2026-10-18, on the stated reasoning that they mirrored
-/// `.eslintcache`/`.turbo`-style tool caches: disposable, and "callers should `.gitignore`
-/// it". That reasoning holds for ESLint and does not hold here, for a reason specific to what
-/// Camerata is: **ESLint's cache sits in a repository whose own developers chose ESLint and
-/// gitignored its cache. Camerata runs on a CLIENT's repository.** The client never opted in,
-/// has never heard of the tool, and will not have gitignored anything. So the "callers should
-/// gitignore it" precondition fails by construction on every single engagement, and what the
-/// client actually sees after an audit is two unexplained vendor-named files in their
-/// `git status` — which at best looks careless and at worst gets committed to their history.
-///
-/// That is the cosmetic half. The expensive half already happened: because the cache sat
-/// inside the scanned tree, the next scan COLLECTED IT AS SOURCE. On hearth that put 174,236
-/// characters of Camerata's own prior findings into the audit prompt, displacing real code
-/// until it was ~35% of what the model read, and the engine then re-detected a snippet quoted
-/// inside its own cache and shipped it to the client as a CRITICAL at queue position #1.
-/// `files::is_engine_artifact` stops the engine READING them; this stops it WRITING them
-/// there in the first place, which is the half that removes the cause rather than the symptom.
-///
-/// Resolution follows the platform convention, with a temp-dir fallback so a missing `HOME`
-/// degrades to a working (if non-persistent) cache rather than failing the inspection.
-fn camerata_state_dir() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches"));
-    #[cfg(not(target_os = "macos"))]
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")));
-
-    base.unwrap_or_else(std::env::temp_dir).join("camerata")
-}
-
-/// A stable, filesystem-safe key identifying one scanned repository.
-///
-/// Shaped `<readable-name>-<hash>` (e.g. `hearth-3f2a9c14`) rather than a bare hash so the
-/// cache directory stays human-debuggable: an operator wondering which cache belongs to which
-/// repo can read it off the filename instead of re-deriving a digest.
-///
-/// The hash is FNV-1a over the absolute path, hand-rolled on purpose. `DefaultHasher` is
-/// explicitly NOT stable across Rust releases, so using it would silently invalidate every
-/// cache on a toolchain upgrade — a slow, confusing, once-a-year performance regression with
-/// no error message. A cache key needs determinism, not cryptographic strength.
-fn repo_state_key(repo: &Path) -> String {
-    let abs = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in abs.to_string_lossy().as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x1000_0000_01b3);
-    }
-    let name: String = abs
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "repo".to_string())
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .take(40)
-        .collect();
-    format!("{name}-{:08x}", hash as u32)
-}
-
 /// Remove a pre-2026-10-18 bookkeeping file from the scanned repository, if one is there.
 ///
 /// Only removes a file that PARSES as the thing we claim it is. The `.camerata-` prefix is
@@ -393,9 +329,8 @@ fn save_manifest(repo: &Path, manifest: &ScanManifest) {
     }
 }
 
-/// Where the completed scan's pipeline-integrity ledger is persisted:
-/// `<repo>/.camerata-scan-ledger.json`. Sits alongside [`manifest_cache_path`] and is
-/// likewise disposable and not meant to be committed.
+/// Best-effort save of the completed scan's pipeline-integrity ledger, at [`ledger_path`]
+/// (re-exported above; beside the manifest cache, likewise disposable and never in the repo).
 ///
 /// # Why this file exists (W6 / I2)
 ///
@@ -405,11 +340,8 @@ fn save_manifest(repo: &Path, manifest: &ScanManifest) {
 /// be re-examined, diffed against a previous scan, or checked by anything other than a person
 /// reading the digest at the moment it scrolled past. `camerata integrity-gate` reads this
 /// file. A ledger is a few kB of JSON; the scan that produced it is dollars and hours.
-pub fn ledger_path(repo: &Path) -> PathBuf {
-    camerata_state_dir().join(format!("{}.ledger.json", repo_state_key(repo)))
-}
-
-/// Best-effort save of the completed scan's ledger. A persistence failure never fails the
+///
+/// A persistence failure never fails the
 /// inspection — but unlike the scan cache (whose absence costs one full re-scan) the absence
 /// of this file makes `camerata integrity-gate` exit `2` (gate unavailable) rather than `0`,
 /// so a silent write failure can never read as a passing gate.
