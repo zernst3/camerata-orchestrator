@@ -3455,10 +3455,16 @@ pub async fn generate_fix_specifics(
     meter: Option<&UsageMeter>,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> (Vec<Finding>, Vec<FailedPass>) {
+    // A finding that already carries its codebase-specific fix keeps it: the only findings that
+    // arrive with one are those a delta retest carried forward from the inspection for a file
+    // that has not changed since, and regenerating would spend tokens re-sending that file's
+    // code to the model to reproduce a fix that is still correct.
     let indices: Vec<usize> = findings
         .iter()
         .enumerate()
-        .filter(|(_, f)| f.rule_id != crate::dep_audit::DEP_AUDIT_RULE_ID)
+        .filter(|(_, f)| {
+            f.rule_id != crate::dep_audit::DEP_AUDIT_RULE_ID && f.fix_specific.is_none()
+        })
         .map(|(i, _)| i)
         .collect();
     if indices.is_empty() {
@@ -16772,6 +16778,72 @@ mod tests {
         );
         assert!(!out[0].needs_review);
         assert_eq!(meter.snapshot().calls, 1);
+    }
+
+    /// A finding a delta retest carried forward already has its codebase-specific fix. Asking the
+    /// model again would re-send the unchanged file's code to reproduce it, so it is left alone
+    /// (and the pass makes no call at all when nothing else needs one).
+    #[tokio::test]
+    async fn generate_fix_specifics_keeps_a_fix_the_finding_already_carries() {
+        let mut carried = fx(
+            "SEC-OPEN-REDIRECT-1",
+            "app/a.ts",
+            2,
+            "rawRedirect(p) is called with an unvalidated path.",
+            "rawRedirect(p)",
+        );
+        carried.fix_specific = Some("The fix from the inspection.".to_string());
+        let fresh = fx(
+            "SEC-OPEN-REDIRECT-1",
+            "app/b.ts",
+            2,
+            "rawRedirect(q) is called with an unvalidated path.",
+            "rawRedirect(q)",
+        );
+        let files = vec![
+            ("app/a.ts".to_string(), "x\nrawRedirect(p)".to_string()),
+            ("app/b.ts".to_string(), "y\nrawRedirect(q)".to_string()),
+        ];
+        let completer = SequencedCompleter::new(&[
+            r#"{"fixes":[{"index":0,"fix":"Validate the path in app/b.ts before the redirect."}]}"#,
+        ]);
+
+        let (out, _) = generate_fix_specifics(
+            &completer,
+            "o/r",
+            vec![carried, fresh],
+            &files,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            out[0].fix_specific.as_deref(),
+            Some("The fix from the inspection."),
+            "the carried finding keeps its fix"
+        );
+        assert_eq!(
+            out[1].fix_specific.as_deref(),
+            Some("Validate the path in app/b.ts before the redirect.")
+        );
+        assert_eq!(
+            completer.calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "one call, for the fresh finding only"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_fix_specifics_makes_no_call_when_every_finding_already_has_a_fix() {
+        let mut carried = fx("SEC-OPEN-REDIRECT-1", "app/a.ts", 2, "d", "rawRedirect(p)");
+        carried.fix_specific = Some("Kept.".to_string());
+        let completer = FailingCompleter;
+        let (out, failed) =
+            generate_fix_specifics(&completer, "o/r", vec![carried], &[], None, None, None).await;
+        assert_eq!(out[0].fix_specific.as_deref(), Some("Kept."));
+        assert!(failed.is_empty());
     }
 
     #[tokio::test]

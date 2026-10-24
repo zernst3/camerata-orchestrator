@@ -275,6 +275,25 @@ async fn get_source_lists_every_repo_in_project_order() {
     assert_eq!(json["ok"], true);
     assert_eq!(json["repos"][0]["state"], "present");
     assert_eq!(json["repos"][0]["repo"], REPO);
+    assert_eq!(
+        json["inspection"],
+        serde_json::Value::Null,
+        "no inspection yet"
+    );
+
+    fx.inspect_at(&fx.head);
+    let (_, body, _) = get(
+        crate::router(fx.state.clone()),
+        &format!("/api/projects/{}/source", fx.project_id),
+    )
+    .await;
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["inspection"]["kind"]["kind"], "full");
+    assert_eq!(json["inspection"]["finished_at"], "2026-10-24T10:05:00Z");
+    assert!(json["inspection"]["id"]
+        .as_str()
+        .unwrap()
+        .starts_with("insp-"));
 }
 
 #[tokio::test]

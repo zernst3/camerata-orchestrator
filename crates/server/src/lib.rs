@@ -1413,6 +1413,10 @@ pub fn router(state: AppState) -> Router {
             post(crate::client_source::refetch::refetch),
         )
         .route(
+            "/api/projects/:id/repos/:repo/rescan-changes",
+            post(crate::client_source::rescan::rescan_changes_handler),
+        )
+        .route(
             "/api/projects/:id/repos/:repo/source/delete-preview",
             post(crate::client_source::delete::delete_preview),
         )
@@ -6824,6 +6828,44 @@ async fn onboard_audit_start(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
 ) -> Json<serde_json::Value> {
+    let job_id = start_audit_job(&state, req, AuditJobOptions::default()).await;
+    Json(serde_json::json!({ "job_id": job_id }))
+}
+
+/// How a started audit job differs from the plain "scan" the UI's scan button starts. Every
+/// field defaults to the plain scan, so [`onboard_audit_start`] passes `default()`.
+#[derive(Default)]
+pub(crate) struct AuditJobOptions {
+    /// The project the job belongs to. `None` = the active project (the plain scan).
+    pub project_id: Option<String>,
+    /// A prior scan manifest to use instead of the project's persisted incremental cache. The
+    /// delta rescan builds one from `git diff` so only the files changed since the inspected
+    /// commit are re-audited.
+    pub prior_override: Option<crate::scan_cache::ScanManifest>,
+    /// Notes to show with the result (for example "the inspection ran on a dirty tree").
+    pub extra_notes: Vec<String>,
+    /// Set for a delta retest: the finished report is recorded as a `DeltaRetest` inspection
+    /// entry instead of a full one.
+    pub delta: Option<DeltaRetest>,
+}
+
+/// The commits a delta retest ran between.
+#[derive(Clone)]
+pub(crate) struct DeltaRetest {
+    pub base_inspection_id: String,
+    pub from_sha: String,
+    pub to_sha: String,
+}
+
+/// Start the audit job for `req` and return its id. The asynchronous body of
+/// [`onboard_audit_start`], shared with the delta rescan (`client_source::rescan`) so there is
+/// ONE implementation of "run an audit as a job". See [`AuditJobOptions`].
+pub(crate) async fn start_audit_job(
+    state: &AppState,
+    req: AuditReq,
+    options: AuditJobOptions,
+) -> String {
+    let state = state.clone();
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -6870,12 +6912,18 @@ async fn onboard_audit_start(
     let (run_ai_review, run_deterministic, _coerced) =
         effective_scan_modes(req.run_ai_review, req.run_deterministic);
     // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
-    let (sources, notes) = resolve_local_sources(&state, &repos);
+    let (sources, mut notes) = resolve_local_sources(&state, &repos);
+    notes.extend(options.extra_notes);
+    let delta = options.delta;
 
-    // Capture the active project up front: the job is stamped with it (ROUTES-5, so a
-    // project's deep-report export finds ITS OWN latest deep report) AND it seeds the
-    // incremental-scan manifest lookup below.
-    let active_project = state.projects.active();
+    // Capture the project up front (the named one, else the active one): the job is stamped
+    // with it (ROUTES-5, so a project's deep-report export finds ITS OWN latest deep report)
+    // AND it seeds the incremental-scan manifest lookup below.
+    let active_project = options
+        .project_id
+        .as_deref()
+        .and_then(|id| state.projects.get(id))
+        .or_else(|| state.projects.active());
     let project_id = active_project.as_ref().map(|p| p.id.clone());
     let job_id = state.jobs.create("audit", project_id.clone());
     state.transcripts.clear(SCAN_AUDIT_KEY);
@@ -6893,13 +6941,15 @@ async fn onboard_audit_start(
     let jobs = state.jobs.clone();
     let transcripts = state.transcripts.clone();
     let jid = job_id.clone();
-    let prior = if req.incremental {
-        project_id
-            .as_deref()
-            .and_then(|id| state.scan_cache.get(id))
-    } else {
-        None
-    };
+    let prior = options.prior_override.or_else(|| {
+        if req.incremental {
+            project_id
+                .as_deref()
+                .and_then(|id| state.scan_cache.get(id))
+        } else {
+            None
+        }
+    });
     let scan_cache = state.scan_cache.clone();
     let soc2_enabled = state.feature_flags.soc2;
     // Captured for the spawned task so the async audit's model calls feed the cumulative meter.
@@ -7104,11 +7154,25 @@ async fn onboard_audit_start(
             // Also update the project-agnostic `recent_scan` fallback so the active-project
             // context can surface this scan even if the active project changed since the
             // scan was submitted (or no project was active at submission time).
-            match &project_id {
-                Some(id) => scan_state.set_last_scan(id.clone(), report.clone()),
-                // No active project: only the project-agnostic fallback can hold it, and there
-                // is no project to key a persisted inspection to.
-                None => scan_state.set_recent_scan(report.clone()),
+            match (&project_id, &delta) {
+                // A delta retest is recorded as its own kind of inspection, naming the
+                // inspection it was computed from and the two commits between.
+                (Some(id), Some(d)) => {
+                    scan_state.record_inspection(
+                        id,
+                        &report,
+                        crate::inspections::InspectionKind::DeltaRetest {
+                            base_inspection_id: d.base_inspection_id.clone(),
+                            from_sha: d.from_sha.clone(),
+                            to_sha: d.to_sha.clone(),
+                        },
+                    );
+                    scan_state.set_last_scan_in_memory(id.clone(), report.clone());
+                }
+                (Some(id), None) => scan_state.set_last_scan(id.clone(), report.clone()),
+                // No project: only the project-agnostic fallback can hold it, and there is no
+                // project to key a persisted inspection to.
+                (None, _) => scan_state.set_recent_scan(report.clone()),
             }
 
             body_jobs.finish(&body_jid, report);
@@ -7116,7 +7180,7 @@ async fn onboard_audit_start(
         .await;
     });
 
-    Json(serde_json::json!({ "job_id": job_id }))
+    job_id
 }
 
 /// Poll an async audit job: status, progress (done/total passes), incremental findings, and
@@ -9244,6 +9308,20 @@ fn normalize_repos(repos: &[String], project_repos: &[String]) -> Vec<String> {
 /// rule's description. The rule-bank is the source; the project stores only the
 /// selection (id + chosen option + repos).
 async fn resolve_project_arm_rules(project: &crate::project::Project) -> Vec<crate::arm::ArmRule> {
+    let mut out = resolve_project_selection_rules(project).await;
+    // Drop any rule whose repos normalized to empty (a leaked sentinel on a project with
+    // no real repos): it has nowhere to emit and would only be dead weight downstream.
+    out.retain(|r| !r.repos.is_empty());
+    out
+}
+
+/// Every base selection of the project resolved to a rule (directive, enforcement, placement),
+/// INCLUDING project-level selections whose placement is empty. [`resolve_project_arm_rules`] is
+/// this minus the rules with nowhere to emit; a SCAN, which audits project-level rules too, uses
+/// this directly.
+pub(crate) async fn resolve_project_selection_rules(
+    project: &crate::project::Project,
+) -> Vec<crate::arm::ArmRule> {
     let corpus_path = camerata_rules::corpus_path();
     let set = if corpus_path.exists() {
         Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
@@ -9296,9 +9374,6 @@ async fn resolve_project_arm_rules(project: &crate::project::Project) -> Vec<cra
             repos: normalize_repos(&sel.repos, &project.repos),
         });
     }
-    // Drop any rule whose repos normalized to empty (a leaked sentinel on a project with
-    // no real repos): it has nowhere to emit and would only be dead weight downstream.
-    out.retain(|r| !r.repos.is_empty());
     out
 }
 

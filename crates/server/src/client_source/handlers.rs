@@ -22,7 +22,17 @@ pub async fn get_source(State(state): State<AppState>, Path(id): Path<String>) -
     for repo in &project.repos {
         repos.push(source_status(&state, &project.id, repo).await);
     }
-    Json(serde_json::json!({ "ok": true, "repos": repos })).into_response()
+    // The current inspection, for the scan surface's header ("Delta retest of changes since
+    // <sha>"): which kind it is and when it finished. `null` before the first inspection.
+    let inspection = state.inspections.latest(&project.id).map(|e| {
+        serde_json::json!({
+            "id": e.id,
+            "kind": e.kind,
+            "finished_at": e.finished_at,
+        })
+    });
+    Json(serde_json::json!({ "ok": true, "repos": repos, "inspection": inspection }))
+        .into_response()
 }
 
 /// `GET /api/projects/:id/source/records` — every deletion and re-fetch record, newest first.
