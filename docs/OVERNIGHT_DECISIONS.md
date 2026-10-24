@@ -62,6 +62,17 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-24 (Zach, `_workspace/brownfield-audits/IMPLEMENTER_HANDOFF_2026-10-24.md` item 8):
+  **Confidentiality marking is V1** (protected: report template; Zach passed it on for building,
+  recorded as his go). Every PDF page: "Confidential, prepared for <client> on <date>". First page:
+  a short handling note (who the report is for; do not forward outside the company without
+  consent). Every workbook sheet: the same line in its header or footer. The client name, today an
+  export-time option (`ReportOptions.client_name`, cover line "Prepared for ..."), becomes a field
+  of the inspection setup saved with the project, so every surface fills in automatically; an empty
+  client name blocks the export with a clear message rather than printing "prepared for ." The
+  marking text goes through the release gate like every other string. Slotted inside the W27 PDF
+  rebuild (same template) with the workbook header/footer and the setup field built alongside.
+
 - 2026-10-24 (delete + re-fetch spec questions): (1, Zach) Claude Code's own session files under
   `~/.claude/projects/` that hold client source from Camerata's CLI-backend AI passes are deleted
   during source deletion: Camerata tags each call it makes per inspection (`--session-id`, ids
