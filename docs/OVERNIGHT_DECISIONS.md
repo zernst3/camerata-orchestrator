@@ -21,6 +21,15 @@
 > triage `missed.txt` into "add a test" vs "equivalent mutant". Only the checks crate's own tests
 > run against each mutant (server-level tests that exercise checkers are not counted). Check it is
 > finished (`pgrep -fl cargo-mutants`) before rebuilding in the main checkout.
+> **STATUS 2026-10-24 (stopped for Zach's manual check):** BOTH client-trust blockers are done
+> and pushed: secret redaction + release gate, and delete + re-fetch client source (Fable-reviewed:
+> 3 HIGH defects fixed, incl. emit-local resurrection; deletion refuses during scans and governed
+> runs; 7,577 tests green). Exports now survive a restart (persisted InspectionStore).
+> **WAITING ON ZACH:** the manual check of delete / re-fetch in the running app on a THROWAWAY
+> clone (steps in TECHNICAL.md section 7 and USER_GUIDE 5a). **Next after that:** item 22a (API
+> backend default for client inspections) and 22b (`camerata count`), then the 26 mutation gaps,
+> the review speed-ups, W29 Wave D (+ 22e), corpus text (+ 22g), engine follow-ups (+ 22f, KEV/EPSS,
+> 22c, 22d), W27 PDF (+ confidentiality marking + visual track), 19f grader, graded run.
 > **STATUS 2026-10-23 (paused for the night):** secret redaction + export release gate DONE and
 > pushed (7,273 tests green). The old leaky exports are NOT regenerated separately: the graded
 > accuracy run (item 20) reruns them (Zach). Mutation run done (97.9%; 26 major gaps ledgered for
