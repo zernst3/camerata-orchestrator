@@ -124,6 +124,16 @@ title bars, Tahoma-style type, bevelled buttons, green accents).
 - Recreate the XP look in CSS. Do NOT ship Microsoft assets (the Bliss wallpaper, Windows logos,
   icon sets): they are copyrighted and trademarked.
 - Bombe stays the default.
+- **Design principle (Zach): a theme is a mood, not a colour swap.** Bombe feels mechanical and
+  heavyweight as you work through an inspection. XP should feel nostalgic and optimistic, the
+  early-2000s look that grew into the Frutiger Aero era of Vista: nature meets technology,
+  saturated, glossy, hopeful. Every element (background, title bars, buttons, highlights,
+  accents) serves that one feeling.
+- **A Bliss stand-in, original:** an SVG landscape drawn in code (a rolling hill with a bright
+  green gradient, a deep-to-pale saturated blue sky, a few soft blurred cumulus clouds), tuned to
+  evoke Bliss without copying the photograph; a different hill shape and our own composition.
+  Scales to any resolution, a few KB. The palette continues through glossy title bars, rounded
+  aqua-style highlights and green/blue accents so the wallpaper and the chrome read as one era.
 
 ## Keep V1 forward-compatible (no extra V1 work)
 
