@@ -701,3 +701,32 @@ Its section 3 page plan is superseded by section 2 here; its section 8 build seq
 is superseded by section 7 here (the kind-on-wire correction moves its largest Phase B
 item into Phase A); its section 11 cover-line draft is superseded by section 6 here.
 The W27 entry in the remediation plan should point at THIS document.
+
+## Addendum 2026-10-24: the visual-design track (Zach)
+
+The plan above settles CONTENT and STRUCTURE. Zach wants the PDF to also carry a visual identity:
+bright, cheery and fun to read, not flat and mechanical. This is deliberate differentiation from
+other contractors and consultants (a typical third-party pen-test report: ~130 grey pages with raw
+request bodies and bearer tokens). The PDF's reader is non-technical (D4), so there is room for
+style. The mood is early-2000s optimism (the XP-to-Vista, Frutiger Aero feeling: saturated,
+glossy, sky and aqua tones), echoing the app's planned XP theme without copying it.
+
+Scope (rides inside the W27 rebuild and its review sessions; not a new phase):
+- **Cover:** the Cantus Works mark, a vivid gradient or original vector illustration, client name
+  set large, the liability line (section 6) unchanged.
+- **Visual summaries:** a severity chart, a findings-by-category bar and a one-glance scorecard
+  near the front, so a non-technical reader gets the picture before any prose.
+- **Section openers and callouts:** coloured section headers, a "what to do this week" callout,
+  small category icons (security, architecture, dependencies). All vector (Typst-native shapes or
+  original SVG), so the file stays small and sharp.
+
+Guardrails:
+- **Fun in the frame, not in the findings.** Colour and graphics live in the cover, openers,
+  charts and layout; finding text stays plain and sober so a critical issue still reads serious.
+- **Survives print and every reader.** Severity never relies on colour alone (an icon or label on
+  every severity mark, a colour-blind-safe palette); high text contrast; readable in greyscale.
+- **One brand with the website.** Palette, typefaces and logo come from Zach's Cantus Works brand
+  (his website and marketing materials, in progress). Visual design work starts once those brand
+  decisions are made, so prospect and client see one identity.
+- **Original assets only;** no third-party logos, stock art or OS imagery.
+- The release gate still runs over everything the template renders.
