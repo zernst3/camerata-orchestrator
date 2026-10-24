@@ -442,6 +442,47 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
   heartbeat, diagnostics_for `||`; fold into the V2 dev-time parity audit), cosmetic
   (LayerConflict Display, describe_path boundary, clone_rules skip_count).
 
+### 2c. Item 22: implementer-handoff items not yet built (added 2026-10-24, Zach)
+
+From `_workspace/brownfield-audits/IMPLEMENTER_HANDOFF_2026-10-24.md`. Its header said these were
+"already handed off", but none had landed in this repo's code or plan, so Zach added them to V1.
+Slotted RIGHT AFTER the delete/re-fetch blocker, blocking items first, all before the graded run.
+
+- **22a (handoff item 2, BLOCKING before any client): client inspections run on the Anthropic API,
+  not the Claude Code subscription.** Today every inspection logs `backend: cli`. Make an API backend
+  the default for client inspections (the CLI backend may stay for internal benchmark runs). Record
+  the backend and provider in the export (manifest + README). If credits later come through AWS
+  Bedrock, Bedrock is acceptable but must be recorded the same way. Side benefit: the API backend
+  writes no Claude Code session files, so source deletion has less to purge.
+- **22b (handoff item 3, BLOCKING): `camerata count`.** Runs ONLY the inspection's own file filter
+  (`crates/server/src/onboard/files.rs`: gitignore + noise denylist + extension allowlist + git
+  ls-files union) on a repo and prints counted lines and files per language plus the
+  excluded-noise count. No model, no tokens, seconds to run. It is the number quotes are priced on,
+  so it MUST call the same filter function the inspection uses (DRY; a client-side `cloc` count
+  includes generated files and differs). Output plain text and JSON.
+- **22c (handoff item 4, protected: export format; the remaining fields):** the manifest already
+  exists; add client name, corpus rule count applied, model backend and provider (22a), counted
+  lines and excluded-noise count (22b). Confirm the corpus version, rules-last-reviewed, inspected
+  commit and engine version fields are populated.
+- **22d (handoff item 6, check):** confirm the release gate's reconciliation covers PDF summary
+  counts = workbook rows = JSON rows = CSV rows BY SEVERITY AND KIND; extend it if it only checks
+  row parity.
+- **22e (handoff item 14, protected: corpus): TESTING-MEANINGFUL-ASSERTION-1.** No rule catches a
+  test that asserts nothing or only asserts a stub (hearth Q10 class). Deterministic for "no
+  assertion in a test body"; judgment for "asserts only a stub". Positive test + safe twin; built
+  with the W29 process (Fable spec, Sonnet build, Fable review). Slotted with W29 Wave D.
+- **22f (handoff item 15, protected: corpus): the corpus freshness routine.** Per
+  `_workspace/brownfield-audits/CORPUS_FRESHNESS_WORK_ORDER.md` (monthly source check command;
+  quarterly review). `camerata corpus check` and the due-soon warning exist; build what the work
+  order still needs (the source-check command / sweep). Slotted with the item-21 engine follow-ups.
+- **22g (handoff item 16, protected: corpus, Zach already asked): clean three showcase rule files**
+  of internal notes for the website overlay: SEC-NO-HARDCODED-SECRETS-1 (drop the internal
+  docs/ENFORCEMENT.md source or relabel it), ARCH-IDEMPOTENCY-KEYS-1 (replace the boilerplate
+  decision question), ARCH-OBSERVABILITY-LOG-CONSISTENCY-1 (move internal module notes out of
+  `qualifies` and the comment). Version bumps + CORPUS_LOCK. Slotted with the corpus text work.
+- Handoff item 12 (re-fetch at a specific commit) is covered by the delete/re-fetch build.
+  Handoff items 1, 5, 7 are done; item 9 (five severity labels stable) needs no change.
+
 ## 3. Explicitly NOT doing
 
 - `ARCH-OBSERVABILITY-CORRELATION-ID-1` stays `decision` — prior ruling, recorded in the roster.

@@ -62,6 +62,12 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-24 (Zach): the untracked IMPLEMENTER_HANDOFF items join V1 as MASTER-SEQUENCE item 22
+  (22a API backend for client inspections and 22b `camerata count` are blocking and go right after
+  the delete/re-fetch blocker; 22c manifest fields; 22d reconciliation by severity and kind; 22e
+  TESTING-MEANINGFUL-ASSERTION-1 with Wave D; 22f corpus freshness routine with the engine
+  follow-ups; 22g showcase rule-file cleanup with the corpus text work).
+
 - 2026-10-24 (Zach, `_workspace/brownfield-audits/IMPLEMENTER_HANDOFF_2026-10-24.md` item 8):
   **Confidentiality marking is V1** (protected: report template; Zach passed it on for building,
   recorded as his go). Every PDF page: "Confidential, prepared for <client> on <date>". First page:
