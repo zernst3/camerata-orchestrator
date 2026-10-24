@@ -33,6 +33,7 @@
 
 pub mod ai_audit;
 pub mod api_agent_driver;
+pub mod app_dirs;
 pub mod arm;
 pub mod auto_fire;
 pub mod checkpoint;
@@ -56,6 +57,7 @@ pub mod feature_flags;
 pub mod fix;
 pub mod github_issues;
 pub mod grounding;
+pub mod inspections;
 pub mod investigation_run;
 pub mod jobs;
 // `lifecycle` (UowStage state machine + transitions) is now the framework-agnostic
@@ -123,6 +125,9 @@ pub mod settings;
 pub mod story_docs_gate;
 pub mod suppression;
 pub mod terminal;
+/// Real-git fixtures shared by unit and integration tests; nothing in the product calls it.
+#[doc(hidden)]
+pub mod test_git;
 pub mod test_tamper;
 pub mod tool_provisioning;
 pub mod transcript;
@@ -189,6 +194,11 @@ pub struct AppState {
     /// re-scan only pays the AI bill for files that changed. Best-effort; losing it just
     /// means the next scan is a full scan.
     scan_cache: crate::scan_cache::ScanCacheStore,
+    /// Persisted per-inspection entries (the sealed report plus its provenance), one file per
+    /// project. The durable twin of `last_scan`: written whenever a scan completes, read back
+    /// by [`AppState::get_last_scan`] when the in-memory map is empty (after a restart), and the
+    /// ONLY source the exports and the review screen have once client source is deleted.
+    inspections: crate::inspections::InspectionStore,
     /// Per-project last completed scan report. Written the instant any scan handler finishes
     /// (both the synchronous `onboard_audit` path and the async job path). Read by
     /// `active_project_context` as the authoritative source for grounding, with the
@@ -301,6 +311,7 @@ impl AppState {
             escalations: crate::escalation::EscalationStore::new(),
             checkpoints: crate::checkpoint::CheckpointStore::new(),
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
+            inspections: crate::inspections::InspectionStore::new(),
             last_scan: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             recent_scan: std::sync::Arc::new(std::sync::Mutex::new(None)),
             artifacts: None,
@@ -449,6 +460,12 @@ impl AppState {
     /// in-crate); this accessor is the out-of-crate test seam.
     pub fn projects(&self) -> &crate::project::ProjectStore {
         &self.projects
+    }
+
+    /// The persisted inspection store. Out-of-crate test seam (mirrors [`Self::projects`]): the
+    /// end-to-end tests read the entry a scan wrote and the one a restart reloads.
+    pub fn inspections(&self) -> &crate::inspections::InspectionStore {
+        &self.inspections
     }
 
     /// The app-level (cross-project) settings store. Out-of-crate test seam (mirrors
@@ -715,20 +732,116 @@ impl AppState {
     ///
     /// Also updates [`Self::recent_scan`] so the project-agnostic fallback always reflects
     /// the most recently completed scan, regardless of which project was active.
+    ///
+    /// A REAL inspection (the report carries at least one audited repo and is neither the
+    /// connect-GitHub gate nor a compliance block) is also appended to the persisted
+    /// [`crate::inspections::InspectionStore`], so it survives a restart and outlives the
+    /// client's source on disk. A persistence failure is logged, never fatal: the in-memory
+    /// copy still serves this session.
     pub(crate) fn set_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
+        self.record_inspection(
+            &project_id,
+            &report,
+            crate::inspections::InspectionKind::Full,
+        );
+        self.set_last_scan_in_memory(project_id, report);
+    }
+
+    /// Replace a project's in-memory last scan and the project-agnostic recent scan WITHOUT
+    /// creating an inspection entry. The part of [`Self::set_last_scan`] shared with callers
+    /// that persist the entry themselves (a delta retest stamps its own
+    /// [`crate::inspections::InspectionKind`]) or amend the existing one.
+    pub(crate) fn set_last_scan_in_memory(
+        &self,
+        project_id: String,
+        report: crate::onboard::ScanReport,
+    ) {
         let mut guard = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(project_id, report.clone());
         drop(guard); // release per-project lock before acquiring recent_scan lock
+        self.set_recent_scan(report);
+    }
+
+    /// Replace the project-agnostic most-recent scan (see [`Self::recent_scan`]).
+    pub(crate) fn set_recent_scan(&self, report: crate::onboard::ScanReport) {
         let mut recent = self.recent_scan.lock().unwrap_or_else(|e| e.into_inner());
         *recent = Some(report);
     }
 
+    /// Append `report` to the persisted inspection store when it is a real inspection.
+    /// See [`Self::set_last_scan`].
+    pub(crate) fn record_inspection(
+        &self,
+        project_id: &str,
+        report: &crate::onboard::ScanReport,
+        kind: crate::inspections::InspectionKind,
+    ) {
+        if report.gated || report.blocked || report.provenance.audited_refs.is_empty() {
+            return;
+        }
+        let entry =
+            crate::inspections::InspectionEntry::from_report(project_id, report.clone(), kind);
+        if let Err(e) = self.inspections.append(entry) {
+            tracing::warn!(
+                project = project_id,
+                error = %e,
+                "could not persist the completed inspection; exports will not survive a restart"
+            );
+        }
+    }
+
+    /// Remember Claude Code sessions that model calls made AFTER the inspection finished (the
+    /// alternatives rescan) on the project's current inspection entry, so source deletion
+    /// removes their session files too. A no-op without sessions or without an entry.
+    pub(crate) fn record_model_sessions(
+        &self,
+        project_id: &str,
+        sessions: Vec<crate::llm::ModelSession>,
+    ) {
+        for session in sessions {
+            if let Err(e) = self.inspections.record_model_session(project_id, session) {
+                tracing::warn!(
+                    project = project_id,
+                    error = %e,
+                    "could not persist a recorded model session"
+                );
+            }
+        }
+    }
+
+    /// Merge a changed report into the project's CURRENT inspection instead of starting a new
+    /// one (the alternatives rescan re-evaluates a few rules of the same inspection). Updates
+    /// the in-memory copy and the latest persisted entry in place.
+    pub(crate) fn amend_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
+        match self
+            .inspections
+            .update_latest_report(&project_id, report.clone())
+        {
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                project = project_id.as_str(),
+                error = %e,
+                "could not persist the amended inspection"
+            ),
+        }
+        self.set_last_scan_in_memory(project_id, report);
+    }
+
     /// Retrieve the last completed scan report for the given project, if any.
+    ///
+    /// The in-memory map answers first (it is the freshest within a session); when it has
+    /// nothing for the project (a restart emptied it) the latest persisted inspection entry
+    /// answers instead. That single fallback is what makes every export, the chat grounding and
+    /// the alternatives rescan keep working after a restart and after source deletion.
     /// Returns a clone so callers do not hold the lock across await points.
-    /// Fail-soft on lock poisoning: returns `None` rather than panicking.
+    /// Fail-soft on lock poisoning: recovers the inner value rather than panicking.
     pub(crate) fn get_last_scan(&self, project_id: &str) -> Option<crate::onboard::ScanReport> {
         let guard = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
-        guard.get(project_id).cloned()
+        if let Some(report) = guard.get(project_id) {
+            return Some(report.clone());
+        }
+        drop(guard);
+        self.inspections.latest(project_id).map(|e| e.report)
     }
 
     /// Retrieve the most recently completed scan, regardless of which project it belonged to.
@@ -755,6 +868,66 @@ impl AppState {
         state
     }
 
+    /// A clean-slate state whose file-backed stores all live under `dir` (the `camerata`
+    /// directory itself, i.e. what `<data_dir>/camerata` is in production). Opens ONLY the JSON
+    /// stores, with an in-memory credential store and no SQLite logs, so it needs no async
+    /// runtime and never touches the keychain or the real per-user directory. This is the
+    /// "restart" seam for end-to-end tests: build a state on a temp dir, drop it, build another
+    /// on the same dir, and everything persisted is what the second one sees.
+    pub fn from_data_dir(dir: &std::path::Path) -> Self {
+        let mut state = Self::new(Arc::new(InMemoryStoryStore::new()));
+        state.open_json_stores(dir);
+        state
+    }
+
+    /// Open every JSON-file-backed store under `dir`. The single list of those stores: both
+    /// [`AppState::from_env`] and [`AppState::from_data_dir`] go through here, and the
+    /// purge-completeness test reads this function's source to prove every store it opens is
+    /// accounted for in `client_source::KNOWN_STORAGE_LOCATIONS`.
+    fn open_json_stores(&mut self, dir: &std::path::Path) {
+        self.projects = crate::project::ProjectStore::load_or_new(dir.join("projects.json"));
+        self.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
+        // Provider-safety session-scoped reset (Pass 2 §3): `safe_mode` must never
+        // survive a restart as OFF, even though it's otherwise persisted alongside the
+        // rest of `Settings`. See `SettingsStore::reset_provider_policy_to_safe_on_startup`
+        // for the full mechanism note — this is the one call site.
+        self.settings.reset_provider_policy_to_safe_on_startup();
+        // No backend env hydration anymore (`docs/design/2026-09-22_per-project-backend.md`):
+        // there is no `CAMERATA_LLM_BACKEND` env var to hydrate. Every project-scoped call
+        // resolves its `Llm` from `project.backend` and the chat path from
+        // `state.settings.chat_backend()`, both read directly at the call seam.
+        self.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
+        self.uow = crate::uow::UowStore::at(dir.join("uow.json"));
+        // Clarifications persist too: every open structured question is a resumable
+        // pause point, so the user can leave and come back to any unanswered question
+        // (and answered ones stay on the record). Survives restarts; safe to delete.
+        self.clarifications =
+            crate::clarify::ClarificationStore::at(dir.join("clarifications.json"));
+        // Phase 3b: resume contexts for runs paused on a clarification persist next to
+        // the clarify store, so a parked run can still resume after a restart.
+        self.clarify_resume =
+            crate::clarify_resume::ClarifyResumeStore::at(dir.join("clarify-resume.json"));
+        // The story spine must persist too: a UoW references its story by id, and
+        // /api/uows resolves the WorkItem from the spine. An in-memory spine meant
+        // restored UoWs rendered blank (and couldn't be run). Persist it alongside.
+        self.stories = Arc::new(InMemoryStoryStore::at(dir.join("stories.json")));
+        // Routines persist too, so a scheduled governed run an architect set up
+        // survives a restart instead of being lost on every launch.
+        self.routines = RoutineStore::at(dir.join("routines.json"));
+        // Open human-review escalations survive a restart so a blocked routine isn't
+        // silently un-blocked by quitting the app.
+        self.escalations = crate::escalation::EscalationStore::at(dir.join("escalations.json"));
+        self.checkpoints = crate::checkpoint::CheckpointStore::at(dir.join("checkpoints.json"));
+        // Incremental-scan cache: per-project file fingerprints + last AI findings, so a
+        // re-scan only re-audits changed files. Survives restarts; safe to delete.
+        self.scan_cache =
+            crate::scan_cache::ScanCacheStore::load_or_new(dir.join("scan-cache.json"));
+        // Completed inspections (sealed report + provenance), one file per project. Unlike the
+        // scan cache this is NOT disposable: it is what exports and the review screen are
+        // built from once the client's source has been deleted.
+        self.inspections = crate::inspections::InspectionStore::at(dir.join("inspections"));
+    }
+
     /// The REAL runtime state: a CLEAN SLATE (no seeded stories, clarifications,
     /// or routines) plus the provider selected from the environment (GitHub when
     /// `CAMERATA_GITHUB_TOKEN` is set, native otherwise). This is what `serve`
@@ -768,34 +941,8 @@ impl AppState {
         // launches in the per-user data dir, so an architect's projects survive a
         // restart. Falls back to an in-memory store if the data dir can't be
         // resolved (the app still runs; it just won't persist that session).
-        if let Some(data) = dirs::data_dir() {
-            let dir = data.join("camerata");
-            state.projects = crate::project::ProjectStore::load_or_new(dir.join("projects.json"));
-            state.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
-            // Provider-safety session-scoped reset (Pass 2 §3): `safe_mode` must never
-            // survive a restart as OFF, even though it's otherwise persisted alongside the
-            // rest of `Settings`. See `SettingsStore::reset_provider_policy_to_safe_on_startup`
-            // for the full mechanism note — this is the one call site.
-            state.settings.reset_provider_policy_to_safe_on_startup();
-            // No backend env hydration anymore (`docs/design/2026-09-22_per-project-backend.md`):
-            // there is no `CAMERATA_LLM_BACKEND` env var to hydrate. Every project-scoped call
-            // resolves its `Llm` from `project.backend` and the chat path from
-            // `state.settings.chat_backend()`, both read directly at the call seam.
-            state.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
-            state.uow = crate::uow::UowStore::at(dir.join("uow.json"));
-            // Clarifications persist too: every open structured question is a resumable
-            // pause point, so the user can leave and come back to any unanswered question
-            // (and answered ones stay on the record). Survives restarts; safe to delete.
-            state.clarifications =
-                crate::clarify::ClarificationStore::at(dir.join("clarifications.json"));
-            // Phase 3b: resume contexts for runs paused on a clarification persist next to
-            // the clarify store, so a parked run can still resume after a restart.
-            state.clarify_resume =
-                crate::clarify_resume::ClarifyResumeStore::at(dir.join("clarify-resume.json"));
-            // The story spine must persist too: a UoW references its story by id, and
-            // /api/uows resolves the WorkItem from the spine. An in-memory spine meant
-            // restored UoWs rendered blank (and couldn't be run). Persist it alongside.
-            state.stories = Arc::new(InMemoryStoryStore::at(dir.join("stories.json")));
+        if let Some(dir) = crate::app_dirs::camerata_dir() {
+            state.open_json_stores(&dir);
             // Central artifact store (ROUTE-A): per-story decision records + investigation
             // notes are versioned here. Opened on the same data dir as the other stores.
             // Best-effort: if the store can't be opened (no runtime handle, or sqlx error),
@@ -909,19 +1056,6 @@ impl AppState {
                     }
                 };
             }
-            // Routines persist too, so a scheduled governed run an architect set up
-            // survives a restart instead of being lost on every launch.
-            state.routines = RoutineStore::at(dir.join("routines.json"));
-            // Open human-review escalations survive a restart so a blocked routine isn't
-            // silently un-blocked by quitting the app.
-            state.escalations =
-                crate::escalation::EscalationStore::at(dir.join("escalations.json"));
-            state.checkpoints =
-                crate::checkpoint::CheckpointStore::at(dir.join("checkpoints.json"));
-            // Incremental-scan cache: per-project file fingerprints + last AI findings, so a
-            // re-scan only re-audits changed files. Survives restarts; safe to delete.
-            state.scan_cache =
-                crate::scan_cache::ScanCacheStore::load_or_new(dir.join("scan-cache.json"));
         }
         // Feature flags: load from .camerata/features.toml (CWD-relative) with env
         // overrides applied on top. Loaded last so the flags are available to every
@@ -4463,8 +4597,12 @@ async fn rescan_alternatives_handler(
         .map(|m| format!("skipped invalid override — {m}"))
         .collect();
 
+    // Same session bookkeeping as `audit_repos`: this rescan re-reads client source into model
+    // prompts, so the Claude Code sessions it spawns belong on the inspection entry too.
+    let model_sessions = crate::llm::SessionSink::new();
     let llm =
-        crate::llm::Llm::from_env_with_backend_and_ledger(llm_backend, state.usage_ledger.clone());
+        crate::llm::Llm::from_env_with_backend_and_ledger(llm_backend, state.usage_ledger.clone())
+            .with_session_sink(model_sessions.clone());
     let (sources, source_notes) = resolve_local_sources(&state, &project.repos);
     run_notes.extend(source_notes);
 
@@ -4572,6 +4710,8 @@ async fn rescan_alternatives_handler(
         }
     }
 
+    state.record_model_sessions(&id, model_sessions.snapshot());
+
     // A rescan builds Findings without going through `audit_repos`, so it must apply the
     // corpus-authored severity bounds itself: the findings returned below AND the ones folded
     // into the stored scan are what the triage view shows, and they must carry the same
@@ -4593,7 +4733,9 @@ async fn rescan_alternatives_handler(
         // W6: fold any freshly-failed pass into the stored report so a LATER export still
         // discloses it — never let a rescan's failure disappear once this handler returns.
         report.failed_passes.extend(all_failed_passes.clone());
-        state.set_last_scan(id.clone(), report);
+        // Same inspection, a few rules re-evaluated: amend the current persisted entry rather
+        // than appending a second one.
+        state.amend_last_scan(id.clone(), report);
     }
 
     Json(serde_json::json!({
@@ -6651,10 +6793,10 @@ async fn onboard_audit_start(
     let soc2_enabled = state.feature_flags.soc2;
     // Captured for the spawned task so the async audit's model calls feed the cumulative meter.
     let usage_ledger = state.usage_ledger.clone();
-    // Captured so the async path can write to last_scan the instant the report is final.
-    let last_scan = state.last_scan.clone();
-    // Also capture recent_scan so the project-agnostic fallback is kept in sync.
-    let recent_scan = state.recent_scan.clone();
+    // Captured so the async path records the finished inspection (in-memory last_scan, the
+    // project-agnostic recent_scan fallback, and the persisted inspection entry) through the
+    // ONE shared writer, `AppState::set_last_scan`, the instant the report is final.
+    let scan_state = state.clone();
     tokio::spawn(async move {
         // PANIC GUARD (see `run_job_body_with_panic_guard`'s doc comment for the full
         // rationale): everything below runs the entire AI + deterministic pipeline in this
@@ -6851,13 +6993,11 @@ async fn onboard_audit_start(
             // Also update the project-agnostic `recent_scan` fallback so the active-project
             // context can surface this scan even if the active project changed since the
             // scan was submitted (or no project was active at submission time).
-            if let Some(id) = &project_id {
-                let mut guard = last_scan.lock().unwrap_or_else(|e| e.into_inner());
-                guard.insert(id.clone(), report.clone());
-            }
-            {
-                let mut recent = recent_scan.lock().unwrap_or_else(|e| e.into_inner());
-                *recent = Some(report.clone());
+            match &project_id {
+                Some(id) => scan_state.set_last_scan(id.clone(), report.clone()),
+                // No active project: only the project-agnostic fallback can hold it, and there
+                // is no project to key a persisted inspection to.
+                None => scan_state.set_recent_scan(report.clone()),
             }
 
             body_jobs.finish(&body_jid, report);

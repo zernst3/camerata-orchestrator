@@ -7621,7 +7621,7 @@ pub struct Threat {
 /// The structured result of ONE deep-tier lens. Each lens carries its own payload (only one
 /// of the vectors is populated per lens) plus the advisory flag + disclaimer so the honesty
 /// guardrail travels with the data.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DeepLensResult {
     /// Stable lens id (`soc2-gap` | `deep-security` | `threat-model`).
     pub lens: String,
@@ -7674,7 +7674,7 @@ impl DeepLensResult {
 
 /// The aggregate deep-tier output across all three lenses for one repo set. Attached to the
 /// scan report under [`crate::onboard::ScanReport::deep`] when the deep tier ran.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DeepReport {
     /// The three lens results, in a stable order (gap analysis, security, threat model).
     pub lenses: Vec<DeepLensResult>,

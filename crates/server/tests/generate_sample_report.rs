@@ -347,12 +347,14 @@ async fn regenerate_sample_report() {
                     sha: Some("a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".to_string()),
                     branch: Some("main".to_string()),
                     dirty: false,
+                    ..AuditedRef::default()
                 },
                 AuditedRef {
                     repo: EDGE.to_string(),
                     sha: Some("9f8e7d6c5b4a39281706f5e4d3c2b1a098765432".to_string()),
                     branch: Some("main".to_string()),
                     dirty: true,
+                    ..AuditedRef::default()
                 },
             ],
             audit_model: Some("anthropic/claude-opus-5".to_string()),
@@ -367,6 +369,7 @@ async fn regenerate_sample_report() {
             osv_scanner_version: Some("1.9.0".to_string()),
             started_at: "2026-07-26T15:30:00Z".to_string(),
             finished_at: "2026-07-26T15:42:00Z".to_string(),
+            model_sessions: Vec::new(),
         },
         recommendations: std::collections::HashMap::new(),
         failed_passes: Vec::new(),

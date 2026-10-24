@@ -5091,6 +5091,7 @@ mod tests {
                     sha: Some("abcdef1234567890".to_string()),
                     branch: Some("main".to_string()),
                     dirty: false,
+                    ..AuditedRef::default()
                 }],
                 audit_model: Some("test-model".to_string()),
                 calibration_model: Some("test-cal-model".to_string()),
@@ -5104,6 +5105,7 @@ mod tests {
                 osv_scanner_version: Some("1.9.0".to_string()),
                 started_at: "2026-07-23T00:00:00Z".to_string(),
                 finished_at: "2026-07-23T00:05:00Z".to_string(),
+                model_sessions: Vec::new(),
             },
             recommendations: std::collections::HashMap::new(),
             failed_passes: Vec::new(),
@@ -13280,6 +13282,7 @@ mod export_invariants_gate {
                     sha: Some("1234567890abcdef".to_string()),
                     branch: Some("main".to_string()),
                     dirty: false,
+                    ..AuditedRef::default()
                 }],
                 audit_model: Some("test-model".to_string()),
                 calibration_model: Some("test-cal-model".to_string()),
@@ -13293,6 +13296,7 @@ mod export_invariants_gate {
                 osv_scanner_version: Some("1.9.0".to_string()),
                 started_at: "2026-10-02T00:00:00Z".to_string(),
                 finished_at: "2026-10-02T00:05:00Z".to_string(),
+                model_sessions: Vec::new(),
             },
             recommendations: std::collections::HashMap::new(),
             failed_passes: Vec::new(),

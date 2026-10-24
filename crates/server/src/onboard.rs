@@ -421,7 +421,7 @@ pub(crate) fn account_location_merge(
 }
 
 /// One alternative the architect can codify for a proposed rule.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuleOptionView {
     /// Stable option id (what gets codified as the choice).
     pub id: String,
@@ -458,7 +458,7 @@ pub struct RuleSourceView {
 
 /// One rule proposed for the starter ruleset, classified by SCOPE and PLACEMENT so
 /// brownfielding decides, up front, where each rule and its mechanical gate live.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProposedRule {
     /// The rule id.
     pub id: String,
@@ -526,7 +526,7 @@ pub struct ProposedRule {
 
 /// The detected tech stack for one repo (languages from extensions, frameworks
 /// from manifests). Drives the stack-specific rule proposals (Approach B).
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepoStack {
     /// `owner/repo`.
     pub repo: String,
@@ -542,7 +542,7 @@ pub struct RepoStack {
 /// `propose::count_source_lines`, which produces the totals this is built from, and
 /// `report_export::CoverJson::code_lines_by_language`, which renders it (hidden entirely when
 /// the total is zero, per the "never render 0" cover rule).
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct LanguageVolume {
     pub language: String,
     pub lines: usize,
@@ -597,6 +597,17 @@ pub struct AuditedRef {
     /// True when `git status --porcelain` reported uncommitted changes at scan time.
     #[serde(default)]
     pub dirty: bool,
+    /// `git config --get remote.origin.url` as observed at scan time (tokenless by
+    /// construction: Camerata's own clone path scrubs it, and a hand-made clone's URL is the
+    /// operator's own). `None` on a non-git folder or when there is no origin. Informational,
+    /// for the deletion record and the renamed-origin report: the remote-match guard compares
+    /// `owner/repo` identities and never this string.
+    #[serde(default)]
+    pub origin_url: Option<String>,
+    /// The origin's default branch (`git symbolic-ref refs/remotes/origin/HEAD`, as `main` /
+    /// `master`); `None` when the clone has no such ref. Lets re-fetch name "latest from main".
+    #[serde(default)]
+    pub default_branch: Option<String>,
 }
 
 /// Provenance stamp on a `ScanReport`: exactly what was audited, with what
@@ -643,13 +654,20 @@ pub struct ScanProvenance {
     pub started_at: String,
     /// RFC3339 timestamp when this audit run finished.
     pub finished_at: String,
+    /// The Claude Code sessions this run's model calls created on the `Cli` backend (one per
+    /// `claude -p` spawn; empty on the `Api` backend). Each persists its prompt, which carries
+    /// client source, under `~/.claude/projects/`, so source deletion needs the ids to remove
+    /// exactly those files. Copied onto the persisted inspection entry. `serde(default)` so a
+    /// previously persisted report still loads.
+    #[serde(default)]
+    pub model_sessions: Vec<crate::llm::ModelSession>,
 }
 
 /// The full scan result across one or more repos. Brownfield onboarding treats a
 /// SET of inter-related repos (e.g. a .NET API + a Python worker + a React app) as
 /// one unit: findings and the proposed ruleset aggregate across all of them, each
 /// finding tagged with its repo.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanReport {
     /// The repos scanned (`owner/repo`).
     pub repos: Vec<String>,
@@ -1265,11 +1283,16 @@ pub async fn audit_repos(
         crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
         crate::llm::BackendResolution::Blocked { .. } => crate::llm::Backend::Cli,
     };
+    // Every `claude -p` this run spawns persists its prompt (client source) in a Claude Code
+    // session file; the sink remembers each session id so source deletion can remove exactly
+    // those files. The Api backend never spawns `claude`, so it records nothing.
+    let sessions = crate::llm::SessionSink::new();
     let llm = match ledger {
         Some(l) => crate::llm::Llm::from_env_with_backend_and_ledger(llm_backend, l),
         None => crate::llm::Llm::from_env_with_backend(llm_backend),
-    };
-    audit_repos_with_llm(
+    }
+    .with_session_sink(sessions.clone());
+    let (mut report, manifest) = audit_repos_with_llm(
         &llm,
         sources,
         selected,
@@ -1289,7 +1312,9 @@ pub async fn audit_repos(
         corpus,
         chosen_options,
     )
-    .await
+    .await;
+    report.provenance.model_sessions = sessions.snapshot();
+    (report, manifest)
 }
 
 /// The brownfield audit over an injected model. [`audit_repos`] is this with the real `Llm`; a
@@ -2380,6 +2405,9 @@ pub async fn audit_repos_with_llm(
             .then(|| crate::tool_provisioning::OSV_SCANNER_VERSION.to_string()),
         started_at,
         finished_at: chrono::Utc::now().to_rfc3339(),
+        // Filled by [`audit_repos`], the one place that builds a real CLI `Llm`; an injected
+        // [`crate::llm::LlmPort`] has no Claude Code sessions to report.
+        model_sessions: Vec::new(),
     };
     // Stamp `ai_covered` exactly here, not earlier: `run_ai_review` may have been forced false
     // above (the `Blocked` gate), and `report.ai_error` (from `first_ai_error`) only reaches its
@@ -2478,16 +2506,86 @@ async fn capture_audited_ref(spec: &str, dir: &std::path::Path) -> AuditedRef {
         .await
         .map(|o| !o.stdout.is_empty())
         .unwrap_or(false);
+    // The origin URL goes into the deletion record and the delivered provenance, so credentials a
+    // hand-made clone may carry in it are scrubbed here, at the one capture point.
+    let origin_url = run(dir, &["config", "--get", "remote.origin.url"])
+        .await
+        .filter(|o| o.status.success())
+        .map(|o| crate::workspace::scrub_remote_url(&String::from_utf8_lossy(&o.stdout)))
+        .filter(|s| !s.is_empty());
+    // `origin/main` -> `main`. Absent when the clone has no `refs/remotes/origin/HEAD`.
+    let default_branch = run(
+        dir,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    .filter(|o| o.status.success())
+    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    .and_then(|s| s.strip_prefix("origin/").map(str::to_string))
+    .filter(|s| !s.is_empty());
     AuditedRef {
         repo: spec.to_string(),
         sha,
         branch,
         dirty,
+        origin_url,
+        default_branch,
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The audited ref carries the origin URL and the default branch, so the deletion record
+    /// can name where the code came from and re-fetch can offer "latest from main".
+    #[tokio::test]
+    async fn audited_ref_captures_origin_url_and_default_branch() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (_bare, url, sha) = crate::test_git::bare_remote(tmp.path(), &[("a.txt", "one\n")]);
+        let clone = tmp.path().join("clone");
+        crate::test_git::clone_as(&url, &clone, "git@github.com:acme/app.git");
+        // `clone_as` rewrote origin, so the tracking ref `origin/HEAD` still exists from the clone.
+
+        let got = capture_audited_ref("acme/app", &clone).await;
+
+        assert_eq!(got.sha.as_deref(), Some(sha.as_str()));
+        assert_eq!(
+            got.origin_url.as_deref(),
+            Some("git@github.com:acme/app.git")
+        );
+        assert_eq!(got.default_branch.as_deref(), Some("main"));
+        assert!(!got.dirty);
+    }
+
+    /// A hand-made clone whose origin embeds credentials must not carry them into the record.
+    #[tokio::test]
+    async fn audited_ref_never_records_credentials_embedded_in_the_origin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        crate::test_git::init_repo_with_origin(
+            &repo,
+            "https://x-access-token:ghp_SECRETSECRET@github.com/acme/app.git",
+            &[("a.txt", "one\n")],
+        );
+
+        let got = capture_audited_ref("acme/app", &repo).await;
+
+        assert_eq!(
+            got.origin_url.as_deref(),
+            Some("https://github.com/acme/app.git")
+        );
+        assert!(!format!("{got:?}").contains("ghp_SECRETSECRET"));
+    }
+
+    /// A folder with no git history yields no origin and no default branch, never an error.
+    #[tokio::test]
+    async fn audited_ref_has_no_origin_for_a_plain_folder() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let got = capture_audited_ref("acme/app", tmp.path()).await;
+        assert_eq!(got.sha, None);
+        assert_eq!(got.origin_url, None);
+        assert_eq!(got.default_branch, None);
+    }
 
     fn sel(id: &str, repos: &[&str]) -> SelectedRule {
         SelectedRule {
@@ -5835,12 +5933,16 @@ mod tests {
                     sha: Some("a".repeat(40)),
                     branch: Some("main".to_string()),
                     dirty: true,
+                    origin_url: Some("git@github.com:me/api.git".to_string()),
+                    default_branch: Some("main".to_string()),
                 },
                 AuditedRef {
                     repo: "me/web".to_string(),
                     sha: None,
                     branch: None,
                     dirty: false,
+                    origin_url: None,
+                    default_branch: None,
                 },
             ],
             audit_model: Some("claude-sonnet-5".to_string()),
@@ -5858,6 +5960,11 @@ mod tests {
             osv_scanner_version: Some("v1.9.2".to_string()),
             started_at: "2026-07-23T00:00:00+00:00".to_string(),
             finished_at: "2026-07-23T00:05:00+00:00".to_string(),
+            model_sessions: vec![crate::llm::ModelSession {
+                session_id: "9d1c0000-0000-4000-8000-000000000000".to_string(),
+                cwd: "/work/me/api".to_string(),
+                created_at: "2026-07-23T00:01:00Z".to_string(),
+            }],
         };
         let json = serde_json::to_string(&prov).unwrap();
         let back: ScanProvenance = serde_json::from_str(&json).unwrap();
