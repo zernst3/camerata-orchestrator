@@ -62,6 +62,19 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-23 (Zach, executive decision): the review speed-ups are V1.
+  `_workspace/brownfield-audits/WORK_ORDER_REVIEW_SPEED.md` (code viewer A.1-A.10; B.2 stacked
+  group view; B.3 pane context; B.4 order presets; B.5 decision memory; B.7 progress counts + ETA;
+  B.6 reviewer notes; B.8 command palette) plus its companion `WORK_ORDER_REVIEW_TIME.md` (items
+  1-3). Slotted (Opus) BEFORE the graded accuracy run so that review uses them and the timer turns
+  it into measured review hours. Order: delete/re-fetch blocker, 26 mutation gaps, review
+  speed-ups, W29 Wave D, corpus text, item-21 engine follow-ups, W27 PDF, 19f grader, graded run.
+  The Phase-2 docked "code mode" layout is decided after one real review; the retest diff view
+  stays V2 (rejected by the order). Opus engineering calls: add `tree-sitter-rust`; when client
+  source has been deleted the viewer says "Source deleted on <date>, re-fetch to view" and never
+  silently falls back to a missing working tree; `symbol-refs` passes the symbol to `git grep`
+  with `-e` (or after `--`) so a leading `-` cannot be parsed as an option.
+
 - 2026-10-23 (Opus, Fable leak-hunt owner calls; asymmetric risk favours redaction): (a) T1
   placeholder words in VENDOR bodies must be delimited (`_`/`-`/start/end/case change) or the body
   single-case, so a random key containing "mock"/"fake"/"your" is still redacted; substring
