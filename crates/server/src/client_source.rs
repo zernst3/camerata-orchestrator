@@ -4,15 +4,25 @@
 //! This module owns the whole lifecycle (docs/design/2026-10-24_delete-and-refetch-client-
 //! source.md): what is on disk now ([`status`]), the proof that it was removed ([`records`]),
 //! the guard that decides whether a folder may be deleted at all, the purge of every copy
-//! Camerata made, and (in later modules) re-fetching, the delta rescan and the git-object
-//! reader the code viewer uses.
+//! Camerata made, re-fetching, the delta rescan, and the git-object reader the code viewer
+//! uses.
 //!
 //! The split follows the concerns, one file each, so no concern is implemented twice:
 //!
 //! - [`git`]: read-only git probes over a checkout.
 //! - [`records`]: the deletion and re-fetch records and their store.
 //! - [`status`]: the derived per-repo source status.
-//! - [`handlers`]: the HTTP surface.
+//! - [`storage`]: every location deletion may touch besides the checkout, injected, and the
+//!   guard that keeps a test from deleting a real one.
+//! - [`ops`]: in-flight claims, so delete, re-fetch, rescan and scans never overlap.
+//! - [`guard`]: the thirteen ordered reasons a folder is refused.
+//! - [`purge`] and [`delete`]: the plan, the removal in a fixed order, and the two endpoints.
+//! - [`resolution`]: readiness and the checkout list, read through the source status.
+//! - [`read`]: where a finding's code may be read from (the inspected commit, never a missing
+//!   folder).
+//! - [`remote`] and [`refetch`]: the network git steps and the re-fetch and probe endpoints.
+//! - [`rescan`]: "Rescan changes", the delta retest through a synthetic prior.
+//! - [`handlers`]: the HTTP surface of status and records.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

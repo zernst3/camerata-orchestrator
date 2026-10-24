@@ -650,6 +650,54 @@ a valid local git checkout (common right after importing a project) is flagged w
 per-repo **Resolve…** button to browse to its folder. A repo is "broken" when its path is unset,
 missing, or not a git checkout whose origin matches `owner/repo`.
 
+### 5a. Delete a client's source code, and fetch it back
+
+When an inspection has been delivered, the client's code should not stay on your machine. Each repo
+card in the **Workspace** tab has a collapsed **Danger zone** with **Delete source code from this
+machine**. Findings, the review screen and every export stay; only the code goes.
+
+**What the card tells you.** Next to the repo name the card says where the code stands:
+
+- *Source at `3f2a9c1` (the inspected commit)*: the code on disk is exactly what was inspected.
+- *Source at `9b7e21c`, 14 commits newer than the inspection (`3f2a9c1`)*: you have moved on. The
+  primary button is **Rescan changes**, which inspects only what changed since the inspection and
+  keeps the findings for everything else. **Full re-inspection** runs the whole scan again.
+- *the inspected commit is not in this clone (history was rewritten)*: only **Full re-inspection**
+  is offered, and the finding code views for that inspection are unavailable.
+- *Source deleted on 24 Oct 2026*: the code is gone. The card says what was removed ("2,729 files,
+  182.9 MB removed") and offers **Re-fetch source** and **View deletion record**.
+
+**Deleting.** Open the Danger zone and press the button. Camerata first checks that the folder really
+is a clone of this repo (the same `owner/repo` as GitHub says) and shows the list of everything it will
+remove: the checkout, any worktrees, its scan caches, the command-line cache, and the Claude Code
+session files that hold the code it sent to the model. If you have uncommitted changes, or commits
+that are not on GitHub, it says so in amber and the button stays off until you also tick **Delete
+uncommitted work too**. Type the repo name exactly (`acme/app`) to enable **Delete source code**.
+Nothing is removed until then, and nothing is removed from any folder that is not this repo's clone
+(a symlinked path, your home folder, a different repo, or Camerata's own folder are all refused with
+the reason).
+
+When it finishes you get the **deletion record**: what was removed, from where, and when, with the
+inspected commit. Use **Copy record** or **Save record as .txt** to hand it to the client. The same
+record is under **View deletion record** on the card afterwards.
+
+What is kept, on purpose: the findings with the lines of code they quote, because they are the
+deliverable. The record says so.
+
+**While the source is deleted.** The project keeps working. Findings, triage, the PDF, the Excel
+workbook and the product package all regenerate from the stored inspection. Anything that needs the
+code (scan, rescan, adding rules to a repo, opening a pull request, governed development) is switched
+off, and says "Source for acme/app was deleted on 24 Oct 2026. Re-fetch source from the Workspace tab
+to rescan." In a finding, the code area reads "Source deleted on 24 Oct 2026, re-fetch to view" with
+the quoted line still shown above it.
+
+**Re-fetching.** **Re-fetch source** asks GitHub for the repo's default branch and offers two choices:
+the latest code, or exactly the commit that was inspected (to reproduce or dispute a finding). The
+clone has full history and goes back to the same folder. It needs a GitHub token (Credentials); if
+the token is missing, revoked, or cannot see the repo, the dialog says which. After it finishes the
+card is back to one of the states above. If GitHub now calls the repository something else, the card
+says so; the project still records the old name.
+
 ---
 
 ## 6. Governed Development (work items → Units of Work → governed dev)
