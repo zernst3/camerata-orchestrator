@@ -151,6 +151,14 @@ Camerata was not.";
 pub const RESIDUAL_UNCOMMITTED: &str =
     "Uncommitted changes and unpushed commits were removed at the operator's request.";
 
+/// A deletion record that is held in memory (and returned to the operator) but could not be
+/// written to disk.
+#[derive(Debug)]
+pub struct RecordNotSaved {
+    pub record: DeletionRecord,
+    pub error: std::io::Error,
+}
+
 /// Everything stored for one project.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ProjectRecords {
@@ -233,7 +241,7 @@ impl SourceRecordStore {
         &self,
         project_id: &str,
         mut record: DeletionRecord,
-    ) -> Result<DeletionRecord, (DeletionRecord, std::io::Error)> {
+    ) -> Result<DeletionRecord, Box<RecordNotSaved>> {
         let mut map = self.lock();
         let entry = map.entry(project_id.to_string()).or_default();
         entry.next_seq += 1;
@@ -241,7 +249,7 @@ impl SourceRecordStore {
         entry.deletions.push(record.clone());
         match self.persist_locked(&map) {
             Ok(()) => Ok(record),
-            Err(e) => Err((record, e)),
+            Err(error) => Err(Box::new(RecordNotSaved { record, error })),
         }
     }
 
@@ -392,7 +400,7 @@ pub fn group_thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);

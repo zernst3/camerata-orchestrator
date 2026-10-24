@@ -120,7 +120,7 @@ const PROVISION_LOCK_POLL: Duration = Duration::from_millis(50);
 /// `true` when `exe` is a cargo-built TEST binary (unit, integration, bench or doc-test
 /// harness). Cargo places every one of those under `target/<profile>/deps/`; a `cargo run`
 /// binary lives one level up and an installed app lives nowhere near a `deps` directory.
-fn is_cargo_test_binary(exe: &Path) -> bool {
+pub(crate) fn is_cargo_test_binary(exe: &Path) -> bool {
     exe.parent()
         .and_then(Path::file_name)
         .is_some_and(|dir| dir == "deps")

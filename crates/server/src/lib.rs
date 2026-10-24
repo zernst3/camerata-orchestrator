@@ -203,6 +203,13 @@ pub struct AppState {
     /// Machine-local deletion records (the proof handed to a client) and re-fetch records.
     /// Not part of the project export. See [`crate::client_source`].
     source_records: crate::client_source::records::SourceRecordStore,
+    /// Operations in flight on a repo's source (delete, re-fetch, rescan) and scans running in a
+    /// request: what the deletion guard's "scan in progress" refusal reads.
+    source_ops: crate::client_source::ops::SourceOps,
+    /// The locations source deletion may touch besides the checkout. EMPTY by default so a
+    /// state built by `new()` can touch nothing outside a checkout; only `from_env()` installs
+    /// the real ones. See [`crate::client_source::storage`].
+    storage_roots: Arc<crate::client_source::storage::StorageRoots>,
     /// Per-project last completed scan report. Written the instant any scan handler finishes
     /// (both the synchronous `onboard_audit` path and the async job path). Read by
     /// `active_project_context` as the authoritative source for grounding, with the
@@ -317,6 +324,8 @@ impl AppState {
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
             inspections: crate::inspections::InspectionStore::new(),
             source_records: crate::client_source::records::SourceRecordStore::new(),
+            source_ops: crate::client_source::ops::SourceOps::new(),
+            storage_roots: Arc::new(crate::client_source::storage::StorageRoots::default()),
             last_scan: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             recent_scan: std::sync::Arc::new(std::sync::Mutex::new(None)),
             artifacts: None,
@@ -888,7 +897,25 @@ impl AppState {
     pub fn from_data_dir(dir: &std::path::Path) -> Self {
         let mut state = Self::new(Arc::new(InMemoryStoryStore::new()));
         state.open_json_stores(dir);
+        // Only the data dir is known: nothing outside it (no CLI cache dir, no Claude Code
+        // folder) can be touched unless the caller installs roots with `with_storage_roots`.
+        state.storage_roots = Arc::new(crate::client_source::storage::StorageRoots {
+            data_dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        });
         state
+    }
+
+    /// Replace the locations source deletion may touch besides the checkout. The test seam that
+    /// confines every deletion to a temp directory; production installs the real roots in
+    /// [`AppState::from_env`] and never calls this.
+    #[must_use]
+    pub fn with_storage_roots(
+        mut self,
+        roots: crate::client_source::storage::StorageRoots,
+    ) -> Self {
+        self.storage_roots = Arc::new(roots);
+        self
     }
 
     /// Open every JSON-file-backed store under `dir`. The single list of those stores: both
@@ -1076,6 +1103,10 @@ impl AppState {
         // overrides applied on top. Loaded last so the flags are available to every
         // handler via AppState from first request. Infallible: missing config = defaults.
         state.feature_flags = crate::feature_flags::FeatureFlags::load();
+        // The ONE place the real home, cache and Claude Code locations are installed: source
+        // deletion removes copies of client code from exactly these.
+        state.storage_roots =
+            Arc::new(crate::client_source::storage::StorageRoots::from_environment());
         // Production path: use the OS keychain (macOS Keychain, Windows Credential
         // Manager, Secret Service on Linux) so credentials survive restarts without
         // living in any file on disk.
@@ -1337,6 +1368,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/projects/:id/source/records/:record_id/text",
             get(crate::client_source::handlers::get_record_text),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/source/delete-preview",
+            post(crate::client_source::delete::delete_preview),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/source/delete",
+            post(crate::client_source::delete::delete),
         )
         .route("/api/projects/:id/repos/:repo/link", post(link_repo))
         .route("/api/projects/:id/reset-onboarding", post(reset_onboarding))

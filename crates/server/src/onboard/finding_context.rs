@@ -218,7 +218,7 @@ fn resolve_contained_path(repo_dir: &Path, rel_path: &str) -> Option<PathBuf> {
 /// Lexically collapse `.`/`..` components WITHOUT touching the filesystem (no symlink
 /// resolution) — the first pass before [`canonicalize_existing_prefix`] resolves symlinks in
 /// whatever prefix actually exists on disk.
-fn normalize_lexical(p: &Path) -> PathBuf {
+pub(crate) fn normalize_lexical(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in p.components() {
         match comp {
@@ -236,7 +236,7 @@ fn normalize_lexical(p: &Path) -> PathBuf {
 /// rejoin the remaining not-yet-existing tail components as-is. Lets containment be verified
 /// even for a path that doesn't exist (a deleted file, or a traversal attempt into a path that
 /// was never real) — [`std::fs::canonicalize`] alone would just error in that case.
-fn canonicalize_existing_prefix(p: &Path) -> PathBuf {
+pub(crate) fn canonicalize_existing_prefix(p: &Path) -> PathBuf {
     let mut ancestor = p.to_path_buf();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     loop {

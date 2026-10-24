@@ -433,6 +433,46 @@ impl JobStore {
             .map(|(_, deep)| deep)
     }
 
+    /// Whether a scan job that could be touching `project_id`'s repos is still `running`. A job
+    /// created with no active project (`project_id == None`) might be scanning ANY repo, so it
+    /// counts for every project: source deletion errs toward refusing, never toward removing a
+    /// checkout out from under a live scan.
+    #[must_use]
+    pub fn has_running_for_project(&self, project_id: &str) -> bool {
+        self.inner.lock().is_ok_and(|g| {
+            g.values().any(|j| {
+                j.status == "running"
+                    && j.project_id
+                        .as_deref()
+                        .is_none_or(|owner| owner == project_id)
+            })
+        })
+    }
+
+    /// Drop every FINISHED (`done`, `failed` or `cancelled`) job of `project_id`, with its
+    /// bookkeeping; returns how many were dropped. A finished job holds its report and streamed
+    /// findings in memory, i.e. client code excerpts; running jobs are left alone.
+    pub fn remove_finished_for_project(&self, project_id: &str) -> usize {
+        let Ok(mut jobs) = self.inner.lock() else {
+            return 0;
+        };
+        let doomed: Vec<String> = jobs
+            .iter()
+            .filter(|(_, j)| j.status != "running" && j.project_id.as_deref() == Some(project_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &doomed {
+            jobs.remove(id);
+        }
+        drop(jobs);
+        if let Ok(mut meta) = self.job_meta.lock() {
+            for id in &doomed {
+                meta.remove(id);
+            }
+        }
+        doomed.len()
+    }
+
     /// Test-only: force a job's completion timestamp so `latest_deep_report`'s "newest
     /// wins within a project" ordering can be exercised deterministically (two jobs finished
     /// in the same wall-clock millisecond would otherwise tie).
@@ -949,5 +989,57 @@ mod tests {
             store.latest_deep_report("proj-a").unwrap().disclaimer,
             "deep-A"
         );
+    }
+
+    /// Source deletion must never pull a checkout out from under a live scan: a running job of
+    /// the project blocks it, and so does a running job of NO project (it might be scanning
+    /// anything). A finished job, or another project's job, does not.
+    #[test]
+    fn running_scan_blocks_only_its_own_project_or_an_unowned_job() {
+        let store = JobStore::new();
+        assert!(!store.has_running_for_project("proj-a"));
+
+        let mine = store.create("audit", Some("proj-a".to_string()));
+        assert!(store.has_running_for_project("proj-a"));
+        assert!(!store.has_running_for_project("proj-b"));
+
+        store.finish(&mine, ScanReport::gated(&["me/api".to_string()]));
+        assert!(!store.has_running_for_project("proj-a"), "finished");
+
+        let failed = store.create("audit", Some("proj-a".to_string()));
+        store.fail(&failed, "boom");
+        assert!(!store.has_running_for_project("proj-a"), "failed");
+
+        let unowned = store.create("audit", None);
+        assert!(store.has_running_for_project("proj-a"));
+        assert!(store.has_running_for_project("proj-b"));
+        store.cancel(&unowned);
+        assert!(!store.has_running_for_project("proj-a"), "cancelled");
+    }
+
+    #[test]
+    fn remove_finished_for_project_drops_finished_jobs_and_keeps_running_ones() {
+        let store = JobStore::new();
+        let done = store.create("audit", Some("proj-a".to_string()));
+        store.finish(&done, ScanReport::gated(&["me/api".to_string()]));
+        let failed = store.create("audit", Some("proj-a".to_string()));
+        store.fail(&failed, "boom");
+        let running = store.create("audit", Some("proj-a".to_string()));
+        let other = store.create("audit", Some("proj-b".to_string()));
+        store.finish(&other, ScanReport::gated(&["me/web".to_string()]));
+
+        assert_eq!(store.remove_finished_for_project("proj-a"), 2);
+
+        assert!(store.get(&done).is_none());
+        assert!(store.get(&failed).is_none());
+        assert!(
+            store.get(&running).is_some(),
+            "a running job is not dropped"
+        );
+        assert!(
+            store.get(&other).is_some(),
+            "another project's job survives"
+        );
+        assert_eq!(store.remove_finished_for_project("proj-a"), 0);
     }
 }

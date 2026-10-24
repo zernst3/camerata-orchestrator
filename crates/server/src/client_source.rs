@@ -18,11 +18,20 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
+pub mod delete;
 pub mod git;
+pub mod guard;
 pub mod handlers;
+pub mod ops;
+pub mod purge;
 pub mod records;
 pub mod status;
+pub mod storage;
 
+#[cfg(test)]
+mod delete_tests;
+#[cfg(test)]
+mod guard_tests;
 #[cfg(test)]
 mod status_tests;
 #[cfg(test)]

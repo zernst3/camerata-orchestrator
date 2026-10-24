@@ -118,6 +118,7 @@ fn fixture_report() -> ScanReport {
             sha: Some("abc1234567890abc1234567890abc1234567890".to_string()),
             branch: Some("main".to_string()),
             dirty: false,
+            ..AuditedRef::default()
         }],
         audited_rule_ids: vec![
             "SEC-NO-HARDCODED-SECRETS-1".to_string(),

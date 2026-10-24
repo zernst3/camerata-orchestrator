@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
+use super::storage::StorageRoots;
 use crate::onboard::{AuditedRef, ScanReport};
 use crate::test_git::{bare_remote, clone_as};
 use crate::AppState;
@@ -51,7 +52,9 @@ pub(crate) fn fixture() -> Fx {
     let checkout = work.join("acme").join("app");
     clone_as(&remote_url, &checkout, "https://github.com/acme/app.git");
 
-    let state = AppState::from_data_dir(&root.join("data"));
+    // Every location deletion may touch is under `root`: nothing real can be reached.
+    let state = AppState::from_data_dir(&root.join("data"))
+        .with_storage_roots(StorageRoots::sandboxed(&root));
     state
         .settings
         .set_workspace_root(Some(work.to_string_lossy().into_owned()));
@@ -78,9 +81,30 @@ impl Fx {
             .set_last_scan(self.project_id.clone(), report_at(REPO, sha));
     }
 
+    /// Add a second repo `owner/name` to the project, cloned under the workspace like the
+    /// first. Returns its checkout.
+    pub(crate) fn add_repo(&self, repo: &str) -> PathBuf {
+        let base = self.root.join(format!("remote-{}", repo.replace('/', "-")));
+        std::fs::create_dir_all(&base).expect("remote base");
+        let (_bare, url, _sha) = bare_remote(&base, &[("lib.rs", "pub fn f() {}\n")]);
+        let checkout = self.root.join("work").join(repo);
+        clone_as(&url, &checkout, &format!("https://github.com/{repo}.git"));
+        self.state
+            .projects
+            .update(&self.project_id, |p| p.repos.push(repo.to_string()))
+            .expect("project exists");
+        checkout
+    }
+
+    /// The sandboxed storage roots this fixture's state was built with.
+    pub(crate) fn roots(&self) -> StorageRoots {
+        StorageRoots::sandboxed(&self.root)
+    }
+
     /// A second, independent state over the same data directory: a restart.
     pub(crate) fn restarted(&self) -> AppState {
-        let restarted = AppState::from_data_dir(&self.root.join("data"));
+        let restarted = AppState::from_data_dir(&self.root.join("data"))
+            .with_storage_roots(StorageRoots::sandboxed(&self.root));
         restarted
             .settings
             .set_workspace_root(Some(self.root.join("work").to_string_lossy().into_owned()));
