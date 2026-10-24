@@ -11,7 +11,7 @@ use camerata_test_env::EnvGuard;
 use tempfile::TempDir;
 
 use super::rescan::{rescan_changes, RescanOutcome};
-use super::test_support::{fixture, Fx, REPO};
+use super::test_support::{fixture, install_fake_claude, Fx, REPO};
 use crate::inspections::InspectionKind;
 use crate::test_git::{commit_all, git, write_file};
 use crate::{start_audit_job, AuditJobOptions, AuditReq};
@@ -38,18 +38,6 @@ fn changed_ts(marker: &str) -> String {
     )
 }
 
-/// The canned `claude -p` stream-json result for an answer object.
-fn result_line(answer: &serde_json::Value) -> String {
-    serde_json::json!({
-        "type": "result",
-        "is_error": false,
-        "result": answer.to_string(),
-        "total_cost_usd": 0.001,
-        "usage": { "input_tokens": 10, "output_tokens": 5 },
-    })
-    .to_string()
-}
-
 struct Rig {
     fx: Fx,
     tools: TempDir,
@@ -66,13 +54,9 @@ impl Rig {
     }
 }
 
-fn install_fake_claude(dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let empty = serde_json::json!({
-        "findings": [], "proposed_rules": [], "needs_files": [], "verdicts": [],
-        "fixes": [], "recommendations": []
-    });
-    // Whenever a prompt contains the STABLE file's body the model "finds" a violation in it.
+/// The fake model for these tests: whenever a prompt contains the STABLE file's body it "finds"
+/// a violation in it.
+fn install_model(dir: &Path) {
     let finding = serde_json::json!({
         "findings": [{
             "path": "src/stable.ts",
@@ -89,22 +73,14 @@ fn install_fake_claude(dir: &Path) {
     let fix = serde_json::json!({
         "fixes": [{ "index": 0, "fix": "Convert the shipping amount into the order's currency before adding it to the subtotal." }]
     });
-    std::fs::write(dir.join("empty.json"), result_line(&empty)).unwrap();
-    std::fs::write(dir.join("with-finding.json"), result_line(&finding)).unwrap();
-    std::fs::write(dir.join("fix.json"), result_line(&fix)).unwrap();
-    let script = format!(
-        "#!/bin/sh\nD=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$@\" >> \"$D/prompts.log\"\ncase \"$*\" in\n  *'codebase-specific fix per finding'*) cat \"$D/fix.json\" ;;\n  *{STABLE_MARKER}*) cat \"$D/with-finding.json\" ;;\n  *) cat \"$D/empty.json\" ;;\nesac\n"
-    );
-    let bin = dir.join("claude");
-    std::fs::write(&bin, script).unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    install_fake_claude(dir, STABLE_MARKER, &finding, &fix);
 }
 
 /// A project of one repo with two TypeScript files committed, the rule selected, and a fake
 /// `claude` on PATH. The first (full) inspection has NOT run yet.
 fn rig() -> Rig {
     let tools = TempDir::new().unwrap();
-    install_fake_claude(tools.path());
+    install_model(tools.path());
     let path = format!(
         "{}:{}",
         tools.path().display(),

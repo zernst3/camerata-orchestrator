@@ -36,6 +36,8 @@ pub mod storage;
 #[cfg(test)]
 mod delete_tests;
 #[cfg(test)]
+mod e2e_tests;
+#[cfg(test)]
 mod guard_tests;
 #[cfg(test)]
 mod read_tests;

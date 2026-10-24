@@ -4612,6 +4612,9 @@ async fn rescan_alternatives_handler(
     let Some(project) = state.projects.get(&id) else {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
+    // Re-reads the project's source and calls the model, all inside this request: while it
+    // does, deleting that source is refused rather than raced.
+    let _scan_claim = state.source_ops.begin_scan(&project.id);
 
     // Dedup by rule id (uppercased) — last override for a given rule wins. Blank ids/options
     // are dropped rather than causing a hard error (defensive against a malformed request).
@@ -5370,6 +5373,11 @@ async fn onboard_scan(
     }
 
     // Local-first: scan reads the repos' local working trees, not GitHub. No token needed.
+    // While it reads them, deleting that source is refused rather than raced (see `onboard_audit`).
+    let _scan_claim = state
+        .projects
+        .active()
+        .map(|p| state.source_ops.begin_scan(&p.id));
     let (sources, notes) = resolve_local_sources(&state, &repos);
     let report = crate::onboard::scan_repos(&sources, notes).await;
     // Populate the per-project last-scan store so the chat assistant sees deterministic
@@ -5830,6 +5838,11 @@ async fn onboard_audit(
     // Incremental scan: load this project's prior manifest unless the user forced a full scan.
     let active_project = state.projects.active();
     let project_id = active_project.as_ref().map(|p| p.id.clone());
+    // This request holds the checkout open for as long as it runs. Register it, so deleting the
+    // source is refused (not raced) until it returns; released when the handler does.
+    let _scan_claim = project_id
+        .as_deref()
+        .map(|id| state.source_ops.begin_scan(id));
     let prior = if req.incremental {
         project_id
             .as_deref()
@@ -16774,6 +16787,14 @@ async fn export_product(
     };
     // Proof the gate ran, visible to the cockpit without reading the zip.
     let release_checks = released.report.check_names().join(", ");
+    // Remember what was delivered on the inspection it came from (hash and manifest). A failure
+    // to save never blocks the export the operator asked for.
+    if let Err(e) = state
+        .inspections
+        .set_package(&id, released.package_record())
+    {
+        tracing::warn!(project = %id, "could not record the delivered package: {e}");
+    }
     let stem = released.stem;
     let zip_bytes = released.bytes;
 

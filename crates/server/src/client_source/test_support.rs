@@ -106,6 +106,15 @@ impl Fx {
         checkout
     }
 
+    /// Make GitHub "have" everything committed so far, as a push would: point the remote-tracking
+    /// ref of `main` at HEAD. (The checkout's `origin` URL is a GitHub one nothing can push to.)
+    pub(crate) fn mark_head_pushed(&self) {
+        crate::test_git::git(
+            &self.checkout,
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+    }
+
     /// The sandboxed storage roots this fixture's state was built with.
     pub(crate) fn roots(&self) -> StorageRoots {
         StorageRoots::sandboxed(&self.root)
@@ -157,4 +166,42 @@ pub(crate) fn count_files(dir: &Path) -> u64 {
             }
         })
         .sum()
+}
+
+/// The canned `claude -p` stream-json result line for an answer object.
+pub(crate) fn result_line(answer: &serde_json::Value) -> String {
+    serde_json::json!({
+        "type": "result",
+        "is_error": false,
+        "result": answer.to_string(),
+        "total_cost_usd": 0.001,
+        "usage": { "input_tokens": 10, "output_tokens": 5 },
+    })
+    .to_string()
+}
+
+/// Install a fake `claude` in `dir` (put `dir` first on PATH). It appends every argument of
+/// every call to `prompts.log` in `dir` and answers the fix-specific pass with `fix`, any call
+/// whose arguments contain `trigger` with `finding`, and everything else with an empty (but
+/// well-formed) result.
+pub(crate) fn install_fake_claude(
+    dir: &Path,
+    trigger: &str,
+    finding: &serde_json::Value,
+    fix: &serde_json::Value,
+) {
+    use std::os::unix::fs::PermissionsExt;
+    let empty = serde_json::json!({
+        "findings": [], "proposed_rules": [], "needs_files": [], "verdicts": [],
+        "fixes": [], "recommendations": []
+    });
+    std::fs::write(dir.join("empty.json"), result_line(&empty)).unwrap();
+    std::fs::write(dir.join("with-finding.json"), result_line(finding)).unwrap();
+    std::fs::write(dir.join("fix.json"), result_line(fix)).unwrap();
+    let script = format!(
+        "#!/bin/sh\nD=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$@\" >> \"$D/prompts.log\"\ncase \"$*\" in\n  *'codebase-specific fix per finding'*) cat \"$D/fix.json\" ;;\n  *{trigger}*) cat \"$D/with-finding.json\" ;;\n  *) cat \"$D/empty.json\" ;;\nesac\n"
+    );
+    let bin = dir.join("claude");
+    std::fs::write(&bin, script).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
