@@ -14,9 +14,9 @@ use serde::Deserialize;
 use super::guard::{guard, GuardedTarget, Intent};
 use super::purge::{execute, plan};
 use super::records::{
-    now_rfc3339, DeletionRecord, PurgeOutcome, PurgedItem, PurgedKind, RecordNotSaved,
-    METHOD_SENTENCE, RESIDUAL_BACKUPS, RESIDUAL_EXCERPTS, RESIDUAL_MODEL_SESSIONS,
-    RESIDUAL_UNCOMMITTED,
+    format_bytes, group_thousands, now_rfc3339, DeletionRecord, PurgeOutcome, PurgedItem,
+    PurgedKind, RecordNotSaved, METHOD_SENTENCE, RESIDUAL_BACKUPS, RESIDUAL_EXCERPTS,
+    RESIDUAL_MODEL_SESSIONS, RESIDUAL_UNCOMMITTED,
 };
 use super::status::{inspected_entry, project_and_repo, source_status, RepoSourceStatus};
 use super::Refusal;
@@ -252,6 +252,22 @@ pub async fn delete_preview(
             u.branch, u.ahead
         ));
     }
+    // The dialog's item list, worded by the same formatter as the record it will produce.
+    let item_view: Vec<serde_json::Value> = items
+        .iter()
+        .map(|i| {
+            serde_json::json!({
+                "label": i.kind.label(),
+                "path": i.path,
+                "counts": i.counts_text(),
+            })
+        })
+        .collect();
+    let total_summary = format!(
+        "{} files, {}",
+        group_thousands(total_files),
+        format_bytes(total_bytes)
+    );
     Json(serde_json::json!({
         "ok": true,
         "plan": {
@@ -264,6 +280,8 @@ pub async fn delete_preview(
             "stashes": target.stashes,
             "unpushed": target.unpushed,
             "items": items,
+            "item_view": item_view,
+            "total_summary": total_summary,
             "total_files": total_files,
             "total_bytes": total_bytes,
             "warnings": warnings,

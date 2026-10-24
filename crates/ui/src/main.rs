@@ -25,6 +25,7 @@ mod provider_safety;
 mod readiness_gate;
 mod routines;
 mod server_process;
+mod source_ui;
 mod style;
 mod terminal;
 mod toast;

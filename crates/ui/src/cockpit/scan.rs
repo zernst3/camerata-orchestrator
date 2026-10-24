@@ -10,6 +10,11 @@ pub(super) struct RepoResolutionView {
     pub resolved: bool,
     #[serde(default)]
     pub reason: String,
+    /// The source was deleted from this machine on purpose; there is nothing to resolve.
+    #[serde(default)]
+    pub source_deleted: bool,
+    #[serde(default)]
+    pub deleted_at: Option<String>,
 }
 
 pub(super) async fn fetch_repo_health(project_id: &str) -> Option<Vec<RepoResolutionView>> {
@@ -53,12 +58,18 @@ pub(super) fn RepoHealthPanel(project_id: String) -> Element {
     if repos.is_empty() {
         return rsx! {};
     }
-    let broken = repos.iter().filter(|r| !r.resolved).count();
+    // A repo whose source was deleted on purpose has nothing to resolve: it is neither "broken"
+    // nor "fine", and the way back is Re-fetch source, not a folder picker.
+    let broken = repos
+        .iter()
+        .filter(|r| !r.resolved && !r.source_deleted)
+        .count();
+    let deleted = repos.iter().filter(|r| r.source_deleted).count();
     rsx! {
         div { class: "repo-health",
-            if broken == 0 {
+            if broken == 0 && deleted == 0 {
                 p { class: "repo-health-ok", "✓ All {repos.len()} repo path(s) resolve to a local checkout." }
-            } else {
+            } else if broken > 0 {
                 div { class: "repo-health-warn",
                     span { class: "repo-health-warn-h", "⚠ {broken} repo path(s) need resolving" }
                     p { class: "section-hint", "These repos don't point at a local git checkout on this machine (common right after importing a project). Resolve each before working on it." }
@@ -70,13 +81,19 @@ pub(super) fn RepoHealthPanel(project_id: String) -> Element {
                     let resolved = r.resolved;
                     let reason = r.reason.clone();
                     let path = r.path.clone().unwrap_or_default();
+                    let source_deleted = r.source_deleted;
+                    let deleted_block = camerata_ui_core::readiness::ScanBlock {
+                        repos: vec![(r.repo.clone(), r.deleted_at.clone().unwrap_or_default())],
+                    };
                     rsx! {
                         div { class: "repo-health-row", key: "{r.repo}",
-                            span { class: if resolved { "repo-health-icon ok" } else { "repo-health-icon bad" },
-                                if resolved { "✓" } else { "⚠" }
+                            span { class: if resolved { "repo-health-icon ok" } else if source_deleted { "repo-health-icon deleted" } else { "repo-health-icon bad" },
+                                if resolved { "✓" } else if source_deleted { "–" } else { "⚠" }
                             }
                             span { class: "repo-health-repo", "{r.repo}" }
-                            if resolved {
+                            if source_deleted {
+                                crate::source_ui::ScanBlockNotice { block: deleted_block }
+                            } else if resolved {
                                 span { class: "repo-health-path", "{path}" }
                             } else {
                                 span { class: "repo-health-reason", "{reason}" }
@@ -138,6 +155,61 @@ struct FindingContextView {
     matches_snippet: bool,
     #[serde(default)]
     reason: String,
+    /// Where the block was read from: `git` (the inspected commit) or `working_tree`.
+    #[serde(default)]
+    source: String,
+    /// The commit a `git` read was taken at.
+    #[serde(default)]
+    commit: String,
+    /// The checkout has moved on from `commit`.
+    #[serde(default)]
+    head_differs: bool,
+    /// When the source was deleted (`source_deleted` status).
+    #[serde(default)]
+    deleted_at: Option<String>,
+}
+
+impl FindingContextView {
+    /// The banner or note that explains where this block came from, if any (pure mapping in
+    /// `camerata_ui_core::source::context_note`).
+    fn note(&self) -> Option<camerata_ui_core::source::ContextNote> {
+        camerata_ui_core::source::context_note(
+            &self.status,
+            &self.source,
+            &self.commit,
+            self.head_differs,
+            self.deleted_at.as_deref(),
+        )
+    }
+}
+
+/// The note under (or instead of) a finding's code block.
+#[component]
+fn ContextNoteView(note: camerata_ui_core::source::ContextNote) -> Element {
+    use camerata_ui_core::source::ContextNote;
+    let nav = try_consume_context::<Signal<CockpitView>>();
+    match note {
+        ContextNote::SourceDeleted(text) => rsx! {
+            p { class: "finding-ctx-note finding-ctx-deleted",
+                span { "{text}" }
+                button {
+                    class: "btn-edit-sm finding-ctx-link",
+                    onclick: move |_| {
+                        if let Some(mut nav) = nav {
+                            nav.set(CockpitView::Workspace);
+                        }
+                    },
+                    "Open Workspace"
+                }
+            }
+        },
+        ContextNote::NewerSource(text) => rsx! {
+            p { class: "finding-ctx-note finding-ctx-newer", "{text}" }
+        },
+        ContextNote::CommitUnavailable(text) => rsx! {
+            p { class: "finding-ctx-banner", "{text}" }
+        },
+    }
 }
 
 async fn fetch_finding_context(
@@ -221,7 +293,6 @@ fn FindingCodeContext(finding: FindingView) -> Element {
         let expect_line = expect_line.clone();
         async move { fetch_finding_context(&f.repo, &f.path, f.line, &expect_line).await }
     });
-    let mut expanded = use_signal(|| false);
 
     let ctx = ctx_res.read().clone();
     match ctx {
@@ -235,67 +306,93 @@ fn FindingCodeContext(finding: FindingView) -> Element {
         // stored snippet above already covers the finding, so say nothing further here
         // rather than showing a confusing empty error box.
         Some(None) => rsx! {},
-        Some(Some(v)) if v.status == "ok" => {
-            let total = v.lines.len();
-            let violation_idx = v.violation_line.saturating_sub(v.start_line);
-            let capped = total > FINDING_CTX_CAP;
-            let (show_from, show_to) = if capped && !expanded() {
-                let from = violation_idx.saturating_sub(FINDING_CTX_HALF);
-                let to = (violation_idx + FINDING_CTX_HALF).min(total.saturating_sub(1));
-                (from, to)
-            } else {
-                (0, total.saturating_sub(1))
-            };
-            let above = show_from;
-            let below = total.saturating_sub(1).saturating_sub(show_to);
-            rsx! {
-                div { class: "finding-ctx",
-                    div { class: "finding-ctx-head",
-                        p { class: "rule-modal-label", "Code context" }
-                        span { class: "rule-modal-tag", "{context_kind_label(&v.kind)}" }
-                        if !v.matches_snippet {
-                            span { class: "rule-modal-tag finding-ctx-stale", "file changed since this scan" }
-                        }
-                    }
-                    if capped && above > 0 {
-                        p { class: "finding-ctx-fold", "… {above} more lines above …" }
-                    }
-                    pre { class: "finding-ctx-pre",
-                        for (i, line) in v.lines.iter().enumerate() {
-                            if i >= show_from && i <= show_to {
-                                {
-                                    let lineno = v.start_line + i;
-                                    let hit = lineno == v.violation_line;
-                                    let row_class = if hit { "finding-ctx-line finding-ctx-line-hit" } else { "finding-ctx-line" };
-                                    rsx! {
-                                        div { class: "{row_class}", key: "{lineno}",
-                                            span { class: "finding-ctx-gutter", "{lineno}" }
-                                            span { class: "finding-ctx-code", "{line}" }
-                                        }
-                                    }
+        Some(Some(v)) => rsx! { FindingContextBlock { view: v } },
+    }
+}
+
+/// The "Code context" block for one answered `finding-context` request: the code (from the
+/// inspected commit, or the working tree when that is all there is), the note about where it
+/// came from, or the reason there is nothing to show. Props-only so it renders in tests.
+#[component]
+fn FindingContextBlock(view: FindingContextView) -> Element {
+    let v = view;
+    let mut expanded = use_signal(|| false);
+    let note = v.note();
+    // The code block renders for a normal read and for the commit-unavailable fallback (the
+    // working tree rides along); every other status degrades to one reason line.
+    let has_block = v.status == "ok" || (v.status == "commit_unavailable" && !v.lines.is_empty());
+    if !has_block {
+        return rsx! {
+            div { class: "finding-ctx finding-ctx-degraded",
+                p { class: "rule-modal-label", "Code context" }
+                if let Some(note) = note.clone().filter(|n| matches!(n, camerata_ui_core::source::ContextNote::SourceDeleted(_))) {
+                    ContextNoteView { note }
+                } else {
+                    span { class: "finding-ctx-note", "{degraded_context_reason(&v.status, &v.reason)}" }
+                }
+            }
+        };
+    }
+    let total = v.lines.len();
+    let violation_idx = v.violation_line.saturating_sub(v.start_line);
+    let capped = total > FINDING_CTX_CAP;
+    let (show_from, show_to) = if capped && !expanded() {
+        let from = violation_idx.saturating_sub(FINDING_CTX_HALF);
+        let to = (violation_idx + FINDING_CTX_HALF).min(total.saturating_sub(1));
+        (from, to)
+    } else {
+        (0, total.saturating_sub(1))
+    };
+    let above = show_from;
+    let below = total.saturating_sub(1).saturating_sub(show_to);
+    rsx! {
+        div { class: "finding-ctx",
+            // The amber banner (commit unavailable) goes above the code it qualifies.
+            if let Some(camerata_ui_core::source::ContextNote::CommitUnavailable(text)) = note.clone() {
+                ContextNoteView { note: camerata_ui_core::source::ContextNote::CommitUnavailable(text) }
+            }
+            div { class: "finding-ctx-head",
+                p { class: "rule-modal-label", "Code context" }
+                span { class: "rule-modal-tag", "{context_kind_label(&v.kind)}" }
+                if !v.matches_snippet {
+                    span { class: "rule-modal-tag finding-ctx-stale", "file changed since this scan" }
+                }
+            }
+            if capped && above > 0 {
+                p { class: "finding-ctx-fold", "… {above} more lines above …" }
+            }
+            pre { class: "finding-ctx-pre",
+                for (i, line) in v.lines.iter().enumerate() {
+                    if i >= show_from && i <= show_to {
+                        {
+                            let lineno = v.start_line + i;
+                            let hit = lineno == v.violation_line;
+                            let row_class = if hit { "finding-ctx-line finding-ctx-line-hit" } else { "finding-ctx-line" };
+                            rsx! {
+                                div { class: "{row_class}", key: "{lineno}",
+                                    span { class: "finding-ctx-gutter", "{lineno}" }
+                                    span { class: "finding-ctx-code", "{line}" }
                                 }
                             }
                         }
                     }
-                    if capped && below > 0 {
-                        p { class: "finding-ctx-fold", "… {below} more lines below …" }
-                    }
-                    if capped {
-                        button {
-                            class: "finding-ctx-toggle",
-                            onclick: move |_| expanded.set(!expanded()),
-                            if expanded() { "Show less" } else { "Show full block ({total} lines)" }
-                        }
-                    }
                 }
             }
-        }
-        Some(Some(v)) => rsx! {
-            div { class: "finding-ctx finding-ctx-degraded",
-                p { class: "rule-modal-label", "Code context" }
-                span { class: "finding-ctx-note", "{degraded_context_reason(&v.status, &v.reason)}" }
+            if capped && below > 0 {
+                p { class: "finding-ctx-fold", "… {below} more lines below …" }
             }
-        },
+            if capped {
+                button {
+                    class: "finding-ctx-toggle",
+                    onclick: move |_| expanded.set(!expanded()),
+                    if expanded() { "Show less" } else { "Show full block ({total} lines)" }
+                }
+            }
+            // "References commit <sha>; source on disk is newer" sits under the code it describes.
+            if let Some(camerata_ui_core::source::ContextNote::NewerSource(text)) = note {
+                ContextNoteView { note: camerata_ui_core::source::ContextNote::NewerSource(text) }
+            }
+        }
     }
 }
 
@@ -765,6 +862,12 @@ pub(super) struct AuditedRefView {
     pub branch: Option<String>,
     #[serde(default)]
     pub dirty: bool,
+    /// The origin remote as observed at scan time (tokenless). Informational.
+    #[serde(default)]
+    pub origin_url: Option<String>,
+    /// The origin's default branch (`main` / `master`), when the clone knew it.
+    #[serde(default)]
+    pub default_branch: Option<String>,
 }
 
 /// The scan's provenance stamp, mirroring `camerata_server::onboard::ScanProvenance` on the
@@ -4410,6 +4513,15 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
     let mut scan = use_context::<Signal<Option<ScanReportView>>>();
     let mut scanning = use_signal(|| false);
     let connected = connection.as_ref().map(|c| c.live).unwrap_or(false);
+    // The part of the project's deleted-source block that touches the repos listed to scan.
+    let scan_scope: Vec<String> = repo()
+        .lines()
+        .flat_map(|l| l.split(','))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let scan_blocked = crate::source_ui::use_scan_block()
+        .and_then(|b| camerata_ui_core::readiness::scan_block_for(&b, &scan_scope));
 
     // Greenfield-specific state: the new repo's name, the local directory to create,
     // the selected corpus rules to bake in, the in-progress flag, and the scaffold result.
@@ -4584,17 +4696,11 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
                         "Browse for a local repo folder\u{2026}"
                     }
                     p { class: "scan-section-sub", "Scans only the currently checked-out branch of each repo. Switch branches first if you want a different branch scanned." }
-                    button {
-                        class: "onboard-cta",
-                        disabled: repo().trim().is_empty() || scanning(),
-                        onclick: move |_| {
-                            let repos: Vec<String> = repo()
-                                .lines()
-                                .flat_map(|l| l.split(','))
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                            if repos.is_empty() { return; }
+                    ScanReposButton {
+                        repos: scan_scope.clone(),
+                        scanning: scanning(),
+                        blocked: scan_blocked.clone(),
+                        on_scan: move |repos: Vec<String>| {
                             scanning.set(true);
                             spawn(async move {
                                 clear_onboarding_draft().await;
@@ -4602,7 +4708,6 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
                                 scanning.set(false);
                             });
                         },
-                        if scanning() { "Scanning\u{2026}" } else { "Scan repos" }
                     }
                 }
             }
@@ -4692,6 +4797,36 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
                     }
                 }
             }
+        }
+    }
+}
+
+/// The brownfield "Scan repos" start button. Scanning reads the repos' source, so it is off for
+/// any listed repo whose source was deleted from this machine, with the way back beside it.
+#[component]
+fn ScanReposButton(
+    repos: Vec<String>,
+    scanning: bool,
+    blocked: Option<camerata_ui_core::readiness::ScanBlock>,
+    on_scan: EventHandler<Vec<String>>,
+) -> Element {
+    rsx! {
+        if let Some(block) = blocked.clone() {
+            crate::source_ui::ScanBlockNotice { block }
+        }
+        button {
+            class: "onboard-cta",
+            disabled: repos.is_empty() || scanning || blocked.is_some(),
+            onclick: {
+                let repos = repos.clone();
+                move |_| {
+                    if repos.is_empty() {
+                        return;
+                    }
+                    on_scan.call(repos.clone());
+                }
+            },
+            if scanning { "Scanning\u{2026}" } else { "Scan repos" }
         }
     }
 }
@@ -5226,14 +5361,20 @@ pub(super) fn RescanStickyBar(
     rescanning: bool,
     on_rescan: EventHandler<()>,
 ) -> Element {
+    // A rescan re-reads the source, so it is off while any of the project's source is deleted
+    // (the hint carries the way back).
+    let block = crate::source_ui::use_scan_block();
     rsx! {
         div { class: "rec-sticky-bar",
             span { class: "rec-sticky-label", "{rescan_button_label(pending_count)}" }
             button {
                 class: "btn-run",
-                disabled: rescanning,
+                disabled: rescanning || block.is_some(),
                 onclick: move |_| on_rescan.call(()),
                 if rescanning { "Rescanning\u{2026}" } else { "{rescan_button_label(pending_count)}" }
+            }
+            if let Some(block) = block.clone() {
+                crate::source_ui::ScanBlockNotice { block }
             }
         }
     }
@@ -6408,6 +6549,10 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // The in-flight async job id (app-scope, survives navigation). RESUME: if a job was
     // already running when this view (re)mounted, re-attach the poll instead of losing it.
     let active_audit_job = use_context::<Signal<Option<String>>>();
+    // The audited repos whose source was deleted from this machine: audit, apply and open-PR
+    // all need the source on disk, so they switch off and say why.
+    let scan_blocked = crate::source_ui::use_scan_block()
+        .and_then(|b| camerata_ui_core::readiness::scan_block_for(&b, &report.repos));
     let scan_idle_ms = use_signal(|| Option::<u128>::None);
     // Captured HERE, in the component's render body, where `LoadingCount` context resolution is
     // guaranteed — never resolved from inside `poll_job`'s own body, which runs detached inside
@@ -7144,6 +7289,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         repo_selection,
                         findings: findings.clone(),
                         auditing: auditing(),
+                        scan_block: scan_blocked.clone(),
                         on_audit: move |rules: Vec<SelectedAuditRule>| {
                             let repos = repos_audit.clone();
                             let model = audit_model();
@@ -8996,7 +9142,8 @@ mod tests {
             "findings": [], "proposed_rules": [], "gated": false,
             "provenance": {
                 "audited_refs": [
-                    { "repo": "owner/repo", "sha": "deadbeef".repeat(5), "branch": "main", "dirty": true }
+                    { "repo": "owner/repo", "sha": "deadbeef".repeat(5), "branch": "main", "dirty": true,
+                      "origin_url": "https://github.com/owner/repo.git", "default_branch": "main" }
                 ],
                 "audit_model": "claude-sonnet-5",
                 "calibration_model": "claude-haiku-4-5",
@@ -9019,6 +9166,12 @@ mod tests {
             p.audited_refs[0].dirty,
             "dirty flag must survive the round trip"
         );
+        assert_eq!(
+            p.audited_refs[0].origin_url.as_deref(),
+            Some("https://github.com/owner/repo.git"),
+            "the origin the deletion record names must survive the round trip"
+        );
+        assert_eq!(p.audited_refs[0].default_branch.as_deref(), Some("main"));
         assert_eq!(p.audit_model.as_deref(), Some("claude-sonnet-5"));
         assert_eq!(p.calibration_model.as_deref(), Some("claude-haiku-4-5"));
         assert_eq!(p.mode, "parallel");
@@ -10104,6 +10257,239 @@ mod tests {
 #[cfg(test)]
 mod render_tests {
     use super::*;
+
+    // ── Finding code context: where the block came from (client source lifecycle) ──────────
+
+    fn render_context(body: serde_json::Value) -> String {
+        #[derive(Clone, PartialEq, Props)]
+        struct Case {
+            view: FindingContextView,
+        }
+        fn harness(case: Case) -> Element {
+            rsx! { FindingContextBlock { view: case.view } }
+        }
+        let view: FindingContextView = serde_json::from_value(body).expect("valid context body");
+        let mut vdom = VirtualDom::new_with_props(harness, Case { view });
+        vdom.rebuild_in_place();
+        dioxus_ssr::render(&vdom)
+    }
+
+    #[test]
+    fn finding_pane_renders_source_deleted_and_newer_source_notes() {
+        // Source deleted: the note replaces the code and points at the Workspace tab.
+        let deleted = render_context(serde_json::json!({
+            "status": "source_deleted",
+            "reason": "Source deleted on 24 Oct 2026, re-fetch to view",
+            "deleted_at": "2026-10-24T17:40:19Z",
+            "record_id": "del-p1-acme-app-20261024T174019Z",
+        }));
+        assert!(
+            deleted.contains("Source deleted on 24 Oct 2026, re-fetch to view"),
+            "{deleted}"
+        );
+        assert!(deleted.contains("Open Workspace"));
+        assert!(!deleted.contains("finding-ctx-pre"), "no code is shown");
+
+        // Read from the inspected commit while the checkout has moved on: code plus a muted note.
+        let newer = render_context(serde_json::json!({
+            "status": "ok",
+            "source": "git",
+            "commit": "3f2a9c14e0b7aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "head_differs": true,
+            "lines": ["fn a() {", "    bad();", "}"],
+            "start_line": 10,
+            "violation_line": 11,
+            "kind": "function",
+            "matches_snippet": true,
+        }));
+        assert!(newer.contains("finding-ctx-pre"), "{newer}");
+        assert!(newer.contains("bad();"));
+        assert!(
+            newer.contains("References commit 3f2a9c1; source on disk is newer"),
+            "{newer}"
+        );
+
+        // At the inspected commit: no note at all.
+        let same = render_context(serde_json::json!({
+            "status": "ok",
+            "source": "git",
+            "commit": "3f2a9c14e0b7aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "head_differs": false,
+            "lines": ["fn a() {", "}"],
+            "start_line": 1,
+            "violation_line": 1,
+            "kind": "function",
+            "matches_snippet": true,
+        }));
+        assert!(!same.contains("source on disk is newer"), "{same}");
+    }
+
+    fn deleted_block() -> camerata_ui_core::readiness::ScanBlock {
+        camerata_ui_core::readiness::ScanBlock {
+            repos: vec![("acme/app".to_string(), "2026-10-24T17:40:19Z".to_string())],
+        }
+    }
+
+    /// The opening tag of the first button whose text is `label`.
+    fn button_tag_labelled(html: &str, label: &str) -> String {
+        let at = html
+            .find(label)
+            .unwrap_or_else(|| panic!("{label:?} not rendered: {html}"));
+        let start = html[..at].rfind("<button").expect("inside a button");
+        let end = html[start..].find('>').expect("tag closes") + start;
+        html[start..=end].to_string()
+    }
+
+    #[test]
+    fn scan_repos_button_is_off_for_a_deleted_source_and_says_why() {
+        #[derive(Clone, PartialEq, Props)]
+        struct Case {
+            blocked: Option<camerata_ui_core::readiness::ScanBlock>,
+        }
+        fn harness(case: Case) -> Element {
+            rsx! {
+                ScanReposButton {
+                    repos: vec!["acme/app".to_string()],
+                    scanning: false,
+                    blocked: case.blocked,
+                    on_scan: move |_| {},
+                }
+            }
+        }
+        let render = |blocked| {
+            let mut vdom = VirtualDom::new_with_props(harness, Case { blocked });
+            vdom.rebuild_in_place();
+            dioxus_ssr::render(&vdom)
+        };
+        let blocked = render(Some(deleted_block()));
+        assert!(
+            button_tag_labelled(&blocked, "Scan repos").contains("disabled"),
+            "{blocked}"
+        );
+        assert!(blocked.contains(
+            "Source for acme/app was deleted on 24 Oct 2026. Re-fetch source from the Workspace tab to rescan."
+        ));
+        let open = render(None);
+        assert!(
+            !button_tag_labelled(&open, "Scan repos").contains("disabled"),
+            "{open}"
+        );
+        assert!(!open.contains("was deleted"));
+    }
+
+    #[test]
+    fn rescan_sticky_bar_is_disabled_with_the_reason_when_a_source_is_deleted() {
+        fn harness() -> Element {
+            let block = use_memo(|| Some(deleted_block()));
+            use_context_provider(|| block);
+            rsx! {
+                RescanStickyBar { pending_count: 2usize, rescanning: false, on_rescan: move |_| {} }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        // The label also appears in the bar's caption; the button is the `btn-run` one.
+        let button = button_tag_labelled(&html, "Rescan 2 overridden rules</button>");
+        assert!(
+            button.contains("btn-run") && button.contains("disabled"),
+            "{html}"
+        );
+        assert!(html.contains("was deleted on 24 Oct 2026"));
+    }
+
+    #[test]
+    fn onboard_view_renders_findings_with_deleted_source_and_disabled_rescan_controls() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(|| Signal::new(None::<String>));
+            use_context_provider(crate::loading::LoadingCount::default);
+            use_context_provider(|| Signal::new(CockpitView::Onboard));
+            // The cockpit's shared "which sources were deleted" memo.
+            let block = use_memo(|| Some(deleted_block()));
+            use_context_provider(|| block);
+            let report: ScanReportView = serde_json::from_value(serde_json::json!({
+                "repos": ["acme/app"],
+                "files_scanned": 3,
+                "findings": [{
+                    "repo": "acme/app", "path": "src/db.rs", "line": 9,
+                    "rule_id": "SQL-INJECTION-1", "severity": "high",
+                    "snippet": "db.query(format!(..))", "detail": "interpolated SQL",
+                }],
+                "proposed_rules": [],
+                "gated": false,
+            }))
+            .expect("valid report");
+            use_context_provider(|| Signal::new(Some(report)));
+            rsx! { OnboardView { connection: None } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        // The review surface is still there: a deleted source does not hide it (the report,
+        // its rules table and the audit panel render), it only switches the source-needing
+        // controls off.
+        assert!(
+            html.contains("Step 2 — audit the code against your selected rules"),
+            "{html}"
+        );
+        assert!(html.contains("findings-toolbar"));
+        // Every control that needs the source says why and is off.
+        assert!(html.contains("Source for acme/app was deleted on 24 Oct 2026."));
+        assert!(
+            button_tag_labelled(&html, "Audit code against selected rules").contains("disabled"),
+            "audit"
+        );
+        assert!(
+            button_tag_labelled(&html, "Add rules to repo(s) (branch + push)").contains("disabled"),
+            "apply"
+        );
+        assert!(
+            button_tag_labelled(&html, "Open governance PR").contains("disabled"),
+            "open PR"
+        );
+    }
+
+    #[test]
+    fn finding_pane_renders_the_commit_unavailable_banner_with_the_working_tree() {
+        let html = render_context(serde_json::json!({
+            "status": "commit_unavailable",
+            "reason": "Inspected commit not available in this clone; showing the working tree",
+            "source": "working_tree",
+            "lines": ["fn a() {", "    bad();", "}"],
+            "start_line": 1,
+            "violation_line": 2,
+            "kind": "function",
+            "matches_snippet": false,
+        }));
+        assert!(html.contains("finding-ctx-banner"), "{html}");
+        assert!(
+            html.contains("Inspected commit not available in this clone; showing the working tree")
+        );
+        assert!(
+            html.contains("bad();"),
+            "the working tree block is still shown"
+        );
+
+        // When even the working tree has nothing, it degrades to the single reason line.
+        let empty = render_context(serde_json::json!({
+            "status": "commit_unavailable",
+            "reason": "Inspected commit not available in this clone; showing the working tree",
+            "source": "working_tree",
+        }));
+        assert!(!empty.contains("finding-ctx-pre"), "{empty}");
+        assert!(empty.contains("Inspected commit not available"));
+    }
+
+    #[test]
+    fn the_existing_degraded_reasons_still_render_one_line() {
+        let html = render_context(serde_json::json!({
+            "status": "file_missing",
+            "reason": "file not found — changed since scan?",
+        }));
+        assert!(html.contains("finding-ctx-degraded"));
+        assert!(html.contains("file not found"));
+    }
 
     // ── Tier-1 render: DeterministicProgress (props-only, no context) ──────────
     // Mirrors the live_run.rs render-test pattern: a harness root mounts the component

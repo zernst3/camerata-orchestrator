@@ -176,6 +176,7 @@ async fn source_status_deleted_only_when_record_newer_than_refetch() {
         deleted_at,
         total_files,
         inspected_sha,
+        summary,
         ..
     } = &status
     else {
@@ -183,6 +184,7 @@ async fn source_status_deleted_only_when_record_newer_than_refetch() {
     };
     assert_eq!(deleted_at, "2026-10-24T17:40:19Z");
     assert_eq!(*total_files, 12);
+    assert_eq!(summary, "12 files, 3.4 KB removed");
     assert_eq!(inspected_sha.as_deref(), Some("abc"));
 
     // A later re-fetch record (same second!) outranks it; if the folder is then gone again by

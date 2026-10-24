@@ -14,8 +14,8 @@
 use dioxus::prelude::*;
 
 pub use camerata_ui_core::readiness::{
-    action_gated, paused_banner_text, resolve_prompt_text, unresolved_repos, ProjectReadiness,
-    RepoResolution,
+    action_gated, paused_banner_text, resolve_prompt_text, scan_block, unresolved_repos,
+    ProjectReadiness, RepoResolution,
 };
 
 /// The parsed readiness snapshot for the active project: the derived state plus the per-repo
@@ -34,7 +34,7 @@ impl Readiness {
 }
 
 /// Percent-encode a `owner/repo` for the `:repo` path segment of the link endpoint.
-fn enc_repo(repo: &str) -> String {
+pub(crate) fn enc_repo(repo: &str) -> String {
     repo.replace('%', "%25")
         .replace('/', "%2F")
         .replace(' ', "%20")
@@ -508,5 +508,87 @@ mod tests {
             !html.contains("readiness-banner"),
             "ready state renders no banner"
         );
+    }
+
+    fn deleted_repo(repo: &str) -> RepoResolution {
+        RepoResolution {
+            repo: repo.to_string(),
+            resolved: false,
+            path: String::new(),
+            reason: "source deleted".to_string(),
+            source_deleted: true,
+            deleted_at: Some("2026-10-24T17:40:19Z".to_string()),
+        }
+    }
+
+    #[test]
+    fn parse_readiness_reads_the_deleted_source_fields() {
+        let v = serde_json::json!({
+            "ok": true,
+            "readiness": "ready",
+            "repos": [
+                { "resolved": false, "repo": "a/gone", "path": "", "reason": "source deleted",
+                  "source_deleted": true, "deleted_at": "2026-10-24T17:40:19Z" },
+                { "resolved": true, "repo": "a/here", "path": "/ws/a/here", "reason": "ok" },
+            ],
+        });
+        let r = parse_readiness(&v);
+        assert_eq!(r.state, ProjectReadiness::Ready);
+        assert!(r.repos[0].source_deleted);
+        assert_eq!(
+            r.repos[0].deleted_at.as_deref(),
+            Some("2026-10-24T17:40:19Z")
+        );
+        assert!(!r.repos[1].source_deleted);
+        assert!(
+            r.unresolved().is_empty(),
+            "a deleted repo has nothing to link"
+        );
+        let block = scan_block(&r.repos).expect("blocked");
+        assert_eq!(block.repos[0].0, "a/gone");
+    }
+
+    #[test]
+    fn resolve_modal_does_not_open_for_deleted_repos() {
+        fn harness() -> Element {
+            rsx! {
+                ResolveModal {
+                    project_id: "p1".to_string(),
+                    readiness: Readiness {
+                        // Even a stale partial state with only deleted repos left must not
+                        // offer to clone or link anything.
+                        state: ProjectReadiness::Partial,
+                        repos: vec![deleted_repo("a/gone")],
+                    },
+                    on_resolved: move |_| {},
+                    on_close: move |_| {},
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(!html.contains("readiness-modal"), "no modal: {html}");
+        assert!(!html.contains("Clone it now"));
+        assert!(!html.contains("Select existing clone"));
+    }
+
+    #[test]
+    fn the_paused_banner_never_counts_a_deleted_repo() {
+        fn harness() -> Element {
+            rsx! {
+                PausedBanner {
+                    readiness: Readiness {
+                        state: ProjectReadiness::Ready,
+                        repos: vec![deleted_repo("a/gone")],
+                    },
+                    open_modal: move |_| {},
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(!html.contains("readiness-banner"), "{html}");
     }
 }

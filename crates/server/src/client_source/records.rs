@@ -83,6 +83,21 @@ pub struct PurgedItem {
     pub outcome: PurgeOutcome,
 }
 
+impl PurgedItem {
+    /// What the item held, in the words the record and the confirmation dialog share:
+    /// `1,204 files, 12.3 MB`, a bare size for a single file, `-` for an in-file entry.
+    pub fn counts_text(&self) -> String {
+        let size = format_bytes(self.bytes);
+        if self.files > 0 {
+            format!("{} files, {size}", group_thousands(self.files))
+        } else if self.bytes > 0 {
+            size
+        } else {
+            "-".to_string()
+        }
+    }
+}
+
 /// Proof that a repository's source was removed from this machine. See the design, section 2.3.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeletionRecord {
@@ -356,14 +371,7 @@ impl DeletionRecord {
         ));
         out.push_str("Removed\n");
         for item in &self.items {
-            let size = format_bytes(item.bytes);
-            let counts = if item.files > 0 {
-                format!("{} files, {size}", group_thousands(item.files))
-            } else if item.bytes > 0 {
-                size
-            } else {
-                "-".to_string()
-            };
+            let counts = item.counts_text();
             let outcome = match &item.outcome {
                 PurgeOutcome::Planned => " [planned]".to_string(),
                 PurgeOutcome::Removed => String::new(),

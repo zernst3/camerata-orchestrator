@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use super::git;
-use super::records::{DeletionRecord, RefetchRecord};
+use super::records::{format_bytes, group_thousands, DeletionRecord, RefetchRecord};
 use super::Refusal;
 use crate::workspace;
 use crate::AppState;
@@ -45,6 +45,10 @@ pub enum RepoSourceStatus {
         inspected_sha: Option<String>,
         total_files: u64,
         total_bytes: u64,
+        /// What was removed, in the card's words: "2,729 files, 182.9 MB removed". Composed
+        /// here so the one formatter ([`super::records::format_bytes`]) serves the record, the
+        /// card and the API.
+        summary: String,
     },
     /// Nothing on disk and no record: the pre-existing "not cloned / not linked" state (also what
     /// a freshly imported project's repos are).
@@ -209,6 +213,11 @@ pub async fn source_status(state: &AppState, project_id: &str, repo: &str) -> Re
             inspected_sha: deletion.inspected_sha.clone(),
             total_files: deletion.total_files,
             total_bytes: deletion.total_bytes,
+            summary: format!(
+                "{} files, {} removed",
+                group_thousands(deletion.total_files),
+                format_bytes(deletion.total_bytes)
+            ),
         };
     }
 

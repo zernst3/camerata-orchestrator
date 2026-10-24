@@ -2198,6 +2198,11 @@ pub(super) fn GovernedDevPage() -> Element {
 
     let uows = uows_res.read().clone().flatten().unwrap_or_default();
 
+    // A repo whose source was deleted on purpose: governed development edits, builds, tests and
+    // ships that source, so the dev controls stay visible but disabled, with the reason on top.
+    // Issue Management reads the board, not the repos, and stays live.
+    let source_block = crate::source_ui::use_scan_block();
+
     // ── Background update poll (Feature 3) ─────────────────────────────────────────
     // Every ~60s, quietly ask the board whether any of this project's UoWs changed. This
     // holds NO LoadingGuard (it is a passive check, not AI work), and a failed poll is
@@ -2354,6 +2359,9 @@ pub(super) fn GovernedDevPage() -> Element {
 
             // ── MAIN: the issue-management panel, or a UoW's dev controls ──────
             section { class: "govdev-main",
+                if let Some(block) = source_block.clone() {
+                    crate::source_ui::ScanBlockNotice { block }
+                }
                 match sel() {
                     GovDevSel::IssueManagement => rsx! {
                         IssueManagementPanel { uows: uows.clone(), uows_refresh, sel }
@@ -2370,7 +2378,17 @@ pub(super) fn GovernedDevPage() -> Element {
                             Some(u) if u.authoring => rsx! {
                                 StoryAuthoringPanel { key: "{u.id}", uow_id: u.id.clone(), uows_refresh, sel }
                             },
-                            Some(u) => rsx! { UowDevControls { key: "{u.id}", uow: u, uows_refresh } },
+                            // `disabled` on a fieldset disables every control inside it natively, so a
+                            // deleted source switches off the whole dev surface without touching each
+                            // button. The server also refuses (409 `source_deleted`).
+                            Some(u) => rsx! {
+                                fieldset {
+                                    key: "{u.id}",
+                                    class: "src-fieldset",
+                                    disabled: source_block.is_some(),
+                                    UowDevControls { uow: u, uows_refresh }
+                                }
+                            },
                             // The UoW vanished from the list (e.g. between refreshes): fall back.
                             None => rsx! {
                                 p { class: "section-hint", "That Unit of Work is no longer available." }

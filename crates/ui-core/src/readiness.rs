@@ -92,6 +92,19 @@ pub fn scan_block(repos: &[RepoResolution]) -> Option<ScanBlock> {
     (!deleted.is_empty()).then_some(ScanBlock { repos: deleted })
 }
 
+/// The part of `block` that touches `scope` (the repos an action would act on), compared the way
+/// GitHub names compare (case-insensitively). `None` when the action does not involve a repo
+/// whose source is deleted, so scanning an unaffected repo stays possible in a mixed project.
+pub fn scan_block_for(block: &ScanBlock, scope: &[String]) -> Option<ScanBlock> {
+    let repos: Vec<(String, String)> = block
+        .repos
+        .iter()
+        .filter(|(repo, _)| scope.iter().any(|s| s.trim().eq_ignore_ascii_case(repo)))
+        .cloned()
+        .collect();
+    (!repos.is_empty()).then_some(ScanBlock { repos })
+}
+
 /// The explanation shown beside every control a deleted source disables, for example
 /// "Source for acme/app was deleted on 24 Oct 2026. Re-fetch source from the Workspace tab to
 /// rescan." Several repos are listed in one sentence.
@@ -233,6 +246,21 @@ mod tests {
             scan_block_text(&block),
             "Source was deleted for a/two (24 Oct 2026), a/four (3 Nov 2026). Re-fetch source from the Workspace tab to rescan."
         );
+    }
+
+    #[test]
+    fn scan_block_for_keeps_only_the_repos_an_action_touches() {
+        let block = scan_block(&[
+            deleted("a/two", "2026-10-24T17:40:19Z"),
+            deleted("a/four", "2026-11-03T09:00:00Z"),
+        ])
+        .expect("blocked");
+        let scope = vec!["A/Two".to_string(), " a/one ".to_string()];
+        let touched = scan_block_for(&block, &scope).expect("a/two is in scope");
+        assert_eq!(touched.repos.len(), 1);
+        assert_eq!(touched.repos[0].0, "a/two");
+        assert_eq!(scan_block_for(&block, &["a/one".to_string()]), None);
+        assert_eq!(scan_block_for(&block, &[]), None);
     }
 
     #[test]

@@ -744,6 +744,14 @@ mod http {
             .contains("uncommitted changes"));
         assert_eq!(plan["items"][0]["kind"], "checkout");
         assert_eq!(plan["items"][0]["outcome"], "planned");
+        // The dialog's worded list: same labels and counts the record will carry.
+        assert_eq!(plan["item_view"][0]["label"], "checkout");
+        assert_eq!(plan["item_view"][0]["path"], plan["items"][0]["path"]);
+        assert!(plan["item_view"][0]["counts"]
+            .as_str()
+            .unwrap()
+            .contains("files"));
+        assert!(plan["total_summary"].as_str().unwrap().contains(" files, "));
         assert!(fx.checkout.exists(), "a preview removes nothing");
     }
 

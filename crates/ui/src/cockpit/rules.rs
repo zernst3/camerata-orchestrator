@@ -3925,6 +3925,11 @@ pub(super) fn ProposedRulesTable(
     findings: Vec<FindingView>,
     on_audit: EventHandler<Vec<SelectedAuditRule>>,
     auditing: bool,
+    /// Set when an audited repo's source was deleted from this machine: audit, apply and
+    /// open-PR then need source that is not there, so they are disabled (the notice carries the
+    /// way back).
+    #[props(default)]
+    scan_block: Option<camerata_ui_core::readiness::ScanBlock>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
@@ -4381,10 +4386,13 @@ pub(super) fn ProposedRulesTable(
                 }
             }
         }
+        if let Some(block) = scan_block.clone() {
+            crate::source_ui::ScanBlockNotice { block }
+        }
         div { class: "findings-toolbar",
             button {
                 class: "btn-run",
-                disabled: auditing,
+                disabled: auditing || scan_block.is_some(),
                 title: unresolved_hint.clone(),
                 onclick: move |_| {
                     // Build the audit request from EVERY repo's saved selection, so one scan
@@ -4442,7 +4450,7 @@ pub(super) fn ProposedRulesTable(
             }
             button {
                 class: "btn-run",
-                disabled: arming(),
+                disabled: arming() || scan_block.is_some(),
                 title: unresolved_hint.clone(),
                 onclick: move |_| {
                     // Arm across EVERY repo's selection: a rule selected in one or more repos'
@@ -4571,7 +4579,7 @@ pub(super) fn ProposedRulesTable(
             }
             button {
                 class: "btn-run",
-                disabled: opening_pr() || applied_repos().is_empty(),
+                disabled: opening_pr() || applied_repos().is_empty() || scan_block.is_some(),
                 title: if applied_repos().is_empty() { "Apply the rules first; then open the PR from the pushed branch." } else { "" },
                 onclick: move |_| {
                     let repos = applied_repos();
