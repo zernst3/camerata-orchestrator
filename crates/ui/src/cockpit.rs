@@ -1644,7 +1644,7 @@ pub(crate) async fn rerun_investigation_run(
 /// Which view the enterprise cockpit is showing. Routines live INSIDE the cockpit
 /// (it's an architect tool), reached via the cockpit's own nav, not a top-level app.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CockpitView {
+pub(crate) enum CockpitView {
     /// The control surface: the story spine + center stage + inspector.
     Stories,
     /// Onboard a repo into governance (brownfield: install rules into an
@@ -2675,6 +2675,17 @@ pub fn CockpitApp() -> Element {
         }
     });
     let readiness = readiness_res.read().clone().flatten();
+    // Which repos' source was deleted on purpose (client source lifecycle). The project stays
+    // READY (there is nothing to link), but every control that needs the source on disk reads
+    // this to disable itself and say why. Shared as a context so any surface can ask.
+    let scan_block_memo = use_memo(move || {
+        readiness_res
+            .read()
+            .clone()
+            .flatten()
+            .and_then(|r| crate::readiness_gate::scan_block(&r.repos))
+    });
+    use_context_provider(|| scan_block_memo);
     let active_pid = active_proj
         .read()
         .clone()

@@ -28,6 +28,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::session_sink::{new_session_id, now_rfc3339};
+pub use crate::session_sink::{ModelSession, SessionSink};
+
 /// One model the UI offers, tagged with its vendor so the selector can group/extend.
 /// `price_in` / `price_out` are USD per MILLION tokens (input / output), used by the UI's
 /// pre-audit cost estimate. Approximate list pricing — enough to size a scan, not billing.
@@ -142,6 +145,36 @@ pub(crate) fn nul_safe(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// Build the `claude -p` command for one completion (everything except the spawn), so the exact
+/// argument list is testable without a `claude` binary.
+fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("claude");
+    // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
+    // leaving a stalled `claude` running in the background.
+    // stdin(null): CRITICAL. `claude -p` reads piped stdin and blocks until EOF before
+    // responding. spawn() INHERITS the parent's stdin, and the desktop app's inherited
+    // stdin is an open pipe that never EOFs — so the audit hung for minutes producing
+    // nothing (shell tests were fast only because their stdin was a TTY/closed).
+    // Redirecting stdin to /dev/null gives an immediate EOF so claude uses the -p arg
+    // and responds at once.
+    cmd.kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .arg("-p")
+        .arg(nul_safe(&req.prompt))
+        .arg("--model")
+        .arg(model)
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--verbose")
+        .arg("--include-partial-messages")
+        .arg("--session-id")
+        .arg(session_id)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    harden_completion(&mut cmd, req);
+    cmd
 }
 
 fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
@@ -1090,6 +1123,9 @@ pub struct Llm {
     /// Process-global cumulative usage meter, threaded so the chokepoint records every call.
     /// `None` in tests / standalone construction (recording is then simply skipped).
     ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
+    /// Collector for the Claude Code session every CLI spawn creates (see
+    /// [`crate::session_sink`]). `None` = nobody is recording; the spawn is still tagged.
+    sessions: Option<SessionSink>,
 }
 
 impl std::fmt::Debug for Llm {
@@ -1130,6 +1166,7 @@ impl Llm {
             default_model,
             api_key,
             ledger: None,
+            sessions: None,
         }
     }
 
@@ -1161,6 +1198,14 @@ impl Llm {
     /// Attach (or replace) the process-global usage ledger on an existing instance.
     pub fn with_ledger(mut self, ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>) -> Self {
         self.ledger = Some(ledger);
+        self
+    }
+
+    /// Attach (or replace) the collector that records every Claude Code session this instance
+    /// (and every clone of it) spawns. Used by the brownfield audit so source deletion can later
+    /// remove exactly the session files that hold the client's prompts.
+    pub fn with_session_sink(mut self, sink: SessionSink) -> Self {
+        self.sessions = Some(sink);
         self
     }
 
@@ -1307,28 +1352,22 @@ impl Llm {
         model: &str,
         on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> anyhow::Result<LlmResponse> {
-        let mut cmd = tokio::process::Command::new("claude");
-        // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
-        // leaving a stalled `claude` running in the background.
-        // stdin(null): CRITICAL. `claude -p` reads piped stdin and blocks until EOF before
-        // responding. spawn() INHERITS the parent's stdin, and the desktop app's inherited
-        // stdin is an open pipe that never EOFs — so the audit hung for minutes producing
-        // nothing (shell tests were fast only because their stdin was a TTY/closed).
-        // Redirecting stdin to /dev/null gives an immediate EOF so claude uses the -p arg
-        // and responds at once.
-        cmd.kill_on_drop(true)
-            .stdin(std::process::Stdio::null())
-            .arg("-p")
-            .arg(nul_safe(&req.prompt))
-            .arg("--model")
-            .arg(model)
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--verbose")
-            .arg("--include-partial-messages")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        harden_completion(&mut cmd, req);
+        // Tag the call with an id of OUR choosing and record it BEFORE the spawn: a call that
+        // times out or is killed has still written (part of) a session file, and "delete the
+        // client's source" must be able to find it.
+        let session_id = new_session_id();
+        if let Some(sink) = &self.sessions {
+            let cwd = match &req.repo_read_dir {
+                Some(dir) => dir.clone(),
+                None => std::env::current_dir().unwrap_or_default(),
+            };
+            sink.record(ModelSession {
+                session_id: session_id.clone(),
+                cwd: cwd.to_string_lossy().into_owned(),
+                created_at: now_rfc3339(),
+            });
+        }
+        let mut cmd = build_cli_command(req, model, &session_id);
         let child = cmd.spawn().map_err(map_spawn_error)?;
         // Track the PID for the shutdown hook; the guard untracks on every exit path.
         let _pid_guard = child.id().map(ClaudePidGuard::new);
@@ -2515,6 +2554,7 @@ mod tests {
             default_model: "claude-sonnet-5".to_string(),
             api_key: None,
             ledger: None,
+            sessions: None,
         };
         // Empty request model -> default.
         assert_eq!(llm.model_for(&LlmRequest::new("hi")), "claude-sonnet-5");
@@ -2730,6 +2770,7 @@ mod tests {
             default_model: "gpt".to_string(),
             api_key: None,
             ledger: None,
+            sessions: None,
         };
         let err = llm.complete(LlmRequest::new("hi")).await.unwrap_err();
         assert!(err.to_string().contains("not wired yet"));
@@ -3033,6 +3074,7 @@ malformed line, not json
             default_model: "claude-sonnet-5".to_string(),
             api_key: None,
             ledger: None,
+            sessions: None,
         })
     }
 
@@ -3847,7 +3889,137 @@ exit 1
             default_model: "claude-haiku-4-5".to_string(),
             api_key: None,
             ledger: None,
+            sessions: None,
         }
+    }
+
+    /// The spawn is tagged with the session id Camerata chose, so the Claude Code session file
+    /// it creates can be found and deleted later (docs/design/2026-10-24_delete-and-refetch-
+    /// client-source.md, 5.1).
+    #[test]
+    fn cli_command_is_tagged_with_the_given_session_id() {
+        let req = LlmRequest::new("hello");
+        let cmd = build_cli_command(
+            &req,
+            "claude-haiku-4-5",
+            "11111111-2222-4333-8444-555555555555",
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = args
+            .iter()
+            .position(|a| a == "--session-id")
+            .expect("--session-id is on the command line");
+        assert_eq!(args[at + 1], "11111111-2222-4333-8444-555555555555");
+        // The prompt rides in the same command, so the id really does name its session.
+        assert!(args.iter().any(|a| a == "hello"));
+    }
+
+    /// The id the sink records is the id the child process actually received, the cwd is
+    /// recorded, and a request without a repo-read dir records the process cwd.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn sink_records_the_session_id_the_child_received() {
+        let fake = FakeClaude::new(
+            "sink-ok",
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "$(dirname "$0")/args.txt"
+printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
+"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sink = SessionSink::new();
+        let llm = cli_llm().with_session_sink(sink.clone());
+
+        llm.complete(LlmRequest::new("a prompt carrying client source"))
+            .await
+            .expect("fake claude answers");
+
+        let recorded = sink.snapshot();
+        assert_eq!(recorded.len(), 1, "one spawn, one recorded session");
+        let args = std::fs::read_to_string(fake.dir.join("args.txt")).expect("fake saw args");
+        let lines: Vec<&str> = args.lines().collect();
+        let at = lines
+            .iter()
+            .position(|a| *a == "--session-id")
+            .expect("child got --session-id");
+        assert_eq!(lines[at + 1], recorded[0].session_id);
+        assert_eq!(
+            recorded[0].cwd,
+            std::env::current_dir().expect("cwd").to_string_lossy()
+        );
+        assert!(!recorded[0].created_at.is_empty());
+    }
+
+    /// A call that fails still wrote (part of) a session file, so it is still recorded.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn sink_records_a_session_even_when_the_call_fails() {
+        let fake = FakeClaude::new(
+            "sink-fail",
+            r#"#!/bin/sh
+printf '%s\n' '{"type":"result","is_error":true,"result":"boom"}'
+exit 1
+"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sink = SessionSink::new();
+        let llm = cli_llm().with_session_sink(sink.clone());
+
+        let result = llm.complete(LlmRequest::new("prompt")).await;
+
+        assert!(result.is_err(), "the fake reports an error");
+        assert_eq!(
+            sink.snapshot().len(),
+            1,
+            "the failed spawn is still recorded"
+        );
+    }
+
+    /// Repo-read calls run with the repo as cwd, and the record says so (the Claude Code folder
+    /// that holds the session file is derived from the cwd).
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn sink_records_the_repo_read_dir_as_cwd() {
+        let fake = FakeClaude::new(
+            "sink-repo",
+            r#"#!/bin/sh
+printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
+"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let repo = std::env::temp_dir().join(format!("camerata-llm-repo-{}", std::process::id()));
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let sink = SessionSink::new();
+        let llm = cli_llm().with_session_sink(sink.clone());
+
+        llm.complete(LlmRequest::new("p").with_repo_read(repo.clone()))
+            .await
+            .expect("fake claude answers");
+
+        assert_eq!(sink.snapshot()[0].cwd, repo.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// The Api backend never starts a Claude Code session, so nothing is recorded there.
+    #[tokio::test]
+    async fn api_backend_records_no_sessions() {
+        let sink = SessionSink::new();
+        let llm = Llm {
+            vendor: Vendor::Anthropic,
+            backend: Backend::Api,
+            default_model: "claude-haiku-4-5".to_string(),
+            api_key: None,
+            ledger: None,
+            sessions: None,
+        }
+        .with_session_sink(sink.clone());
+        // No key: the call fails before any network, and must not have recorded a session.
+        let _ = llm.complete(LlmRequest::new("p")).await;
+        assert!(sink.snapshot().is_empty());
     }
 
     /// HALF 1 — a long-but-LIVE call must survive past the overall window.

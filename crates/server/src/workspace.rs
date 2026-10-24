@@ -64,23 +64,26 @@ pub fn repo_dir(root: &Path, repo: &str) -> PathBuf {
 }
 
 /// True if `dir` holds a git working copy.
-fn is_git_repo(dir: &Path) -> bool {
+pub(crate) fn is_git_repo(dir: &Path) -> bool {
     dir.join(".git").exists()
 }
 
 /// The tokenless HTTPS remote (what we persist on disk).
-fn clean_url(repo: &str) -> String {
+pub(crate) fn clean_url(repo: &str) -> String {
     format!("https://github.com/{repo}.git")
 }
 
 /// The authenticated HTTPS remote — used ONLY for transient network commands, never
 /// written into `.git/config`.
-fn authed_url(repo: &str, token: &str) -> String {
+pub(crate) fn authed_url(repo: &str, token: &str) -> String {
     format!("https://x-access-token:{token}@github.com/{repo}.git")
 }
 
 /// Run a git command (optionally in `cwd`) and capture its output.
-async fn git(cwd: Option<&Path>, args: &[&str]) -> std::io::Result<std::process::Output> {
+pub(crate) async fn git(
+    cwd: Option<&Path>,
+    args: &[&str],
+) -> std::io::Result<std::process::Output> {
     let mut cmd = Command::new("git");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -91,7 +94,7 @@ async fn git(cwd: Option<&Path>, args: &[&str]) -> std::io::Result<std::process:
     cmd.output().await
 }
 
-fn stderr_of(out: &std::process::Output) -> String {
+pub(crate) fn stderr_of(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).trim().to_string()
 }
 
@@ -298,20 +301,66 @@ pub async fn refresh_resolved(dir: &Path, repo: &str, token: &str) -> RepoChecko
 /// can let a developer NAVIGATE to a repo folder instead of typing `owner/repo`. Returns
 /// a specific human error so the UI can tell the user exactly what went wrong.
 pub async fn detect_remote_repo(path: &Path) -> Result<String, String> {
+    detect_origin(path).await.map_err(|e| e.to_string())
+}
+
+/// Why a folder's `origin` could not be turned into a GitHub `owner/repo`. The `Display` text is
+/// exactly the message [`detect_remote_repo`] has always returned; the variants exist so a caller
+/// that must treat the cases differently (source deletion reports a stable refusal code for each)
+/// does not have to pattern-match on prose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OriginError {
+    /// `git` itself could not be run.
+    GitUnavailable(String),
+    /// The folder has no `origin` remote.
+    NoRemote,
+    /// `git` failed with its own message (not a repository, dubious ownership, ...).
+    Git(String),
+    /// The `origin` remote exists but is not a GitHub repository URL.
+    NotGithub { url: String },
+}
+
+impl std::fmt::Display for OriginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OriginError::GitUnavailable(e) => {
+                write!(
+                    f,
+                    "couldn't run `git` ({e}) — is git installed and on PATH?"
+                )
+            }
+            OriginError::NoRemote => {
+                write!(
+                    f,
+                    "that folder has no `origin` remote (is it cloned from GitHub?)"
+                )
+            }
+            OriginError::Git(stderr) => write!(f, "{stderr}"),
+            OriginError::NotGithub { url } => {
+                write!(f, "the origin remote isn't a GitHub URL: {url}")
+            }
+        }
+    }
+}
+
+/// The GitHub `owner/repo` of a local checkout's `origin` remote, with a typed reason on
+/// failure. [`detect_remote_repo`] is this with the error rendered to its message.
+pub async fn detect_origin(path: &Path) -> Result<String, OriginError> {
     let out = git(Some(path), &["config", "--get", "remote.origin.url"])
         .await
-        .map_err(|e| format!("couldn't run `git` ({e}) — is git installed and on PATH?"))?;
+        .map_err(|e| OriginError::GitUnavailable(e.to_string()))?;
     if !out.status.success() {
         let stderr = stderr_of(&out);
         return Err(if stderr.is_empty() {
-            "that folder has no `origin` remote (is it cloned from GitHub?)".to_string()
+            OriginError::NoRemote
         } else {
-            stderr
+            OriginError::Git(stderr)
         });
     }
     let url = String::from_utf8_lossy(&out.stdout);
-    parse_owner_repo(&url)
-        .ok_or_else(|| format!("the origin remote isn't a GitHub URL: {}", url.trim()))
+    parse_owner_repo(&url).ok_or_else(|| OriginError::NotGithub {
+        url: url.trim().to_string(),
+    })
 }
 
 /// Whether a git remote URL's `origin` refers to the same GitHub repo as `owner/repo`.
@@ -353,13 +402,61 @@ pub async fn validate_link_target(path: &Path, repo: &str) -> Result<(), String>
     }
 }
 
+/// A remote URL with any embedded credentials removed, safe to store in a record.
+///
+/// `http(s)://user:token@host/...` and `http(s)://token@host/...` lose their userinfo (a hand-made
+/// clone commonly carries a personal access token there). An ssh user (`ssh://git@host/...`,
+/// `git@host:o/r`) is a login name, not a secret, so ssh-style remotes are returned unchanged.
+/// Surrounding whitespace is trimmed.
+pub fn scrub_remote_url(url: &str) -> String {
+    let url = url.trim();
+    for scheme in ["https://", "http://"] {
+        let Some(rest) = url
+            .get(..scheme.len())
+            .filter(|s| s.eq_ignore_ascii_case(scheme))
+            .map(|_| &url[scheme.len()..])
+        else {
+            continue;
+        };
+        let authority_end = rest.find('/').unwrap_or(rest.len());
+        let (authority, tail) = rest.split_at(authority_end);
+        let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        return format!("{}{host}{tail}", &url[..scheme.len()]);
+    }
+    url.to_string()
+}
+
+/// Split a git remote URL into its `(host, path)`, for the forms git itself accepts: a
+/// scheme URL (`https://[userinfo@]host[:port]/path`, `ssh://git@host/path`), the scp-like form
+/// (`[user@]host:path`), and a bare `host/path`. Userinfo and port are dropped from the host.
+fn split_remote(url: &str) -> Option<(&str, &str)> {
+    if let Some((_, rest)) = url.split_once("://") {
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        let host = host_port.split(':').next().unwrap_or(host_port);
+        return Some((host, path));
+    }
+    if let Some((left, path)) = url.split_once(':') {
+        // scp-like: `[user@]host:path`
+        let host = left.rsplit_once('@').map_or(left, |(_, h)| h);
+        return Some((host, path));
+    }
+    url.split_once('/')
+}
+
 /// Parse `owner/repo` from a GitHub remote URL (https or ssh form), tolerant of a
-/// trailing `.git` and extra path segments.
+/// trailing `.git`, a trailing slash and extra path segments.
+///
+/// The HOST must be exactly `github.com` (case-insensitive). Source deletion trusts this
+/// function to decide whether a folder is the project's repository, so a lookalike such as
+/// `notgithub.com` or `github.com.evil.example` must never parse as a GitHub identity.
 fn parse_owner_repo(url: &str) -> Option<String> {
     let s = url.trim().trim_end_matches('/').trim_end_matches(".git");
-    let i = s.find("github.com")?;
-    let after = s[i + "github.com".len()..].trim_start_matches([':', '/']);
-    let parts: Vec<&str> = after.split('/').filter(|p| !p.is_empty()).collect();
+    let (host, path) = split_remote(s)?;
+    if !host.eq_ignore_ascii_case("github.com") {
+        return None;
+    }
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
     if parts.len() >= 2 {
         Some(format!("{}/{}", parts[0], parts[1]))
     } else {
@@ -393,6 +490,28 @@ pub struct RepoResolution {
     pub resolved: bool,
     /// Human reason when not resolved (no path / not a checkout / wrong origin).
     pub reason: String,
+    /// The source was deleted on purpose (client source deletion) and has not been fetched back.
+    /// `repo_resolution` only looks at the filesystem and never sets this; the server fills it
+    /// from the deletion records (`client_source::resolution`). Such a repo has nothing to link.
+    #[serde(default)]
+    pub source_deleted: bool,
+    /// RFC3339 time of that deletion, when `source_deleted`.
+    #[serde(default)]
+    pub deleted_at: Option<String>,
+}
+
+impl RepoResolution {
+    /// A filesystem-only resolution: not deleted (the records are consulted separately).
+    fn on_disk(repo: &str, path: Option<String>, resolved: bool, reason: String) -> Self {
+        Self {
+            repo: repo.to_string(),
+            path,
+            resolved,
+            reason,
+            source_deleted: false,
+            deleted_at: None,
+        }
+    }
 }
 
 /// Resolve + validate one repo against the local filesystem: is there a folder, is it a git
@@ -403,13 +522,12 @@ pub async fn repo_resolution(
     repo: &str,
 ) -> RepoResolution {
     let Some(dir) = resolve_repo_dir(override_path, workspace_root, repo) else {
-        return RepoResolution {
-            repo: repo.to_string(),
-            path: None,
-            resolved: false,
-            reason: "no local path set — choose the repo's folder (or set a workspace root)"
-                .to_string(),
-        };
+        return RepoResolution::on_disk(
+            repo,
+            None,
+            false,
+            "no local path set — choose the repo's folder (or set a workspace root)".to_string(),
+        );
     };
     let path_str = dir.to_string_lossy().into_owned();
     // `detect_remote_repo` returns the already-parsed `owner/repo` string (from the origin
@@ -417,24 +535,16 @@ pub async fn repo_resolution(
     // project identity (e.g. stored `Owner/Repo`, origin `owner/repo`) still resolves as
     // expected — matching the same invariant enforced by `validate_link_target`.
     match detect_remote_repo(&dir).await {
-        Ok(found) if found.eq_ignore_ascii_case(repo.trim()) => RepoResolution {
-            repo: repo.to_string(),
-            path: Some(path_str),
-            resolved: true,
-            reason: String::new(),
-        },
-        Ok(found) => RepoResolution {
-            repo: repo.to_string(),
-            path: Some(path_str),
-            resolved: false,
-            reason: format!("that folder is a different repo (origin: {found})"),
-        },
-        Err(e) => RepoResolution {
-            repo: repo.to_string(),
-            path: Some(path_str),
-            resolved: false,
-            reason: e,
-        },
+        Ok(found) if found.eq_ignore_ascii_case(repo.trim()) => {
+            RepoResolution::on_disk(repo, Some(path_str), true, String::new())
+        }
+        Ok(found) => RepoResolution::on_disk(
+            repo,
+            Some(path_str),
+            false,
+            format!("that folder is a different repo (origin: {found})"),
+        ),
+        Err(e) => RepoResolution::on_disk(repo, Some(path_str), false, e),
     }
 }
 
@@ -1595,21 +1705,6 @@ pub async fn push_branch(dir: &Path, repo: &str, branch: &str, token: &str) -> a
     anyhow::bail!("git push {branch}: {}", stderr_of(&out));
 }
 
-/// Best-effort fast-forward pull of the repo's CURRENT branch from its configured origin. Used by
-/// read-only refreshes (e.g. the suppressions registry) so the data reflects the latest remote
-/// state, without touching the working copy beyond a clean fast-forward. Returns true on success;
-/// false on any failure (diverged history, no upstream, offline, not a clone) — callers treat it
-/// as best-effort and read whatever is on disk regardless.
-pub async fn pull_local_ff(dir: &Path) -> bool {
-    if !is_git_repo(dir) {
-        return false;
-    }
-    match git(Some(dir), &["pull", "--ff-only"]).await {
-        Ok(out) => out.status.success(),
-        Err(_) => false,
-    }
-}
-
 /// Fast-forward `branch` from origin using an authenticated transient URL.
 pub async fn pull_branch(
     dir: &Path,
@@ -1828,6 +1923,71 @@ mod tests {
         // Non-GitHub or malformed -> None.
         assert_eq!(parse_owner_repo("https://gitlab.com/acme/api.git"), None);
         assert_eq!(parse_owner_repo("not a url"), None);
+    }
+
+    /// The remote-match guard is what stands between "delete this folder" and the wrong
+    /// folder, so the host must be EXACTLY github.com: a lookalike host that merely contains
+    /// the string must never parse as a GitHub identity.
+    #[test]
+    fn parse_owner_repo_requires_the_exact_github_host() {
+        for lookalike in [
+            "https://notgithub.com/acme/api.git",
+            "https://github.com.evil.example/acme/api.git",
+            "https://evil.example/github.com/acme/api.git",
+            "git@notgithub.com:acme/api.git",
+            "https://gitlab.com/acme/github.com",
+            "https://user:github.com@evil.example/acme/api.git",
+        ] {
+            assert_eq!(parse_owner_repo(lookalike), None, "{lookalike}");
+        }
+        // The forms that must keep working.
+        for (url, want) in [
+            ("https://github.com/acme/api/", "acme/api"),
+            ("https://GitHub.com/Acme/Api.git", "Acme/Api"),
+            (
+                "https://x-access-token:tok@github.com/acme/api.git",
+                "acme/api",
+            ),
+            ("https://github.com:443/acme/api.git", "acme/api"),
+            ("ssh://git@github.com/acme/api.git", "acme/api"),
+            ("git@github.com:acme/api", "acme/api"),
+            ("github.com/acme/api", "acme/api"),
+        ] {
+            assert_eq!(parse_owner_repo(url).as_deref(), Some(want), "{url}");
+        }
+    }
+
+    #[test]
+    fn scrub_remote_url_drops_credentials_and_keeps_everything_else() {
+        assert_eq!(
+            scrub_remote_url("https://x-access-token:ghp_abc@github.com/acme/api.git"),
+            "https://github.com/acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("https://ghp_onlyatoken@github.com/acme/api.git"),
+            "https://github.com/acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("http://u:p@host.example:8080/a/b.git"),
+            "http://host.example:8080/a/b.git"
+        );
+        // Not credentials: an ssh user, an scp-style remote, a clean https URL.
+        assert_eq!(
+            scrub_remote_url("ssh://git@github.com/acme/api.git"),
+            "ssh://git@github.com/acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("git@github.com:acme/api.git"),
+            "git@github.com:acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("https://github.com/acme/api.git"),
+            "https://github.com/acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("  https://github.com/a/b \n"),
+            "https://github.com/a/b"
+        );
     }
 
     #[test]

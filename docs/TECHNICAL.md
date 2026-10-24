@@ -2921,11 +2921,134 @@ JSON files in `dirs::data_dir()/camerata/`:
 | `uow.json` | `UowStore` (`crates/server/src/uow.rs`) | `HashMap<story_id, UnitOfWork>`. Each UoW holds `branch`, `DevStatus`, the precise `UowStage` lifecycle, `history`, `gate_provenance`, `sign_off`, `evidence`, and a `decisions` read-cache (durable home is the `ArtifactStore`). See §10. |
 | `routines.json` | `RoutineStore` (`crates/server/src/routine.rs`) | Scheduled routines: name, schedule, intent, operational prompt, scope, model, enabled/provisioned, `RoutineStatus` (Idle/Running/BlockedNeedsReview/Done/Failed), last_run/last_fired, project_id, and a bounded `runs` history (cap 20). The auto-fire scheduler (`auto_fire.rs`) ticks over these; see 4c. |
 | `escalations.json` | `EscalationStore` (`crates/server/src/escalation.rs`) | Routine escalations: a blocked run's reason/options/suggestions, the human↔lead-engineer conversation, status (open/resolved), and the translated resume directive. |
+| `inspections/<project_id>.json` | `InspectionStore` (`crates/server/src/inspections.rs`) | One file per project: every completed inspection as an `InspectionEntry` (id, `InspectionKind` Full or DeltaRetest, the audited refs with commit, branch, origin and default branch, the sealed report with its finding excerpts, the Claude Code sessions its model calls created, and the `PackageRecord` of the client package generated from it). The durable twin of the in-memory last scan: `AppState::get_last_scan` falls back to the latest entry after a restart, so exports and the review screen never need the source. Written atomically (temp file and rename). |
+| `source-records.json` | `SourceRecordStore` (`crates/server/src/client_source/records.rs`) | Machine-local proof of source deletion (`DeletionRecord`: what was removed from where and when, byte and file counts, outcome per location, the method sentence, residuals) and re-fetch records. Per-project strictly increasing `seq` decides whether a repo is deleted or fetched back; timestamps are never compared. Never exported with a project. |
+| `scan-cache.json` | `ScanCacheStore` (`crates/server/src/scan_cache.rs`) | Per-project incremental-scan manifest (file fingerprints and the last AI findings). Holds finding excerpts, so source deletion purges the repo's slice (`remove_repo`). |
 
 Each store type follows the same pattern: `Arc<Mutex<T>>` in-memory mirror,
 optional `Arc<PathBuf>` for disk persistence, load-or-default on startup,
 best-effort write-through on mutation. `Clone` is a shallow handle (shared `Arc`)
 so stores live in `AppState`.
+
+### Client source lifecycle: delete and re-fetch (`crates/server/src/client_source/`)
+
+Design: `docs/design/2026-10-24_delete-and-refetch-client-source.md`. Decision record:
+`docs/decisions/2026-10-24_delete-and-refetch-client-source.md`. After an inspection is delivered the
+client's code should not stay on the operator's machine, and nothing the product delivers may need
+it. Findings, the review screen, exports and package regeneration read only the persisted
+inspection; the source is needed only to scan, apply, develop and view code.
+
+**Source status** (`status.rs`, derived, never stored) is one of `present` (a clone whose `origin`
+matches the repo; carries head, branch, dirty, the inspected commit, commits newer than it and
+whether the inspected commit is still in the clone), `deleted` (the newest record of the pair
+deletion and re-fetch is a deletion and no clone is on disk), `unresolved` (the old not-cloned or
+not-linked state) or `mismatch` (a folder that is a different repo). A clone on disk wins over any
+record: an operator who cloned the repo back by hand has source.
+
+**Endpoints** (all errors are `{ ok:false, code, message }`; the `Refusal` type):
+
+| Route | Purpose |
+|---|---|
+| `GET /api/projects/:id/source` | Per-repo source status in project order, plus the latest inspection stamp. |
+| `POST /api/projects/:id/repos/:repo/source/delete-preview` | Runs the guard (no typed name needed) and returns the plan: items worded with the record's own formatter, totals, and the uncommitted/unpushed warnings. Removes nothing. |
+| `POST /api/projects/:id/repos/:repo/source/delete` | Body `{ confirm, include_uncommitted }`. Guard, purge, record. A second call on a deleted repo returns `already_deleted` and writes no second record. A partly failed purge returns `code: "partial"` with the record. |
+| `GET /api/projects/:id/source/records`, `.../records/:record_id/text` | Records as JSON, and the plain-text proof ("Save record as .txt"). |
+| `GET /api/projects/:id/repos/:repo/source/remote` | `git ls-remote --symref`: default branch and head for the re-fetch dialog. |
+| `POST /api/projects/:id/repos/:repo/source/refetch` | Body `{ target: { kind: "latest" } or { kind: "commit", sha } }`. Full-history clone (never `--depth`), `origin` rewritten to the tokenless URL, stderr token-redacted. |
+| `POST /api/projects/:id/repos/:repo/rescan-changes` | The delta retest: `git diff` since the inspected commit builds a synthetic prior manifest so only changed files reach the model; AI findings for unchanged files carry forward. Returns an ordinary audit job id. |
+
+`POST /api/onboard/scan`, `/audit`, `/audit/start`, `/apply`, `/apply/preflight`, `/arm`,
+`/open-pr`, `POST /api/projects/:id/rescan-alternatives` and `POST /api/projects/:id/emit-local` pass
+through a scope gate (`source_gate`) that returns 409 `source_deleted` with the date before any of
+them resolves a folder. The gate checks every repo the request names, and a request that names none
+(emit-local) is scoped to all of the project's repos; a named repo is checked against the deletion
+records of EVERY project that lists it (the folder is per machine, not per project). Readiness treats a deleted repo like a resolved one (`RepoLink::Deleted` in
+`camerata_app_core::readiness`): there is nothing to link, so the project is not paused.
+
+**The guard** (`guard.rs`) refuses in a fixed order, the first failure reported: unknown project or
+repo, no path, not a directory, a symlinked path, a protected path (home, workspace root, an ancestor
+of either, Camerata's own stores or program, another checkout), not a git repo, no or unreadable or
+non-GitHub `origin`, an `origin` that is a different repo, a typed name that is not the repo's name
+byte for byte, uncommitted work and unpushed commits without the second tick, a scan or other source
+operation running or an unfinished governed run on the repo (per-(project, repo) claims in `ops.rs`; the synchronous scan handlers and the
+alternatives rescan register as running scans), and a registered worktree that is itself a symlink or
+a protected location. A target whose `.git` is a FILE is a linked worktree and is refused
+(`linked_worktree`, naming the clone it belongs to), so deleting never leaves the main clone behind
+while the repo reads as deleted. `git::linked_worktrees` prunes stale registrations first, drops
+entries git flags `prunable`, excludes the asked folder by canonical path (git lists the MAIN
+worktree first, which is not the asked folder when that is itself a linked worktree), and refuses
+under R13 when a listed folder's `.git` file does not point into this clone's `worktrees/` area, so
+a folder reused for something else is never removed or counted.
+
+**The purge** (`purge.rs`) runs in this order and records every item as removed, already absent or
+failed: registered git worktrees, the checkout (and its empty `<owner>` parent under the workspace
+root), the repo's slice of `scan-cache.json`, the CLI's cache and ledger for that checkout (the key
+function is shared with the CLI in `scan_cache/state_dir.rs`), the Claude Code session files for the
+exact session ids the inspection recorded (every model call is tagged `--session-id`), and the
+in-memory copies (transcripts, finished jobs). Kept on purpose: the review draft and the inspection,
+both of which hold finding excerpts that are part of the delivered product. Everything checked and
+found to hold no client code is listed in `storage::DATA_DIR_ENTRIES`; a test proves it covers every
+store `AppState` opens.
+
+**Stays deleted.** No route may bring a deleted repo's folder back as a side effect. Beyond the scope
+gate: `resolution::clone_root_for` refuses (as a per-repo `source_deleted` result) to let `apply_local`
+clone a repo that has a standing deletion record, in both emit-local and Apply; `checkout_project`
+skips deleted repos; `generate-ci-workflow` writes only into an existing git checkout; and a gated
+write into a worktree that vanished mid-run is denied rather than recreating its parents. Audited and
+found safe because they require an existing git checkout before writing: `create_branch`,
+`ensure_uow_worktree` (so every `resolve_uow_worktree` caller), `ship_repo`, the `git_*` handlers.
+Still possible by the operator's own act: greenfield scaffolds a NEW directory at a path the operator
+chooses (it can be a deleted checkout's old path, which then blocks re-fetch, but it brings back no
+client code). A governed run in flight when its checkout is deleted is prevented, not just contained: the
+guard refuses (`governed_run_in_progress`) while any unfinished run in `AppState::runs` (governed
+development, investigation, update-branch, PR-resolve, routine-driven ones included; a run paused
+on a question or review still counts) is attributed to the repo by its story id, a linked work
+item, or the repos in its UoW's intake scope. The gated-write jail's denial of a vanished worktree
+stays as defense in depth.
+
+**Residual sentences.** Every record carries what deletion cannot cover: backups and the kept
+excerpts always; recorded sessions removed; on the Cli backend, a sentence for inspections whose
+session ids were never recorded (`InspectionEntry::sessions_unrecorded`: no ids and not cleared;
+`forget_model_sessions` sets `model_sessions_cleared` so a project whose ids were removed with an
+earlier repo is not mistaken for one that never recorded them) and one for chat-assistant and
+governed-dev sessions that Camerata does not track; always a sentence about CLI caches under an old
+path if the checkout was moved; a sentence naming other projects that list the repo and hold a
+scan-cache slice for it (only when they exist); and the uncommitted-work sentence when ticked.
+
+**Inspection store growth.** Every entry is kept (it is the inspection history), and each write
+rewrites the project's whole file, so a write costs the sum of that project's report sizes.
+Writes happen a handful of times per inspection (append at the end of a scan, an alternatives
+amend, a recorded session, the package record, and session forgetting at deletion), never per
+request, so this is acceptable for the dozens of inspections a project realistically accumulates.
+If histories reach hundreds, the next step is one file per entry (atomic rename keeps working).
+The report written is a sweep-redacted clone, never the caller's copy.
+
+**Test safety.** Deletion never looks a location up: it works from a `StorageRoots` carried by the
+`AppState`, empty by default, with real roots installed only by `AppState::from_env()`. Tests install
+`StorageRoots::sandboxed(tempdir)`. `ensure_not_real_location_in_test` is the backstop (it mirrors the
+tool-provisioning `RealToolingProtected`): when the running executable is a cargo test binary, a path
+under the real home, data, cache or `~/.claude` directory is refused whatever the roots say. Network
+git steps go through `GitRemotes`, which tests point at local bare repositories. Seams:
+`CAMERATA_DATA_DIR` replaces the platform data directory and `CAMERATA_STATE_DIR` the platform cache
+directory (`camerata/` is appended to both); `AppState::from_data_dir` is the restart seam.
+
+**Reading code for a finding** (`read.rs`, `onboard/finding_context.rs`): from the inspected commit
+through git objects (`git cat-file blob <sha>:<path>`, size-capped and redacted), never the working
+tree, so a finding shows the code the inspection saw. Statuses added to the contract:
+`source_deleted` (with the date) and `commit_unavailable` (the one labelled working-tree fallback).
+Responses are `Cache-Control: no-store`.
+
+**UI** (`crates/ui/src/source_ui.rs`, `workspace.rs`, pure logic in `camerata_ui_core::source`): the
+Workspace repo card has four states, a Danger zone with the typed confirmation, the re-fetch dialog and
+"Rescan changes"; every control that needs the source shows the same explanation (`scan_block_text`)
+while a repo is deleted.
+
+**Tests.** `client_source/*_tests.rs` (guard, delete, status, read, refetch, rescan, readiness),
+`client_source/e2e_tests.rs` (`purge_completeness_no_client_file_remains_in_any_known_location`,
+`project_fully_usable_after_source_deletion_e2e` (always runs),
+`exports_regenerate_from_the_stored_report_after_source_deletion_e2e` and
+`export_product_works_after_restart_and_records_package` (need `typst`; each prints SKIPPED when it is
+missing), `exports_never_touch_resolve_repo_dir_or_read_the_repo`), `client_source/resurrection_tests.rs`, the SSR tests in `crates/ui`.
 
 ### SQLite (`camerata-persistence`)
 

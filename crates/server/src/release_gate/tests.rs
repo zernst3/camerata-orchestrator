@@ -62,6 +62,7 @@ fn scan_report() -> ScanReport {
                 sha: Some("abcdef1234567890".to_string()),
                 branch: Some("main".to_string()),
                 dirty: false,
+                ..AuditedRef::default()
             }],
             audit_model: None,
             calibration_model: None,
@@ -75,6 +76,7 @@ fn scan_report() -> ScanReport {
             osv_scanner_version: None,
             started_at: "2026-10-21T00:00:00Z".to_string(),
             finished_at: "2026-10-21T00:05:00Z".to_string(),
+            model_sessions: Vec::new(),
         },
         recommendations: HashMap::new(),
         failed_passes: Vec::new(),

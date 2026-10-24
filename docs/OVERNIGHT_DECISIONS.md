@@ -95,6 +95,9 @@ commit sits on the branch ready for review + push.
   record. Zach approved this outside-repo deletion. (2, Opus engineering call) Deletion refuses
   while the checkout has uncommitted or unpushed work unless the operator ticks "Delete
   uncommitted work too". Spec: `docs/design/2026-10-24_delete-and-refetch-client-source.md`.
+  BUILT (2026-10-24, Sonnet): both decisions are implemented as written; the decision record, the
+  as-built deviations from the spec, and the manual checks are in
+  `docs/decisions/2026-10-24_delete-and-refetch-client-source.md`.
 
 - 2026-10-24 (Zach): **Vulnerability intelligence, pieces 1 and 3 are V1.** (1) Enrich the
   existing osv-scanner dependency findings with CISA KEV (Known Exploited Vulnerabilities, JSON

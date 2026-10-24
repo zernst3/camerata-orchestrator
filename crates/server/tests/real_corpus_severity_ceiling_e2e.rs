@@ -92,6 +92,7 @@ fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanRepor
                 sha: Some("abcdef1234567890".to_string()),
                 branch: Some("main".to_string()),
                 dirty: false,
+                ..AuditedRef::default()
             }],
             audit_model: Some("test-model".to_string()),
             calibration_model: Some("test-cal-model".to_string()),
@@ -105,6 +106,7 @@ fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanRepor
             osv_scanner_version: Some("1.9.0".to_string()),
             started_at: "2026-10-10T00:00:00Z".to_string(),
             finished_at: "2026-10-10T00:05:00Z".to_string(),
+            model_sessions: Vec::new(),
         },
         recommendations: HashMap::new(),
         failed_passes: Vec::new(),

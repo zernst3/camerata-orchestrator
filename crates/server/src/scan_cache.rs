@@ -35,7 +35,7 @@ use crate::onboard::Finding;
 /// that, so a secret value sits in it on disk; [`ScanCacheStore::load_or_new`] drops every
 /// non-current manifest and rewrites the file at once, so the raw content is gone on first
 /// start rather than on the next scan.
-const MANIFEST_VERSION: u32 = 2;
+pub(crate) const MANIFEST_VERSION: u32 = 2;
 
 /// Fingerprint a file's EXACT content with the stable FNV-1a hash the suppression baseline uses.
 ///
@@ -123,8 +123,9 @@ impl ScanManifest {
     /// The fingerprint recorded for a file on the last scan, if any.
     fn fingerprint_of(&self, repo: &str, path: &str) -> Option<&str> {
         self.files
-            .get(repo)
-            .and_then(|m| m.get(path))
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(repo))
+            .and_then(|(_, m)| m.get(path))
             .map(String::as_str)
     }
 }
@@ -189,7 +190,7 @@ pub fn partition(
     let carried: Vec<Finding> = prior
         .findings
         .iter()
-        .filter(|f| f.repo == repo && unchanged_paths.contains(&f.path))
+        .filter(|f| f.repo.eq_ignore_ascii_case(repo) && unchanged_paths.contains(&f.path))
         .cloned()
         .collect();
 
@@ -254,8 +255,12 @@ impl ManifestBuilder {
         for (path, content) in files {
             entry.insert(path.clone(), content_fingerprint(content));
         }
-        self.findings
-            .extend(ai_findings.iter().filter(|f| f.repo == repo).cloned());
+        self.findings.extend(
+            ai_findings
+                .iter()
+                .filter(|f| f.repo.eq_ignore_ascii_case(repo))
+                .cloned(),
+        );
     }
 
     /// Finalize into a persistable manifest stamped with the current schema version.
@@ -279,6 +284,40 @@ impl ManifestBuilder {
 struct CacheState {
     /// project id → that project's scan manifest.
     by_project: BTreeMap<String, ScanManifest>,
+}
+
+/// What [`ScanCacheStore::remove_repo`] took out of the cache.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RemovedFromCache {
+    /// The cache held something for the repo.
+    pub had_entry: bool,
+    /// Fingerprinted files dropped.
+    pub files: u64,
+    /// Serialized size of what was dropped (fingerprints and findings).
+    pub bytes: u64,
+}
+
+/// How much of `manifest` belongs to `repo` (case-insensitive): fingerprinted files plus cached
+/// findings, sized by their serialized form.
+fn repo_slice_stats(manifest: &ScanManifest, repo: &str) -> RemovedFromCache {
+    let mut stats = RemovedFromCache::default();
+    for (key, files) in &manifest.files {
+        if key.eq_ignore_ascii_case(repo) {
+            stats.had_entry = true;
+            stats.files += files.len() as u64;
+            stats.bytes += serde_json::to_vec(files).map_or(0, |b| b.len() as u64);
+        }
+    }
+    let findings: Vec<&Finding> = manifest
+        .findings
+        .iter()
+        .filter(|f| f.repo.eq_ignore_ascii_case(repo))
+        .collect();
+    if !findings.is_empty() {
+        stats.had_entry = true;
+        stats.bytes += serde_json::to_vec(&findings).map_or(0, |b| b.len() as u64);
+    }
+    stats
 }
 
 /// Thread-safe, file-backed store of per-project scan manifests.
@@ -350,6 +389,49 @@ impl ScanCacheStore {
         }
     }
 
+    /// Remove everything this cache holds about ONE repo of a project: its file fingerprints and
+    /// every cached finding (snippets included) that belongs to it. The project's manifest is
+    /// dropped entirely when no repo is left in it, so the file does not keep an empty shell.
+    /// Persists atomically with the lock held (same discipline as [`Self::put`]).
+    ///
+    /// Source deletion calls this: the manifest is a copy of client code (excerpts) that must go
+    /// with the checkout, while the rest of the project's entries must survive.
+    ///
+    /// Returns what was removed (`had_entry == false` when the cache held nothing for the repo).
+    pub fn remove_repo(&self, project_id: &str, repo: &str) -> RemovedFromCache {
+        let Ok(mut s) = self.inner.lock() else {
+            return RemovedFromCache::default();
+        };
+        let Some(manifest) = s.by_project.get_mut(project_id) else {
+            return RemovedFromCache::default();
+        };
+        let removed = repo_slice_stats(manifest, repo);
+        manifest.files.retain(|k, _| !k.eq_ignore_ascii_case(repo));
+        manifest
+            .findings
+            .retain(|f| !f.repo.eq_ignore_ascii_case(repo));
+        if manifest.files.is_empty() {
+            s.by_project.remove(project_id);
+        }
+        if removed.had_entry {
+            self.save_locked(&s);
+        }
+        removed
+    }
+
+    /// What [`Self::remove_repo`] WOULD remove, without removing it (the deletion preview).
+    pub fn peek_repo(&self, project_id: &str, repo: &str) -> RemovedFromCache {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|s| {
+                s.by_project
+                    .get(project_id)
+                    .map(|m| repo_slice_stats(m, repo))
+            })
+            .unwrap_or_default()
+    }
+
     /// Write `state` to disk while the caller already holds the mutex guard.
     ///
     /// Separated from `save` so `put` / `clear` can call it while they own the lock,
@@ -381,8 +463,12 @@ impl ScanCacheStore {
     }
 }
 
+pub mod state_dir;
+
 #[cfg(test)]
 mod redaction_tests;
+#[cfg(test)]
+mod remove_repo_tests;
 
 #[cfg(test)]
 mod tests {
@@ -525,6 +611,30 @@ mod tests {
             p.carried[0].rule_id, "API-RULE",
             "must not pull the other repo's finding"
         );
+    }
+
+    /// The same repo spelled with different case (a project's `Acme/App`, an origin's `acme/app`)
+    /// is one repo: its unchanged files and their cached findings carry forward either way,
+    /// exactly as `repo_delta` and the cache purge already treat it.
+    #[test]
+    fn partition_matches_the_repo_case_insensitively() {
+        let files = vec![file("a.rs", "code a")];
+        let mut b = ManifestBuilder::new();
+        b.record_repo("Me/Api", &files, &[finding("Me/Api", "a.rs", "ARCH-1")]);
+        let prior = b.finish();
+
+        let p = partition(Some(&prior), "me/api", &files);
+
+        assert_eq!(p.unchanged_count, 1, "the file is recognised as unchanged");
+        assert_eq!(p.carried.len(), 1, "and its finding carries forward");
+    }
+
+    #[test]
+    fn recording_a_repo_keeps_findings_spelled_in_another_case() {
+        let files = vec![file("a.rs", "code a")];
+        let mut b = ManifestBuilder::new();
+        b.record_repo("me/api", &files, &[finding("Me/Api", "a.rs", "ARCH-1")]);
+        assert_eq!(b.finish().findings.len(), 1);
     }
 
     #[test]

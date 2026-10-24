@@ -3102,6 +3102,42 @@ html, body {
 .ws-repo-pr { font-size: 12.5px; margin: 10px 0 0; }
 .ws-repo-pr a { color: var(--accent-ink); }
 .ws-repo-msg { font-size: 12.5px; color: var(--ink-soft); margin: 8px 0 0; }
+/* ── Client source lifecycle (delete / re-fetch / rescan changes) ───────────────── */
+.ws-repo-state.deleted { color: var(--danger-color); font-weight: 600; }
+.ws-repo-source { font-size: 12.5px; color: var(--ink-soft); margin: 0 0 10px; }
+.ws-repo-source.deleted { color: var(--danger-color); font-weight: 600; margin-bottom: 4px; }
+.ws-repo-source.mismatch { color: var(--warning-color); }
+.ws-repo-source-summary { font-size: 12px; color: var(--ink-faint); margin: 0 0 10px; }
+.ws-source-actions { margin-bottom: 10px; }
+.ws-danger { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.ws-danger-summary { font-size: 12px; color: var(--ink-faint); cursor: pointer; }
+.ws-danger-text { font-size: 12px; color: var(--ink-faint); margin: 8px 0; }
+.src-modal { max-width: 720px; }
+.src-plan { list-style: none; margin: 10px 0 4px; padding: 0; font-size: 12.5px; }
+.src-plan li { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; border-bottom: 1px solid var(--line); }
+.src-plan-label { flex: 0 0 130px; color: var(--ink-soft); }
+.src-plan-path { flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; word-break: break-all; }
+.src-plan-counts { flex: 0 0 auto; color: var(--ink-faint); }
+.src-plan-total { font-size: 12.5px; font-weight: 600; margin: 6px 0 10px; }
+.src-warning { font-size: 12.5px; color: var(--warning-color); margin: 4px 0; }
+.src-tick { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 10px 0; }
+.src-method { font-size: 11.5px; color: var(--ink-faint); margin: 8px 0; }
+.src-confirm-label { display: block; font-size: 12.5px; margin: 12px 0 6px; }
+.src-confirm-input { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.src-refusal { font-size: 12.5px; color: var(--danger-color); margin: 10px 0 0; }
+.src-modal-foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+.src-radio { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 10px 0 4px; }
+.src-destination { font-size: 12px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 12px 0 0; word-break: break-all; }
+.src-record { margin-top: 10px; }
+.src-record-text { font-size: 11.5px; line-height: 1.5; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; max-height: 320px; overflow: auto; white-space: pre-wrap; }
+.src-record-actions { display: flex; gap: 10px; margin-top: 8px; }
+.scan-block-hint { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink-soft); margin: 8px 0; }
+.scan-block-link { flex: 0 0 auto; }
+.src-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.repo-health-icon.deleted { color: var(--ink-faint); }
+.finding-ctx-banner { font-size: 12.5px; color: var(--warning-color); border: 1px solid var(--warning-color); border-radius: 8px; padding: 6px 10px; margin: 0 0 8px; }
+.finding-ctx-newer { font-size: 11.5px; color: var(--ink-faint); margin: 6px 0 0; }
+.finding-ctx-deleted { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .ws-project-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .ws-health { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 4px; }
 .ws-health-stat { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 20px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft); }

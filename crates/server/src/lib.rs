@@ -33,12 +33,14 @@
 
 pub mod ai_audit;
 pub mod api_agent_driver;
+pub mod app_dirs;
 pub mod arm;
 pub mod auto_fire;
 pub mod checkpoint;
 pub mod clarify;
 pub mod clarify_resume;
 pub mod client_provenance;
+pub mod client_source;
 pub mod connections;
 mod corpus_freshness;
 /// `POST /api/apps` (Part 2 of the Rust-fullstack scaffolder): drives
@@ -56,6 +58,7 @@ pub mod feature_flags;
 pub mod fix;
 pub mod github_issues;
 pub mod grounding;
+pub mod inspections;
 pub mod investigation_run;
 pub mod jobs;
 // `lifecycle` (UowStage state machine + transitions) is now the framework-agnostic
@@ -123,6 +126,9 @@ pub mod settings;
 pub mod story_docs_gate;
 pub mod suppression;
 pub mod terminal;
+/// Real-git fixtures shared by unit and integration tests; nothing in the product calls it.
+#[doc(hidden)]
+pub mod test_git;
 pub mod test_tamper;
 pub mod tool_provisioning;
 pub mod transcript;
@@ -189,6 +195,24 @@ pub struct AppState {
     /// re-scan only pays the AI bill for files that changed. Best-effort; losing it just
     /// means the next scan is a full scan.
     scan_cache: crate::scan_cache::ScanCacheStore,
+    /// Persisted per-inspection entries (the sealed report plus its provenance), one file per
+    /// project. The durable twin of `last_scan`: written whenever a scan completes, read back
+    /// by [`AppState::get_last_scan`] when the in-memory map is empty (after a restart), and the
+    /// ONLY source the exports and the review screen have once client source is deleted.
+    inspections: crate::inspections::InspectionStore,
+    /// Machine-local deletion records (the proof handed to a client) and re-fetch records.
+    /// Not part of the project export. See [`crate::client_source`].
+    source_records: crate::client_source::records::SourceRecordStore,
+    /// Operations in flight on a repo's source (delete, re-fetch, rescan) and scans running in a
+    /// request: what the deletion guard's "scan in progress" refusal reads.
+    source_ops: crate::client_source::ops::SourceOps,
+    /// Where network git steps (re-fetch clone, probe, commit fetch) go. GitHub in production;
+    /// tests map a repo to a local bare repository so nothing touches the network.
+    git_remotes: crate::client_source::remote::GitRemotes,
+    /// The locations source deletion may touch besides the checkout. EMPTY by default so a
+    /// state built by `new()` can touch nothing outside a checkout; only `from_env()` installs
+    /// the real ones. See [`crate::client_source::storage`].
+    storage_roots: Arc<crate::client_source::storage::StorageRoots>,
     /// Per-project last completed scan report. Written the instant any scan handler finishes
     /// (both the synchronous `onboard_audit` path and the async job path). Read by
     /// `active_project_context` as the authoritative source for grounding, with the
@@ -301,6 +325,11 @@ impl AppState {
             escalations: crate::escalation::EscalationStore::new(),
             checkpoints: crate::checkpoint::CheckpointStore::new(),
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
+            inspections: crate::inspections::InspectionStore::new(),
+            source_records: crate::client_source::records::SourceRecordStore::new(),
+            source_ops: crate::client_source::ops::SourceOps::new(),
+            git_remotes: crate::client_source::remote::GitRemotes::default(),
+            storage_roots: Arc::new(crate::client_source::storage::StorageRoots::default()),
             last_scan: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             recent_scan: std::sync::Arc::new(std::sync::Mutex::new(None)),
             artifacts: None,
@@ -449,6 +478,18 @@ impl AppState {
     /// in-crate); this accessor is the out-of-crate test seam.
     pub fn projects(&self) -> &crate::project::ProjectStore {
         &self.projects
+    }
+
+    /// The persisted inspection store. Out-of-crate test seam (mirrors [`Self::projects`]): the
+    /// end-to-end tests read the entry a scan wrote and the one a restart reloads.
+    pub fn inspections(&self) -> &crate::inspections::InspectionStore {
+        &self.inspections
+    }
+
+    /// The deletion and re-fetch record store. Out-of-crate test seam (mirrors
+    /// [`Self::projects`]).
+    pub fn source_records(&self) -> &crate::client_source::records::SourceRecordStore {
+        &self.source_records
     }
 
     /// The app-level (cross-project) settings store. Out-of-crate test seam (mirrors
@@ -715,20 +756,120 @@ impl AppState {
     ///
     /// Also updates [`Self::recent_scan`] so the project-agnostic fallback always reflects
     /// the most recently completed scan, regardless of which project was active.
+    ///
+    /// A REAL inspection (the report carries at least one audited repo and is neither the
+    /// connect-GitHub gate nor a compliance block) is also appended to the persisted
+    /// [`crate::inspections::InspectionStore`], so it survives a restart and outlives the
+    /// client's source on disk. A persistence failure is logged, never fatal: the in-memory
+    /// copy still serves this session.
     pub(crate) fn set_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
+        self.record_inspection(
+            &project_id,
+            &report,
+            crate::inspections::InspectionKind::Full,
+        );
+        self.set_last_scan_in_memory(project_id, report);
+    }
+
+    /// Replace a project's in-memory last scan and the project-agnostic recent scan WITHOUT
+    /// creating an inspection entry. The part of [`Self::set_last_scan`] shared with callers
+    /// that persist the entry themselves (a delta retest stamps its own
+    /// [`crate::inspections::InspectionKind`]) or amend the existing one.
+    pub(crate) fn set_last_scan_in_memory(
+        &self,
+        project_id: String,
+        report: crate::onboard::ScanReport,
+    ) {
         let mut guard = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(project_id, report.clone());
         drop(guard); // release per-project lock before acquiring recent_scan lock
+        self.set_recent_scan(report);
+    }
+
+    /// Replace the project-agnostic most-recent scan (see [`Self::recent_scan`]).
+    pub(crate) fn set_recent_scan(&self, report: crate::onboard::ScanReport) {
         let mut recent = self.recent_scan.lock().unwrap_or_else(|e| e.into_inner());
         *recent = Some(report);
     }
 
+    /// Append `report` to the persisted inspection store when it is a real inspection.
+    /// See [`Self::set_last_scan`].
+    pub(crate) fn record_inspection(
+        &self,
+        project_id: &str,
+        report: &crate::onboard::ScanReport,
+        kind: crate::inspections::InspectionKind,
+    ) {
+        if report.gated || report.blocked || report.provenance.audited_refs.is_empty() {
+            return;
+        }
+        // The stored report is the sealed artifact every export is built from, so it carries
+        // only redacted text: sweep a CLONE (the caller's copy is left as handed in) before
+        // anything reaches the file.
+        let mut sealed = report.clone();
+        sealed.sweep_secrets_before_seal();
+        let entry = crate::inspections::InspectionEntry::from_report(project_id, sealed, kind);
+        if let Err(e) = self.inspections.append(entry) {
+            tracing::warn!(
+                project = project_id,
+                error = %e,
+                "could not persist the completed inspection; exports will not survive a restart"
+            );
+        }
+    }
+
+    /// Remember Claude Code sessions that model calls made AFTER the inspection finished (the
+    /// alternatives rescan) on the project's current inspection entry, so source deletion
+    /// removes their session files too. A no-op without sessions or without an entry.
+    pub(crate) fn record_model_sessions(
+        &self,
+        project_id: &str,
+        sessions: Vec<crate::llm::ModelSession>,
+    ) {
+        for session in sessions {
+            if let Err(e) = self.inspections.record_model_session(project_id, session) {
+                tracing::warn!(
+                    project = project_id,
+                    error = %e,
+                    "could not persist a recorded model session"
+                );
+            }
+        }
+    }
+
+    /// Merge a changed report into the project's CURRENT inspection instead of starting a new
+    /// one (the alternatives rescan re-evaluates a few rules of the same inspection). Updates
+    /// the in-memory copy and the latest persisted entry in place.
+    pub(crate) fn amend_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
+        // Same sweep as `record_inspection`: the stored report carries only redacted text.
+        let mut sealed = report.clone();
+        sealed.sweep_secrets_before_seal();
+        match self.inspections.update_latest_report(&project_id, sealed) {
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                project = project_id.as_str(),
+                error = %e,
+                "could not persist the amended inspection"
+            ),
+        }
+        self.set_last_scan_in_memory(project_id, report);
+    }
+
     /// Retrieve the last completed scan report for the given project, if any.
+    ///
+    /// The in-memory map answers first (it is the freshest within a session); when it has
+    /// nothing for the project (a restart emptied it) the latest persisted inspection entry
+    /// answers instead. That single fallback is what makes every export, the chat grounding and
+    /// the alternatives rescan keep working after a restart and after source deletion.
     /// Returns a clone so callers do not hold the lock across await points.
-    /// Fail-soft on lock poisoning: returns `None` rather than panicking.
+    /// Fail-soft on lock poisoning: recovers the inner value rather than panicking.
     pub(crate) fn get_last_scan(&self, project_id: &str) -> Option<crate::onboard::ScanReport> {
         let guard = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
-        guard.get(project_id).cloned()
+        if let Some(report) = guard.get(project_id) {
+            return Some(report.clone());
+        }
+        drop(guard);
+        self.inspections.latest(project_id).map(|e| e.report)
     }
 
     /// Retrieve the most recently completed scan, regardless of which project it belonged to.
@@ -755,6 +896,95 @@ impl AppState {
         state
     }
 
+    /// A clean-slate state whose file-backed stores all live under `dir` (the `camerata`
+    /// directory itself, i.e. what `<data_dir>/camerata` is in production). Opens ONLY the JSON
+    /// stores, with an in-memory credential store and no SQLite logs, so it needs no async
+    /// runtime and never touches the keychain or the real per-user directory. This is the
+    /// "restart" seam for end-to-end tests: build a state on a temp dir, drop it, build another
+    /// on the same dir, and everything persisted is what the second one sees.
+    pub fn from_data_dir(dir: &std::path::Path) -> Self {
+        let mut state = Self::new(Arc::new(InMemoryStoryStore::new()));
+        state.open_json_stores(dir);
+        // Only the data dir is known: nothing outside it (no CLI cache dir, no Claude Code
+        // folder) can be touched unless the caller installs roots with `with_storage_roots`.
+        state.storage_roots = Arc::new(crate::client_source::storage::StorageRoots {
+            data_dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        });
+        state
+    }
+
+    /// Replace where network git steps go. Test seam (see [`crate::client_source::remote`]).
+    #[must_use]
+    pub fn with_git_remotes(mut self, remotes: crate::client_source::remote::GitRemotes) -> Self {
+        self.git_remotes = remotes;
+        self
+    }
+
+    /// Replace the locations source deletion may touch besides the checkout. The test seam that
+    /// confines every deletion to a temp directory; production installs the real roots in
+    /// [`AppState::from_env`] and never calls this.
+    #[must_use]
+    pub fn with_storage_roots(
+        mut self,
+        roots: crate::client_source::storage::StorageRoots,
+    ) -> Self {
+        self.storage_roots = Arc::new(roots);
+        self
+    }
+
+    /// Open every JSON-file-backed store under `dir`. The single list of those stores: both
+    /// [`AppState::from_env`] and [`AppState::from_data_dir`] go through here, and the
+    /// purge-completeness test reads this function's source to prove every store it opens is
+    /// accounted for in `client_source::KNOWN_STORAGE_LOCATIONS`.
+    fn open_json_stores(&mut self, dir: &std::path::Path) {
+        self.projects = crate::project::ProjectStore::load_or_new(dir.join("projects.json"));
+        self.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
+        // Provider-safety session-scoped reset (Pass 2 §3): `safe_mode` must never
+        // survive a restart as OFF, even though it's otherwise persisted alongside the
+        // rest of `Settings`. See `SettingsStore::reset_provider_policy_to_safe_on_startup`
+        // for the full mechanism note — this is the one call site.
+        self.settings.reset_provider_policy_to_safe_on_startup();
+        // No backend env hydration anymore (`docs/design/2026-09-22_per-project-backend.md`):
+        // there is no `CAMERATA_LLM_BACKEND` env var to hydrate. Every project-scoped call
+        // resolves its `Llm` from `project.backend` and the chat path from
+        // `state.settings.chat_backend()`, both read directly at the call seam.
+        self.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
+        self.uow = crate::uow::UowStore::at(dir.join("uow.json"));
+        // Clarifications persist too: every open structured question is a resumable
+        // pause point, so the user can leave and come back to any unanswered question
+        // (and answered ones stay on the record). Survives restarts; safe to delete.
+        self.clarifications =
+            crate::clarify::ClarificationStore::at(dir.join("clarifications.json"));
+        // Phase 3b: resume contexts for runs paused on a clarification persist next to
+        // the clarify store, so a parked run can still resume after a restart.
+        self.clarify_resume =
+            crate::clarify_resume::ClarifyResumeStore::at(dir.join("clarify-resume.json"));
+        // The story spine must persist too: a UoW references its story by id, and
+        // /api/uows resolves the WorkItem from the spine. An in-memory spine meant
+        // restored UoWs rendered blank (and couldn't be run). Persist it alongside.
+        self.stories = Arc::new(InMemoryStoryStore::at(dir.join("stories.json")));
+        // Routines persist too, so a scheduled governed run an architect set up
+        // survives a restart instead of being lost on every launch.
+        self.routines = RoutineStore::at(dir.join("routines.json"));
+        // Open human-review escalations survive a restart so a blocked routine isn't
+        // silently un-blocked by quitting the app.
+        self.escalations = crate::escalation::EscalationStore::at(dir.join("escalations.json"));
+        self.checkpoints = crate::checkpoint::CheckpointStore::at(dir.join("checkpoints.json"));
+        // Incremental-scan cache: per-project file fingerprints + last AI findings, so a
+        // re-scan only re-audits changed files. Survives restarts; safe to delete.
+        self.scan_cache =
+            crate::scan_cache::ScanCacheStore::load_or_new(dir.join("scan-cache.json"));
+        // Completed inspections (sealed report + provenance), one file per project. Unlike the
+        // scan cache this is NOT disposable: it is what exports and the review screen are
+        // built from once the client's source has been deleted.
+        self.inspections = crate::inspections::InspectionStore::at(dir.join("inspections"));
+        // The proof of what source deletion removed, and when source was fetched back.
+        self.source_records = crate::client_source::records::SourceRecordStore::load_or_new(
+            dir.join("source-records.json"),
+        );
+    }
+
     /// The REAL runtime state: a CLEAN SLATE (no seeded stories, clarifications,
     /// or routines) plus the provider selected from the environment (GitHub when
     /// `CAMERATA_GITHUB_TOKEN` is set, native otherwise). This is what `serve`
@@ -768,34 +998,8 @@ impl AppState {
         // launches in the per-user data dir, so an architect's projects survive a
         // restart. Falls back to an in-memory store if the data dir can't be
         // resolved (the app still runs; it just won't persist that session).
-        if let Some(data) = dirs::data_dir() {
-            let dir = data.join("camerata");
-            state.projects = crate::project::ProjectStore::load_or_new(dir.join("projects.json"));
-            state.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
-            // Provider-safety session-scoped reset (Pass 2 §3): `safe_mode` must never
-            // survive a restart as OFF, even though it's otherwise persisted alongside the
-            // rest of `Settings`. See `SettingsStore::reset_provider_policy_to_safe_on_startup`
-            // for the full mechanism note — this is the one call site.
-            state.settings.reset_provider_policy_to_safe_on_startup();
-            // No backend env hydration anymore (`docs/design/2026-09-22_per-project-backend.md`):
-            // there is no `CAMERATA_LLM_BACKEND` env var to hydrate. Every project-scoped call
-            // resolves its `Llm` from `project.backend` and the chat path from
-            // `state.settings.chat_backend()`, both read directly at the call seam.
-            state.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
-            state.uow = crate::uow::UowStore::at(dir.join("uow.json"));
-            // Clarifications persist too: every open structured question is a resumable
-            // pause point, so the user can leave and come back to any unanswered question
-            // (and answered ones stay on the record). Survives restarts; safe to delete.
-            state.clarifications =
-                crate::clarify::ClarificationStore::at(dir.join("clarifications.json"));
-            // Phase 3b: resume contexts for runs paused on a clarification persist next to
-            // the clarify store, so a parked run can still resume after a restart.
-            state.clarify_resume =
-                crate::clarify_resume::ClarifyResumeStore::at(dir.join("clarify-resume.json"));
-            // The story spine must persist too: a UoW references its story by id, and
-            // /api/uows resolves the WorkItem from the spine. An in-memory spine meant
-            // restored UoWs rendered blank (and couldn't be run). Persist it alongside.
-            state.stories = Arc::new(InMemoryStoryStore::at(dir.join("stories.json")));
+        if let Some(dir) = crate::app_dirs::camerata_dir() {
+            state.open_json_stores(&dir);
             // Central artifact store (ROUTE-A): per-story decision records + investigation
             // notes are versioned here. Opened on the same data dir as the other stores.
             // Best-effort: if the store can't be opened (no runtime handle, or sqlx error),
@@ -909,24 +1113,15 @@ impl AppState {
                     }
                 };
             }
-            // Routines persist too, so a scheduled governed run an architect set up
-            // survives a restart instead of being lost on every launch.
-            state.routines = RoutineStore::at(dir.join("routines.json"));
-            // Open human-review escalations survive a restart so a blocked routine isn't
-            // silently un-blocked by quitting the app.
-            state.escalations =
-                crate::escalation::EscalationStore::at(dir.join("escalations.json"));
-            state.checkpoints =
-                crate::checkpoint::CheckpointStore::at(dir.join("checkpoints.json"));
-            // Incremental-scan cache: per-project file fingerprints + last AI findings, so a
-            // re-scan only re-audits changed files. Survives restarts; safe to delete.
-            state.scan_cache =
-                crate::scan_cache::ScanCacheStore::load_or_new(dir.join("scan-cache.json"));
         }
         // Feature flags: load from .camerata/features.toml (CWD-relative) with env
         // overrides applied on top. Loaded last so the flags are available to every
         // handler via AppState from first request. Infallible: missing config = defaults.
         state.feature_flags = crate::feature_flags::FeatureFlags::load();
+        // The ONE place the real home, cache and Claude Code locations are installed: source
+        // deletion removes copies of client code from exactly these.
+        state.storage_roots =
+            Arc::new(crate::client_source::storage::StorageRoots::from_environment());
         // Production path: use the OS keychain (macOS Keychain, Windows Credential
         // Manager, Secret Service on Linux) so credentials survive restarts without
         // living in any file on disk.
@@ -969,6 +1164,12 @@ pub struct RuleDto {
 /// Build the router for a given state. Separated from [`serve`] so it can be
 /// exercised in tests without binding a socket.
 pub fn router(state: AppState) -> Router {
+    // The operations that scan or write into a repo's source answer `409 source_deleted` when a
+    // repo in their scope had its source deleted, before any handler tries to read the folder.
+    let source_gate = axum::middleware::from_fn_with_state(
+        state.clone(),
+        crate::client_source::resolution::scope_gate,
+    );
     Router::new()
         .route("/api/health", get(health))
         .route("/api/rules", get(rules))
@@ -1012,7 +1213,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/projects/:id/reconcile", get(reconcile_project))
         .route("/api/projects/:id/emit", post(emit_project))
-        .route("/api/projects/:id/emit-local", post(emit_project_local))
+        // Writes into every repo's local clone (and clones a missing one): turned away with
+        // `409 source_deleted` when any repo of the project had its source deleted.
+        .route(
+            "/api/projects/:id/emit-local",
+            post(emit_project_local).layer(source_gate.clone()),
+        )
         .route("/api/projects/:id/custom", post(add_custom_rule))
         .route("/api/projects/:id/custom/delete", post(delete_custom_rule))
         .route("/api/projects/:id/max-iterations", post(set_max_iterations))
@@ -1044,7 +1250,7 @@ pub fn router(state: AppState) -> Router {
         // multi-option rules, and persisting the current per-rule selection.
         .route(
             "/api/projects/:id/rescan-alternatives",
-            post(rescan_alternatives_handler),
+            post(rescan_alternatives_handler).layer(source_gate.clone()),
         )
         .route(
             "/api/projects/:id/accept-alternatives",
@@ -1076,9 +1282,18 @@ pub fn router(state: AppState) -> Router {
         // GitHub Issue intake (#20): list a repo's open issues, then adopt one onto the spine.
         .route("/api/github/issues", get(github_issues_list))
         .route("/api/stories/adopt-issue", post(adopt_issue))
-        .route("/api/onboard/scan", post(onboard_scan))
-        .route("/api/onboard/audit", post(onboard_audit))
-        .route("/api/onboard/audit/start", post(onboard_audit_start))
+        .route(
+            "/api/onboard/scan",
+            post(onboard_scan).layer(source_gate.clone()),
+        )
+        .route(
+            "/api/onboard/audit",
+            post(onboard_audit).layer(source_gate.clone()),
+        )
+        .route(
+            "/api/onboard/audit/start",
+            post(onboard_audit_start).layer(source_gate.clone()),
+        )
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
         .route("/api/onboard/finding-context", get(onboard_finding_context))
@@ -1086,13 +1301,22 @@ pub fn router(state: AppState) -> Router {
         .route("/api/git/detect-repo", post(detect_repo))
         .route("/api/gate-probe", post(gate_probe))
         .route("/api/onboard/ticket", post(onboard_ticket))
-        .route("/api/onboard/arm", post(onboard_arm))
-        .route("/api/onboard/apply", post(onboard_apply))
+        .route(
+            "/api/onboard/arm",
+            post(onboard_arm).layer(source_gate.clone()),
+        )
+        .route(
+            "/api/onboard/apply",
+            post(onboard_apply).layer(source_gate.clone()),
+        )
         .route(
             "/api/onboard/apply/preflight",
-            post(onboard_apply_preflight),
+            post(onboard_apply_preflight).layer(source_gate.clone()),
         )
-        .route("/api/onboard/open-pr", post(onboard_open_pr))
+        .route(
+            "/api/onboard/open-pr",
+            post(onboard_open_pr).layer(source_gate.clone()),
+        )
         .route(
             "/api/onboard/draft",
             get(onboard_draft_get).post(onboard_draft_save),
@@ -1175,6 +1399,40 @@ pub fn router(state: AppState) -> Router {
         )
         // Derived readiness gate + "link existing local clone" (readiness-gate ADR).
         .route("/api/projects/:id/readiness", get(project_readiness))
+        // Client source lifecycle (delete / re-fetch): docs/design/2026-10-24_delete-and-refetch-
+        // client-source.md, section 3.
+        .route(
+            "/api/projects/:id/source",
+            get(crate::client_source::handlers::get_source),
+        )
+        .route(
+            "/api/projects/:id/source/records",
+            get(crate::client_source::handlers::get_records),
+        )
+        .route(
+            "/api/projects/:id/source/records/:record_id/text",
+            get(crate::client_source::handlers::get_record_text),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/source/remote",
+            get(crate::client_source::refetch::remote_probe),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/source/refetch",
+            post(crate::client_source::refetch::refetch),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/rescan-changes",
+            post(crate::client_source::rescan::rescan_changes_handler),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/source/delete-preview",
+            post(crate::client_source::delete::delete_preview),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/source/delete",
+            post(crate::client_source::delete::delete),
+        )
         .route("/api/projects/:id/repos/:repo/link", post(link_repo))
         .route("/api/projects/:id/reset-onboarding", post(reset_onboarding))
         .route("/api/projects/:id/branch", post(checkout_branch))
@@ -4363,6 +4621,9 @@ async fn rescan_alternatives_handler(
     let Some(project) = state.projects.get(&id) else {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
+    // Re-reads the project's source and calls the model, all inside this request: while it
+    // does, deleting that source is refused rather than raced.
+    let _scan_claim = state.source_ops.begin_scan(&project.id);
 
     // Dedup by rule id (uppercased) — last override for a given rule wins. Blank ids/options
     // are dropped rather than causing a hard error (defensive against a malformed request).
@@ -4463,8 +4724,12 @@ async fn rescan_alternatives_handler(
         .map(|m| format!("skipped invalid override — {m}"))
         .collect();
 
+    // Same session bookkeeping as `audit_repos`: this rescan re-reads client source into model
+    // prompts, so the Claude Code sessions it spawns belong on the inspection entry too.
+    let model_sessions = crate::llm::SessionSink::new();
     let llm =
-        crate::llm::Llm::from_env_with_backend_and_ledger(llm_backend, state.usage_ledger.clone());
+        crate::llm::Llm::from_env_with_backend_and_ledger(llm_backend, state.usage_ledger.clone())
+            .with_session_sink(model_sessions.clone());
     let (sources, source_notes) = resolve_local_sources(&state, &project.repos);
     run_notes.extend(source_notes);
 
@@ -4572,6 +4837,8 @@ async fn rescan_alternatives_handler(
         }
     }
 
+    state.record_model_sessions(&id, model_sessions.snapshot());
+
     // A rescan builds Findings without going through `audit_repos`, so it must apply the
     // corpus-authored severity bounds itself: the findings returned below AND the ones folded
     // into the stored scan are what the triage view shows, and they must carry the same
@@ -4593,7 +4860,9 @@ async fn rescan_alternatives_handler(
         // W6: fold any freshly-failed pass into the stored report so a LATER export still
         // discloses it — never let a rescan's failure disappear once this handler returns.
         report.failed_passes.extend(all_failed_passes.clone());
-        state.set_last_scan(id.clone(), report);
+        // Same inspection, a few rules re-evaluated: amend the current persisted entry rather
+        // than appending a second one.
+        state.amend_last_scan(id.clone(), report);
     }
 
     Json(serde_json::json!({
@@ -5113,6 +5382,11 @@ async fn onboard_scan(
     }
 
     // Local-first: scan reads the repos' local working trees, not GitHub. No token needed.
+    // While it reads them, deleting that source is refused rather than raced (see `onboard_audit`).
+    let _scan_claim = state
+        .projects
+        .active()
+        .map(|p| state.source_ops.begin_scan(&p.id));
     let (sources, notes) = resolve_local_sources(&state, &repos);
     let report = crate::onboard::scan_repos(&sources, notes).await;
     // Populate the per-project last-scan store so the chat assistant sees deterministic
@@ -5573,6 +5847,11 @@ async fn onboard_audit(
     // Incremental scan: load this project's prior manifest unless the user forced a full scan.
     let active_project = state.projects.active();
     let project_id = active_project.as_ref().map(|p| p.id.clone());
+    // This request holds the checkout open for as long as it runs. Register it, so deleting the
+    // source is refused (not raced) until it returns; released when the handler does.
+    let _scan_claim = project_id
+        .as_deref()
+        .map(|id| state.source_ops.begin_scan(id));
     let prior = if req.incremental {
         project_id
             .as_deref()
@@ -6571,6 +6850,44 @@ async fn onboard_audit_start(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
 ) -> Json<serde_json::Value> {
+    let job_id = start_audit_job(&state, req, AuditJobOptions::default()).await;
+    Json(serde_json::json!({ "job_id": job_id }))
+}
+
+/// How a started audit job differs from the plain "scan" the UI's scan button starts. Every
+/// field defaults to the plain scan, so [`onboard_audit_start`] passes `default()`.
+#[derive(Default)]
+pub(crate) struct AuditJobOptions {
+    /// The project the job belongs to. `None` = the active project (the plain scan).
+    pub project_id: Option<String>,
+    /// A prior scan manifest to use instead of the project's persisted incremental cache. The
+    /// delta rescan builds one from `git diff` so only the files changed since the inspected
+    /// commit are re-audited.
+    pub prior_override: Option<crate::scan_cache::ScanManifest>,
+    /// Notes to show with the result (for example "the inspection ran on a dirty tree").
+    pub extra_notes: Vec<String>,
+    /// Set for a delta retest: the finished report is recorded as a `DeltaRetest` inspection
+    /// entry instead of a full one.
+    pub delta: Option<DeltaRetest>,
+}
+
+/// The commits a delta retest ran between.
+#[derive(Clone)]
+pub(crate) struct DeltaRetest {
+    pub base_inspection_id: String,
+    pub from_sha: String,
+    pub to_sha: String,
+}
+
+/// Start the audit job for `req` and return its id. The asynchronous body of
+/// [`onboard_audit_start`], shared with the delta rescan (`client_source::rescan`) so there is
+/// ONE implementation of "run an audit as a job". See [`AuditJobOptions`].
+pub(crate) async fn start_audit_job(
+    state: &AppState,
+    req: AuditReq,
+    options: AuditJobOptions,
+) -> String {
+    let state = state.clone();
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -6617,12 +6934,18 @@ async fn onboard_audit_start(
     let (run_ai_review, run_deterministic, _coerced) =
         effective_scan_modes(req.run_ai_review, req.run_deterministic);
     // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
-    let (sources, notes) = resolve_local_sources(&state, &repos);
+    let (sources, mut notes) = resolve_local_sources(&state, &repos);
+    notes.extend(options.extra_notes);
+    let delta = options.delta;
 
-    // Capture the active project up front: the job is stamped with it (ROUTES-5, so a
-    // project's deep-report export finds ITS OWN latest deep report) AND it seeds the
-    // incremental-scan manifest lookup below.
-    let active_project = state.projects.active();
+    // Capture the project up front (the named one, else the active one): the job is stamped
+    // with it (ROUTES-5, so a project's deep-report export finds ITS OWN latest deep report)
+    // AND it seeds the incremental-scan manifest lookup below.
+    let active_project = options
+        .project_id
+        .as_deref()
+        .and_then(|id| state.projects.get(id))
+        .or_else(|| state.projects.active());
     let project_id = active_project.as_ref().map(|p| p.id.clone());
     let job_id = state.jobs.create("audit", project_id.clone());
     state.transcripts.clear(SCAN_AUDIT_KEY);
@@ -6640,21 +6963,23 @@ async fn onboard_audit_start(
     let jobs = state.jobs.clone();
     let transcripts = state.transcripts.clone();
     let jid = job_id.clone();
-    let prior = if req.incremental {
-        project_id
-            .as_deref()
-            .and_then(|id| state.scan_cache.get(id))
-    } else {
-        None
-    };
+    let prior = options.prior_override.or_else(|| {
+        if req.incremental {
+            project_id
+                .as_deref()
+                .and_then(|id| state.scan_cache.get(id))
+        } else {
+            None
+        }
+    });
     let scan_cache = state.scan_cache.clone();
     let soc2_enabled = state.feature_flags.soc2;
     // Captured for the spawned task so the async audit's model calls feed the cumulative meter.
     let usage_ledger = state.usage_ledger.clone();
-    // Captured so the async path can write to last_scan the instant the report is final.
-    let last_scan = state.last_scan.clone();
-    // Also capture recent_scan so the project-agnostic fallback is kept in sync.
-    let recent_scan = state.recent_scan.clone();
+    // Captured so the async path records the finished inspection (in-memory last_scan, the
+    // project-agnostic recent_scan fallback, and the persisted inspection entry) through the
+    // ONE shared writer, `AppState::set_last_scan`, the instant the report is final.
+    let scan_state = state.clone();
     tokio::spawn(async move {
         // PANIC GUARD (see `run_job_body_with_panic_guard`'s doc comment for the full
         // rationale): everything below runs the entire AI + deterministic pipeline in this
@@ -6851,13 +7176,25 @@ async fn onboard_audit_start(
             // Also update the project-agnostic `recent_scan` fallback so the active-project
             // context can surface this scan even if the active project changed since the
             // scan was submitted (or no project was active at submission time).
-            if let Some(id) = &project_id {
-                let mut guard = last_scan.lock().unwrap_or_else(|e| e.into_inner());
-                guard.insert(id.clone(), report.clone());
-            }
-            {
-                let mut recent = recent_scan.lock().unwrap_or_else(|e| e.into_inner());
-                *recent = Some(report.clone());
+            match (&project_id, &delta) {
+                // A delta retest is recorded as its own kind of inspection, naming the
+                // inspection it was computed from and the two commits between.
+                (Some(id), Some(d)) => {
+                    scan_state.record_inspection(
+                        id,
+                        &report,
+                        crate::inspections::InspectionKind::DeltaRetest {
+                            base_inspection_id: d.base_inspection_id.clone(),
+                            from_sha: d.from_sha.clone(),
+                            to_sha: d.to_sha.clone(),
+                        },
+                    );
+                    scan_state.set_last_scan_in_memory(id.clone(), report.clone());
+                }
+                (Some(id), None) => scan_state.set_last_scan(id.clone(), report.clone()),
+                // No project: only the project-agnostic fallback can hold it, and there is no
+                // project to key a persisted inspection to.
+                (None, _) => scan_state.set_recent_scan(report.clone()),
             }
 
             body_jobs.finish(&body_jid, report);
@@ -6865,7 +7202,7 @@ async fn onboard_audit_start(
         .await;
     });
 
-    Json(serde_json::json!({ "job_id": job_id }))
+    job_id
 }
 
 /// Poll an async audit job: status, progress (done/total passes), incremental findings, and
@@ -6910,67 +7247,23 @@ async fn cancel_audit_job(
     StatusCode::NO_CONTENT
 }
 
-/// Query parameters for `GET /api/onboard/finding-context`.
-#[derive(serde::Deserialize)]
-struct FindingContextQuery {
-    /// `owner/repo` — resolved to a local checkout via `settings.repo_path` /
-    /// `settings.workspace_root`, same as the git-status endpoints.
-    repo: String,
-    /// Repo-relative file path (as stored on `FindingView::path`).
-    path: String,
-    /// 1-based violation line (as stored on `FindingView::line`).
-    line: usize,
-    /// Optional first line of the scan-time stored `snippet`, for a cheap staleness check
-    /// (`matches_snippet` in the response). Absent = no comparison, never flagged stale.
-    #[serde(default)]
-    expect: Option<String>,
-}
-
 /// `GET /api/onboard/finding-context` — the enclosing-code-block lookup for the scan-review
 /// finding modal (`docs/design/2026-07-27_finding-code-context.md`). ON-DEMAND, not scan-time
 /// cached (see `onboard::finding_context` module docs for why): a handful of reads per triage
-/// session, always reflects the file as it exists now, zero LLM tokens (a pure local file
-/// read + deterministic parse).
+/// session, zero LLM tokens (a local read + deterministic parse).
 ///
-/// Resolves the repo dir exactly like the git-status endpoints (`resolve_git_dir`'s sibling
-/// here, inlined so the "unlinked repo" case maps to `file_missing` rather than a distinct
-/// error shape); an unresolved repo is indistinguishable from "file missing" to the UI, which
-/// is the correct degradation per the design's table. All other failure modes (missing file,
-/// non-UTF8, oversized, the line no longer existing, or a path-traversal refusal) are computed
-/// by `onboard::finding_context::lookup` and returned as `{ "status": "...", "reason": "..." }`
-/// — see that module for the floor guarantee. Path traversal is the only case that gets a
-/// non-200: everything else is 200 with a `status` field, exactly like every other onboard
-/// endpoint, so the UI's normal JSON-parsing path handles every case uniformly.
+/// The code is read from the INSPECTED COMMIT through git objects (so old findings stay accurate
+/// while the checkout sits at the latest commit), from the working tree only when the scan had
+/// no commit, and not at all when the repo's source was deleted (`status: "source_deleted"`).
+/// Where it may be read from is decided by `client_source::read::source_for_read`, the one
+/// resolver the code viewer will share. Every failure degrades to a `status` + `reason` the UI
+/// shows beside the stored snippet; path traversal is the only non-200. The response is never
+/// cached by the webview (`Cache-Control: no-store`).
 async fn onboard_finding_context(
     State(state): State<AppState>,
-    axum::extract::Query(q): axum::extract::Query<FindingContextQuery>,
-) -> impl IntoResponse {
-    let override_path = state.settings.repo_path(&q.repo);
-    let workspace_root = state.settings.workspace_root();
-    let Some(repo_dir) = crate::workspace::resolve_repo_dir(
-        override_path.as_deref(),
-        workspace_root.as_deref(),
-        &q.repo,
-    ) else {
-        // Unlinked project / repo path unresolved — treated as file_missing (design §5).
-        return (
-            StatusCode::OK,
-            Json(crate::onboard::finding_context::FindingContextOutcome::FileMissing.to_json()),
-        );
-    };
-
-    let outcome =
-        crate::onboard::finding_context::lookup(&repo_dir, &q.path, q.line, q.expect.as_deref())
-            .await;
-    let status = if matches!(
-        outcome,
-        crate::onboard::finding_context::FindingContextOutcome::PathTraversal
-    ) {
-        StatusCode::BAD_REQUEST
-    } else {
-        StatusCode::OK
-    };
-    (status, Json(outcome.to_json()))
+    axum::extract::Query(q): axum::extract::Query<crate::client_source::read::FindingContextParams>,
+) -> Response {
+    crate::client_source::read::finding_context(&state, q).await
 }
 
 /// Query parameters for `GET /api/onboard/finding-fix`.
@@ -7439,15 +7732,21 @@ async fn onboard_apply(
             continue;
         };
         // Clone into the workspace root only when there's no explicit override (never clone
-        // over a folder the architect chose by hand).
-        let clone_root = if override_path
-            .as_deref()
-            .map(|p| !p.trim().is_empty())
-            .unwrap_or(false)
-        {
-            None
-        } else {
-            workspace_root.as_deref().map(std::path::Path::new)
+        // over a folder the architect chose by hand), and never for a repo whose source was
+        // deleted on purpose: that stays deleted until "Re-fetch source".
+        let clone_root = match crate::client_source::resolution::clone_root_for(
+            &state,
+            repo,
+            override_path.as_deref(),
+            workspace_root.as_deref(),
+        ) {
+            Ok(root) => root,
+            Err(refusal) => {
+                results.push(serde_json::json!({
+                    "repo": repo, "ok": false, "code": refusal.code, "message": refusal.message
+                }));
+                continue;
+            }
         };
         let msg = format!("chore(governance): apply Camerata ruleset to {repo}");
         match crate::workspace::apply_local_and_push(
@@ -7498,18 +7797,7 @@ async fn project_repo_health(
     let Some(project) = state.projects.get(&id) else {
         return Json(serde_json::json!({ "ok": false, "message": "unknown project", "repos": [] }));
     };
-    let workspace_root = state.settings.workspace_root();
-    let mut out = Vec::new();
-    for repo in &project.repos {
-        let override_path = state.settings.repo_path(repo);
-        let res = crate::workspace::repo_resolution(
-            override_path.as_deref(),
-            workspace_root.as_deref(),
-            repo,
-        )
-        .await;
-        out.push(res);
-    }
+    let out = crate::client_source::resolution::resolve_all(&state, &project).await;
     Json(serde_json::json!({ "ok": true, "repos": out }))
 }
 
@@ -7575,21 +7863,12 @@ async fn project_readiness(
             "repos": [],
         }));
     };
-    let workspace_root = state.settings.workspace_root();
-    let mut resolutions = Vec::with_capacity(project.repos.len());
-    let mut resolved_flags = Vec::with_capacity(project.repos.len());
-    for repo in &project.repos {
-        let override_path = state.settings.repo_path(repo);
-        let res = crate::workspace::repo_resolution(
-            override_path.as_deref(),
-            workspace_root.as_deref(),
-            repo,
-        )
-        .await;
-        resolved_flags.push(res.resolved);
-        resolutions.push(res);
-    }
-    let readiness = camerata_app_core::readiness::classify_readiness(&resolved_flags);
+    let resolutions = crate::client_source::resolution::resolve_all(&state, &project).await;
+    let links: Vec<camerata_app_core::readiness::RepoLink> = resolutions
+        .iter()
+        .map(crate::client_source::resolution::link_of)
+        .collect();
+    let readiness = camerata_app_core::readiness::classify_links(&links);
     Json(serde_json::json!({
         "ok": true,
         "readiness": readiness,
@@ -7605,19 +7884,13 @@ async fn derive_project_readiness(
     id: &str,
 ) -> Option<camerata_app_core::readiness::ProjectReadiness> {
     let project = state.projects.get(id)?;
-    let workspace_root = state.settings.workspace_root();
-    let mut flags = Vec::with_capacity(project.repos.len());
-    for repo in &project.repos {
-        let override_path = state.settings.repo_path(repo);
-        let res = crate::workspace::repo_resolution(
-            override_path.as_deref(),
-            workspace_root.as_deref(),
-            repo,
-        )
-        .await;
-        flags.push(res.resolved);
-    }
-    Some(camerata_app_core::readiness::classify_readiness(&flags))
+    let links: Vec<camerata_app_core::readiness::RepoLink> =
+        crate::client_source::resolution::resolve_all(state, &project)
+            .await
+            .iter()
+            .map(crate::client_source::resolution::link_of)
+            .collect();
+    Some(camerata_app_core::readiness::classify_links(&links))
 }
 
 #[derive(serde::Deserialize)]
@@ -7921,20 +8194,38 @@ async fn onboard_ignore(
 async fn project_suppressions(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<crate::suppression::SuppressionRecord>>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     let project = state
         .projects
         .get(&id)
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
+    // A repo whose source was deleted has no tree to read: say so (with the date) instead of
+    // silently listing nothing for it. The other repos are still read.
+    let deleted: Vec<(String, String)> = project
+        .repos
+        .iter()
+        .filter_map(|repo| {
+            crate::client_source::status::deleted_record(&state, &project.id, repo)
+                .map(|r| (repo.clone(), r.completed_at))
+        })
+        .collect();
     // Local-first: the waiver registry reads each repo's local working tree, not GitHub.
     let (sources, _notes) = resolve_local_sources(&state, &project.repos);
-    // Refresh = best-effort fast-forward pull of each local repo so the listing reflects the
-    // latest remote state, THEN read. A pull failure (diverged/offline/dirty) is non-fatal: we
-    // still read whatever is on disk. This endpoint is informational and read-only.
-    for (_spec, dir) in &sources {
-        let _ = crate::workspace::pull_local_ff(dir).await;
-    }
-    Ok(Json(crate::onboard::suppression_registry(&sources).await))
+    // Read-only, as a GET must be: this used to fast-forward `git pull` every repo first, which
+    // moved a checkout past the inspected commit just by opening a screen (and cannot work on a
+    // detached HEAD, where a re-fetch at the inspected commit leaves the tree). The Workspace
+    // tab's "Clone / update all repos" is the deliberate way to refresh.
+    let entries = crate::onboard::suppression_registry(&sources).await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "source_deleted": !deleted.is_empty(),
+        "deleted_at": deleted.first().map(|(_, at)| at.as_str()),
+        "deleted_repos": deleted
+            .iter()
+            .map(|(repo, at)| serde_json::json!({ "repo": repo, "deleted_at": at }))
+            .collect::<Vec<_>>(),
+        "entries": entries,
+    })))
 }
 
 /// One CI-tier rule sent by the UI for story generation. Carries the rule id and title
@@ -8702,12 +8993,26 @@ struct GenerateCiWorkflowReq {
 ///
 /// A missing manifest is NOT an error — it generates a workflow with only the
 /// built-in language steps. The caller can store the YAML in the repo.
-async fn generate_ci_workflow(Json(req): Json<GenerateCiWorkflowReq>) -> Json<serde_json::Value> {
+async fn generate_ci_workflow(Json(req): Json<GenerateCiWorkflowReq>) -> axum::response::Response {
     use crate::workflow_gen::generate_gates_workflow;
+    use axum::response::IntoResponse;
     use camerata_checks::manifest::load_manifest;
     use std::path::Path;
 
     let root = Path::new(&req.repo_root);
+    // Only ever write into an existing git checkout. Without this the route created
+    // `<repo_root>/.github/workflows/` (and every missing parent) for ANY path, which brought
+    // back the folder of a repo whose source was deleted on purpose and then blocked re-fetch.
+    if !crate::workspace::is_git_repo(root) {
+        return crate::client_source::Refusal::conflict(
+            "not_a_git_repo",
+            format!(
+                "{} is not a git checkout, so no workflow was written.",
+                root.display()
+            ),
+        )
+        .into_response();
+    }
 
     // Load manifest (best-effort: absent/invalid → empty).
     let manifest = match load_manifest(root) {
@@ -8736,7 +9041,8 @@ async fn generate_ci_workflow(Json(req): Json<GenerateCiWorkflowReq>) -> Json<se
             return Json(serde_json::json!({
                 "ok": false,
                 "message": format!("failed to create workflow dir: {e}")
-            }));
+            }))
+            .into_response();
         }
     }
 
@@ -8744,7 +9050,8 @@ async fn generate_ci_workflow(Json(req): Json<GenerateCiWorkflowReq>) -> Json<se
         return Json(serde_json::json!({
             "ok": false,
             "message": format!("failed to write workflow file: {e}")
-        }));
+        }))
+        .into_response();
     }
 
     Json(serde_json::json!({
@@ -8752,6 +9059,7 @@ async fn generate_ci_workflow(Json(req): Json<GenerateCiWorkflowReq>) -> Json<se
         "path": workflow_path.display().to_string(),
         "yaml": yaml
     }))
+    .into_response()
 }
 
 // ── Greenfield scaffold handler ───────────────────────────────────────────────
@@ -9043,6 +9351,20 @@ fn normalize_repos(repos: &[String], project_repos: &[String]) -> Vec<String> {
 /// rule's description. The rule-bank is the source; the project stores only the
 /// selection (id + chosen option + repos).
 async fn resolve_project_arm_rules(project: &crate::project::Project) -> Vec<crate::arm::ArmRule> {
+    let mut out = resolve_project_selection_rules(project).await;
+    // Drop any rule whose repos normalized to empty (a leaked sentinel on a project with
+    // no real repos): it has nowhere to emit and would only be dead weight downstream.
+    out.retain(|r| !r.repos.is_empty());
+    out
+}
+
+/// Every base selection of the project resolved to a rule (directive, enforcement, placement),
+/// INCLUDING project-level selections whose placement is empty. [`resolve_project_arm_rules`] is
+/// this minus the rules with nowhere to emit; a SCAN, which audits project-level rules too, uses
+/// this directly.
+pub(crate) async fn resolve_project_selection_rules(
+    project: &crate::project::Project,
+) -> Vec<crate::arm::ArmRule> {
     let corpus_path = camerata_rules::corpus_path();
     let set = if corpus_path.exists() {
         Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
@@ -9095,9 +9417,6 @@ async fn resolve_project_arm_rules(project: &crate::project::Project) -> Vec<cra
             repos: normalize_repos(&sel.repos, &project.repos),
         });
     }
-    // Drop any rule whose repos normalized to empty (a leaked sentinel on a project with
-    // no real repos): it has nowhere to emit and would only be dead weight downstream.
-    out.retain(|r| !r.repos.is_empty());
     out
 }
 
@@ -9251,14 +9570,19 @@ async fn emit_project_local(
             }));
             continue;
         };
-        let clone_root = if override_path
-            .as_deref()
-            .map(|p| !p.trim().is_empty())
-            .unwrap_or(false)
-        {
-            None
-        } else {
-            workspace_root.as_deref().map(std::path::Path::new)
+        let clone_root = match crate::client_source::resolution::clone_root_for(
+            &state,
+            repo,
+            override_path.as_deref(),
+            workspace_root.as_deref(),
+        ) {
+            Ok(root) => root,
+            Err(refusal) => {
+                results.push(serde_json::json!({
+                    "repo": repo, "ok": false, "code": refusal.code, "message": refusal.message
+                }));
+                continue;
+            }
         };
         let msg = format!("chore(governance): re-emit Camerata ruleset to {repo}");
         match crate::workspace::apply_local(
@@ -10725,7 +11049,7 @@ async fn list_credentials(State(state): State<AppState>) -> Json<Vec<CredentialS
 async fn checkout_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<crate::workspace::RepoCheckout>>, AppError> {
+) -> Result<Json<Vec<crate::client_source::resolution::RepoCheckoutView>>, AppError> {
     let project = state
         .projects
         .get(&id)
@@ -10733,21 +11057,11 @@ async fn checkout_status(
     // Override-aware (issue #33/#38): resolve each repo via its per-repo path override first,
     // falling back to `<workspace_root>/<owner>/<repo>`. A repo can resolve via an override even
     // when no workspace root is set, so we do NOT hard-fail on a missing workspace root — repos
-    // that resolve via neither report not-cloned with a helpful reason instead.
-    let workspace_root = state.settings.workspace_root();
-    let mut out = Vec::with_capacity(project.repos.len());
-    for repo in &project.repos {
-        let override_path = state.settings.repo_path(repo);
-        out.push(
-            crate::workspace::checkout_status_resolved(
-                override_path.as_deref(),
-                workspace_root.as_deref(),
-                repo,
-            )
-            .await,
-        );
-    }
-    Ok(Json(out))
+    // that resolve via neither report not-cloned with a helpful reason instead. Each repo also
+    // carries its source status (present / deleted / unresolved / mismatch).
+    Ok(Json(
+        crate::client_source::resolution::checkout_views(&state, &project).await,
+    ))
 }
 
 /// The effective workspace root (fix for the "no workspace folder chosen yet" dead end): the
@@ -10773,7 +11087,7 @@ fn effective_workspace_root(state: &AppState, project: &crate::project::Project)
 async fn checkout_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<crate::workspace::RepoCheckout>>, AppError> {
+) -> Result<Json<Vec<crate::client_source::resolution::RepoCheckoutView>>, AppError> {
     let project = state
         .projects
         .get(&id)
@@ -10793,6 +11107,26 @@ async fn checkout_project(
     let root = std::path::PathBuf::from(&root);
     let mut out = Vec::with_capacity(project.repos.len());
     for repo in &project.repos {
+        // A repo whose source the operator DELETED stays deleted: updating the others must not
+        // quietly re-clone it as a side effect. "Re-fetch source" is the deliberate way back.
+        if let Some(record) =
+            crate::client_source::status::deleted_record(&state, &project.id, repo)
+        {
+            let status =
+                crate::client_source::status::source_status(&state, &project.id, repo).await;
+            out.push(crate::client_source::resolution::RepoCheckoutView::new(
+                crate::workspace::RepoCheckout {
+                    repo: repo.clone(),
+                    cloned: false,
+                    path: record.path.clone(),
+                    branch: None,
+                    dirty: false,
+                    detail: String::new(),
+                },
+                status,
+            ));
+            continue;
+        }
         // If the repo ALREADY resolves (override-aware git checkout with a matching origin),
         // REFRESH it (pull/fetch its current branch) instead of just re-reporting stale status —
         // "Clone / update all repos" must actually update repos that are already linked/cloned, not
@@ -10805,15 +11139,19 @@ async fn checkout_project(
             repo,
         )
         .await;
-        if resolution.resolved {
+        let checkout = if resolution.resolved {
             let dir = resolution
                 .path
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| crate::workspace::repo_dir(&root, repo));
-            out.push(crate::workspace::refresh_resolved(&dir, repo, &token).await);
-            continue;
-        }
-        out.push(crate::workspace::clone_or_pull(&root, repo, &token).await);
+            crate::workspace::refresh_resolved(&dir, repo, &token).await
+        } else {
+            crate::workspace::clone_or_pull(&root, repo, &token).await
+        };
+        let source = crate::client_source::status::source_status(&state, &project.id, repo).await;
+        out.push(crate::client_source::resolution::RepoCheckoutView::new(
+            checkout, source,
+        ));
     }
     Ok(Json(out))
 }
@@ -16486,6 +16824,14 @@ async fn export_product(
     };
     // Proof the gate ran, visible to the cockpit without reading the zip.
     let release_checks = released.report.check_names().join(", ");
+    // Remember what was delivered on the inspection it came from (hash and manifest). A failure
+    // to save never blocks the export the operator asked for.
+    if let Err(e) = state
+        .inspections
+        .set_package(&id, released.package_record())
+    {
+        tracing::warn!(project = %id, "could not record the delivered package: {e}");
+    }
     let stem = released.stem;
     let zip_bytes = released.bytes;
 

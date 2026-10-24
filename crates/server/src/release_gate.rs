@@ -168,6 +168,31 @@ pub struct ReleasedZip {
     pub report: GateReport,
 }
 
+impl ReleasedZip {
+    /// What to remember about this package on the inspection it was made from: when, the
+    /// SHA-256 of the exact bytes delivered, and the manifest inside them (file names and
+    /// hashes), so the package can be proven later without the zip. A manifest that cannot be
+    /// read back is recorded as `null` rather than failing the export: the hash still proves
+    /// the bytes.
+    pub fn package_record(&self) -> crate::inspections::PackageRecord {
+        use sha2::{Digest, Sha256};
+        let zip_sha256: String = Sha256::digest(&self.bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let manifest_json = read_zip_entries(&self.bytes)
+            .ok()
+            .and_then(|entries| entries.get("manifest.json").cloned())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or(serde_json::Value::Null);
+        crate::inspections::PackageRecord {
+            generated_at: crate::client_source::records::now_rfc3339(),
+            zip_sha256,
+            manifest_json,
+        }
+    }
+}
+
 /// Why [`release`] produced no zip.
 #[derive(Debug)]
 pub enum ReleaseError {

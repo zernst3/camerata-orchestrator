@@ -309,7 +309,18 @@ pub(super) struct SuppressionView {
     pub repo: String,
 }
 
-pub(super) async fn fetch_suppressions(project_id: &str) -> Option<Vec<SuppressionView>> {
+/// `GET /api/projects/:id/suppressions`: the waivers found in the repos whose source is on this
+/// machine, plus the date a repo's source was deleted when one was (its waivers cannot be read).
+#[derive(Clone, PartialEq, serde::Deserialize)]
+pub(super) struct SuppressionsListing {
+    #[serde(default)]
+    pub entries: Vec<SuppressionView>,
+    /// RFC3339 time the first deleted repo's source was removed; `None` when none was.
+    #[serde(default)]
+    pub deleted_at: Option<String>,
+}
+
+pub(super) async fn fetch_suppressions(project_id: &str) -> Option<SuppressionsListing> {
     reqwest::get(format!(
         "{}/api/projects/{}/suppressions",
         crate::bff_base(),
@@ -317,14 +328,14 @@ pub(super) async fn fetch_suppressions(project_id: &str) -> Option<Vec<Suppressi
     ))
     .await
     .ok()?
-    .json::<Vec<SuppressionView>>()
+    .json::<SuppressionsListing>()
     .await
     .ok()
 }
 
 /// The central suppression audit view: an INFORMATIONAL, read-only listing of everything waived
 /// across the project's repos (inline waivers + baseline), with stale ones flagged. Hidden until
-/// the user hits Refresh, which fast-forward-pulls each repo and then lists.
+/// the user hits Refresh, which re-reads each repo's code on this machine and lists (read-only).
 #[component]
 pub(super) fn SuppressionsPanel(project_id: String) -> Element {
     let pid = project_id.clone();
@@ -359,16 +370,29 @@ pub(super) fn SuppressionsPanel(project_id: String) -> Element {
                 }
             }
             p { class: "section-hint",
-                "Informational and read-only. Findings the team has waived across this project's repos — inline waivers (// camerata:allow) and baseline entries. Refresh fast-forward-pulls each repo, then lists what's waived. \"stale\" = the waiver no longer matches any live finding (a dead waiver, safe to remove)."
+                "Informational and read-only. Findings the team has waived across this project's repos — inline waivers (// camerata:allow) and baseline entries. Refresh re-reads each repo's code on this machine (it never changes it; use Clone / update on the Workspace tab to refresh the code itself). \"stale\" = the waiver no longer matches any live finding (a dead waiver, safe to remove)."
             }
             if !requested() {
-                p { class: "section-hint", "Press Refresh to pull the repos and list their waivers." }
+                p { class: "section-hint", "Press Refresh to list the waivers in the code on this machine." }
             } else {
                 match state {
-                    None => rsx! { p { class: "section-hint", "Refreshing… (pulling repos)" } },
+                    None => rsx! { p { class: "section-hint", "Refreshing… (reading the repos)" } },
                     Some(None) => rsx! { p { class: "section-hint", "Couldn't read suppressions (no local clones, or repos unreadable)." } },
-                    Some(Some(v)) if v.is_empty() => rsx! { p { class: "section-hint", "No suppressions recorded." } },
-                    Some(Some(v)) => rsx! {
+                    Some(Some(listing)) if listing.entries.is_empty() => rsx! {
+                        if let Some(at) = &listing.deleted_at {
+                            p { class: "section-hint",
+                                {format!("Source deleted on {}. Waivers live in the code, so they can be listed again once the source is re-fetched.", camerata_ui_core::source::format_date(at))}
+                            }
+                        } else {
+                            p { class: "section-hint", "No suppressions recorded." }
+                        }
+                    },
+                    Some(Some(listing)) => rsx! {
+                        if let Some(at) = &listing.deleted_at {
+                            p { class: "section-hint",
+                                {format!("Some source was deleted on {}; only the repos still on this machine are listed.", camerata_ui_core::source::format_date(at))}
+                            }
+                        }
                         div { class: "sups-scroll",
                             table { class: "sups-table",
                                 thead {
@@ -383,7 +407,7 @@ pub(super) fn SuppressionsPanel(project_id: String) -> Element {
                                     }
                                 }
                                 tbody {
-                                    for (i , s) in v.iter().enumerate() {
+                                    for (i , s) in listing.entries.iter().enumerate() {
                                         tr { key: "{i}", class: if s.stale { "sup-row stale" } else { "sup-row" },
                                             td { class: "sup-rule", "{s.rule_id}" }
                                             td { class: "sup-repo", "{s.repo}" }
@@ -2905,6 +2929,9 @@ pub(super) fn RulesView() -> Element {
     // imported scoping as-is.
     let mut import_repos = use_signal(Vec::<String>::new);
     let mut emitting_local = use_signal(|| false);
+    // Emitting writes into (and would re-clone) every repo's checkout, so it is off while any
+    // repo's source is deleted on purpose; the notice beside it carries the way back.
+    let source_block = crate::source_ui::use_scan_block();
     // Emit cascade toggles (each requires the previous): commit to a managed branch → push it →
     // open a PR. All off = write the ruleset into the local working copy only.
     let mut emit_branch = use_signal(|| false);
@@ -3185,7 +3212,7 @@ pub(super) fn RulesView() -> Element {
                         div { class: "rules-emit",
                             button {
                                 class: "btn-run",
-                                disabled: emitting_local(),
+                                disabled: emitting_local() || source_block.is_some(),
                                 onclick: move |_| {
                                     let id = pid_emit_local.clone();
                                     let (b, pu, pr) = (emit_branch(), emit_push(), emit_pr());
@@ -3201,6 +3228,9 @@ pub(super) fn RulesView() -> Element {
                                     });
                                 },
                                 if emitting_local() { "Emitting…" } else { "Emit rules locally" }
+                            }
+                            if let Some(block) = source_block.clone() {
+                                crate::source_ui::ScanBlockNotice { block }
                             }
                             // Cascading toggles. Unchecking a level clears the deeper ones so a
                             // request can never be branch=false but push=true.
@@ -3901,6 +3931,11 @@ pub(super) fn ProposedRulesTable(
     findings: Vec<FindingView>,
     on_audit: EventHandler<Vec<SelectedAuditRule>>,
     auditing: bool,
+    /// Set when an audited repo's source was deleted from this machine: audit, apply and
+    /// open-PR then need source that is not there, so they are disabled (the notice carries the
+    /// way back).
+    #[props(default)]
+    scan_block: Option<camerata_ui_core::readiness::ScanBlock>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
@@ -4357,10 +4392,13 @@ pub(super) fn ProposedRulesTable(
                 }
             }
         }
+        if let Some(block) = scan_block.clone() {
+            crate::source_ui::ScanBlockNotice { block }
+        }
         div { class: "findings-toolbar",
             button {
                 class: "btn-run",
-                disabled: auditing,
+                disabled: auditing || scan_block.is_some(),
                 title: unresolved_hint.clone(),
                 onclick: move |_| {
                     // Build the audit request from EVERY repo's saved selection, so one scan
@@ -4418,7 +4456,7 @@ pub(super) fn ProposedRulesTable(
             }
             button {
                 class: "btn-run",
-                disabled: arming(),
+                disabled: arming() || scan_block.is_some(),
                 title: unresolved_hint.clone(),
                 onclick: move |_| {
                     // Arm across EVERY repo's selection: a rule selected in one or more repos'
@@ -4547,7 +4585,7 @@ pub(super) fn ProposedRulesTable(
             }
             button {
                 class: "btn-run",
-                disabled: opening_pr() || applied_repos().is_empty(),
+                disabled: opening_pr() || applied_repos().is_empty() || scan_block.is_some(),
                 title: if applied_repos().is_empty() { "Apply the rules first; then open the PR from the pushed branch." } else { "" },
                 onclick: move |_| {
                     let repos = applied_repos();
@@ -6626,28 +6664,35 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-1/suppressions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                {
-                    "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
-                    "path": "src/main.rs",
-                    "line": 12,
-                    "source": "inline",
-                    "stale": false,
-                    "repo": "me/api"
-                }
-            ])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "source_deleted": true,
+                "deleted_at": "2026-10-24T17:40:19Z",
+                "entries": [
+                    {
+                        "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+                        "path": "src/main.rs",
+                        "line": 12,
+                        "source": "inline",
+                        "stale": false,
+                        "repo": "me/api"
+                    }
+                ]
+            })))
             .mount(&server)
             .await;
 
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let sups = super::fetch_suppressions("proj-1").await;
 
-        let sups = sups.expect("valid array parses");
+        let listing = sups.expect("a valid envelope parses");
+        let sups = listing.entries;
         assert_eq!(sups.len(), 1);
         assert_eq!(sups[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
         assert_eq!(sups[0].line, Some(12));
         assert!(!sups[0].stale);
         assert_eq!(sups[0].repo, "me/api");
+        assert_eq!(listing.deleted_at.as_deref(), Some("2026-10-24T17:40:19Z"));
     }
 
     #[tokio::test]
@@ -7046,7 +7091,7 @@ mod render_tests {
         );
         // Before Refresh is pressed the panel shows the press-Refresh hint, not a table.
         assert!(
-            html.contains("Press Refresh to pull the repos"),
+            html.contains("Press Refresh to list the waivers"),
             "the hidden-until-refresh hint; html=\n{html}"
         );
         assert!(
