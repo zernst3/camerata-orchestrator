@@ -102,6 +102,19 @@ pub fn walk_totals(path: &Path, skip: &[PathBuf]) -> (u64, u64) {
     totals
 }
 
+/// The registered worktrees that live inside `checkout`, as canonical paths, for the checkout's
+/// walk to skip (each is counted by its own step). Compared canonically: git reports worktrees
+/// by the spelling it was given and the checkout is canonical, so a raw prefix test misses an
+/// alias such as macOS's `/var` for `/private/var` and counts the files twice.
+fn worktrees_inside(checkout: &Path, worktrees: &[PathBuf]) -> Vec<PathBuf> {
+    let checkout = crate::onboard::finding_context::canonicalize_existing_prefix(checkout);
+    worktrees
+        .iter()
+        .map(|w| crate::onboard::finding_context::canonicalize_existing_prefix(w))
+        .filter(|w| w.starts_with(&checkout))
+        .collect()
+}
+
 /// Session files recorded for deletion: for each id, every `<claude dir>/*/<id>.jsonl` file and
 /// `<claude dir>/*/<id>/` directory that exists. Blocking.
 fn find_session_paths(claude_dir: &Path, id: &str) -> Vec<(PathBuf, bool)> {
@@ -155,11 +168,7 @@ pub async fn plan(state: &AppState, target: &GuardedTarget) -> PurgePlan {
             action: Action::Worktree(wt),
         });
     }
-    let inside: Vec<PathBuf> = worktrees
-        .iter()
-        .filter(|w| w.starts_with(&target.path))
-        .cloned()
-        .collect();
+    let inside = worktrees_inside(&target.path, &worktrees);
     let checkout = target.path.clone();
     let totals = tokio::task::spawn_blocking({
         let checkout = checkout.clone();
@@ -441,6 +450,33 @@ mod tests {
         assert_eq!(walk_totals(root, &[root.join("skipme")]), (2, 8));
         assert_eq!(walk_totals(&root.join("a/one"), &[]), (1, 5));
         assert_eq!(walk_totals(&root.join("missing"), &[]), (0, 0));
+    }
+
+    /// A worktree reported through an alias of the checkout's real path is still recognised as
+    /// inside it, so the checkout's walk skips it and no file is counted twice.
+    #[cfg(unix)]
+    #[test]
+    fn worktrees_inside_compares_canonical_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().canonicalize().unwrap().join("real");
+        std::fs::create_dir_all(real.join("checkout/.camerata-worktrees/wt")).unwrap();
+        std::fs::create_dir_all(real.join("elsewhere/wt")).unwrap();
+        let alias = tmp.path().canonicalize().unwrap().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+        let inside = worktrees_inside(
+            &real.join("checkout"),
+            &[
+                alias.join("checkout/.camerata-worktrees/wt"),
+                alias.join("elsewhere/wt"),
+            ],
+        );
+
+        assert_eq!(inside, vec![real.join("checkout/.camerata-worktrees/wt")]);
+        // And the checkout's walk then skips it.
+        std::fs::write(real.join("checkout/.camerata-worktrees/wt/f"), "12345").unwrap();
+        std::fs::write(real.join("checkout/g"), "123").unwrap();
+        assert_eq!(walk_totals(&real.join("checkout"), &inside), (1, 3));
     }
 
     #[cfg(unix)]

@@ -431,14 +431,15 @@ any removal, in this order; the first failing check is the one reported. `Refusa
 | R3 | `not_a_directory` | the path exists and is a directory | "<path> does not exist (or is not a folder). Nothing to delete." (if a deletion record exists this is reported as `already_deleted`, not a refusal) |
 | R4 | `symlinked_path` | no component of the path, including the last, is a symlink (`symlink_metadata` on each prefix) | "<path> is a symbolic link. Camerata deletes only a real folder; link the real folder instead." |
 | R5 | `protected_path` | the canonical path is not `/`, not `$HOME`, not `settings.workspace_root`, not an ancestor of `dirs::data_dir()/camerata`, not an ancestor of the running executable's directory, and has at least 3 components | "<path> is a protected location, not a repository checkout." |
-| R6 | `not_a_git_repo` | `<path>/.git` exists (dir or gitfile) | "<path> is not a git repository (no .git). Camerata deletes only a git checkout whose origin matches the project." |
+| R6 | `not_a_git_repo` | `<path>/.git` exists | "<path> is not a git repository (no .git). Camerata deletes only a git checkout whose origin matches the project." |
+| R6b | `linked_worktree` | `<path>/.git` is a directory, not a file (a file means a linked worktree of another clone) | "<path> is a worktree of the clone at <clone>; delete that clone instead." |
 | R7 | `no_origin` / `origin_not_github` | `detect_remote_repo(path)` is `Ok` | its message ("that folder has no `origin` remote ..." / "the origin remote isn't a GitHub URL: ...") |
 | R8 | `origin_mismatch` | `found.eq_ignore_ascii_case(repo)` (same comparison as `repo_resolution`, `workspace.rs:413`) | "<path> is a clone of <found>, not acme/app. Nothing was deleted." |
 | R9 | `confirmation_mismatch` | `req.confirm == repo` byte-for-byte (the dialog shows the exact string) | "Type the repository name exactly as shown: acme/app." |
 | R10 | `dirty_tree` | `git status --porcelain` empty, OR `include_uncommitted` | "acme/app has uncommitted changes (<n> files). Tick 'Delete uncommitted work too' to remove them." |
 | R11 | `unpushed_commits` | every local branch has `git rev-list --count origin/<b>..<b>` == 0 (branches with no upstream count as unpushed), OR `include_uncommitted` | "acme/app has commits that are not on GitHub (<branch>: <n>). Tick 'Delete uncommitted work too' to remove them." |
 | R12 | `scan_in_progress` | no running audit job for the project (`JobStore` status), no re-fetch in flight for the repo (a per-repo `Mutex` in `client_source`) | "A scan is running for this project. Wait for it to finish or cancel it first." |
-| R13 | `worktree_outside_refused` | every registered worktree path (from `git worktree list --porcelain`) passes R4 and R5 itself | "A worktree of acme/app at <path> is in a protected location; remove it by hand first." |
+| R13 | `worktree_outside_refused` | every registered worktree path (from `git worktree list --porcelain`, after `git worktree prune`, minus `prunable` entries and the target itself) passes R4 and R5 itself, and each existing one has a `.git` file pointing into this clone's `worktrees/` area | "A worktree of acme/app at <path> is in a protected location; remove it by hand first." |
 
 R10 and R11 exist because Camerata's own governed-dev flows commit on branches in these
 checkouts (`commit_all`, `workspace.rs:1498`); deleting unpushed client remediation silently

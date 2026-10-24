@@ -681,13 +681,23 @@ When it finishes you get the **deletion record**: what was removed, from where, 
 inspected commit. Use **Copy record** or **Save record as .txt** to hand it to the client. The same
 record is under **View deletion record** on the card afterwards.
 
+If you linked the repo to a folder yourself (Repo health, "choose the folder"), Delete works on
+that folder. It can aim at any clone, anywhere on disk, whose `origin` is the project's repo: that
+is by design, so a second clone can be removed through its project. The uncommitted-work and
+unpushed-commit checks still apply to that clone, and a folder that is itself a linked worktree of
+another clone is refused ("delete that clone instead").
+
 What is kept, on purpose: the findings with the lines of code they quote, because they are the
-deliverable. The record says so.
+deliverable. The record says so. It also says what it cannot cover: Claude Code session files
+from inspections that ran before Camerata recorded session ids, sessions of the chat assistant and
+of governed development that read the repo's code, files left under an old path if you moved the
+checkout, and other projects' scan caches for the same repo (only when they exist). Clear those by
+hand if the client requires it (Claude Code keeps sessions under `~/.claude/projects`).
 
 **While the source is deleted.** The project keeps working. Findings, triage, the PDF, the Excel
 workbook and the product package all regenerate from the stored inspection. Anything that needs the
-code (scan, rescan, adding rules to a repo, opening a pull request, governed development) is switched
-off, and says "Source for acme/app was deleted on 24 Oct 2026. Re-fetch source from the Workspace tab
+code (scan, rescan, adding rules to a repo, emitting rules locally, opening a pull request, governed
+development) is switched off, and says "Source for acme/app was deleted on 24 Oct 2026. Re-fetch source from the Workspace tab
 to rescan." In a finding, the code area reads "Source deleted on 24 Oct 2026, re-fetch to view" with
 the quoted line still shown above it.
 

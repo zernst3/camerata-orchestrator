@@ -24,6 +24,15 @@
 //! it. Code excerpts inside its findings are part of the delivered product and stay (Zach,
 //! 2026-10-22); they are why deletion's purge-completeness test distinguishes "kept" from "must
 //! vanish".
+//!
+//! # Growth and write cost
+//!
+//! Every entry is kept (it is the inspection history). Each write rewrites the project's whole
+//! file, so a write costs the sum of that project's report sizes; writes happen a handful of
+//! times per inspection (append at the end of a scan, an alternatives amend, a recorded session,
+//! the package record, and session forgetting at deletion), never per request. That is
+//! acceptable for the dozens of inspections a project realistically accumulates. If histories
+//! reach hundreds, the next step is one file per entry (the atomic rename keeps working).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

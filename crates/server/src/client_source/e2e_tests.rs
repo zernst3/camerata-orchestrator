@@ -613,18 +613,51 @@ fn unzip(bytes: &[u8]) -> std::collections::BTreeMap<String, Vec<u8>> {
     out
 }
 
+/// Whether `typst` (which compiles every PDF) is missing. A test that needs a PDF skips itself
+/// with a message naming it, instead of returning silently; the assertions that need no PDF live
+/// in tests of their own that always run.
+fn typst_missing(test: &str) -> bool {
+    let missing = std::process::Command::new("typst")
+        .arg("--version")
+        .output()
+        .is_err();
+    if missing {
+        eprintln!("SKIPPED {test}: typst is not on PATH, so no PDF can be compiled");
+    }
+    missing
+}
+
+/// Delete `REPO` over HTTP exactly as the modal does; returns the record's `completed_at`.
+async fn delete_over_http(fx: &Fx) -> String {
+    let (status, body) = call(
+        &fx.state,
+        "POST",
+        &format!(
+            "/api/projects/{}/repos/acme%2Fapp/source/delete",
+            fx.project_id
+        ),
+        serde_json::json!({ "confirm": REPO, "include_uncommitted": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        json(&body)["ok"],
+        true,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(!fx.checkout.exists());
+    json(&body)["record"]["completed_at"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn export_product_works_after_restart_and_records_package() {
     use sha2::{Digest, Sha256};
-    if std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!(
-            "skipping export_product_works_after_restart_and_records_package: typst not on PATH"
-        );
+    if typst_missing("export_product_works_after_restart_and_records_package") {
         return;
     }
     let rig = rig();
@@ -682,43 +715,16 @@ async fn export_product_works_after_restart_and_records_package() {
     );
 }
 
+/// Everything about a project that needs NO PDF keeps working after its source is deleted and
+/// the server restarts: readiness, status, the draft, the findings, the code view, the refusals
+/// and the Workspace card. (The exports are proven by the test below, which needs `typst`.)
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn project_fully_usable_after_source_deletion_e2e() {
-    if std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("skipping project_fully_usable_after_source_deletion_e2e: typst not on PATH");
-        return;
-    }
     let rig = rig();
     let fx = &rig.fx;
     let pid = fx.project_id.clone();
     inspect(fx).await;
-
-    // The package the client would receive, before anything is deleted.
-    let (status, before_zip) = call(
-        &fx.state,
-        "POST",
-        &format!("/api/projects/{pid}/product-export"),
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "{}",
-        String::from_utf8_lossy(&before_zip)
-    );
-    let before = unzip(&before_zip);
-    let before_findings = before
-        .iter()
-        .find(|(name, _)| name.ends_with("findings.json"))
-        .map(|(_, bytes)| bytes.clone())
-        .expect("the package carries findings.json");
-    assert!(String::from_utf8_lossy(&before_findings).contains("src/leak.ts"));
     // The operator's review draft, as the UI saves it while triaging.
     let scanned = fx.state.get_last_scan(&pid).unwrap();
     fx.state.draft.save(
@@ -726,26 +732,7 @@ async fn project_fully_usable_after_source_deletion_e2e() {
         serde_json::json!({ "scan": serde_json::to_value(&scanned).unwrap() }),
     );
 
-    // Delete over HTTP, exactly as the modal does.
-    let (status, body) = call(
-        &fx.state,
-        "POST",
-        &format!("/api/projects/{pid}/repos/acme%2Fapp/source/delete"),
-        serde_json::json!({ "confirm": REPO, "include_uncommitted": false }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert_eq!(
-        json(&body)["ok"],
-        true,
-        "{}",
-        String::from_utf8_lossy(&body)
-    );
-    assert!(!fx.checkout.exists());
-    let deleted_at = json(&body)["record"]["completed_at"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let deleted_at = delete_over_http(fx).await;
 
     // ── Restart: a new state over the same data directory, nothing in memory ────────────
     let state = fx.restarted();
@@ -797,48 +784,6 @@ async fn project_fully_usable_after_source_deletion_e2e() {
         "findings are still there"
     );
 
-    // Exports regenerate through the release gate, from the stored report alone.
-    let (status, after_zip) = call(
-        &state,
-        "POST",
-        &format!("/api/projects/{pid}/product-export"),
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "{}",
-        String::from_utf8_lossy(&after_zip)
-    );
-    let after = unzip(&after_zip);
-    let after_findings = after
-        .iter()
-        .find(|(name, _)| name.ends_with("findings.json"))
-        .map(|(_, bytes)| bytes.clone())
-        .expect("the regenerated package carries findings.json");
-    let strip_clock = |bytes: &[u8]| -> serde_json::Value {
-        let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        if let Some(map) = value.as_object_mut() {
-            map.remove("generated_at");
-        }
-        value
-    };
-    assert_eq!(
-        strip_clock(&before_findings),
-        strip_clock(&after_findings),
-        "the findings dataset is the same before and after deletion"
-    );
-    let (status, pdf) = call(
-        &state,
-        "POST",
-        &format!("/api/projects/{pid}/audit-report"),
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&pdf));
-    assert!(pdf.starts_with(b"%PDF"));
-
     // The code view says why there is no code, with the date.
     let (status, body) = call(
         &state,
@@ -865,6 +810,10 @@ async fn project_fully_usable_after_source_deletion_e2e() {
         (
             format!("/api/projects/{pid}/rescan-alternatives"),
             serde_json::json!({ "overrides": {} }),
+        ),
+        (
+            format!("/api/projects/{pid}/emit-local"),
+            serde_json::json!({}),
         ),
         (
             format!("/api/projects/{pid}/repos/acme%2Fapp/rescan-changes"),
@@ -915,4 +864,86 @@ async fn project_fully_usable_after_source_deletion_e2e() {
             .starts_with("source deleted on "),
         "{checkout}"
     );
+}
+
+/// The exports regenerate, through the release gate and from the stored report alone, after the
+/// source is deleted and the server restarts: the same findings dataset, and a PDF. Needs `typst`
+/// (it says so when skipped).
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn exports_regenerate_from_the_stored_report_after_source_deletion_e2e() {
+    if typst_missing("exports_regenerate_from_the_stored_report_after_source_deletion_e2e") {
+        return;
+    }
+    let rig = rig();
+    let fx = &rig.fx;
+    let pid = fx.project_id.clone();
+    inspect(fx).await;
+
+    // The package the client would receive, before anything is deleted.
+    let (status, before_zip) = call(
+        &fx.state,
+        "POST",
+        &format!("/api/projects/{pid}/product-export"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&before_zip)
+    );
+    let before = unzip(&before_zip);
+    let before_findings = before
+        .iter()
+        .find(|(name, _)| name.ends_with("findings.json"))
+        .map(|(_, bytes)| bytes.clone())
+        .expect("the package carries findings.json");
+    assert!(String::from_utf8_lossy(&before_findings).contains("src/leak.ts"));
+
+    delete_over_http(fx).await;
+    let state = fx.restarted();
+    state.projects.set_active(&pid);
+
+    let (status, after_zip) = call(
+        &state,
+        "POST",
+        &format!("/api/projects/{pid}/product-export"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&after_zip)
+    );
+    let after = unzip(&after_zip);
+    let after_findings = after
+        .iter()
+        .find(|(name, _)| name.ends_with("findings.json"))
+        .map(|(_, bytes)| bytes.clone())
+        .expect("the regenerated package carries findings.json");
+    let strip_clock = |bytes: &[u8]| -> serde_json::Value {
+        let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        if let Some(map) = value.as_object_mut() {
+            map.remove("generated_at");
+        }
+        value
+    };
+    assert_eq!(
+        strip_clock(&before_findings),
+        strip_clock(&after_findings),
+        "the findings dataset is the same before and after deletion"
+    );
+    let (status, pdf) = call(
+        &state,
+        "POST",
+        &format!("/api/projects/{pid}/audit-report"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&pdf));
+    assert!(pdf.starts_with(b"%PDF"));
 }

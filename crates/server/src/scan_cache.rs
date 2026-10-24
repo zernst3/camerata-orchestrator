@@ -123,8 +123,9 @@ impl ScanManifest {
     /// The fingerprint recorded for a file on the last scan, if any.
     fn fingerprint_of(&self, repo: &str, path: &str) -> Option<&str> {
         self.files
-            .get(repo)
-            .and_then(|m| m.get(path))
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(repo))
+            .and_then(|(_, m)| m.get(path))
             .map(String::as_str)
     }
 }
@@ -189,7 +190,7 @@ pub fn partition(
     let carried: Vec<Finding> = prior
         .findings
         .iter()
-        .filter(|f| f.repo == repo && unchanged_paths.contains(&f.path))
+        .filter(|f| f.repo.eq_ignore_ascii_case(repo) && unchanged_paths.contains(&f.path))
         .cloned()
         .collect();
 
@@ -254,8 +255,12 @@ impl ManifestBuilder {
         for (path, content) in files {
             entry.insert(path.clone(), content_fingerprint(content));
         }
-        self.findings
-            .extend(ai_findings.iter().filter(|f| f.repo == repo).cloned());
+        self.findings.extend(
+            ai_findings
+                .iter()
+                .filter(|f| f.repo.eq_ignore_ascii_case(repo))
+                .cloned(),
+        );
     }
 
     /// Finalize into a persistable manifest stamped with the current schema version.
@@ -606,6 +611,30 @@ mod tests {
             p.carried[0].rule_id, "API-RULE",
             "must not pull the other repo's finding"
         );
+    }
+
+    /// The same repo spelled with different case (a project's `Acme/App`, an origin's `acme/app`)
+    /// is one repo: its unchanged files and their cached findings carry forward either way,
+    /// exactly as `repo_delta` and the cache purge already treat it.
+    #[test]
+    fn partition_matches_the_repo_case_insensitively() {
+        let files = vec![file("a.rs", "code a")];
+        let mut b = ManifestBuilder::new();
+        b.record_repo("Me/Api", &files, &[finding("Me/Api", "a.rs", "ARCH-1")]);
+        let prior = b.finish();
+
+        let p = partition(Some(&prior), "me/api", &files);
+
+        assert_eq!(p.unchanged_count, 1, "the file is recognised as unchanged");
+        assert_eq!(p.carried.len(), 1, "and its finding carries forward");
+    }
+
+    #[test]
+    fn recording_a_repo_keeps_findings_spelled_in_another_case() {
+        let files = vec![file("a.rs", "code a")];
+        let mut b = ManifestBuilder::new();
+        b.record_repo("me/api", &files, &[finding("Me/Api", "a.rs", "ARCH-1")]);
+        assert_eq!(b.finish().findings.len(), 1);
     }
 
     #[test]
