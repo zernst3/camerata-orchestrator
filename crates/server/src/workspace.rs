@@ -353,13 +353,61 @@ pub async fn validate_link_target(path: &Path, repo: &str) -> Result<(), String>
     }
 }
 
+/// A remote URL with any embedded credentials removed, safe to store in a record.
+///
+/// `http(s)://user:token@host/...` and `http(s)://token@host/...` lose their userinfo (a hand-made
+/// clone commonly carries a personal access token there). An ssh user (`ssh://git@host/...`,
+/// `git@host:o/r`) is a login name, not a secret, so ssh-style remotes are returned unchanged.
+/// Surrounding whitespace is trimmed.
+pub fn scrub_remote_url(url: &str) -> String {
+    let url = url.trim();
+    for scheme in ["https://", "http://"] {
+        let Some(rest) = url
+            .get(..scheme.len())
+            .filter(|s| s.eq_ignore_ascii_case(scheme))
+            .map(|_| &url[scheme.len()..])
+        else {
+            continue;
+        };
+        let authority_end = rest.find('/').unwrap_or(rest.len());
+        let (authority, tail) = rest.split_at(authority_end);
+        let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        return format!("{}{host}{tail}", &url[..scheme.len()]);
+    }
+    url.to_string()
+}
+
+/// Split a git remote URL into its `(host, path)`, for the forms git itself accepts: a
+/// scheme URL (`https://[userinfo@]host[:port]/path`, `ssh://git@host/path`), the scp-like form
+/// (`[user@]host:path`), and a bare `host/path`. Userinfo and port are dropped from the host.
+fn split_remote(url: &str) -> Option<(&str, &str)> {
+    if let Some((_, rest)) = url.split_once("://") {
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        let host = host_port.split(':').next().unwrap_or(host_port);
+        return Some((host, path));
+    }
+    if let Some((left, path)) = url.split_once(':') {
+        // scp-like: `[user@]host:path`
+        let host = left.rsplit_once('@').map_or(left, |(_, h)| h);
+        return Some((host, path));
+    }
+    url.split_once('/')
+}
+
 /// Parse `owner/repo` from a GitHub remote URL (https or ssh form), tolerant of a
-/// trailing `.git` and extra path segments.
+/// trailing `.git`, a trailing slash and extra path segments.
+///
+/// The HOST must be exactly `github.com` (case-insensitive). Source deletion trusts this
+/// function to decide whether a folder is the project's repository, so a lookalike such as
+/// `notgithub.com` or `github.com.evil.example` must never parse as a GitHub identity.
 fn parse_owner_repo(url: &str) -> Option<String> {
     let s = url.trim().trim_end_matches('/').trim_end_matches(".git");
-    let i = s.find("github.com")?;
-    let after = s[i + "github.com".len()..].trim_start_matches([':', '/']);
-    let parts: Vec<&str> = after.split('/').filter(|p| !p.is_empty()).collect();
+    let (host, path) = split_remote(s)?;
+    if !host.eq_ignore_ascii_case("github.com") {
+        return None;
+    }
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
     if parts.len() >= 2 {
         Some(format!("{}/{}", parts[0], parts[1]))
     } else {
@@ -1828,6 +1876,71 @@ mod tests {
         // Non-GitHub or malformed -> None.
         assert_eq!(parse_owner_repo("https://gitlab.com/acme/api.git"), None);
         assert_eq!(parse_owner_repo("not a url"), None);
+    }
+
+    /// The remote-match guard is what stands between "delete this folder" and the wrong
+    /// folder, so the host must be EXACTLY github.com: a lookalike host that merely contains
+    /// the string must never parse as a GitHub identity.
+    #[test]
+    fn parse_owner_repo_requires_the_exact_github_host() {
+        for lookalike in [
+            "https://notgithub.com/acme/api.git",
+            "https://github.com.evil.example/acme/api.git",
+            "https://evil.example/github.com/acme/api.git",
+            "git@notgithub.com:acme/api.git",
+            "https://gitlab.com/acme/github.com",
+            "https://user:github.com@evil.example/acme/api.git",
+        ] {
+            assert_eq!(parse_owner_repo(lookalike), None, "{lookalike}");
+        }
+        // The forms that must keep working.
+        for (url, want) in [
+            ("https://github.com/acme/api/", "acme/api"),
+            ("https://GitHub.com/Acme/Api.git", "Acme/Api"),
+            (
+                "https://x-access-token:tok@github.com/acme/api.git",
+                "acme/api",
+            ),
+            ("https://github.com:443/acme/api.git", "acme/api"),
+            ("ssh://git@github.com/acme/api.git", "acme/api"),
+            ("git@github.com:acme/api", "acme/api"),
+            ("github.com/acme/api", "acme/api"),
+        ] {
+            assert_eq!(parse_owner_repo(url).as_deref(), Some(want), "{url}");
+        }
+    }
+
+    #[test]
+    fn scrub_remote_url_drops_credentials_and_keeps_everything_else() {
+        assert_eq!(
+            scrub_remote_url("https://x-access-token:ghp_abc@github.com/acme/api.git"),
+            "https://github.com/acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("https://ghp_onlyatoken@github.com/acme/api.git"),
+            "https://github.com/acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("http://u:p@host.example:8080/a/b.git"),
+            "http://host.example:8080/a/b.git"
+        );
+        // Not credentials: an ssh user, an scp-style remote, a clean https URL.
+        assert_eq!(
+            scrub_remote_url("ssh://git@github.com/acme/api.git"),
+            "ssh://git@github.com/acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("git@github.com:acme/api.git"),
+            "git@github.com:acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("https://github.com/acme/api.git"),
+            "https://github.com/acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("  https://github.com/a/b \n"),
+            "https://github.com/a/b"
+        );
     }
 
     #[test]
