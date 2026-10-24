@@ -40,6 +40,7 @@ pub mod checkpoint;
 pub mod clarify;
 pub mod clarify_resume;
 pub mod client_provenance;
+pub mod client_source;
 pub mod connections;
 mod corpus_freshness;
 /// `POST /api/apps` (Part 2 of the Rust-fullstack scaffolder): drives
@@ -199,6 +200,9 @@ pub struct AppState {
     /// by [`AppState::get_last_scan`] when the in-memory map is empty (after a restart), and the
     /// ONLY source the exports and the review screen have once client source is deleted.
     inspections: crate::inspections::InspectionStore,
+    /// Machine-local deletion records (the proof handed to a client) and re-fetch records.
+    /// Not part of the project export. See [`crate::client_source`].
+    source_records: crate::client_source::records::SourceRecordStore,
     /// Per-project last completed scan report. Written the instant any scan handler finishes
     /// (both the synchronous `onboard_audit` path and the async job path). Read by
     /// `active_project_context` as the authoritative source for grounding, with the
@@ -312,6 +316,7 @@ impl AppState {
             checkpoints: crate::checkpoint::CheckpointStore::new(),
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
             inspections: crate::inspections::InspectionStore::new(),
+            source_records: crate::client_source::records::SourceRecordStore::new(),
             last_scan: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             recent_scan: std::sync::Arc::new(std::sync::Mutex::new(None)),
             artifacts: None,
@@ -466,6 +471,12 @@ impl AppState {
     /// end-to-end tests read the entry a scan wrote and the one a restart reloads.
     pub fn inspections(&self) -> &crate::inspections::InspectionStore {
         &self.inspections
+    }
+
+    /// The deletion and re-fetch record store. Out-of-crate test seam (mirrors
+    /// [`Self::projects`]).
+    pub fn source_records(&self) -> &crate::client_source::records::SourceRecordStore {
+        &self.source_records
     }
 
     /// The app-level (cross-project) settings store. Out-of-crate test seam (mirrors
@@ -926,6 +937,10 @@ impl AppState {
         // scan cache this is NOT disposable: it is what exports and the review screen are
         // built from once the client's source has been deleted.
         self.inspections = crate::inspections::InspectionStore::at(dir.join("inspections"));
+        // The proof of what source deletion removed, and when source was fetched back.
+        self.source_records = crate::client_source::records::SourceRecordStore::load_or_new(
+            dir.join("source-records.json"),
+        );
     }
 
     /// The REAL runtime state: a CLEAN SLATE (no seeded stories, clarifications,
@@ -1309,6 +1324,20 @@ pub fn router(state: AppState) -> Router {
         )
         // Derived readiness gate + "link existing local clone" (readiness-gate ADR).
         .route("/api/projects/:id/readiness", get(project_readiness))
+        // Client source lifecycle (delete / re-fetch): docs/design/2026-10-24_delete-and-refetch-
+        // client-source.md, section 3.
+        .route(
+            "/api/projects/:id/source",
+            get(crate::client_source::handlers::get_source),
+        )
+        .route(
+            "/api/projects/:id/source/records",
+            get(crate::client_source::handlers::get_records),
+        )
+        .route(
+            "/api/projects/:id/source/records/:record_id/text",
+            get(crate::client_source::handlers::get_record_text),
+        )
         .route("/api/projects/:id/repos/:repo/link", post(link_repo))
         .route("/api/projects/:id/reset-onboarding", post(reset_onboarding))
         .route("/api/projects/:id/branch", post(checkout_branch))

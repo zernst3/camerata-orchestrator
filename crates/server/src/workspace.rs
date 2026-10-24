@@ -64,23 +64,26 @@ pub fn repo_dir(root: &Path, repo: &str) -> PathBuf {
 }
 
 /// True if `dir` holds a git working copy.
-fn is_git_repo(dir: &Path) -> bool {
+pub(crate) fn is_git_repo(dir: &Path) -> bool {
     dir.join(".git").exists()
 }
 
 /// The tokenless HTTPS remote (what we persist on disk).
-fn clean_url(repo: &str) -> String {
+pub(crate) fn clean_url(repo: &str) -> String {
     format!("https://github.com/{repo}.git")
 }
 
 /// The authenticated HTTPS remote — used ONLY for transient network commands, never
 /// written into `.git/config`.
-fn authed_url(repo: &str, token: &str) -> String {
+pub(crate) fn authed_url(repo: &str, token: &str) -> String {
     format!("https://x-access-token:{token}@github.com/{repo}.git")
 }
 
 /// Run a git command (optionally in `cwd`) and capture its output.
-async fn git(cwd: Option<&Path>, args: &[&str]) -> std::io::Result<std::process::Output> {
+pub(crate) async fn git(
+    cwd: Option<&Path>,
+    args: &[&str],
+) -> std::io::Result<std::process::Output> {
     let mut cmd = Command::new("git");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -91,7 +94,7 @@ async fn git(cwd: Option<&Path>, args: &[&str]) -> std::io::Result<std::process:
     cmd.output().await
 }
 
-fn stderr_of(out: &std::process::Output) -> String {
+pub(crate) fn stderr_of(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).trim().to_string()
 }
 
@@ -298,20 +301,66 @@ pub async fn refresh_resolved(dir: &Path, repo: &str, token: &str) -> RepoChecko
 /// can let a developer NAVIGATE to a repo folder instead of typing `owner/repo`. Returns
 /// a specific human error so the UI can tell the user exactly what went wrong.
 pub async fn detect_remote_repo(path: &Path) -> Result<String, String> {
+    detect_origin(path).await.map_err(|e| e.to_string())
+}
+
+/// Why a folder's `origin` could not be turned into a GitHub `owner/repo`. The `Display` text is
+/// exactly the message [`detect_remote_repo`] has always returned; the variants exist so a caller
+/// that must treat the cases differently (source deletion reports a stable refusal code for each)
+/// does not have to pattern-match on prose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OriginError {
+    /// `git` itself could not be run.
+    GitUnavailable(String),
+    /// The folder has no `origin` remote.
+    NoRemote,
+    /// `git` failed with its own message (not a repository, dubious ownership, ...).
+    Git(String),
+    /// The `origin` remote exists but is not a GitHub repository URL.
+    NotGithub { url: String },
+}
+
+impl std::fmt::Display for OriginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OriginError::GitUnavailable(e) => {
+                write!(
+                    f,
+                    "couldn't run `git` ({e}) — is git installed and on PATH?"
+                )
+            }
+            OriginError::NoRemote => {
+                write!(
+                    f,
+                    "that folder has no `origin` remote (is it cloned from GitHub?)"
+                )
+            }
+            OriginError::Git(stderr) => write!(f, "{stderr}"),
+            OriginError::NotGithub { url } => {
+                write!(f, "the origin remote isn't a GitHub URL: {url}")
+            }
+        }
+    }
+}
+
+/// The GitHub `owner/repo` of a local checkout's `origin` remote, with a typed reason on
+/// failure. [`detect_remote_repo`] is this with the error rendered to its message.
+pub async fn detect_origin(path: &Path) -> Result<String, OriginError> {
     let out = git(Some(path), &["config", "--get", "remote.origin.url"])
         .await
-        .map_err(|e| format!("couldn't run `git` ({e}) — is git installed and on PATH?"))?;
+        .map_err(|e| OriginError::GitUnavailable(e.to_string()))?;
     if !out.status.success() {
         let stderr = stderr_of(&out);
         return Err(if stderr.is_empty() {
-            "that folder has no `origin` remote (is it cloned from GitHub?)".to_string()
+            OriginError::NoRemote
         } else {
-            stderr
+            OriginError::Git(stderr)
         });
     }
     let url = String::from_utf8_lossy(&out.stdout);
-    parse_owner_repo(&url)
-        .ok_or_else(|| format!("the origin remote isn't a GitHub URL: {}", url.trim()))
+    parse_owner_repo(&url).ok_or_else(|| OriginError::NotGithub {
+        url: url.trim().to_string(),
+    })
 }
 
 /// Whether a git remote URL's `origin` refers to the same GitHub repo as `owner/repo`.
