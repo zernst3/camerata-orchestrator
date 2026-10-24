@@ -74,6 +74,18 @@ commit sits on the branch ready for review + push.
   source has been deleted the viewer says "Source deleted on <date>, re-fetch to view" and never
   silently falls back to a missing working tree; `symbol-refs` passes the symbol to `git grep`
   with `-e` (or after `--`) so a leading `-` cannot be parsed as an option.
+  Zach's protected-area answers (2026-10-23): (1) APPROVED: AI-advisory findings are mapped at
+  calibration to the closest corpus rule (stable class label when none matches), the model's id
+  kept as a secondary field, and the queue groups by the mapped id. (2) Review timer and the
+  per-row "reviewed" flag are INTERNAL ONLY, never in any client export ("might raise more
+  questions than necessary"); shown in an internal stats view as data for pricing. Timer behaviour
+  (Opus, per Zach "automatic as much as it can, with overriding buttons"): starts automatically
+  on opening a group or acting on a finding; auto-pauses after 3 minutes with no key or click and
+  whenever the Camerata window is not focused, and the idle stretch before the pause is NOT
+  counted; an always-visible Pause / Resume button in the progress strip; the ETA uses only
+  active time. (3) Reviewer notes: one note per group (optional per row) exported as a
+  `reviewer_note` column in the xlsx and JSON exports AND as the italic sentence under the group
+  heading in the PDF; redacted and covered by the release gate.
 
 - 2026-10-23 (Opus, Fable leak-hunt owner calls; asymmetric risk favours redaction): (a) T1
   placeholder words in VENDOR bodies must be delimited (`_`/`-`/start/end/case change) or the body
