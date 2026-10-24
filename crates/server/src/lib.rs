@@ -803,8 +803,12 @@ impl AppState {
         if report.gated || report.blocked || report.provenance.audited_refs.is_empty() {
             return;
         }
-        let entry =
-            crate::inspections::InspectionEntry::from_report(project_id, report.clone(), kind);
+        // The stored report is the sealed artifact every export is built from, so it carries
+        // only redacted text: sweep a CLONE (the caller's copy is left as handed in) before
+        // anything reaches the file.
+        let mut sealed = report.clone();
+        sealed.sweep_secrets_before_seal();
+        let entry = crate::inspections::InspectionEntry::from_report(project_id, sealed, kind);
         if let Err(e) = self.inspections.append(entry) {
             tracing::warn!(
                 project = project_id,
@@ -837,10 +841,10 @@ impl AppState {
     /// one (the alternatives rescan re-evaluates a few rules of the same inspection). Updates
     /// the in-memory copy and the latest persisted entry in place.
     pub(crate) fn amend_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
-        match self
-            .inspections
-            .update_latest_report(&project_id, report.clone())
-        {
+        // Same sweep as `record_inspection`: the stored report carries only redacted text.
+        let mut sealed = report.clone();
+        sealed.sweep_secrets_before_seal();
+        match self.inspections.update_latest_report(&project_id, sealed) {
             Ok(_) => {}
             Err(e) => tracing::warn!(
                 project = project_id.as_str(),

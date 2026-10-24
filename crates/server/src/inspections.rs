@@ -85,6 +85,11 @@ pub struct InspectionEntry {
     /// Claude Code sessions this inspection's model calls created. Empty on the Api backend.
     #[serde(default)]
     pub model_sessions: Vec<ModelSession>,
+    /// Set when this entry's recorded sessions were removed with a deleted checkout and their ids
+    /// forgotten ([`InspectionStore::forget_model_sessions`]). An entry with no ids because they
+    /// were cleared is not an entry that never recorded any.
+    #[serde(default)]
+    pub model_sessions_cleared: bool,
     /// Set when a client package was generated from this entry.
     #[serde(default)]
     pub package: Option<PackageRecord>,
@@ -105,9 +110,17 @@ impl InspectionEntry {
             rules_fingerprint: p.rules_fingerprint.clone(),
             camerata_version: p.camerata_version.clone(),
             model_sessions: p.model_sessions.clone(),
+            model_sessions_cleared: false,
             package: None,
             report,
         }
+    }
+
+    /// Whether Camerata has no record of the Claude Code sessions this inspection created: it
+    /// recorded none and none were cleared. True for every inspection made before session ids
+    /// were recorded (and for one that made no model calls), whose session files cannot be found.
+    pub fn sessions_unrecorded(&self) -> bool {
+        self.model_sessions.is_empty() && !self.model_sessions_cleared
     }
 
     /// The commit the inspection read for `repo` (case-insensitive), if it was a git folder.
@@ -287,9 +300,9 @@ impl InspectionStore {
         self.persist_locked(project_id, list).map(|()| true)
     }
 
-    /// Replace every recorded session of every entry of a project, removing the ones in
-    /// `removed` from `model_sessions` (used after deletion so a second delete does not report
-    /// files that are already gone). Entries and findings are untouched.
+    /// Remove the sessions in `removed` from every entry's `model_sessions` (used after deletion
+    /// so a second delete does not report files that are already gone), marking each entry that
+    /// lost any as `model_sessions_cleared`. Entries and findings are untouched.
     pub fn forget_model_sessions(
         &self,
         project_id: &str,
@@ -300,8 +313,12 @@ impl InspectionStore {
             return Ok(());
         };
         for e in list.iter_mut() {
+            let before = e.model_sessions.len();
             e.model_sessions
                 .retain(|s| !removed.iter().any(|r| r == &s.session_id));
+            // Remember that the ids were cleared, not never recorded: a later deletion must still
+            // tell an entry that recorded its sessions from one that predates the recording.
+            e.model_sessions_cleared |= e.model_sessions.len() < before;
         }
         self.persist_locked(project_id, list)
     }

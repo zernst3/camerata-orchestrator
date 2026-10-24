@@ -886,3 +886,179 @@ mod http {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
+
+// ── Honest residual sentences (what a deletion cannot cover) ───────────────────────────────
+
+const UNRECORDED: &str = "before Camerata recorded session ids";
+const NOT_TRACKED: &str = "chat assistant";
+const MOVED: &str = "moved or renamed";
+const OTHER_PROJECTS: &str = "Other projects";
+
+fn has(record: &DeletionRecord, needle: &str) -> bool {
+    record.residuals.iter().any(|r| r.contains(needle))
+}
+
+/// An inspection entry for `REPO` carrying `sessions` (empty = what every inspection made
+/// before Camerata recorded session ids looks like).
+fn append_inspection(fx: &Fx, started: &str, sessions: &[&str]) {
+    let mut report = report_at(REPO, &fx.head);
+    report.provenance.started_at = started.to_string();
+    report.provenance.model_sessions = sessions
+        .iter()
+        .map(|id| ModelSession {
+            session_id: (*id).to_string(),
+            cwd: "/work".to_string(),
+            created_at: String::new(),
+        })
+        .collect();
+    fx.state
+        .inspections
+        .append(crate::inspections::InspectionEntry::from_report(
+            &fx.project_id,
+            report,
+            crate::inspections::InspectionKind::Full,
+        ))
+        .unwrap();
+}
+
+async fn delete_repo(fx: &Fx, repo: &str) -> DeletionRecord {
+    let request = DeleteRequest {
+        confirm: repo.to_string(),
+        include_uncommitted: false,
+    };
+    match delete_source(&fx.state, &fx.project_id, repo, &request).await {
+        Ok(DeleteOutcome::Done { record, .. }) => *record,
+        other => panic!("expected a deletion of {repo}: {:?}", other.err()),
+    }
+}
+
+/// M1: an inspection from before session ids were recorded left Claude Code session files that
+/// cannot be found. The record must say so instead of silently implying completeness.
+#[tokio::test]
+async fn a_cli_project_with_an_unrecorded_inspection_says_its_sessions_were_not_removed() {
+    let fx = fixture();
+    append_inspection(&fx, "2026-10-24T10:00:00Z", &[]);
+
+    let record = delete_ok(&fx).await;
+
+    assert!(has(&record, UNRECORDED), "{:?}", record.residuals);
+    assert!(has(&record, "~/.claude/projects"), "{:?}", record.residuals);
+}
+
+#[tokio::test]
+async fn a_cli_project_with_no_inspection_at_all_carries_the_same_sentence() {
+    let fx = fixture();
+    let record = delete_ok(&fx).await;
+    assert!(has(&record, UNRECORDED), "{:?}", record.residuals);
+}
+
+#[tokio::test]
+async fn an_api_project_has_no_claude_code_sessions_to_disclose() {
+    let fx = fixture();
+    fx.state
+        .projects
+        .set_backend(&fx.project_id, crate::project::ProjectBackend::Api);
+    append_inspection(&fx, "2026-10-24T10:00:00Z", &[]);
+
+    let record = delete_ok(&fx).await;
+
+    assert!(!has(&record, UNRECORDED), "{:?}", record.residuals);
+    assert!(!has(&record, NOT_TRACKED), "{:?}", record.residuals);
+}
+
+#[tokio::test]
+async fn fully_recorded_inspections_do_not_carry_the_unrecorded_sentence() {
+    let fx = fixture();
+    append_inspection(&fx, "2026-10-24T10:00:00Z", &[SESSION_A]);
+
+    let record = delete_ok(&fx).await;
+
+    assert!(!has(&record, UNRECORDED), "{:?}", record.residuals);
+}
+
+/// The ids are forgotten after the first repo's deletion. That must not make a fully recorded
+/// project look unrecorded to the second repo's record, nor hide a genuinely unrecorded entry.
+#[tokio::test]
+async fn forgetting_sessions_after_the_first_repo_keeps_the_second_records_sentence_correct() {
+    let fx = fixture();
+    fx.add_repo("acme/lib");
+    append_inspection(&fx, "2026-10-24T10:00:00Z", &[SESSION_A]);
+
+    let first = delete_repo(&fx, REPO).await;
+    let second = delete_repo(&fx, "acme/lib").await;
+
+    assert!(!has(&first, UNRECORDED), "{:?}", first.residuals);
+    assert!(
+        !has(&second, UNRECORDED),
+        "the sessions were recorded, then removed with the first repo: {:?}",
+        second.residuals
+    );
+}
+
+#[tokio::test]
+async fn a_genuinely_unrecorded_entry_is_still_disclosed_on_the_second_repos_record() {
+    let fx = fixture();
+    fx.add_repo("acme/lib");
+    append_inspection(&fx, "2026-10-24T09:00:00Z", &[]);
+    append_inspection(&fx, "2026-10-24T10:00:00Z", &[SESSION_A]);
+
+    let first = delete_repo(&fx, REPO).await;
+    let second = delete_repo(&fx, "acme/lib").await;
+
+    assert!(has(&first, UNRECORDED), "{:?}", first.residuals);
+    assert!(has(&second, UNRECORDED), "{:?}", second.residuals);
+}
+
+/// Owner decision (b): sessions of the chat assistant and of governed-dev agents are not
+/// tracked, so a Cli project's record says what it cannot cover.
+#[tokio::test]
+async fn a_cli_record_discloses_untracked_assistant_and_governed_dev_sessions() {
+    let fx = fixture();
+    let record = delete_ok(&fx).await;
+    assert!(has(&record, NOT_TRACKED), "{:?}", record.residuals);
+    assert!(has(&record, "--add-dir"), "{:?}", record.residuals);
+}
+
+#[tokio::test]
+async fn every_record_discloses_caches_left_under_an_old_path() {
+    let fx = fixture();
+    let record = delete_ok(&fx).await;
+    assert!(has(&record, MOVED), "{:?}", record.residuals);
+}
+
+#[tokio::test]
+async fn other_projects_scan_cache_slices_for_the_same_repo_are_disclosed_only_when_they_exist() {
+    let fx = fixture();
+    let other = fx
+        .state
+        .projects
+        .create("Other", vec![REPO.to_string()])
+        .unwrap();
+    fx.state.scan_cache.put(&other.id, manifest_for(&[REPO]));
+    // A third project lists the repo but holds no cache for it: not mentioned.
+    let quiet = fx
+        .state
+        .projects
+        .create("Quiet", vec![REPO.to_string()])
+        .unwrap();
+
+    let record = delete_ok(&fx).await;
+
+    assert!(has(&record, OTHER_PROJECTS), "{:?}", record.residuals);
+    let sentence = record
+        .residuals
+        .iter()
+        .find(|r| r.contains(OTHER_PROJECTS))
+        .unwrap();
+    assert!(sentence.contains("Other"), "{sentence}");
+    assert!(!sentence.contains(&quiet.name), "{sentence}");
+    // The other project's cache is indeed still there.
+    assert!(fx.state.scan_cache.get(&other.id).is_some());
+}
+
+#[tokio::test]
+async fn no_other_projects_sentence_when_nobody_else_caches_the_repo() {
+    let fx = fixture();
+    let record = delete_ok(&fx).await;
+    assert!(!has(&record, OTHER_PROJECTS), "{:?}", record.residuals);
+}

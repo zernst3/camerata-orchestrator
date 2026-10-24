@@ -162,6 +162,29 @@ pub const RESIDUAL_EXCERPTS: &str =
 pub const RESIDUAL_MODEL_SESSIONS: &str = "This repository was inspected on the Cli backend; \
 Claude Code session files recorded by Camerata were removed, any session not recorded by \
 Camerata was not.";
+/// Residual sentence: present on the Cli backend when an inspection has no recorded sessions.
+pub const RESIDUAL_UNRECORDED_SESSIONS: &str =
+    "Claude Code session files from inspections that ran \
+before Camerata recorded session ids were not removed; clear them in Claude Code by hand \
+(~/.claude/projects).";
+/// Residual sentence: present on the Cli backend (Camerata does not track these sessions).
+pub const RESIDUAL_UNTRACKED_SESSIONS: &str = "Claude Code sessions started by the chat assistant \
+or by governed-dev agents are not tracked by Camerata; any that read this repository's code (for \
+example through --add-dir) were not removed. Clear them in Claude Code by hand \
+(~/.claude/projects).";
+/// Residual sentence: always present (Camerata cannot know whether a checkout was ever moved).
+pub const RESIDUAL_MOVED_CHECKOUT: &str = "The CLI's scan cache and ledger are keyed by the \
+checkout's path and were removed for the path deleted here only; if this checkout was ever moved \
+or renamed, files left under its old path were not removed.";
+/// Residual sentence: present when another project lists the repo and holds a scan cache for it.
+/// `{}` is the comma-separated project names.
+pub fn residual_other_projects(names: &[String]) -> String {
+    format!(
+        "Other projects on this machine also list this repository ({}); their incremental-scan \
+         caches for it were not removed.",
+        names.join(", ")
+    )
+}
 /// Residual sentence: present when the operator ticked the uncommitted-work box.
 pub const RESIDUAL_UNCOMMITTED: &str =
     "Uncommitted changes and unpushed commits were removed at the operator's request.";

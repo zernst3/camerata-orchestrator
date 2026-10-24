@@ -14,12 +14,15 @@ use serde::Deserialize;
 use super::guard::{guard, GuardedTarget, Intent};
 use super::purge::{execute, plan};
 use super::records::{
-    format_bytes, group_thousands, now_rfc3339, DeletionRecord, PurgeOutcome, PurgedItem,
-    PurgedKind, RecordNotSaved, METHOD_SENTENCE, RESIDUAL_BACKUPS, RESIDUAL_EXCERPTS,
-    RESIDUAL_MODEL_SESSIONS, RESIDUAL_UNCOMMITTED,
+    format_bytes, group_thousands, now_rfc3339, residual_other_projects, DeletionRecord,
+    PurgeOutcome, PurgedItem, PurgedKind, RecordNotSaved, METHOD_SENTENCE, RESIDUAL_BACKUPS,
+    RESIDUAL_EXCERPTS, RESIDUAL_MODEL_SESSIONS, RESIDUAL_MOVED_CHECKOUT, RESIDUAL_UNCOMMITTED,
+    RESIDUAL_UNRECORDED_SESSIONS, RESIDUAL_UNTRACKED_SESSIONS,
 };
 use super::status::{inspected_entry, project_and_repo, source_status, RepoSourceStatus};
 use super::Refusal;
+use crate::inspections::InspectionEntry;
+use crate::project::ProjectBackend;
 use crate::AppState;
 
 /// Body of `POST .../source/delete`.
@@ -153,13 +156,7 @@ async fn build_record(
     let total_bytes = removed.iter().map(|i| i.bytes).sum();
 
     let entry = inspected_entry(state, &target.project_id, &target.repo);
-    let mut residuals = vec![RESIDUAL_BACKUPS.to_string(), RESIDUAL_EXCERPTS.to_string()];
-    if had_recorded_sessions {
-        residuals.push(RESIDUAL_MODEL_SESSIONS.to_string());
-    }
-    if req.include_uncommitted {
-        residuals.push(RESIDUAL_UNCOMMITTED.to_string());
-    }
+    let residuals = residual_sentences(state, target, req, had_recorded_sessions);
     let sanitised: String = target
         .repo
         .chars()
@@ -191,6 +188,55 @@ async fn build_record(
         camerata_version: env!("CARGO_PKG_VERSION").to_string(),
         machine: machine_name().await,
     }
+}
+
+/// The sentences a record carries for what a deletion cannot cover. Each is present only when
+/// its condition holds where Camerata can know it, and otherwise generic.
+fn residual_sentences(
+    state: &AppState,
+    target: &GuardedTarget,
+    req: &DeleteRequest,
+    had_recorded_sessions: bool,
+) -> Vec<String> {
+    let mut residuals = vec![RESIDUAL_BACKUPS.to_string(), RESIDUAL_EXCERPTS.to_string()];
+    if had_recorded_sessions {
+        residuals.push(RESIDUAL_MODEL_SESSIONS.to_string());
+    }
+    // Claude Code writes session files only on the Cli backend.
+    let cli = state
+        .projects
+        .get(&target.project_id)
+        .is_none_or(|p| p.backend == ProjectBackend::Cli);
+    if cli {
+        let entries = state.inspections.list(&target.project_id);
+        if entries.is_empty() || entries.iter().any(InspectionEntry::sessions_unrecorded) {
+            residuals.push(RESIDUAL_UNRECORDED_SESSIONS.to_string());
+        }
+        residuals.push(RESIDUAL_UNTRACKED_SESSIONS.to_string());
+    }
+    residuals.push(RESIDUAL_MOVED_CHECKOUT.to_string());
+    let others = other_projects_caching(state, target);
+    if !others.is_empty() {
+        residuals.push(residual_other_projects(&others));
+    }
+    if req.include_uncommitted {
+        residuals.push(RESIDUAL_UNCOMMITTED.to_string());
+    }
+    residuals
+}
+
+/// The names of the OTHER projects that list the target's repo and hold an incremental-scan
+/// cache slice for it (a deletion removes only its own project's slice).
+fn other_projects_caching(state: &AppState, target: &GuardedTarget) -> Vec<String> {
+    state
+        .projects
+        .list()
+        .into_iter()
+        .filter(|p| p.id != target.project_id)
+        .filter(|p| p.repos.iter().any(|r| r.eq_ignore_ascii_case(&target.repo)))
+        .filter(|p| state.scan_cache.peek_repo(&p.id, &target.repo).had_entry)
+        .map(|p| p.name)
+        .collect()
 }
 
 /// This machine's host name, for the client's record.
