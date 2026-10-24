@@ -7,6 +7,21 @@ redaction with the export release gate; delete-and-re-fetch client source). Noth
 After V1, Camerata keeps developing toward the rest of what Cantus Works offers. Zach's read
 (80/20): the pieces below are roughly 80% there; the remaining 20% is fleshed out after V1.
 
+## 0. FIRST V2 item: runtime and framework end-of-life + runtime CVEs (decided 2026-10-24)
+
+V1 ships CISA KEV + EPSS enrichment of dependency findings and the "vulnerability data as of"
+stamp. V2 starts with the piece V1 cannot see: vulnerabilities in the RUNTIME itself (a PHP, Node,
+Python or nginx CVE, which OSV covers poorly).
+
+- Detect declared runtime and framework versions: Dockerfile `FROM`, `composer.json` `"php"`,
+  `.nvmrc`, `package.json` `engines`, `.python-version`, `runtime.txt`, `rust-toolchain`,
+  `.tool-versions`, framework versions from lockfiles.
+- Flag end-of-life versions from endoflife.date ("PHP 7.2 has received no security fixes since
+  2020") and known runtime CVEs from NVD, with KEV marking actively exploited ones.
+- Deterministic feeds only; the feed snapshot date goes into provenance like V1's stamp.
+- Example motivating case: a PHP runtime CVE exploited at scale within hours of disclosure, on
+  sites still running PHP 5.6 and 7.2 (end-of-life alone was already the finding).
+
 ## 1. Governance: inspection history and the monthly delta retest
 
 The governance offering includes a monthly retest of what changed. It needs real UI/UX work.

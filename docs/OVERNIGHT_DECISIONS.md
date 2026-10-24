@@ -62,6 +62,16 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-24 (Zach): **Vulnerability intelligence, pieces 1 and 3 are V1.** (1) Enrich the
+  existing osv-scanner dependency findings with CISA KEV (Known Exploited Vulnerabilities, JSON
+  feed): a CVE on KEV is labelled "known exploited" and floored to the top severity; show the
+  FIRST.org EPSS exploit-probability score. (3) Stamp "Vulnerability data as of <date>" (KEV, EPSS,
+  OSV snapshot dates) into the package provenance (README + manifest). Deterministic feeds only;
+  NO agent scraping news or social media (unverifiable, violates the verifiable-finding law).
+  Piece 2 (runtime/framework version detection + end-of-life via endoflife.date + runtime CVEs via
+  NVD/KEV) is the FIRST V2 item. Slotted after the item-21 engine follow-ups. Zach: the goal is to
+  finish V1; if marketing is still the bottleneck after V1, start adding V2 features.
+
 - 2026-10-23 (Zach, executive decision): the review speed-ups are V1.
   `_workspace/brownfield-audits/WORK_ORDER_REVIEW_SPEED.md` (code viewer A.1-A.10; B.2 stacked
   group view; B.3 pane context; B.4 order presets; B.5 decision memory; B.7 progress counts + ETA;
