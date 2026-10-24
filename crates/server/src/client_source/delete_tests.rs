@@ -205,6 +205,84 @@ async fn delete_removes_registered_worktree_outside_checkout_and_prunes() {
     assert!(fx.root.join("elsewhere").exists());
 }
 
+/// H3, end to end: a worktree folder was removed by hand and its path reused for the operator's
+/// own data. Git keeps listing the stale registration; the deletion must neither remove that
+/// folder nor count it in the record.
+#[tokio::test]
+async fn a_reused_folder_of_a_stale_worktree_registration_is_not_deleted_or_counted() {
+    let fx = fixture();
+    let wt = fx.root.join("scratch").join("wt");
+    std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+    git(
+        &fx.checkout,
+        &["worktree", "add", "-q", "-b", "side", &wt.to_string_lossy()],
+    );
+    std::fs::remove_dir_all(&wt).unwrap();
+    write_file(
+        &wt,
+        "precious/thesis.txt",
+        "the operator's unrelated data\n",
+    );
+
+    let record = delete_ok(&fx).await;
+
+    assert!(!fx.checkout.exists());
+    assert!(
+        wt.join("precious/thesis.txt").exists(),
+        "the reused folder is not ours to remove"
+    );
+    assert!(
+        item(&record, PurgedKind::Worktree).is_empty(),
+        "and it is not in the record: {:?}",
+        record.items
+    );
+    assert!(
+        record.items.iter().all(|i| !i.path.contains("scratch")),
+        "{:?}",
+        record.items
+    );
+}
+
+/// H2, end to end: the override points at a linked worktree of the client's clone. Nothing is
+/// deleted, no record is written, and the repo does not read as deleted.
+#[tokio::test]
+async fn deleting_a_linked_worktree_as_the_target_is_refused_and_nothing_is_recorded() {
+    let fx = fixture();
+    let main = fx.root.join("elsewhere").join("main");
+    std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+    std::fs::rename(&fx.checkout, &main).unwrap();
+    let linked = fx.root.join("elsewhere").join("linked");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "side",
+            &linked.to_string_lossy(),
+        ],
+    );
+    fx.state
+        .settings
+        .set_repo_path(REPO, Some(linked.to_string_lossy().into_owned()));
+
+    let refusal = delete_source(&fx.state, &fx.project_id, REPO, &req(true))
+        .await
+        .err()
+        .expect("refused");
+
+    assert_eq!(refusal.code, "linked_worktree");
+    assert!(main.join("src/main.rs").exists(), "the main clone survives");
+    assert!(linked.exists());
+    assert!(fx.state.source_records.deletions(&fx.project_id).is_empty());
+    let status = source_status(&fx.state, &fx.project_id, REPO).await;
+    assert!(
+        matches!(status, RepoSourceStatus::Present { .. }),
+        "{status:?}"
+    );
+}
+
 #[tokio::test]
 async fn delete_purges_server_scan_cache_for_that_repo_only() {
     let fx = fixture();

@@ -2,7 +2,9 @@
 //! re-fetch handler and the delta rescan.
 //!
 //! Every function runs the system `git` through [`crate::workspace::git`] (kill-on-drop, one
-//! process, no shell) and never writes to the checkout. Anything that cannot be determined
+//! process, no shell) and never writes to the checkout (the one exception is
+//! [`linked_worktrees`], which first prunes stale worktree registrations: administrative records
+//! of folders that no longer exist, never a working tree). Anything that cannot be determined
 //! comes back as `None`/`false`/empty rather than an error: callers decide what "unknown" means
 //! for them (the deletion guard treats an unreadable branch list as a refusal, the status view as
 //! a missing field).
@@ -11,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::onboard::finding_context::canonicalize_existing_prefix;
 use crate::workspace::{git, stderr_of};
 
 /// Untracked paths Camerata itself creates inside a checkout. They are scratch, not work: a
@@ -166,22 +169,131 @@ pub async fn unpushed(dir: &Path) -> Vec<Unpushed> {
     found
 }
 
-/// Registered worktree paths of the checkout at `dir`, EXCLUDING the checkout itself (git lists
-/// it first). `git worktree list --porcelain` is authoritative: Camerata's own live under
+/// One entry of `git worktree list --porcelain`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ListedWorktree {
+    pub path: PathBuf,
+    /// Git annotated the entry `prunable`: the registration points at a folder that is no
+    /// longer that worktree.
+    pub prunable: bool,
+}
+
+/// Parse `git worktree list --porcelain`: blocks separated by a blank line, each starting with
+/// `worktree <path>` and optionally carrying a `prunable <reason>` line. Pure.
+pub(crate) fn parse_worktree_list(porcelain: &str) -> Vec<ListedWorktree> {
+    let mut out: Vec<ListedWorktree> = Vec::new();
+    for line in porcelain.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            out.push(ListedWorktree {
+                path: PathBuf::from(path),
+                prunable: false,
+            });
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            if let Some(last) = out.last_mut() {
+                last.prunable = true;
+            }
+        }
+    }
+    out
+}
+
+/// The canonical path of the git directory shared by every worktree of the clone `dir` belongs
+/// to (`git rev-parse --git-common-dir`): `<clone>/.git` for the main checkout AND for each of
+/// its linked worktrees. `None` when `dir` is not a repository.
+pub async fn common_dir(dir: &Path) -> Option<PathBuf> {
+    let raw = read(dir, &["rev-parse", "--git-common-dir"]).await?;
+    let path = PathBuf::from(raw);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        dir.join(path)
+    };
+    Some(canonicalize_existing_prefix(&absolute))
+}
+
+/// Registered worktree paths of the checkout at `dir`, EXCLUDING `dir` itself. `git worktree
+/// list --porcelain` is authoritative: Camerata's own live under
 /// `<checkout>/.camerata-worktrees/<branch>`, but a hand-made one may be anywhere.
+///
+/// Three safeguards keep a worktree that is not really one out of the answer, because every path
+/// returned is later deleted:
+///
+/// - stale registrations are pruned first (this removes only administrative records of
+///   worktrees whose folder is gone; no working tree is touched), and any entry git still
+///   flags `prunable` is dropped;
+/// - the asked folder is excluded by its canonical path, not by position (git lists the MAIN
+///   worktree first, which is not `dir` when `dir` is itself a linked worktree);
+/// - a listed folder that exists must carry a `.git` file pointing into THIS clone's
+///   `worktrees/` area, else the whole answer is an error: a folder reused for something else
+///   is not ours to remove.
 pub async fn linked_worktrees(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let _ = git(Some(dir), &["worktree", "prune"]).await;
     let out = git(Some(dir), &["worktree", "list", "--porcelain"])
         .await
         .map_err(|e| format!("couldn't run git: {e}"))?;
     if !out.status.success() {
         return Err(stderr_of(&out));
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
+    let Some(common) = common_dir(dir).await else {
+        return Err("couldn't find the clone's git directory".to_string());
+    };
+    let me = canonicalize_existing_prefix(dir);
+    let mut found = Vec::new();
+    for listed in parse_worktree_list(&String::from_utf8_lossy(&out.stdout)) {
+        if listed.prunable || canonicalize_existing_prefix(&listed.path) == me {
+            continue;
+        }
+        // Nothing on disk, nothing to remove (a locked registration for a missing folder).
+        if std::fs::symlink_metadata(&listed.path).is_err() {
+            continue;
+        }
+        verify_belongs_to(&listed.path, &common)?;
+        found.push(listed.path);
+    }
+    Ok(found)
+}
+
+/// `Ok` when the existing folder `wt` is a worktree of the clone whose shared git directory is
+/// `common`: its `.git` is a file whose `gitdir:` line points under `<common>/worktrees/`, or
+/// (the main checkout, listed from a linked worktree) its `.git` directory IS `common`.
+fn verify_belongs_to(wt: &Path, common: &Path) -> Result<(), String> {
+    let not_ours = |detail: &str| {
+        format!(
+            "{} is not a worktree of this clone ({detail})",
+            wt.display()
+        )
+    };
+    let dot_git = wt.join(".git");
+    let Ok(meta) = std::fs::symlink_metadata(&dot_git) else {
+        return Err(not_ours("it has no .git"));
+    };
+    if meta.is_dir() {
+        return (canonicalize_existing_prefix(&dot_git) == common)
+            .then_some(())
+            .ok_or_else(|| not_ours("its .git is another repository's"));
+    }
+    let text = std::fs::read_to_string(&dot_git).map_err(|e| not_ours(&e.to_string()))?;
+    let Some(target) = text
         .lines()
-        .filter_map(|l| l.strip_prefix("worktree "))
-        .skip(1)
-        .map(PathBuf::from)
-        .collect())
+        .find_map(|l| l.strip_prefix("gitdir:"))
+        .map(str::trim)
+    else {
+        return Err(not_ours("its .git file has no gitdir line"));
+    };
+    let target = Path::new(target);
+    let target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        wt.join(target)
+    };
+    if canonicalize_existing_prefix(&target).starts_with(common.join("worktrees")) {
+        Ok(())
+    } else {
+        Err(not_ours(&format!(
+            "its .git file points to {}",
+            target.display()
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -323,5 +435,130 @@ mod tests {
             listed[0].canonicalize().unwrap(),
             wt.canonicalize().unwrap()
         );
+    }
+
+    /// Git lists the MAIN worktree first, whichever worktree it is asked from. Excluding "the
+    /// first entry" therefore excluded the wrong folder when asked from a linked worktree, and
+    /// listed the folder itself as one of its own worktrees.
+    #[tokio::test]
+    async fn linked_worktrees_excludes_the_asked_folder_even_when_git_lists_the_main_first() {
+        let (tmp, clone, _) = fixture();
+        let wt = tmp.path().join("elsewhere-wt");
+        sync_git(
+            &clone,
+            &["worktree", "add", "-q", "-b", "side", &wt.to_string_lossy()],
+        );
+
+        let from_linked = linked_worktrees(&wt).await.unwrap();
+
+        assert_eq!(from_linked.len(), 1, "{from_linked:?}");
+        assert_eq!(
+            from_linked[0].canonicalize().unwrap(),
+            clone.canonicalize().unwrap(),
+            "the other worktree is the main checkout, not the folder asked about"
+        );
+    }
+
+    /// A worktree whose folder was removed by hand stays registered until pruned. Listing prunes
+    /// first, so a registration for a vanished folder never appears (and its path, reused later
+    /// for something else, is never mistaken for a worktree).
+    #[tokio::test]
+    async fn a_stale_registration_is_pruned_before_listing() {
+        let (tmp, clone, _) = fixture();
+        let wt = tmp.path().join("gone-wt");
+        sync_git(
+            &clone,
+            &["worktree", "add", "-q", "-b", "side", &wt.to_string_lossy()],
+        );
+        std::fs::remove_dir_all(&wt).unwrap();
+        std::fs::create_dir_all(wt.join("precious")).unwrap();
+        assert!(
+            sync_git(&clone, &["worktree", "list", "--porcelain"]).contains("prunable"),
+            "git itself still lists the stale registration"
+        );
+
+        assert!(linked_worktrees(&clone).await.unwrap().is_empty());
+        assert!(
+            !sync_git(&clone, &["worktree", "list", "--porcelain"]).contains("gone-wt"),
+            "the registration is gone"
+        );
+        assert!(
+            wt.join("precious").exists(),
+            "the reused folder is untouched"
+        );
+    }
+
+    #[test]
+    fn the_listing_parser_reads_paths_and_the_prunable_flag() {
+        let porcelain = "worktree /x/main\nHEAD aaa\nbranch refs/heads/main\n\n\
+                         worktree /x/live\nHEAD bbb\nbranch refs/heads/live\n\n\
+                         worktree /x/stale\nHEAD ccc\ndetached\nprunable gitdir file points to non-existent location\n";
+        let listed = parse_worktree_list(porcelain);
+        assert_eq!(
+            listed,
+            vec![
+                ListedWorktree {
+                    path: PathBuf::from("/x/main"),
+                    prunable: false
+                },
+                ListedWorktree {
+                    path: PathBuf::from("/x/live"),
+                    prunable: false
+                },
+                ListedWorktree {
+                    path: PathBuf::from("/x/stale"),
+                    prunable: true
+                },
+            ]
+        );
+    }
+
+    /// A registration prune left behind (a locked one, say) that git still flags `prunable`
+    /// is never returned either.
+    #[test]
+    fn prunable_entries_are_dropped_from_the_returned_list() {
+        let porcelain =
+            "worktree /x/main\nHEAD aaa\n\nworktree /x/stale\nHEAD ccc\nprunable gone\n";
+        let kept: Vec<PathBuf> = parse_worktree_list(porcelain)
+            .into_iter()
+            .filter(|w| !w.prunable)
+            .map(|w| w.path)
+            .collect();
+        assert_eq!(kept, vec![PathBuf::from("/x/main")]);
+    }
+
+    /// A folder that exists at a registered path but whose `.git` file points into SOME OTHER
+    /// repository's admin area is not this clone's worktree; asking to delete it is an error.
+    #[tokio::test]
+    async fn a_listed_folder_whose_git_file_points_elsewhere_is_an_error() {
+        let (tmp, clone, _) = fixture();
+        let wt = tmp.path().join("reused-wt");
+        sync_git(
+            &clone,
+            &["worktree", "add", "-q", "-b", "side", &wt.to_string_lossy()],
+        );
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}/other/.git/worktrees/x\n", tmp.path().display()),
+        )
+        .unwrap();
+
+        let err = linked_worktrees(&clone).await.unwrap_err();
+
+        assert!(err.contains("not a worktree of this clone"), "{err}");
+        assert!(wt.exists());
+    }
+
+    #[tokio::test]
+    async fn the_common_dir_of_a_worktree_is_the_main_clones_git_dir() {
+        let (tmp, clone, _) = fixture();
+        let wt = tmp.path().join("elsewhere-wt");
+        sync_git(
+            &clone,
+            &["worktree", "add", "-q", "-b", "side", &wt.to_string_lossy()],
+        );
+        let expected = clone.join(".git").canonicalize().unwrap();
+        assert_eq!(common_dir(&clone).await.unwrap(), expected);
+        assert_eq!(common_dir(&wt).await.unwrap(), expected);
     }
 }

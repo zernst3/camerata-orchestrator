@@ -440,6 +440,81 @@ async fn guard_refuses_worktree_in_protected_location() {
     assert!(evil.exists() && fx.checkout.exists());
 }
 
+/// H2: the path override aimed at a LINKED worktree of the client's clone. Its `.git` is a
+/// file, the origin matches, and the purge used to skip the wrong worktree-list entry, so the
+/// main clone (with all the client code) survived while the status flipped to deleted.
+#[tokio::test]
+async fn guard_refuses_a_linked_worktree_as_the_target() {
+    let fx = fixture();
+    let linked = fx.root.join("elsewhere").join("linked");
+    git(
+        &fx.checkout,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "side",
+            &linked.to_string_lossy(),
+        ],
+    );
+    assert!(
+        linked.join(".git").is_file(),
+        "a linked worktree has a .git FILE"
+    );
+    point_repo_at(&fx, &linked);
+
+    for intent in [delete_intent(true), Intent::Preview] {
+        let refusal = guard(&fx.state, &fx.project_id, REPO, intent)
+            .await
+            .err()
+            .expect("a linked worktree is never the target");
+        assert_eq!(refusal.code, "linked_worktree");
+        assert!(
+            refusal.message.contains("is a worktree of the clone at")
+                && refusal.message.contains(
+                    &fx.checkout
+                        .canonicalize()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                )
+                && refusal.message.contains("delete that clone instead"),
+            "{}",
+            refusal.message
+        );
+    }
+    assert!(linked.exists() && fx.checkout.exists());
+}
+
+/// H3: the registered worktree's folder was reused by a worktree of a DIFFERENT repository.
+/// Git still lists the registration (the `.git` file exists), but it is not this clone's
+/// worktree and must never be removed with it.
+#[tokio::test]
+async fn guard_refuses_when_a_registered_folder_now_belongs_to_another_repository() {
+    let fx = fixture();
+    let wt = fx.root.join("scratch").join("wt");
+    git(
+        &fx.checkout,
+        &["worktree", "add", "-q", "-b", "side", &wt.to_string_lossy()],
+    );
+    std::fs::write(
+        wt.join(".git"),
+        format!(
+            "gitdir: {}/someone-else/.git/worktrees/wt\n",
+            fx.root.display()
+        ),
+    )
+    .unwrap();
+    write_file(&wt, "precious.txt", "not this clone's\n");
+
+    assert_eq!(
+        code(&fx, delete_intent(true)).await,
+        "worktree_outside_refused"
+    );
+    assert!(wt.join("precious.txt").exists() && fx.checkout.exists());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_worktree_behind_a_symlink_is_refused_by_the_worktree_check() {

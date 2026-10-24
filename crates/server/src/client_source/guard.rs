@@ -11,14 +11,14 @@
 //! | R3 | `not_a_directory` | the recorded path is missing or is not a folder |
 //! | R4 | `symlinked_path` | any component of the path is a symbolic link |
 //! | R5 | `protected_path` | the folder is the home dir, the workspace root, Camerata's own stores or program, an ancestor of any of those or of another checkout, too shallow, relative, or (in a test) a real user location |
-//! | R6 | `not_a_git_repo` | the folder has no `.git` |
+//! | R6 | `not_a_git_repo` / `linked_worktree` | the folder has no `.git`, or its `.git` is a file (it is a linked worktree of another clone) |
 //! | R7 | `no_origin` / `origin_not_github` / `origin_unreadable` | its `origin` cannot be read as a GitHub repo |
 //! | R8 | `origin_mismatch` | its `origin` is a different repo than the project's |
 //! | R9 | `confirmation_mismatch` | the typed name is not the repo's name, byte for byte |
 //! | R10 | `dirty_tree` | uncommitted work and the operator did not tick "Delete uncommitted work too" |
 //! | R11 | `unpushed_commits` | commits not on GitHub, same tick |
 //! | R12 | `scan_in_progress` | a scan, re-fetch or delete is running for the project or repo |
-//! | R13 | `worktree_outside_refused` | a registered worktree is itself a symlink or a protected location |
+//! | R13 | `worktree_outside_refused` | a registered worktree is itself a symlink or a protected location, or a listed folder is not really a worktree of this clone |
 //!
 //! A preview ([`Intent::Preview`]) runs the same checks except R9 (nothing was typed yet) and
 //! reports R10/R11 as facts about the target instead of refusing, so the confirmation dialog can
@@ -130,6 +130,26 @@ pub async fn guard(
                 "{} is not a git repository (no .git). Camerata deletes only a git checkout whose \
                  origin matches the project.",
                 path.display()
+            ),
+        ));
+    }
+
+    // A linked worktree has a `.git` FILE, not a directory. Deleting it would leave the clone it
+    // belongs to (and all of its code) on disk while the repo read as deleted.
+    if path.join(".git").is_file() {
+        let clone = match git::common_dir(&path).await {
+            Some(common) if common.file_name().is_some_and(|n| n == ".git") => {
+                common.parent().map(Path::to_path_buf).unwrap_or(common)
+            }
+            Some(common) => common,
+            None => PathBuf::from("its main clone"),
+        };
+        return Err(Refusal::conflict(
+            "linked_worktree",
+            format!(
+                "{} is a worktree of the clone at {}; delete that clone instead.",
+                path.display(),
+                clone.display()
             ),
         ));
     }
