@@ -1209,7 +1209,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/projects/:id/reconcile", get(reconcile_project))
         .route("/api/projects/:id/emit", post(emit_project))
-        .route("/api/projects/:id/emit-local", post(emit_project_local))
+        // Writes into every repo's local clone (and clones a missing one): turned away with
+        // `409 source_deleted` when any repo of the project had its source deleted.
+        .route(
+            "/api/projects/:id/emit-local",
+            post(emit_project_local).layer(source_gate.clone()),
+        )
         .route("/api/projects/:id/custom", post(add_custom_rule))
         .route("/api/projects/:id/custom/delete", post(delete_custom_rule))
         .route("/api/projects/:id/max-iterations", post(set_max_iterations))
@@ -7723,15 +7728,21 @@ async fn onboard_apply(
             continue;
         };
         // Clone into the workspace root only when there's no explicit override (never clone
-        // over a folder the architect chose by hand).
-        let clone_root = if override_path
-            .as_deref()
-            .map(|p| !p.trim().is_empty())
-            .unwrap_or(false)
-        {
-            None
-        } else {
-            workspace_root.as_deref().map(std::path::Path::new)
+        // over a folder the architect chose by hand), and never for a repo whose source was
+        // deleted on purpose: that stays deleted until "Re-fetch source".
+        let clone_root = match crate::client_source::resolution::clone_root_for(
+            &state,
+            repo,
+            override_path.as_deref(),
+            workspace_root.as_deref(),
+        ) {
+            Ok(root) => root,
+            Err(refusal) => {
+                results.push(serde_json::json!({
+                    "repo": repo, "ok": false, "code": refusal.code, "message": refusal.message
+                }));
+                continue;
+            }
         };
         let msg = format!("chore(governance): apply Camerata ruleset to {repo}");
         match crate::workspace::apply_local_and_push(
@@ -8978,12 +8989,26 @@ struct GenerateCiWorkflowReq {
 ///
 /// A missing manifest is NOT an error — it generates a workflow with only the
 /// built-in language steps. The caller can store the YAML in the repo.
-async fn generate_ci_workflow(Json(req): Json<GenerateCiWorkflowReq>) -> Json<serde_json::Value> {
+async fn generate_ci_workflow(Json(req): Json<GenerateCiWorkflowReq>) -> axum::response::Response {
     use crate::workflow_gen::generate_gates_workflow;
+    use axum::response::IntoResponse;
     use camerata_checks::manifest::load_manifest;
     use std::path::Path;
 
     let root = Path::new(&req.repo_root);
+    // Only ever write into an existing git checkout. Without this the route created
+    // `<repo_root>/.github/workflows/` (and every missing parent) for ANY path, which brought
+    // back the folder of a repo whose source was deleted on purpose and then blocked re-fetch.
+    if !crate::workspace::is_git_repo(root) {
+        return crate::client_source::Refusal::conflict(
+            "not_a_git_repo",
+            format!(
+                "{} is not a git checkout, so no workflow was written.",
+                root.display()
+            ),
+        )
+        .into_response();
+    }
 
     // Load manifest (best-effort: absent/invalid → empty).
     let manifest = match load_manifest(root) {
@@ -9012,7 +9037,8 @@ async fn generate_ci_workflow(Json(req): Json<GenerateCiWorkflowReq>) -> Json<se
             return Json(serde_json::json!({
                 "ok": false,
                 "message": format!("failed to create workflow dir: {e}")
-            }));
+            }))
+            .into_response();
         }
     }
 
@@ -9020,7 +9046,8 @@ async fn generate_ci_workflow(Json(req): Json<GenerateCiWorkflowReq>) -> Json<se
         return Json(serde_json::json!({
             "ok": false,
             "message": format!("failed to write workflow file: {e}")
-        }));
+        }))
+        .into_response();
     }
 
     Json(serde_json::json!({
@@ -9028,6 +9055,7 @@ async fn generate_ci_workflow(Json(req): Json<GenerateCiWorkflowReq>) -> Json<se
         "path": workflow_path.display().to_string(),
         "yaml": yaml
     }))
+    .into_response()
 }
 
 // ── Greenfield scaffold handler ───────────────────────────────────────────────
@@ -9538,14 +9566,19 @@ async fn emit_project_local(
             }));
             continue;
         };
-        let clone_root = if override_path
-            .as_deref()
-            .map(|p| !p.trim().is_empty())
-            .unwrap_or(false)
-        {
-            None
-        } else {
-            workspace_root.as_deref().map(std::path::Path::new)
+        let clone_root = match crate::client_source::resolution::clone_root_for(
+            &state,
+            repo,
+            override_path.as_deref(),
+            workspace_root.as_deref(),
+        ) {
+            Ok(root) => root,
+            Err(refusal) => {
+                results.push(serde_json::json!({
+                    "repo": repo, "ok": false, "code": refusal.code, "message": refusal.message
+                }));
+                continue;
+            }
         };
         let msg = format!("chore(governance): re-emit Camerata ruleset to {repo}");
         match crate::workspace::apply_local(

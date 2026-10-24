@@ -1442,6 +1442,21 @@ fn execute_gated_write(
     // write EFFECT are the same path: no `wt.join(trim)` path-doubling (GATE-F3) and no
     // check-here/write-there divergence (GATE-F4).
     let write_path = if let Some(wt) = &driver.worktree {
+        // The jail root must still exist: a write creates missing parents, so into a worktree
+        // whose checkout was deleted mid-run it would quietly recreate the deleted folder.
+        if !wt.is_dir() {
+            let msg = format!(
+                "DENIED: the worktree {} no longer exists (its checkout may have been deleted); nothing was written.",
+                wt.display()
+            );
+            let denial = GateDenial {
+                message: msg.clone(),
+                rule_id: None,
+                reason: "the worktree no longer exists".to_string(),
+                path: Some(path),
+            };
+            return (msg, Some(denial));
+        }
         match assert_in_worktree(wt, &path) {
             Ok(resolved) => resolved,
             Err(e) => {
@@ -3076,6 +3091,35 @@ mod tests {
         assert!(
             wt.join("src/lib.rs").exists(),
             "allowed write must create the file"
+        );
+    }
+
+    /// A governed run still in flight when its checkout was deleted must not recreate the
+    /// worktree folder (and with it the deleted checkout's path) by writing into it.
+    #[tokio::test]
+    async fn gated_write_into_a_vanished_worktree_writes_and_creates_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wt = tmp
+            .path()
+            .join("acme")
+            .join("app")
+            .join(".camerata-worktrees")
+            .join("wt");
+        let role = all_rules_role();
+        let driver = driver_with(Arc::new(StubCompleter("x".into())), &role, Some(wt.clone()));
+        let inv = ToolInvocation {
+            id: "call-gone".to_string(),
+            name: "gated_write".to_string(),
+            input: serde_json::json!({ "path": "src/lib.rs", "content": "pub fn hello() {}" }),
+        };
+
+        let (result, denial) = execute_gated_write(&driver, &role, &inv);
+
+        assert!(denial.is_some(), "the write is refused: {result}");
+        assert!(result.contains("no longer exists"), "{result}");
+        assert!(
+            !tmp.path().join("acme").exists(),
+            "nothing under the vanished worktree's path was created"
         );
     }
 

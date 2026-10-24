@@ -14,7 +14,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
-use super::records::long_date;
+use super::records::{long_date, DeletionRecord};
 use super::status::{deleted_record, source_status, RepoSourceStatus};
 use super::Refusal;
 use crate::project::Project;
@@ -167,32 +167,73 @@ fn project_id_in_path(uri: &Uri) -> Option<String> {
         .flatten()
 }
 
+/// The deletion record that still stands for `repo` in ANY project that has it, as
+/// `(project_id, record)`. A repo's folder is per machine, not per project, so a deletion
+/// recorded against one project means the folder is gone for every project that lists the repo.
+pub(crate) fn deleted_in_any_project(
+    state: &AppState,
+    repo: &str,
+) -> Option<(String, DeletionRecord)> {
+    state.projects.list().into_iter().find_map(|project| {
+        let spelled = project
+            .repos
+            .iter()
+            .find(|r| r.eq_ignore_ascii_case(repo.trim()))?;
+        deleted_record(state, &project.id, spelled).map(|record| (project.id.clone(), record))
+    })
+}
+
 /// The first repo in scope whose source is deleted, as `(repo, deleted_at)`.
 ///
-/// Scope is the repos the request names that belong to the project; a request that names none
-/// (a project-level rule set) is scoped to ALL of the project's repos.
+/// Scope is the repos the request names that belong to the project (a request that names none, a
+/// project-level rule set, is scoped to ALL of the project's repos), PLUS every repo the request
+/// names that belongs to any other project: a deletion recorded against another project removes
+/// the same folder (owner decision, 2026-10-24).
 pub fn first_deleted_in_scope(
     state: &AppState,
     project_id: Option<&str>,
     named: &[String],
 ) -> Option<(String, String)> {
     let project = match project_id {
-        Some(id) => state.projects.get(id)?,
-        None => state.projects.active()?,
+        Some(id) => state.projects.get(id),
+        None => state.projects.active(),
     };
-    let in_scope: Vec<&String> = project
-        .repos
-        .iter()
-        .filter(|r| named.iter().any(|n| n.eq_ignore_ascii_case(r)))
-        .collect();
-    let candidates: Vec<&String> = if in_scope.is_empty() {
-        project.repos.iter().collect()
-    } else {
-        in_scope
-    };
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(project) = &project {
+        let in_scope: Vec<&String> = project
+            .repos
+            .iter()
+            .filter(|r| named.iter().any(|n| n.eq_ignore_ascii_case(r)))
+            .collect();
+        if in_scope.is_empty() {
+            candidates.extend(project.repos.iter().cloned());
+        } else {
+            candidates.extend(in_scope.into_iter().cloned());
+        }
+    }
+    candidates.extend(named.iter().cloned());
     candidates.into_iter().find_map(|repo| {
-        deleted_record(state, &project.id, repo).map(|r| (repo.clone(), r.completed_at))
+        deleted_in_any_project(state, &repo).map(|(_, record)| (repo, record.completed_at))
     })
+}
+
+/// Where a handler may let `apply_local` clone `repo` when it is not on disk: the workspace root,
+/// or `None` for a repo with a per-repo path override (never clone over a folder the architect
+/// chose by hand). `Err` for a repo whose source was deleted: the route must report the refusal
+/// instead of cloning, so no emit or apply can bring deleted source back as a side effect.
+pub(crate) fn clone_root_for<'a>(
+    state: &AppState,
+    repo: &str,
+    override_path: Option<&str>,
+    workspace_root: Option<&'a str>,
+) -> Result<Option<&'a std::path::Path>, Refusal> {
+    if let Some((_, record)) = deleted_in_any_project(state, repo) {
+        return Err(source_deleted_refusal(repo, &record.completed_at));
+    }
+    if override_path.is_some_and(|p| !p.trim().is_empty()) {
+        return Ok(None);
+    }
+    Ok(workspace_root.map(std::path::Path::new))
 }
 
 /// Axum middleware for the routes that scan or write into a repo: answer `409 source_deleted`

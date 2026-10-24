@@ -2929,6 +2929,9 @@ pub(super) fn RulesView() -> Element {
     // imported scoping as-is.
     let mut import_repos = use_signal(Vec::<String>::new);
     let mut emitting_local = use_signal(|| false);
+    // Emitting writes into (and would re-clone) every repo's checkout, so it is off while any
+    // repo's source is deleted on purpose; the notice beside it carries the way back.
+    let source_block = crate::source_ui::use_scan_block();
     // Emit cascade toggles (each requires the previous): commit to a managed branch → push it →
     // open a PR. All off = write the ruleset into the local working copy only.
     let mut emit_branch = use_signal(|| false);
@@ -3209,7 +3212,7 @@ pub(super) fn RulesView() -> Element {
                         div { class: "rules-emit",
                             button {
                                 class: "btn-run",
-                                disabled: emitting_local(),
+                                disabled: emitting_local() || source_block.is_some(),
                                 onclick: move |_| {
                                     let id = pid_emit_local.clone();
                                     let (b, pu, pr) = (emit_branch(), emit_push(), emit_pr());
@@ -3225,6 +3228,9 @@ pub(super) fn RulesView() -> Element {
                                     });
                                 },
                                 if emitting_local() { "Emitting…" } else { "Emit rules locally" }
+                            }
+                            if let Some(block) = source_block.clone() {
+                                crate::source_ui::ScanBlockNotice { block }
                             }
                             // Cascading toggles. Unchecking a level clears the deeper ones so a
                             // request can never be branch=false but push=true.
