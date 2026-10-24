@@ -26,6 +26,8 @@ pub mod ops;
 pub mod purge;
 pub mod read;
 pub mod records;
+pub mod refetch;
+pub mod remote;
 pub mod resolution;
 pub mod status;
 pub mod storage;
@@ -38,6 +40,8 @@ mod guard_tests;
 mod read_tests;
 #[cfg(test)]
 mod readiness_tests;
+#[cfg(test)]
+mod refetch_tests;
 #[cfg(test)]
 mod status_tests;
 #[cfg(test)]

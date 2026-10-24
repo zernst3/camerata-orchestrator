@@ -18,7 +18,7 @@ use super::records::{
     METHOD_SENTENCE, RESIDUAL_BACKUPS, RESIDUAL_EXCERPTS, RESIDUAL_MODEL_SESSIONS,
     RESIDUAL_UNCOMMITTED,
 };
-use super::status::{inspected_entry, source_status, RepoSourceStatus};
+use super::status::{inspected_entry, project_and_repo, source_status, RepoSourceStatus};
 use super::Refusal;
 use crate::AppState;
 
@@ -52,23 +52,12 @@ pub async fn delete_source(
     repo_param: &str,
     req: &DeleteRequest,
 ) -> Result<DeleteOutcome, Refusal> {
-    let project = state.projects.get(project_id).ok_or_else(|| {
-        Refusal::not_found(
-            "unknown_project",
-            format!("project not found: {project_id}"),
-        )
-    })?;
-    if let Some(repo) = project
-        .repos
-        .iter()
-        .find(|r| r.eq_ignore_ascii_case(repo_param.trim()))
+    let (project, repo) = project_and_repo(state, project_id, repo_param)?;
+    if let RepoSourceStatus::Deleted { record_id, .. } =
+        source_status(state, &project.id, &repo).await
     {
-        if let RepoSourceStatus::Deleted { record_id, .. } =
-            source_status(state, &project.id, repo).await
-        {
-            if let Some(record) = state.source_records.deletion(&project.id, &record_id) {
-                return Ok(DeleteOutcome::AlreadyDeleted(Box::new(record)));
-            }
+        if let Some(record) = state.source_records.deletion(&project.id, &record_id) {
+            return Ok(DeleteOutcome::AlreadyDeleted(Box::new(record)));
         }
     }
 
@@ -225,24 +214,20 @@ pub async fn delete_preview(
     State(state): State<AppState>,
     Path((id, repo)): Path<(String, String)>,
 ) -> Response {
-    if let Some(project) = state.projects.get(&id) {
-        if let Some(r) = project
-            .repos
-            .iter()
-            .find(|r| r.eq_ignore_ascii_case(repo.trim()))
-        {
-            if source_status(&state, &project.id, r)
-                .await
-                .deleted()
-                .is_some()
-            {
-                return Refusal::conflict(
-                    "already_deleted",
-                    format!("The source of {r} was already deleted from this machine."),
-                )
-                .into_response();
-            }
-        }
+    let (project, repo) = match project_and_repo(&state, &id, &repo) {
+        Ok(found) => found,
+        Err(refusal) => return refusal.into_response(),
+    };
+    if source_status(&state, &project.id, &repo)
+        .await
+        .deleted()
+        .is_some()
+    {
+        return Refusal::conflict(
+            "already_deleted",
+            format!("The source of {repo} was already deleted from this machine."),
+        )
+        .into_response();
     }
     let target = match guard(&state, &id, &repo, Intent::Preview).await {
         Ok(t) => t,

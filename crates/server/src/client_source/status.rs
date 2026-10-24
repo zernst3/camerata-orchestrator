@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use super::git;
 use super::records::{DeletionRecord, RefetchRecord};
+use super::Refusal;
 use crate::workspace;
 use crate::AppState;
 
@@ -83,6 +84,34 @@ impl RepoSourceStatus {
             _ => None,
         }
     }
+}
+
+/// The project and the repo AS THE PROJECT SPELLS IT, for an endpoint addressed by
+/// `(project id, repo name)`. Refuses with `unknown_project` (404) or `repo_not_in_project` (409).
+/// The first check of every source operation (R1 of the deletion guard).
+pub(crate) fn project_and_repo(
+    state: &AppState,
+    project_id: &str,
+    repo_param: &str,
+) -> Result<(crate::project::Project, String), Refusal> {
+    let project = state.projects.get(project_id).ok_or_else(|| {
+        Refusal::not_found(
+            "unknown_project",
+            format!("project not found: {project_id}"),
+        )
+    })?;
+    let repo = project
+        .repos
+        .iter()
+        .find(|r| r.eq_ignore_ascii_case(repo_param.trim()))
+        .cloned()
+        .ok_or_else(|| {
+            Refusal::conflict(
+                "repo_not_in_project",
+                format!("{repo_param} is not one of this project's repositories."),
+            )
+        })?;
+    Ok((project, repo))
 }
 
 /// Where the repo's folder is, per the machine-local override else the workspace layout. The ONE

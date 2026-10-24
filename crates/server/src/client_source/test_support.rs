@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
+use super::remote::GitRemotes;
 use super::storage::StorageRoots;
 use crate::onboard::{AuditedRef, ScanReport};
 use crate::test_git::{bare_remote, clone_as};
@@ -53,8 +54,17 @@ pub(crate) fn fixture() -> Fx {
     clone_as(&remote_url, &checkout, "https://github.com/acme/app.git");
 
     // Every location deletion may touch is under `root`: nothing real can be reached.
+    // Network git steps (re-fetch, probe) go to the local bare remote, never to GitHub.
     let state = AppState::from_data_dir(&root.join("data"))
-        .with_storage_roots(StorageRoots::sandboxed(&root));
+        .with_storage_roots(StorageRoots::sandboxed(&root))
+        .with_git_remotes(GitRemotes::default().with_url(REPO, &remote_url));
+    state
+        .credential_store
+        .set(
+            crate::credentials::GITHUB_TOKEN,
+            "test-token-never-sent-anywhere",
+        )
+        .expect("memory credential store");
     state
         .settings
         .set_workspace_root(Some(work.to_string_lossy().into_owned()));
@@ -104,7 +114,8 @@ impl Fx {
     /// A second, independent state over the same data directory: a restart.
     pub(crate) fn restarted(&self) -> AppState {
         let restarted = AppState::from_data_dir(&self.root.join("data"))
-            .with_storage_roots(StorageRoots::sandboxed(&self.root));
+            .with_storage_roots(StorageRoots::sandboxed(&self.root))
+            .with_git_remotes(GitRemotes::default().with_url(REPO, &self.remote_url));
         restarted
             .settings
             .set_workspace_root(Some(self.root.join("work").to_string_lossy().into_owned()));

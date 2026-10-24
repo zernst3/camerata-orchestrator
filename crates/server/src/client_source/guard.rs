@@ -28,7 +28,7 @@ use std::path::{Component, Path, PathBuf};
 
 use super::git::{self, Unpushed};
 use super::ops::OpGuard;
-use super::status::resolve_dir;
+use super::status::{project_and_repo, resolve_dir};
 use super::storage::{ensure_not_real_location_in_test, StorageRoots};
 use super::Refusal;
 use crate::onboard::finding_context::canonicalize_existing_prefix;
@@ -77,23 +77,7 @@ pub async fn guard(
     intent: Intent<'_>,
 ) -> Result<GuardedTarget, Refusal> {
     // ── R1 ──────────────────────────────────────────────────────────────────────────────────
-    let Some(project) = state.projects.get(project_id) else {
-        return Err(Refusal::not_found(
-            "unknown_project",
-            format!("project not found: {project_id}"),
-        ));
-    };
-    let Some(repo) = project
-        .repos
-        .iter()
-        .find(|r| r.eq_ignore_ascii_case(repo_param.trim()))
-        .cloned()
-    else {
-        return Err(Refusal::conflict(
-            "repo_not_in_project",
-            format!("{repo_param} is not one of this project's repositories."),
-        ));
-    };
+    let (project, repo) = project_and_repo(state, project_id, repo_param)?;
 
     // ── R2 ──────────────────────────────────────────────────────────────────────────────────
     let Some(recorded) = resolve_dir(state, &repo) else {

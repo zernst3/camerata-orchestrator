@@ -206,6 +206,9 @@ pub struct AppState {
     /// Operations in flight on a repo's source (delete, re-fetch, rescan) and scans running in a
     /// request: what the deletion guard's "scan in progress" refusal reads.
     source_ops: crate::client_source::ops::SourceOps,
+    /// Where network git steps (re-fetch clone, probe, commit fetch) go. GitHub in production;
+    /// tests map a repo to a local bare repository so nothing touches the network.
+    git_remotes: crate::client_source::remote::GitRemotes,
     /// The locations source deletion may touch besides the checkout. EMPTY by default so a
     /// state built by `new()` can touch nothing outside a checkout; only `from_env()` installs
     /// the real ones. See [`crate::client_source::storage`].
@@ -325,6 +328,7 @@ impl AppState {
             inspections: crate::inspections::InspectionStore::new(),
             source_records: crate::client_source::records::SourceRecordStore::new(),
             source_ops: crate::client_source::ops::SourceOps::new(),
+            git_remotes: crate::client_source::remote::GitRemotes::default(),
             storage_roots: Arc::new(crate::client_source::storage::StorageRoots::default()),
             last_scan: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             recent_scan: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -906,6 +910,13 @@ impl AppState {
         state
     }
 
+    /// Replace where network git steps go. Test seam (see [`crate::client_source::remote`]).
+    #[must_use]
+    pub fn with_git_remotes(mut self, remotes: crate::client_source::remote::GitRemotes) -> Self {
+        self.git_remotes = remotes;
+        self
+    }
+
     /// Replace the locations source deletion may touch besides the checkout. The test seam that
     /// confines every deletion to a temp directory; production installs the real roots in
     /// [`AppState::from_env`] and never calls this.
@@ -1392,6 +1403,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/projects/:id/source/records/:record_id/text",
             get(crate::client_source::handlers::get_record_text),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/source/remote",
+            get(crate::client_source::refetch::remote_probe),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/source/refetch",
+            post(crate::client_source::refetch::refetch),
         )
         .route(
             "/api/projects/:id/repos/:repo/source/delete-preview",
