@@ -62,6 +62,14 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-24 (delete + re-fetch spec questions): (1, Zach) Claude Code's own session files under
+  `~/.claude/projects/` that hold client source from Camerata's CLI-backend AI passes are deleted
+  during source deletion: Camerata tags each call it makes per inspection (`--session-id`, ids
+  recorded on the inspection entry) and deletes exactly those files, listing them in the deletion
+  record. Zach approved this outside-repo deletion. (2, Opus engineering call) Deletion refuses
+  while the checkout has uncommitted or unpushed work unless the operator ticks "Delete
+  uncommitted work too". Spec: `docs/design/2026-10-24_delete-and-refetch-client-source.md`.
+
 - 2026-10-24 (Zach): **Vulnerability intelligence, pieces 1 and 3 are V1.** (1) Enrich the
   existing osv-scanner dependency findings with CISA KEV (Known Exploited Vulnerabilities, JSON
   feed): a CVE on KEV is labelled "known exploited" and floored to the top severity; show the
