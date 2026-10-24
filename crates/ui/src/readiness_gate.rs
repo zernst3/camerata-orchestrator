@@ -70,6 +70,14 @@ fn parse_readiness(v: &serde_json::Value) -> Readiness {
                         .and_then(|s| s.as_str())
                         .unwrap_or_default()
                         .to_string(),
+                    source_deleted: it
+                        .get("source_deleted")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false),
+                    deleted_at: it
+                        .get("deleted_at")
+                        .and_then(|s| s.as_str())
+                        .map(str::to_string),
                 })
                 .collect()
         })
@@ -468,6 +476,8 @@ mod tests {
                             resolved: false,
                             path: String::new(),
                             reason: "no local match".to_string(),
+                            source_deleted: false,
+                            deleted_at: None,
                         }],
                     },
                     open_modal: move |_| {},

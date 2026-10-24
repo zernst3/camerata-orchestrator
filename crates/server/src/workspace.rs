@@ -490,6 +490,28 @@ pub struct RepoResolution {
     pub resolved: bool,
     /// Human reason when not resolved (no path / not a checkout / wrong origin).
     pub reason: String,
+    /// The source was deleted on purpose (client source deletion) and has not been fetched back.
+    /// `repo_resolution` only looks at the filesystem and never sets this; the server fills it
+    /// from the deletion records (`client_source::resolution`). Such a repo has nothing to link.
+    #[serde(default)]
+    pub source_deleted: bool,
+    /// RFC3339 time of that deletion, when `source_deleted`.
+    #[serde(default)]
+    pub deleted_at: Option<String>,
+}
+
+impl RepoResolution {
+    /// A filesystem-only resolution: not deleted (the records are consulted separately).
+    fn on_disk(repo: &str, path: Option<String>, resolved: bool, reason: String) -> Self {
+        Self {
+            repo: repo.to_string(),
+            path,
+            resolved,
+            reason,
+            source_deleted: false,
+            deleted_at: None,
+        }
+    }
 }
 
 /// Resolve + validate one repo against the local filesystem: is there a folder, is it a git
@@ -500,13 +522,12 @@ pub async fn repo_resolution(
     repo: &str,
 ) -> RepoResolution {
     let Some(dir) = resolve_repo_dir(override_path, workspace_root, repo) else {
-        return RepoResolution {
-            repo: repo.to_string(),
-            path: None,
-            resolved: false,
-            reason: "no local path set — choose the repo's folder (or set a workspace root)"
-                .to_string(),
-        };
+        return RepoResolution::on_disk(
+            repo,
+            None,
+            false,
+            "no local path set — choose the repo's folder (or set a workspace root)".to_string(),
+        );
     };
     let path_str = dir.to_string_lossy().into_owned();
     // `detect_remote_repo` returns the already-parsed `owner/repo` string (from the origin
@@ -514,24 +535,16 @@ pub async fn repo_resolution(
     // project identity (e.g. stored `Owner/Repo`, origin `owner/repo`) still resolves as
     // expected — matching the same invariant enforced by `validate_link_target`.
     match detect_remote_repo(&dir).await {
-        Ok(found) if found.eq_ignore_ascii_case(repo.trim()) => RepoResolution {
-            repo: repo.to_string(),
-            path: Some(path_str),
-            resolved: true,
-            reason: String::new(),
-        },
-        Ok(found) => RepoResolution {
-            repo: repo.to_string(),
-            path: Some(path_str),
-            resolved: false,
-            reason: format!("that folder is a different repo (origin: {found})"),
-        },
-        Err(e) => RepoResolution {
-            repo: repo.to_string(),
-            path: Some(path_str),
-            resolved: false,
-            reason: e,
-        },
+        Ok(found) if found.eq_ignore_ascii_case(repo.trim()) => {
+            RepoResolution::on_disk(repo, Some(path_str), true, String::new())
+        }
+        Ok(found) => RepoResolution::on_disk(
+            repo,
+            Some(path_str),
+            false,
+            format!("that folder is a different repo (origin: {found})"),
+        ),
+        Err(e) => RepoResolution::on_disk(repo, Some(path_str), false, e),
     }
 }
 

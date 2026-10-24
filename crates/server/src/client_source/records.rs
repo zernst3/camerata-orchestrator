@@ -434,6 +434,17 @@ fn display_time(rfc3339: &str) -> String {
         .unwrap_or_else(|_| rfc3339.to_string())
 }
 
+/// `2026-10-24T17:40:19Z` -> `24 Oct 2026`; an unparseable string is shown as given.
+pub fn long_date(rfc3339: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .map(|t| {
+            t.with_timezone(&chrono::Utc)
+                .format("%-d %b %Y")
+                .to_string()
+        })
+        .unwrap_or_else(|_| rfc3339.to_string())
+}
+
 /// The current time as RFC3339 UTC with second precision (`2026-10-24T17:40:12Z`).
 pub fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)

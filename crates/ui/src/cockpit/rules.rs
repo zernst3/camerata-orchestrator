@@ -309,7 +309,18 @@ pub(super) struct SuppressionView {
     pub repo: String,
 }
 
-pub(super) async fn fetch_suppressions(project_id: &str) -> Option<Vec<SuppressionView>> {
+/// `GET /api/projects/:id/suppressions`: the waivers found in the repos whose source is on this
+/// machine, plus the date a repo's source was deleted when one was (its waivers cannot be read).
+#[derive(Clone, PartialEq, serde::Deserialize)]
+pub(super) struct SuppressionsListing {
+    #[serde(default)]
+    pub entries: Vec<SuppressionView>,
+    /// RFC3339 time the first deleted repo's source was removed; `None` when none was.
+    #[serde(default)]
+    pub deleted_at: Option<String>,
+}
+
+pub(super) async fn fetch_suppressions(project_id: &str) -> Option<SuppressionsListing> {
     reqwest::get(format!(
         "{}/api/projects/{}/suppressions",
         crate::bff_base(),
@@ -317,7 +328,7 @@ pub(super) async fn fetch_suppressions(project_id: &str) -> Option<Vec<Suppressi
     ))
     .await
     .ok()?
-    .json::<Vec<SuppressionView>>()
+    .json::<SuppressionsListing>()
     .await
     .ok()
 }
@@ -367,8 +378,21 @@ pub(super) fn SuppressionsPanel(project_id: String) -> Element {
                 match state {
                     None => rsx! { p { class: "section-hint", "Refreshing… (pulling repos)" } },
                     Some(None) => rsx! { p { class: "section-hint", "Couldn't read suppressions (no local clones, or repos unreadable)." } },
-                    Some(Some(v)) if v.is_empty() => rsx! { p { class: "section-hint", "No suppressions recorded." } },
-                    Some(Some(v)) => rsx! {
+                    Some(Some(listing)) if listing.entries.is_empty() => rsx! {
+                        if let Some(at) = &listing.deleted_at {
+                            p { class: "section-hint",
+                                {format!("Source deleted on {}. Waivers live in the code, so they can be listed again once the source is re-fetched.", camerata_ui_core::source::format_date(at))}
+                            }
+                        } else {
+                            p { class: "section-hint", "No suppressions recorded." }
+                        }
+                    },
+                    Some(Some(listing)) => rsx! {
+                        if let Some(at) = &listing.deleted_at {
+                            p { class: "section-hint",
+                                {format!("Some source was deleted on {}; only the repos still on this machine are listed.", camerata_ui_core::source::format_date(at))}
+                            }
+                        }
                         div { class: "sups-scroll",
                             table { class: "sups-table",
                                 thead {
@@ -383,7 +407,7 @@ pub(super) fn SuppressionsPanel(project_id: String) -> Element {
                                     }
                                 }
                                 tbody {
-                                    for (i , s) in v.iter().enumerate() {
+                                    for (i , s) in listing.entries.iter().enumerate() {
                                         tr { key: "{i}", class: if s.stale { "sup-row stale" } else { "sup-row" },
                                             td { class: "sup-rule", "{s.rule_id}" }
                                             td { class: "sup-repo", "{s.repo}" }
@@ -6626,28 +6650,35 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-1/suppressions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                {
-                    "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
-                    "path": "src/main.rs",
-                    "line": 12,
-                    "source": "inline",
-                    "stale": false,
-                    "repo": "me/api"
-                }
-            ])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "source_deleted": true,
+                "deleted_at": "2026-10-24T17:40:19Z",
+                "entries": [
+                    {
+                        "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+                        "path": "src/main.rs",
+                        "line": 12,
+                        "source": "inline",
+                        "stale": false,
+                        "repo": "me/api"
+                    }
+                ]
+            })))
             .mount(&server)
             .await;
 
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let sups = super::fetch_suppressions("proj-1").await;
 
-        let sups = sups.expect("valid array parses");
+        let listing = sups.expect("a valid envelope parses");
+        let sups = listing.entries;
         assert_eq!(sups.len(), 1);
         assert_eq!(sups[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
         assert_eq!(sups[0].line, Some(12));
         assert!(!sups[0].stale);
         assert_eq!(sups[0].repo, "me/api");
+        assert_eq!(listing.deleted_at.as_deref(), Some("2026-10-24T17:40:19Z"));
     }
 
     #[tokio::test]

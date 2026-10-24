@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use super::git;
+use super::records::{DeletionRecord, RefetchRecord};
 use crate::workspace;
 use crate::AppState;
 
@@ -107,6 +108,40 @@ pub(crate) fn inspected_entry(
         .find(|e| e.sha_for(repo).is_some())
 }
 
+/// The deletion record that still stands, i.e. the newest deletion unless a re-fetch is newer.
+/// A deletion followed by a re-fetch is history; a re-fetch followed by a deletion is deleted.
+fn newer_deletion(
+    deletion: Option<DeletionRecord>,
+    refetch: Option<&RefetchRecord>,
+) -> Option<DeletionRecord> {
+    let deletion = deletion?;
+    let fetched_back_later = refetch.is_some_and(|r| r.seq > deletion.seq);
+    (!fetched_back_later).then_some(deletion)
+}
+
+/// The deletion record behind a `Deleted` repo, without any git probing: `Some` exactly when
+/// [`source_status`] would answer `Deleted`. Cheap enough to run on every scan request, which is
+/// where "source deleted" must be answered before anything tries to read the missing folder.
+pub(crate) fn deleted_record(
+    state: &AppState,
+    project_id: &str,
+    repo: &str,
+) -> Option<DeletionRecord> {
+    if resolve_dir(state, repo)
+        .as_deref()
+        .is_some_and(workspace::is_git_repo)
+    {
+        return None;
+    }
+    newer_deletion(
+        state.source_records.latest_deletion(project_id, repo),
+        state
+            .source_records
+            .latest_refetch(project_id, repo)
+            .as_ref(),
+    )
+}
+
 /// The status of one repo of `project_id`. Never errors: every failure is a state.
 pub async fn source_status(state: &AppState, project_id: &str, repo: &str) -> RepoSourceStatus {
     let dir = resolve_dir(state, repo);
@@ -135,21 +170,17 @@ pub async fn source_status(state: &AppState, project_id: &str, repo: &str) -> Re
         };
     }
 
-    // No checkout on disk. The newest of {deletion, re-fetch} decides: a deletion newer than any
-    // re-fetch means the operator removed the source and has not fetched it back.
-    if let Some(deletion) = deletion {
-        let fetched_back_later = refetch.as_ref().is_some_and(|r| r.seq > deletion.seq);
-        if !fetched_back_later {
-            return RepoSourceStatus::Deleted {
-                repo: repo.to_string(),
-                path: deletion.path.clone(),
-                deleted_at: deletion.completed_at.clone(),
-                record_id: deletion.id.clone(),
-                inspected_sha: deletion.inspected_sha.clone(),
-                total_files: deletion.total_files,
-                total_bytes: deletion.total_bytes,
-            };
-        }
+    // No checkout on disk. The newest of {deletion, re-fetch} decides.
+    if let Some(deletion) = newer_deletion(deletion, refetch.as_ref()) {
+        return RepoSourceStatus::Deleted {
+            repo: repo.to_string(),
+            path: deletion.path.clone(),
+            deleted_at: deletion.completed_at.clone(),
+            record_id: deletion.id.clone(),
+            inspected_sha: deletion.inspected_sha.clone(),
+            total_files: deletion.total_files,
+            total_bytes: deletion.total_bytes,
+        };
     }
 
     let (path, reason) = match &dir {

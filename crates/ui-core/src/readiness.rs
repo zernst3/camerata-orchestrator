@@ -56,12 +56,70 @@ pub struct RepoResolution {
     pub path: String,
     /// A human-readable reason for the current state (e.g. "no local match", "origin mismatch").
     pub reason: String,
+    /// The source was deleted from this machine on purpose (client source deletion) and has not
+    /// been fetched back. Such a repo has nothing to link, so it is not "unresolved".
+    pub source_deleted: bool,
+    /// RFC3339 time of the deletion, when `source_deleted`.
+    pub deleted_at: Option<String>,
 }
 
-/// The repos that still need resolving (i.e. not resolved) — the ones the modal offers to
-/// clone-or-link. Order is preserved from the input.
+/// The repos that still need resolving (not resolved AND not deliberately deleted) — the ones the
+/// modal offers to clone-or-link. A repo whose source was deleted is excluded: the project keeps
+/// working without it, and the way back is "Re-fetch source", not "Link repo". Order is
+/// preserved from the input.
 pub fn unresolved_repos(repos: &[RepoResolution]) -> Vec<&RepoResolution> {
-    repos.iter().filter(|r| !r.resolved).collect()
+    repos
+        .iter()
+        .filter(|r| !r.resolved && !r.source_deleted)
+        .collect()
+}
+
+/// The scan-and-write operations that cannot run while a repo's source is deleted, and why.
+/// `None` when every repo's source is available (or never was deleted).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScanBlock {
+    /// `(repo, deleted_at)` for each repo whose source is deleted, in input order.
+    pub repos: Vec<(String, String)>,
+}
+
+/// Which repos block scanning, if any. Pure.
+pub fn scan_block(repos: &[RepoResolution]) -> Option<ScanBlock> {
+    let deleted: Vec<(String, String)> = repos
+        .iter()
+        .filter(|r| r.source_deleted)
+        .map(|r| (r.repo.clone(), r.deleted_at.clone().unwrap_or_default()))
+        .collect();
+    (!deleted.is_empty()).then_some(ScanBlock { repos: deleted })
+}
+
+/// The explanation shown beside every control a deleted source disables, for example
+/// "Source for acme/app was deleted on 24 Oct 2026. Re-fetch source from the Workspace tab to
+/// rescan." Several repos are listed in one sentence.
+pub fn scan_block_text(block: &ScanBlock) -> String {
+    let named: Vec<String> = block
+        .repos
+        .iter()
+        .map(|(repo, at)| {
+            if at.is_empty() {
+                repo.clone()
+            } else {
+                format!("{repo} ({})", crate::source::format_date(at))
+            }
+        })
+        .collect();
+    match block.repos.as_slice() {
+        [(repo, at)] if !at.is_empty() => format!(
+            "Source for {repo} was deleted on {}. Re-fetch source from the Workspace tab to rescan.",
+            crate::source::format_date(at)
+        ),
+        [(repo, _)] => format!(
+            "Source for {repo} was deleted. Re-fetch source from the Workspace tab to rescan."
+        ),
+        _ => format!(
+            "Source was deleted for {}. Re-fetch source from the Workspace tab to rescan.",
+            named.join(", ")
+        ),
+    }
 }
 
 /// The banner headline for a paused project, given its readiness. `Ready` has no banner (returns
@@ -122,7 +180,73 @@ mod tests {
             } else {
                 "no local match".to_string()
             },
+            source_deleted: false,
+            deleted_at: None,
         }
+    }
+
+    fn deleted(repo: &str, at: &str) -> RepoResolution {
+        RepoResolution {
+            source_deleted: true,
+            deleted_at: Some(at.to_string()),
+            reason: "source deleted".to_string(),
+            ..res(repo, false)
+        }
+    }
+
+    #[test]
+    fn unresolved_repos_excludes_deleted() {
+        let repos = vec![
+            res("a/one", false),
+            deleted("a/two", "2026-10-24T17:40:19Z"),
+            res("a/three", true),
+        ];
+        let un = unresolved_repos(&repos);
+        assert_eq!(un.len(), 1);
+        assert_eq!(un[0].repo, "a/one");
+        // A project whose only unresolved repo was deleted has nothing for the modal to offer.
+        assert!(unresolved_repos(&[deleted("a/two", "2026-10-24T17:40:19Z")]).is_empty());
+    }
+
+    #[test]
+    fn scan_block_lists_deleted_repos_with_dates() {
+        let repos = vec![
+            res("a/one", true),
+            deleted("a/two", "2026-10-24T17:40:19Z"),
+            deleted("a/four", "2026-11-03T09:00:00Z"),
+        ];
+        let block = scan_block(&repos).expect("blocked");
+        assert_eq!(
+            block.repos,
+            vec![
+                ("a/two".to_string(), "2026-10-24T17:40:19Z".to_string()),
+                ("a/four".to_string(), "2026-11-03T09:00:00Z".to_string()),
+            ]
+        );
+        assert_eq!(
+            scan_block_text(&ScanBlock {
+                repos: vec![("acme/app".to_string(), "2026-10-24T17:40:19Z".to_string())]
+            }),
+            "Source for acme/app was deleted on 24 Oct 2026. Re-fetch source from the Workspace tab to rescan."
+        );
+        assert_eq!(
+            scan_block_text(&block),
+            "Source was deleted for a/two (24 Oct 2026), a/four (3 Nov 2026). Re-fetch source from the Workspace tab to rescan."
+        );
+    }
+
+    #[test]
+    fn scan_block_none_when_all_present() {
+        assert_eq!(scan_block(&[res("a/one", true), res("a/two", false)]), None);
+        assert_eq!(scan_block(&[]), None);
+        // A missing date still reads as a sentence.
+        let undated = ScanBlock {
+            repos: vec![("a/b".to_string(), String::new())],
+        };
+        assert_eq!(
+            scan_block_text(&undated),
+            "Source for a/b was deleted. Re-fetch source from the Workspace tab to rescan."
+        );
     }
 
     #[test]

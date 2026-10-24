@@ -1149,6 +1149,12 @@ pub struct RuleDto {
 /// Build the router for a given state. Separated from [`serve`] so it can be
 /// exercised in tests without binding a socket.
 pub fn router(state: AppState) -> Router {
+    // The operations that scan or write into a repo's source answer `409 source_deleted` when a
+    // repo in their scope had its source deleted, before any handler tries to read the folder.
+    let source_gate = axum::middleware::from_fn_with_state(
+        state.clone(),
+        crate::client_source::resolution::scope_gate,
+    );
     Router::new()
         .route("/api/health", get(health))
         .route("/api/rules", get(rules))
@@ -1224,7 +1230,7 @@ pub fn router(state: AppState) -> Router {
         // multi-option rules, and persisting the current per-rule selection.
         .route(
             "/api/projects/:id/rescan-alternatives",
-            post(rescan_alternatives_handler),
+            post(rescan_alternatives_handler).layer(source_gate.clone()),
         )
         .route(
             "/api/projects/:id/accept-alternatives",
@@ -1256,9 +1262,18 @@ pub fn router(state: AppState) -> Router {
         // GitHub Issue intake (#20): list a repo's open issues, then adopt one onto the spine.
         .route("/api/github/issues", get(github_issues_list))
         .route("/api/stories/adopt-issue", post(adopt_issue))
-        .route("/api/onboard/scan", post(onboard_scan))
-        .route("/api/onboard/audit", post(onboard_audit))
-        .route("/api/onboard/audit/start", post(onboard_audit_start))
+        .route(
+            "/api/onboard/scan",
+            post(onboard_scan).layer(source_gate.clone()),
+        )
+        .route(
+            "/api/onboard/audit",
+            post(onboard_audit).layer(source_gate.clone()),
+        )
+        .route(
+            "/api/onboard/audit/start",
+            post(onboard_audit_start).layer(source_gate.clone()),
+        )
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
         .route("/api/onboard/finding-context", get(onboard_finding_context))
@@ -1266,13 +1281,22 @@ pub fn router(state: AppState) -> Router {
         .route("/api/git/detect-repo", post(detect_repo))
         .route("/api/gate-probe", post(gate_probe))
         .route("/api/onboard/ticket", post(onboard_ticket))
-        .route("/api/onboard/arm", post(onboard_arm))
-        .route("/api/onboard/apply", post(onboard_apply))
+        .route(
+            "/api/onboard/arm",
+            post(onboard_arm).layer(source_gate.clone()),
+        )
+        .route(
+            "/api/onboard/apply",
+            post(onboard_apply).layer(source_gate.clone()),
+        )
         .route(
             "/api/onboard/apply/preflight",
-            post(onboard_apply_preflight),
+            post(onboard_apply_preflight).layer(source_gate.clone()),
         )
-        .route("/api/onboard/open-pr", post(onboard_open_pr))
+        .route(
+            "/api/onboard/open-pr",
+            post(onboard_open_pr).layer(source_gate.clone()),
+        )
         .route(
             "/api/onboard/draft",
             get(onboard_draft_get).post(onboard_draft_save),
@@ -7706,18 +7730,7 @@ async fn project_repo_health(
     let Some(project) = state.projects.get(&id) else {
         return Json(serde_json::json!({ "ok": false, "message": "unknown project", "repos": [] }));
     };
-    let workspace_root = state.settings.workspace_root();
-    let mut out = Vec::new();
-    for repo in &project.repos {
-        let override_path = state.settings.repo_path(repo);
-        let res = crate::workspace::repo_resolution(
-            override_path.as_deref(),
-            workspace_root.as_deref(),
-            repo,
-        )
-        .await;
-        out.push(res);
-    }
+    let out = crate::client_source::resolution::resolve_all(&state, &project).await;
     Json(serde_json::json!({ "ok": true, "repos": out }))
 }
 
@@ -7783,21 +7796,12 @@ async fn project_readiness(
             "repos": [],
         }));
     };
-    let workspace_root = state.settings.workspace_root();
-    let mut resolutions = Vec::with_capacity(project.repos.len());
-    let mut resolved_flags = Vec::with_capacity(project.repos.len());
-    for repo in &project.repos {
-        let override_path = state.settings.repo_path(repo);
-        let res = crate::workspace::repo_resolution(
-            override_path.as_deref(),
-            workspace_root.as_deref(),
-            repo,
-        )
-        .await;
-        resolved_flags.push(res.resolved);
-        resolutions.push(res);
-    }
-    let readiness = camerata_app_core::readiness::classify_readiness(&resolved_flags);
+    let resolutions = crate::client_source::resolution::resolve_all(&state, &project).await;
+    let links: Vec<camerata_app_core::readiness::RepoLink> = resolutions
+        .iter()
+        .map(crate::client_source::resolution::link_of)
+        .collect();
+    let readiness = camerata_app_core::readiness::classify_links(&links);
     Json(serde_json::json!({
         "ok": true,
         "readiness": readiness,
@@ -7813,19 +7817,13 @@ async fn derive_project_readiness(
     id: &str,
 ) -> Option<camerata_app_core::readiness::ProjectReadiness> {
     let project = state.projects.get(id)?;
-    let workspace_root = state.settings.workspace_root();
-    let mut flags = Vec::with_capacity(project.repos.len());
-    for repo in &project.repos {
-        let override_path = state.settings.repo_path(repo);
-        let res = crate::workspace::repo_resolution(
-            override_path.as_deref(),
-            workspace_root.as_deref(),
-            repo,
-        )
-        .await;
-        flags.push(res.resolved);
-    }
-    Some(camerata_app_core::readiness::classify_readiness(&flags))
+    let links: Vec<camerata_app_core::readiness::RepoLink> =
+        crate::client_source::resolution::resolve_all(state, &project)
+            .await
+            .iter()
+            .map(crate::client_source::resolution::link_of)
+            .collect();
+    Some(camerata_app_core::readiness::classify_links(&links))
 }
 
 #[derive(serde::Deserialize)]
@@ -8129,11 +8127,21 @@ async fn onboard_ignore(
 async fn project_suppressions(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<crate::suppression::SuppressionRecord>>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     let project = state
         .projects
         .get(&id)
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
+    // A repo whose source was deleted has no tree to read: say so (with the date) instead of
+    // silently listing nothing for it. The other repos are still read.
+    let deleted: Vec<(String, String)> = project
+        .repos
+        .iter()
+        .filter_map(|repo| {
+            crate::client_source::status::deleted_record(&state, &project.id, repo)
+                .map(|r| (repo.clone(), r.completed_at))
+        })
+        .collect();
     // Local-first: the waiver registry reads each repo's local working tree, not GitHub.
     let (sources, _notes) = resolve_local_sources(&state, &project.repos);
     // Refresh = best-effort fast-forward pull of each local repo so the listing reflects the
@@ -8142,7 +8150,17 @@ async fn project_suppressions(
     for (_spec, dir) in &sources {
         let _ = crate::workspace::pull_local_ff(dir).await;
     }
-    Ok(Json(crate::onboard::suppression_registry(&sources).await))
+    let entries = crate::onboard::suppression_registry(&sources).await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "source_deleted": !deleted.is_empty(),
+        "deleted_at": deleted.first().map(|(_, at)| at.as_str()),
+        "deleted_repos": deleted
+            .iter()
+            .map(|(repo, at)| serde_json::json!({ "repo": repo, "deleted_at": at }))
+            .collect::<Vec<_>>(),
+        "entries": entries,
+    })))
 }
 
 /// One CI-tier rule sent by the UI for story generation. Carries the rule id and title
@@ -10933,7 +10951,7 @@ async fn list_credentials(State(state): State<AppState>) -> Json<Vec<CredentialS
 async fn checkout_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<crate::workspace::RepoCheckout>>, AppError> {
+) -> Result<Json<Vec<crate::client_source::resolution::RepoCheckoutView>>, AppError> {
     let project = state
         .projects
         .get(&id)
@@ -10941,21 +10959,11 @@ async fn checkout_status(
     // Override-aware (issue #33/#38): resolve each repo via its per-repo path override first,
     // falling back to `<workspace_root>/<owner>/<repo>`. A repo can resolve via an override even
     // when no workspace root is set, so we do NOT hard-fail on a missing workspace root — repos
-    // that resolve via neither report not-cloned with a helpful reason instead.
-    let workspace_root = state.settings.workspace_root();
-    let mut out = Vec::with_capacity(project.repos.len());
-    for repo in &project.repos {
-        let override_path = state.settings.repo_path(repo);
-        out.push(
-            crate::workspace::checkout_status_resolved(
-                override_path.as_deref(),
-                workspace_root.as_deref(),
-                repo,
-            )
-            .await,
-        );
-    }
-    Ok(Json(out))
+    // that resolve via neither report not-cloned with a helpful reason instead. Each repo also
+    // carries its source status (present / deleted / unresolved / mismatch).
+    Ok(Json(
+        crate::client_source::resolution::checkout_views(&state, &project).await,
+    ))
 }
 
 /// The effective workspace root (fix for the "no workspace folder chosen yet" dead end): the
@@ -10981,7 +10989,7 @@ fn effective_workspace_root(state: &AppState, project: &crate::project::Project)
 async fn checkout_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<crate::workspace::RepoCheckout>>, AppError> {
+) -> Result<Json<Vec<crate::client_source::resolution::RepoCheckoutView>>, AppError> {
     let project = state
         .projects
         .get(&id)
@@ -11001,6 +11009,26 @@ async fn checkout_project(
     let root = std::path::PathBuf::from(&root);
     let mut out = Vec::with_capacity(project.repos.len());
     for repo in &project.repos {
+        // A repo whose source the operator DELETED stays deleted: updating the others must not
+        // quietly re-clone it as a side effect. "Re-fetch source" is the deliberate way back.
+        if let Some(record) =
+            crate::client_source::status::deleted_record(&state, &project.id, repo)
+        {
+            let status =
+                crate::client_source::status::source_status(&state, &project.id, repo).await;
+            out.push(crate::client_source::resolution::RepoCheckoutView::new(
+                crate::workspace::RepoCheckout {
+                    repo: repo.clone(),
+                    cloned: false,
+                    path: record.path.clone(),
+                    branch: None,
+                    dirty: false,
+                    detail: String::new(),
+                },
+                status,
+            ));
+            continue;
+        }
         // If the repo ALREADY resolves (override-aware git checkout with a matching origin),
         // REFRESH it (pull/fetch its current branch) instead of just re-reporting stale status —
         // "Clone / update all repos" must actually update repos that are already linked/cloned, not
@@ -11013,15 +11041,19 @@ async fn checkout_project(
             repo,
         )
         .await;
-        if resolution.resolved {
+        let checkout = if resolution.resolved {
             let dir = resolution
                 .path
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| crate::workspace::repo_dir(&root, repo));
-            out.push(crate::workspace::refresh_resolved(&dir, repo, &token).await);
-            continue;
-        }
-        out.push(crate::workspace::clone_or_pull(&root, repo, &token).await);
+            crate::workspace::refresh_resolved(&dir, repo, &token).await
+        } else {
+            crate::workspace::clone_or_pull(&root, repo, &token).await
+        };
+        let source = crate::client_source::status::source_status(&state, &project.id, repo).await;
+        out.push(crate::client_source::resolution::RepoCheckoutView::new(
+            checkout, source,
+        ));
     }
     Ok(Json(out))
 }
