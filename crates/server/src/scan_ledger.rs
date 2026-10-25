@@ -356,6 +356,12 @@ pub struct ScanLedger {
     /// Whether the sealed rows' paths are really paths. See [`PathHygiene`].
     #[serde(default)]
     path_hygiene: PathHygiene,
+    /// Per-stage token and cost telemetry for the scan (operator-only; see
+    /// [`crate::stage_telemetry`]). Not an integrity fact: no gate reads it and no exporter
+    /// renders it. `None` for a scan that made no model call or a ledger written before this
+    /// field existed.
+    #[serde(default)]
+    stage_telemetry: Option<crate::stage_telemetry::StageTelemetry>,
 }
 
 /// The facts about a scan's INPUT, recorded so the integrity gate can judge them.
@@ -550,6 +556,16 @@ impl ScanLedger {
     /// running total, and a second call means a second scan that should have its own ledger.
     pub fn record_input(&mut self, input: ScanInputFacts) {
         self.input = input;
+    }
+
+    /// Record the scan's per-stage cost telemetry. Overwrites: one scan, one record.
+    pub fn record_stage_telemetry(&mut self, telemetry: crate::stage_telemetry::StageTelemetry) {
+        self.stage_telemetry = Some(telemetry);
+    }
+
+    /// The scan's per-stage cost telemetry, when it recorded any.
+    pub fn stage_telemetry(&self) -> Option<&crate::stage_telemetry::StageTelemetry> {
+        self.stage_telemetry.as_ref()
     }
 
     /// What this scan was fed. Default (all zero, no model) when nothing recorded it — which

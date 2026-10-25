@@ -316,6 +316,27 @@ async fn a_judged_scan_ships_the_confirmed_finding_and_stamps_the_judge() {
     // The judge's spend is in the same meter as every other pass.
     assert!(report.actual_usage.as_ref().unwrap().calls >= 2);
 
+    // Rank 1: the same spend, split by stage on the OPERATOR ledger (never the export), joined to
+    // the scan's own counted-line total. The judge is its own stage; the stage rows sum to the
+    // aggregate.
+    let telemetry = report
+        .ledger
+        .stage_telemetry()
+        .expect("the scan records per-stage telemetry on its ledger");
+    assert_eq!(telemetry.counted_lines, report.code_lines);
+    assert!(report.code_lines > 0, "the fixture has counted lines");
+    assert!(
+        telemetry
+            .stages
+            .iter()
+            .any(|s| s.stage == camerata_server::stage_telemetry::Stage::CloneJudge),
+        "{telemetry:#?}"
+    );
+    assert_eq!(
+        telemetry.total().calls,
+        report.actual_usage.as_ref().unwrap().calls
+    );
+
     // The transcript shows the candidate list and the verdicts.
     let agents = store.get("scan-key");
     let judge = agents

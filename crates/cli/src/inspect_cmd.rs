@@ -119,6 +119,10 @@ pub struct InspectOutcome {
     /// The release gate's verdict line (`release gate: passed (6 checks)`): proof, in the
     /// operator's output, that the gate ran over the zip that was just written.
     pub release_gate: String,
+    /// Per-stage token, cache and cost telemetry for this run (also persisted on the operator
+    /// ledger at [`ledger_path`]). Printed as a table at the end of the run; deliberately NOT
+    /// part of the export. `None` when no model call ran.
+    pub stage_telemetry: Option<camerata_server::stage_telemetry::StageTelemetry>,
 }
 
 /// The exit code `camerata inspect` uses when the release gate refuses the export (the
@@ -661,6 +665,7 @@ pub async fn run_inspect_with_key_presence(
         ledger_summary,
         ledger_path: ledger_path(&args.repo),
         release_gate,
+        stage_telemetry: report.ledger.stage_telemetry().cloned(),
     })
 }
 
@@ -881,9 +886,14 @@ pub fn format_outcome_report(outcome: &InspectOutcome) -> String {
         ProjectBackend::Cli => "cli",
         ProjectBackend::Api => "api",
     };
+    let telemetry = outcome
+        .stage_telemetry
+        .as_ref()
+        .map(|t| format!("\n{}", t.render_table()))
+        .unwrap_or_default();
     format!(
         "camerata inspect: wrote {} ({} bytes) — backend: {backend_label}, findings: {}\n\
-         {}\nintegrity ledger: {}\n{}\n\n{}",
+         {}\nintegrity ledger: {}\n{}\n\n{}{telemetry}",
         outcome.export_path.display(),
         outcome.export_zip_bytes,
         outcome.findings_count,
@@ -1209,6 +1219,7 @@ mod tests {
             ledger_summary: "== PIPELINE STAGES ==\n  (no stages recorded this scan)".to_string(),
             ledger_path: PathBuf::from("/tmp/state/out-deadbeef.ledger.json"),
             release_gate: "release gate: passed (6 checks)".to_string(),
+            stage_telemetry: None,
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("/tmp/out.zip"), "{text}");
@@ -1219,6 +1230,47 @@ mod tests {
             text.contains("PIPELINE STAGES"),
             "the ledger summary must be appended to the final report block: {text}"
         );
+        assert!(
+            !text.contains("STAGE TELEMETRY"),
+            "a scan that made no model call has no telemetry table: {text}"
+        );
+    }
+
+    /// Rank 1: the per-stage cost table closes the operator's output, so the next sweep can read
+    /// where the money went without hand-summing a log.
+    #[test]
+    fn format_outcome_report_prints_the_per_stage_telemetry_table() {
+        let meter = camerata_server::stage_telemetry::StageMeter::default();
+        meter.record(
+            camerata_server::stage_telemetry::Stage::ScanPass,
+            &camerata_server::llm::LlmResponse {
+                text: String::new(),
+                model: "m".to_string(),
+                backend: "api".to_string(),
+                cost_usd: Some(2.0),
+                input_tokens: Some(9_000),
+                output_tokens: Some(700),
+                cache_read_input_tokens: 4_000,
+                cache_creation_input_tokens: 2_000,
+                or_cache_discount: None,
+            },
+        );
+        let outcome = InspectOutcome {
+            export_path: PathBuf::from("/tmp/out.zip"),
+            export_zip_bytes: 1,
+            backend: ProjectBackend::Api,
+            batch: false,
+            actual_usage: Some(synthetic_usage()),
+            findings_count: 0,
+            ledger_summary: String::new(),
+            ledger_path: PathBuf::from("/tmp/state/x.ledger.json"),
+            release_gate: String::new(),
+            stage_telemetry: Some(meter.snapshot(8_000)),
+        };
+        let text = format_outcome_report(&outcome);
+        assert!(text.contains("STAGE TELEMETRY"), "{text}");
+        assert!(text.contains("$/1K lines"), "{text}");
+        assert!(text.contains("counted lines: 8000"), "{text}");
     }
 
     // ── render_ledger_summary ────────────────────────────────────────────────────────

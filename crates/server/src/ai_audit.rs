@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::llm::{Llm, LlmPort, LlmRequest};
 use crate::onboard::{Finding, MergedLocation, ProposedRule, RuleOptionView};
+use crate::stage_telemetry::{Stage, StageMeter, StageTelemetry};
 
 // ════════════════════════════════════════════════════════════════════════════════════
 // AUDIT-INTEGRATED ALTERNATIVE RECOMMENDATION (docs/design/2026-09-22_audit-integrated-
@@ -234,11 +235,34 @@ pub struct UsageMeter {
     /// Tokens written to the prompt cache (billed at ~1.25× input rate, one-time per TTL).
     /// Populated only when the API backend is active with prompt caching enabled.
     cache_creation_input_tokens: AtomicU64,
+    /// The same calls split by pipeline stage (operator telemetry; never exported — see
+    /// [`crate::stage_telemetry`]). Always updated together with the aggregate above.
+    stages: StageMeter,
 }
 
 impl UsageMeter {
-    /// Fold one completion's reported usage in. Missing fields are simply not counted.
-    pub fn record(&self, r: &crate::llm::LlmResponse) {
+    /// Fold one completion into the aggregate AND into `stage`'s own row. Every model call
+    /// names its stage, so the per-stage table can never drift from the aggregate.
+    pub fn record_stage(&self, stage: Stage, r: &crate::llm::LlmResponse) {
+        self.stages.record(stage, r);
+        self.record(r);
+    }
+
+    /// Mark a completion already passed to [`Self::record_stage`] as one whose output was
+    /// thrown away (a rejected fix, a truncated pass that had to be repeated), so the table
+    /// can show how much of a stage's spend bought nothing. Does not touch the aggregate.
+    pub fn record_wasted(&self, stage: Stage, r: &crate::llm::LlmResponse) {
+        self.stages.record_wasted(stage, r);
+    }
+
+    /// The per-stage telemetry so far, joined to the scan's counted-line total.
+    pub fn stage_telemetry(&self, counted_lines: usize) -> StageTelemetry {
+        self.stages.snapshot(counted_lines)
+    }
+
+    /// Fold one completion's reported usage into the aggregate. Missing fields are simply not
+    /// counted. Private: callers go through [`Self::record_stage`].
+    fn record(&self, r: &crate::llm::LlmResponse) {
         if let Some(i) = r.input_tokens {
             self.input_tokens.fetch_add(i, Ordering::Relaxed);
         }
@@ -2134,7 +2158,7 @@ pub async fn verify_findings(
             let mut on_delta = |_: &str| {};
             if let Ok(resp) = llm.complete_streaming(build_req(), &mut on_delta).await {
                 if let Some(m) = meter {
-                    m.record(&resp);
+                    m.record_stage(Stage::Calibration, &resp);
                 }
                 if let Some((store, key)) = feedback {
                     // Single-pass (the common case) records the raw response as-is, so the
@@ -2935,7 +2959,7 @@ async fn recommend_alternatives(
         }
         let resp = resp_result?;
         if let Some(m) = meter {
-            m.record(&resp);
+            m.record_stage(Stage::Alternatives, &resp);
         }
         recommendations.extend(parse_alternative_recommendations(&resp.text, alt_chunk));
     }
@@ -3357,7 +3381,7 @@ async fn run_fix_specifics_round(
             }
         };
         if let Some(m) = meter {
-            m.record(&resp);
+            m.record_stage(Stage::FixGeneration, &resp);
         }
         let parsed = parse_fix_specifics(&resp.text);
 
@@ -3739,7 +3763,7 @@ async fn audit_pass(
             .map_err(|_| anyhow::anyhow!("LLM call exceeded the {}s backstop", cap.as_secs()))??
     };
     if let Some(m) = meter {
-        m.record(&resp);
+        m.record_stage(Stage::ScanPass, &resp);
     }
     let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
     let needs = parse_needs_files(&resp.text);
@@ -4299,7 +4323,7 @@ async fn run_passes_batch(
         match all_responses.get(&custom_id) {
             Some(resp) => {
                 if let Some(m) = meter {
-                    m.record(resp);
+                    m.record_stage(Stage::ScanPass, resp);
                 }
                 let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
                 let needs = parse_needs_files(&resp.text);
@@ -7949,7 +7973,7 @@ async fn run_prose_lens(
     match resp {
         Ok(r) => {
             if let Some(m) = meter {
-                m.record(&r);
+                m.record_stage(Stage::DeepTier, &r);
             }
             match lens {
                 DeepLens::Soc2Gap => {
@@ -8103,7 +8127,7 @@ async fn run_security_passes(
                             .map_err(|_| anyhow::anyhow!("security pass exceeded the {}s backstop", cap.as_secs()))??
                     };
                     if let Some(m) = meter {
-                        m.record(&resp);
+                        m.record_stage(Stage::DeepTier, &resp);
                     }
                     let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
                     let needs = parse_needs_files(&resp.text);
@@ -8236,6 +8260,9 @@ pub async fn run_deep_tier(
 
 #[cfg(test)]
 mod redaction_tests;
+
+#[cfg(test)]
+mod stage_telemetry_tests;
 
 #[cfg(test)]
 mod tests {

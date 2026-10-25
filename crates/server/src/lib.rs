@@ -91,6 +91,7 @@ pub mod scan_routing;
 pub mod scan_tools;
 pub mod scope_registration;
 pub mod severity_bounds;
+pub mod stage_telemetry;
 pub mod stall_sweep;
 /// Excel workbook export (product-export, Pass C): `build_workbook`, the Excel sibling of
 /// `report_export::build_report_json`. See the module doc comment and

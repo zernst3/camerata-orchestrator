@@ -2344,6 +2344,15 @@ pub async fn audit_repos_with_llm(
         }
     }
     report.ledger = pipeline_ledger;
+    // Operator telemetry: the per-stage split of the spend, joined to the SAME counted-line
+    // total `camerata count` prints (it comes from the same file filter). Lives on the ledger,
+    // never on a client export. Skipped when no model ran, so a deterministic-only scan carries
+    // no empty record.
+    if report.actual_usage.as_ref().is_some_and(|u| u.calls > 0) {
+        report
+            .ledger
+            .record_stage_telemetry(meter.stage_telemetry(code_lines_total));
+    }
     // W6: never a silent omission — surface every failed/timed-out pass so the export's
     // methodology and summary can disclose it explicitly instead of shipping quietly
     // incomplete.
