@@ -21,7 +21,13 @@
 > triage `missed.txt` into "add a test" vs "equivalent mutant". Only the checks crate's own tests
 > run against each mutant (server-level tests that exercise checkers are not counted). Check it is
 > finished (`pgrep -fl cargo-mutants`) before rebuilding in the main checkout.
-> **IN FLIGHT 2026-10-24 (end of the weekly budget):** a Sonnet agent in a worktree under
+> **DONE 2026-10-24 (end of budget):** item 22b `camerata count` (reuses the inspection's
+> `read_local_repo_files`; fixed a double count of tracked noise files) and the 26 major mutation
+> gaps (25 killed, 1 documented equivalent) are MERGED. OPEN DEFECT: the test
+> `tool_provisioning::tests::a_reader_never_sees_a_missing_tree_while_eslint_reprovisions` flaked
+> once under the full suite (passed on rerun); fix the root cause next session. Next: Zach's manual
+> check, then 22a (API backend default).
+> (Superseded) **IN FLIGHT 2026-10-24 (end of the weekly budget):** a Sonnet agent in a worktree under
 > `.claude/worktrees/agent-*` (find it with `git worktree list`) is building item 22b
 > `camerata count`, then the 26 major mutation gaps, committing each green step. It may have been
 > cut off when the budget ran out. NEXT SESSION: check that worktree's commits, run the full gate,
