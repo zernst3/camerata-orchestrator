@@ -21,6 +21,9 @@
 > triage `missed.txt` into "add a test" vs "equivalent mutant". Only the checks crate's own tests
 > run against each mutant (server-level tests that exercise checkers are not counted). Check it is
 > finished (`pgrep -fl cargo-mutants`) before rebuilding in the main checkout.
+> **NEW V1 ITEM 2026-10-25 (Zach):** token efficiency on the API, MASTER-SEQUENCE item 23
+> (spike `_workspace/brownfield-audits/SPIKE_TOKEN_EFFICIENCY.md`, recall first). Slotted right
+> after 22a. Start with the Fable spike (read-only), then build the gaps.
 > **DONE 2026-10-25:** provisioning test flake fixed (macOS transient EINVAL on a lookup racing
 > the atomic symlink swap; 150/150 under load) and 22a's CLI half: `camerata inspect` defaults to
 > the API backend, no key = clear error (never a CLI fallback), backend + provider recorded in the

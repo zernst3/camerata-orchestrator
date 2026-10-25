@@ -483,6 +483,31 @@ Slotted RIGHT AFTER the delete/re-fetch blocker, blocking items first, all befor
 - Handoff item 12 (re-fetch at a specific commit) is covered by the delete/re-fetch build.
   Handoff items 1, 5, 7 are done; item 9 (five severity labels stable) needs no change.
 
+### 2d. Item 23: token efficiency on the Anthropic API (added 2026-10-25, Zach, V1)
+
+Spec: `_workspace/brownfield-audits/SPIKE_TOKEN_EFFICIENCY.md`. Goal: client inspections on the
+API at the lowest cost that does not reduce recall. **Recall first: no saving is accepted if any
+fixture's recall drops.** Evidence: output ~60% of cost; ~480K fixed input per run plus ~310
+tokens per counted line (each line sent ~25 to 30 times across rule groups); cache economics
+inverted (faktura wrote 661K, read 80K; hearth wrote 1.34M, read 80K); rule routing only 3%;
+fix-specific retries paid with no output kept.
+- **Part 1 (spike, read-only):** the 14-item EXISTS / PARTIAL / MISSING table with expected
+  savings, written to `_workspace/brownfield-audits/SPIKE_TOKEN_EFFICIENCY_RESULTS.md`. Fable
+  (judgment on recall trade-offs and cache economics).
+- **Part 2 (build), priority order unless the spike says otherwise:** batch API default for client
+  runs; cache placement and TTL fixed (or stop caching single-use content); defer prose and fix
+  generation until after calibration and dedup; result caching by content hash (also makes the
+  delta retest cheap); better routing / merged rule groups; deterministic pre-filtering; telemetry,
+  pre-flight estimate, budget cap and a cost-regression check. Fable spec where recall is at
+  stake, Sonnet builds, Fable review.
+- **Protected (needs Zach's go when hit):** calibration, dedup/merge, severity, export format,
+  the corpus.
+- **Acceptance needs live model runs** on faktura, tutorly, lumen, hearth and supabase-portal:
+  recall and decoy results unchanged or better; cost per 1K counted lines before and after each
+  change. These runs spend API tokens.
+- **Slot:** right after 22a (the API backend default), before the review speed-ups, so every
+  later live run (including the graded run) is measured at the lower cost.
+
 ## 3. Explicitly NOT doing
 
 - `ARCH-OBSERVABILITY-CORRELATION-ID-1` stays `decision` — prior ruling, recorded in the roster.
