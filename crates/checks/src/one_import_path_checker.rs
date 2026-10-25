@@ -1321,4 +1321,41 @@ mod tests {
             &files(vec![("README.md", ""), ("src/a.py", ""), ("src/a.rs", "")])
         ));
     }
+
+    /// A re-export chain deeper than the search limit is unprovable from its top, but a file
+    /// nearer the end of the chain is not: a depth-limited answer must not be remembered and
+    /// served to a later, shallower import of the same symbol.
+    #[test]
+    fn a_too_deep_chain_does_not_poison_a_later_shallow_import() {
+        let last = MAX_CHAIN_DEPTH + 2;
+        let mut v: Vec<(String, String)> = (0..last)
+            .map(|i| {
+                (
+                    format!("lib/c{i}.ts"),
+                    format!("export {{ a }} from './c{}';\n", i + 1),
+                )
+            })
+            .collect();
+        v.push((
+            format!("lib/c{last}.ts"),
+            "export function a() {}\n".to_string(),
+        ));
+        // The deep import is read first, then two shallow ones through different files.
+        v.push((
+            "app/deep.ts".to_string(),
+            "import { a } from '../lib/c0';\n".to_string(),
+        ));
+        v.push((
+            "app/mid.ts".to_string(),
+            format!("import {{ a }} from '../lib/c{}';\n", last - 10),
+        ));
+        v.push((
+            "app/origin.ts".to_string(),
+            format!("import {{ a }} from '../lib/c{last}';\n"),
+        ));
+        let vs = run(&v);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert!(vs[0].message.contains("app/mid.ts"), "{}", vs[0].message);
+        assert!(vs[0].message.contains("app/origin.ts"), "{}", vs[0].message);
+    }
 }
