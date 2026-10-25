@@ -521,6 +521,28 @@ fix-specific retries paid with no output kept.
   inspection and ~90% off a rerun. Awaiting Zach: go on ranks 4, 7, 8, 9 and on the live API
   fixture runs (they spend tokens).
 
+### 2e. Item 24: Firebase / Firestore rules (added 2026-10-25, Zach, V1; corpus scope approved)
+
+Spec: `_workspace/brownfield-audits/WORK_ORDER_FIREBASE_RULES.md`. The corpus has zero Firebase
+rules, and Firebase is the second default backend for AI-built apps. Zach: the site claims
+Firebase (including Flutter apps) once this ships; if a Firebase or Flutter client signs before
+V2, the V2 items (keyed fixture, Dart grammar, Flutter rules) move to the front.
+- **24a (blocking, small, first):** admit `firestore.rules` / `storage.rules` in
+  `crates/server/src/onboard/files.rs` (they are filtered out today, so every check would see
+  nothing), and add `dart` to CODE_EXTS (Zach GO) so the secret floor and advisory tier read
+  Flutter client code. Tests for both. Also the Firebase web-config `apiKey` safe twin in the
+  shared secret detector (an identifier, not a secret, per Firebase's docs) so every Firebase app
+  does not get a false critical.
+- **24b:** new `firebase` domain + stack detection; about 13 rules (open rules, test-mode rules,
+  auth-only, ownership, field validation, recursive wildcard, storage open, RTDB open, admin
+  claims, Functions auth, Admin SDK in client code, App Check, rules tests), each grounded in
+  Firebase's own docs with a positive test and a safe twin. Rule files are a DSL with no grammar:
+  statement-level text matching for deterministic checks, advisory tier for judgment.
+- **Process:** Fable spec (traps, grounding, which rules are deterministic vs judgment), Sonnet
+  build, Fable review. **Acceptance:** a small open-source Firebase app scans end to end with no
+  false critical on the apiKey. Keyed calibration fixture: V2.
+- **Slot:** with W29 Wave D and 22e (the corpus/detector block), after token efficiency.
+
 ## 3. Explicitly NOT doing
 
 - `ARCH-OBSERVABILITY-CORRELATION-ID-1` stays `decision` — prior ruling, recorded in the roster.
