@@ -388,8 +388,8 @@ pub async fn ensure_semgrep(tooling: &Path) -> Result<PathBuf, ProvisionError> {
 
 /// Path to the Camerata-managed eslint workspace:
 /// `<tooling_dir>/eslint/` (on unix a symlink to the current complete generation; see
-/// [`ensure_eslint`]). Always read it through this path: a re-provision repoints the link, so a
-/// path resolved once and cached can name a tree that is about to be pruned.
+/// [`ensure_eslint`]). Probe and provision through this path; a process that RUNS eslint
+/// resolves it once via [`eslint_run_paths`] and uses the concrete paths for the whole run.
 pub fn eslint_workspace_dir(tooling: &Path) -> PathBuf {
     tooling.join("eslint")
 }
@@ -411,6 +411,47 @@ pub fn eslint_bin(workspace: &Path) -> PathBuf {
 /// Camerata's baseline rather than the repo's config.
 pub fn eslint_config_path(workspace: &Path) -> PathBuf {
     workspace.join("camerata.config.mjs")
+}
+
+/// The concrete paths one eslint run uses, all under the canonical generation directory (never
+/// the `eslint` symlink). See [`eslint_run_paths`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EslintRunPaths {
+    /// The canonical generation directory (`eslint.gen/<id>` on unix).
+    pub workspace: PathBuf,
+    /// The eslint binary inside [`Self::workspace`].
+    pub bin: PathBuf,
+    /// The bundled flat config inside [`Self::workspace`].
+    pub config: PathBuf,
+}
+
+/// Resolve the eslint workspace link ONCE to its concrete generation directory and derive every
+/// path a run needs from it. A re-provision atomically swaps the `eslint` symlink; a run that
+/// kept spelling its paths through the link could see a lookup fail transiently (`EINVAL` on
+/// macOS while the link is replaced) or land in a half-swapped state. Holding canonical paths
+/// makes the run immune: the previous generation is kept one cycle, so they stay valid.
+///
+/// The resolution itself can hit that transient `EINVAL`; it is retried a few times (a missing
+/// tree fails with `NotFound` every time and is returned immediately).
+pub async fn eslint_run_paths(tooling: &Path) -> std::io::Result<EslintRunPaths> {
+    const ATTEMPTS: usize = 5;
+    let link = eslint_workspace_dir(tooling);
+    let mut attempt = 0;
+    let workspace = loop {
+        attempt += 1;
+        match tokio::fs::canonicalize(&link).await {
+            Ok(p) => break p,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput && attempt < ATTEMPTS => {
+                tokio::task::yield_now().await;
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    Ok(EslintRunPaths {
+        bin: eslint_bin(&workspace),
+        config: eslint_config_path(&workspace),
+        workspace,
+    })
 }
 
 /// Source path of the bundled eslint flat config inside the Camerata repo
@@ -1983,6 +2024,49 @@ mod tests {
             "one generation, no staging debris: {:?}",
             generation_names(tooling.path())
         );
+    }
+
+    /// A real eslint run spawns from the CONCRETE generation directory, never through the
+    /// `eslint` symlink: the binary, the config and the workspace all live under the canonical
+    /// `eslint.gen/<id>` path, resolved once. A re-provision that swaps the link afterwards
+    /// cannot affect a run already holding these paths, and the previous generation (kept one
+    /// cycle) still serves them.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn eslint_run_paths_are_canonical_generation_paths_not_the_symlink() {
+        let tooling = TempDir::new().unwrap();
+        let npm = FakeNpm::new("0", false);
+        ensure_eslint_with(tooling.path(), npm.program.as_os_str())
+            .await
+            .expect("first provision");
+        let link = eslint_workspace_dir(tooling.path());
+        let generation = std::fs::canonicalize(&link).unwrap();
+
+        let paths = eslint_run_paths(tooling.path()).await.expect("resolve");
+        assert_eq!(paths.workspace, generation);
+        assert_ne!(paths.workspace, link, "must not be the symlink path");
+        assert!(paths.bin.starts_with(&generation), "{:?}", paths.bin);
+        assert!(paths.config.starts_with(&generation), "{:?}", paths.config);
+        for p in [&paths.workspace, &paths.bin, &paths.config] {
+            assert!(!p.starts_with(&link), "{p:?} goes through the symlink");
+        }
+
+        // A re-provision swaps the link to a new generation; the resolved paths still work
+        // because the previous generation is kept for one cycle.
+        make_eslint_workspace_stale(tooling.path());
+        ensure_eslint_with(tooling.path(), npm.program.as_os_str())
+            .await
+            .expect("re-provision");
+        assert_ne!(
+            std::fs::canonicalize(&link).unwrap(),
+            generation,
+            "link swapped"
+        );
+        assert!(
+            paths.config.exists(),
+            "previous generation is kept one cycle"
+        );
+        assert!(eslint_runs(&paths.bin).await, "the resolved bin still runs");
     }
 
     /// Whether `path` is readable, tolerating the kernel's transient `EINVAL`.

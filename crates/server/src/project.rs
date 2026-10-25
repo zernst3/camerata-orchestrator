@@ -142,10 +142,10 @@ impl ProjectStore {
                 operating_principles: default_operating_principles(),
                 memory: Vec::new(),
                 hierarchy_schema: default_hierarchy_schema(),
-                // Zero-setup default: a brand-new project runs on the Claude Code
-                // subscription (no key needed) until the operator explicitly switches it to
-                // the Anthropic API (e.g. for client work).
-                backend: ProjectBackend::Cli,
+                // A brand-new project runs on the metered Anthropic API; the operator opts
+                // into the Claude Code subscription explicitly. Persisted projects keep
+                // whatever backend they stored (a legacy file without the field stays `Cli`).
+                backend: ProjectBackend::for_new_project(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -251,9 +251,9 @@ impl ProjectStore {
                     // `backend` is deliberately NOT part of `ProjectImport` (not transferable):
                     // importing another project's export must never carry over a CLIENT
                     // project's `Api` backend choice by inheritance onto this machine. A
-                    // freshly imported project always starts on the zero-setup `Cli` default,
-                    // same as a brand-new project, until the operator explicitly sets it.
-                    backend: ProjectBackend::Cli,
+                    // freshly imported project always starts on the new-project default
+                    // (`Api`), same as a brand-new project, until the operator explicitly sets it.
+                    backend: ProjectBackend::for_new_project(),
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -876,12 +876,12 @@ mod tests {
     }
 
     #[test]
-    fn new_project_defaults_backend_to_cli() {
-        // Zero-setup default: a freshly-created project runs on the Claude Code
-        // subscription until the operator explicitly switches it to the Anthropic API.
+    fn new_project_defaults_backend_to_api() {
+        // A freshly-created project runs on the metered Anthropic API (the compliant,
+        // client-safe chain); the operator opts into the Claude Code subscription explicitly.
         let store = ProjectStore::new();
         let p = store.create("Fresh", vec![]).unwrap();
-        assert_eq!(p.backend, ProjectBackend::Cli);
+        assert_eq!(p.backend, ProjectBackend::Api);
     }
 
     #[test]
@@ -892,23 +892,23 @@ mod tests {
         let a = store.create("A", vec![]).unwrap();
         let b = store.create("B", vec![]).unwrap();
 
-        let updated_a = store.set_backend(&a.id, ProjectBackend::Api).unwrap();
-        assert_eq!(updated_a.backend, ProjectBackend::Api);
+        let updated_a = store.set_backend(&a.id, ProjectBackend::Cli).unwrap();
+        assert_eq!(updated_a.backend, ProjectBackend::Cli);
 
         assert_eq!(
             store.get(&a.id).unwrap().backend,
-            ProjectBackend::Api,
-            "project A was switched to Api"
+            ProjectBackend::Cli,
+            "project A was switched to Cli"
         );
         assert_eq!(
             store.get(&b.id).unwrap().backend,
-            ProjectBackend::Cli,
+            ProjectBackend::Api,
             "project B must be untouched by A's change"
         );
 
-        // Switching it back to Cli works too.
-        let updated_a = store.set_backend(&a.id, ProjectBackend::Cli).unwrap();
-        assert_eq!(updated_a.backend, ProjectBackend::Cli);
+        // Switching it back to Api works too.
+        let updated_a = store.set_backend(&a.id, ProjectBackend::Api).unwrap();
+        assert_eq!(updated_a.backend, ProjectBackend::Api);
     }
 
     #[test]
@@ -935,7 +935,9 @@ mod tests {
         let id = {
             let store = ProjectStore::load_or_new(path.clone());
             let p = store.create("Persisted", vec![]).unwrap();
-            store.set_backend(&p.id, ProjectBackend::Api).unwrap();
+            // Cli is NOT the new-project default, so surviving a reload proves the stored
+            // value is kept rather than re-defaulted.
+            store.set_backend(&p.id, ProjectBackend::Cli).unwrap();
             p.id
         };
 
@@ -944,7 +946,7 @@ mod tests {
         let p = reloaded.get(&id).expect("project survived reload");
         assert_eq!(
             p.backend,
-            ProjectBackend::Api,
+            ProjectBackend::Cli,
             "backend survived persistence + reload"
         );
 

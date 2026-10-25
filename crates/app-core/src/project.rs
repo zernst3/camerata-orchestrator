@@ -432,8 +432,9 @@ pub struct Project {
     /// compliance-safety flag AND the global `CAMERATA_LLM_BACKEND`-driven app preference that
     /// used to also apply to project work — there is no cross-setting override anymore.
     ///
-    /// **`Cli` (the default)** — the Claude Code subscription; no key needed; a scan "just
-    /// works" out of the box.
+    /// **`Cli`** — the Claude Code subscription; no key needed. The value of an absent
+    /// `backend` field (legacy files); a NEW project starts on `Api` instead
+    /// ([`ProjectBackend::for_new_project`]).
     ///
     /// **`Api`** — the Anthropic API; needs a key. A missing key means the AI does not run at
     /// all (`camerata_llm::BackendResolution::Blocked`) — never a silent fallback to the CLI.
@@ -1304,6 +1305,31 @@ mod tests {
         }"#;
         let p_api: Project = serde_json::from_str(json_api).unwrap();
         assert_eq!(p_api.backend, ProjectBackend::Api);
+    }
+
+    /// The new-project default (`Api`) must not leak into persisted projects: an explicit
+    /// `"cli"` stays `Cli`, an absent field stays `Cli` (legacy), and the new-project default
+    /// is `Api`.
+    #[test]
+    fn persisted_backend_is_never_switched_by_the_new_project_default() {
+        let explicit_cli = r#"{
+            "id": "proj-1", "name": "Cli", "repos": [], "ruleset": {}, "onboarded": [],
+            "backend": "cli"
+        }"#;
+        let p: Project = serde_json::from_str(explicit_cli).unwrap();
+        assert_eq!(p.backend, ProjectBackend::Cli);
+
+        let legacy = r#"{
+            "id": "proj-2", "name": "Legacy", "repos": [], "ruleset": {}, "onboarded": []
+        }"#;
+        let p: Project = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            p.backend,
+            ProjectBackend::Cli,
+            "legacy file keeps the Cli behavior"
+        );
+
+        assert_eq!(ProjectBackend::for_new_project(), ProjectBackend::Api);
     }
 
     /// MIGRATION (per `docs/design/2026-09-22_per-project-backend.md`): a project persisted

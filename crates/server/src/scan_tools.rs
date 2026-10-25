@@ -1638,13 +1638,17 @@ async fn run_one_tool<'r>(
             let tooling_dir = tool_provisioning::tooling_dir().ok_or_else(|| {
                 anyhow::anyhow!("could not resolve Camerata data dir for tool provisioning")
             })?;
-            let eslint_bin = tool_provisioning::ensure_eslint(&tooling_dir)
+            tool_provisioning::ensure_eslint(&tooling_dir)
                 .await
                 .map_err(|e| anyhow::anyhow!("eslint provisioning: {e}"))?;
-            let workspace = tool_provisioning::eslint_workspace_dir(&tooling_dir);
-            let config_path = tool_provisioning::eslint_config_path(&workspace);
-            let bin_str = eslint_bin.to_string_lossy().into_owned();
-            let config_str = config_path.to_string_lossy().into_owned();
+            // Resolve the `eslint` symlink ONCE to the concrete generation directory and run
+            // from those paths, so a re-provision swapping the link mid-run cannot affect us.
+            let run_paths = tool_provisioning::eslint_run_paths(&tooling_dir)
+                .await
+                .map_err(|e| anyhow::anyhow!("eslint workspace: {e}"))?;
+            let workspace = run_paths.workspace;
+            let bin_str = run_paths.bin.to_string_lossy().into_owned();
+            let config_str = run_paths.config.to_string_lossy().into_owned();
 
             // Withhold any selector whose plugin package is absent — handing one
             // to `--rule` is fatal to the WHOLE invocation, not just that rule.

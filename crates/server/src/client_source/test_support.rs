@@ -72,6 +72,12 @@ pub(crate) fn fixture() -> Fx {
         .projects
         .create("Acme", vec![REPO.to_string()])
         .expect("project");
+    // These tests exercise the Claude Code subscription path (session files, a CLI scan); a new
+    // project defaults to the Api backend, so the fixture opts in explicitly.
+    let project = state
+        .projects
+        .set_backend(&project.id, crate::project::ProjectBackend::Cli)
+        .expect("project exists");
     Fx {
         _tmp: tmp,
         root,
