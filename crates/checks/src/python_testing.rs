@@ -12,7 +12,7 @@
 //! a test file (helper/fixture modules are legitimate), only that a file whose name signals
 //! test intent actually uses a name pytest will collect.
 
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_MEDIUM};
+use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_MEDIUM};
 
 pub const RULE_PYTHON_TEST_FILE_NAMING: &str = "PYTHON-TESTING-FILE-NAMING-1";
 
@@ -69,6 +69,7 @@ fn stray_test_file_violation(path: &str, filename: &str) -> Option<ArchViolation
     // the ambiguity the design memo calls out as out of scope for this lexical-grade pass.
     if filename.to_ascii_lowercase().starts_with("test") {
         return Some(ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: RULE_PYTHON_TEST_FILE_NAMING.to_string(),
             file: path.to_string(),
             line: 0, // file-level finding — no single line is meaningful

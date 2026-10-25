@@ -3,6 +3,7 @@
 
 use sha2::{Digest, Sha256};
 
+use crate::firebase::{is_firebase_web_api_key, TwinContext};
 use crate::shapes::{prefix_of, SecretShape};
 
 /// Why a match is NOT a secret (left readable, never a gate failure).
@@ -32,6 +33,11 @@ pub enum Twin {
     ReadableName,
     /// Extension: a key that is public by design (`sb_publishable_`, `pk_live_`, `pk_test_`).
     PublishableKey,
+    /// Extension (item 24): a Google API key that is the `apiKey` of a Firebase app configuration.
+    /// Firebase documents it as an identifier, not a credential ("do not need to be treated as
+    /// secrets, and it's safe to include them in your code or configuration files"). A Google key
+    /// anywhere else is not covered.
+    FirebaseWebApiKey,
 }
 
 impl Twin {
@@ -46,6 +52,7 @@ impl Twin {
                 | Twin::PathLike
                 | Twin::ReadableName
                 | Twin::PublishableKey
+                | Twin::FirebaseWebApiKey
         )
     }
 }
@@ -247,13 +254,15 @@ fn names_a_secret(before_value: &str) -> bool {
 }
 
 /// Classify a candidate. `before_value` is the matched text before the value (the identifier, for
-/// a context shape). `role` is the decoded JWT role for the JWT shapes. Order (spec 3.2):
-/// redaction marker, T3 digest, T4 role, T2, T1, T5, then the path-like extension.
+/// a context shape). `role` is the decoded JWT role for the JWT shapes. `context` is the text
+/// around the match (the Firebase `apiKey` twin reads it). Order (spec 3.2): redaction marker, T3
+/// digest, T4 role, T2, T1, T5, then the path-like and Firebase extensions.
 pub(crate) fn classify(
     shape: SecretShape,
     value: &str,
     before_value: &str,
     role: Option<&str>,
+    context: &TwinContext<'_>,
 ) -> Option<Twin> {
     if value.contains(ELLIPSIS) {
         return Some(Twin::RedactionMarker);
@@ -301,6 +310,9 @@ pub(crate) fn classify(
     if shape == SecretShape::BasicAuthCredential && value.bytes().all(|b| b.is_ascii_lowercase()) {
         // `Authorization: Basic authentication ...` is prose; a real credential is not one word.
         return Some(Twin::ReadableName);
+    }
+    if shape == SecretShape::GoogleApiKey && is_firebase_web_api_key(context) {
+        return Some(Twin::FirebaseWebApiKey);
     }
     None
 }

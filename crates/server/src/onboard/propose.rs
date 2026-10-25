@@ -20,6 +20,7 @@ pub(crate) fn lang_for_ext(path: &str) -> Option<&'static str> {
         "rb" => "Ruby",
         "php" => "PHP",
         "swift" => "Swift",
+        "dart" => "Dart",
         "c" | "h" => "C",
         "cpp" => "C++",
         "sql" => "SQL",
@@ -101,6 +102,37 @@ pub(crate) fn detect_frameworks(
             // repo talks to a Supabase project — drive the supabase:* domains below.
             if lc.contains("\"@supabase/") {
                 add("Supabase");
+            }
+            // The Firebase client SDK (`"firebase":`, matched with its colon so `firebase-admin`
+            // and `firebase-functions` are matched by their own clauses), the Admin and
+            // Functions SDKs, and the framework bindings.
+            if lc.contains("\"firebase\":")
+                || lc.contains("\"firebase\" :")
+                || lc.contains("\"firebase-admin\"")
+                || lc.contains("\"firebase-functions\"")
+                || lc.contains("\"@react-native-firebase/")
+                || lc.contains("\"@angular/fire\"")
+                || lc.contains("\"reactfire\"")
+                || lc.contains("\"firebaseui\"")
+                || lc.contains("\"@firebase/")
+            {
+                add("Firebase");
+            }
+        }
+        // Flutter: the FlutterFire packages.
+        "pubspec.yaml" => {
+            if [
+                "firebase_core",
+                "cloud_firestore",
+                "firebase_auth",
+                "firebase_storage",
+                "firebase_database",
+                "cloud_functions",
+            ]
+            .iter()
+            .any(|pkg| lc.contains(pkg))
+            {
+                add("Firebase");
             }
         }
         "requirements.txt" | "pyproject.toml" | "Pipfile" => {
@@ -244,6 +276,26 @@ pub(crate) fn detect_frameworks(
     }
     if path.contains("supabase/migrations/") && file.ends_with(".sql") {
         add("Supabase");
+    }
+    // Firebase: the project config, the rules files and the platform config files are
+    // structural markers at any depth (a monorepo keeps one `firebase.json` per app). A `.rules`
+    // file also used by other tools (udev, Prometheus alerting) counts only when its content
+    // declares a Firebase `service`.
+    if matches!(
+        file,
+        "firebase.json"
+            | ".firebaserc"
+            | "firestore.rules"
+            | "storage.rules"
+            | "database.rules.json"
+            | "firestore.indexes.json"
+            | "google-services.json"
+            | "GoogleService-Info.plist"
+            | "firebase_options.dart"
+    ) || (file.ends_with(".rules")
+        && (lc.contains("service cloud.firestore") || lc.contains("service firebase.storage")))
+    {
+        add("Firebase");
     }
     // CI/CD → `ci-cd`:
     if path.contains(".github/workflows/") {
@@ -464,6 +516,10 @@ const FRAMEWORK_DOMAINS: &[(&str, &[&str])] = &[
             "sql",
         ],
     ),
+    // ── Firebase ────────────────────────────────────────────────────────────────────────────
+    // One flat `firebase` domain holds every Firebase rule (the Functions rules reach JS/TS repos
+    // only through this row; they carry no `extra_domains`, so a plain Express app never sees them).
+    ("Firebase", &["firebase"]),
     // ── Infrastructure-as-code → `iac` ──────────────────────────────────────────────────────
     ("Terraform", &["iac"]),
     ("Terragrunt", &["iac"]),
@@ -811,12 +867,149 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
 mod tests {
     use super::*;
 
+    #[test]
+    fn lang_for_ext_maps_dart() {
+        assert_eq!(lang_for_ext("lib/main.dart"), Some("Dart"));
+        assert_eq!(lang_for_ext("lib/Main.DART"), Some("Dart"));
+        assert_eq!(lang_for_ext("firestore.rules"), None);
+    }
+
     /// A synthetic repo: `(path, content)` pairs, built the shape `detect_stack` consumes.
     fn files(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
             .iter()
             .map(|(p, c)| (p.to_string(), c.to_string()))
             .collect()
+    }
+
+    // ── Firebase stack detection (MASTER-SEQUENCE item 24) ──────────────────────────────────
+
+    fn frameworks_of(path: &str, content: &str) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        detect_frameworks(path, content, &mut out);
+        out
+    }
+
+    #[test]
+    fn firebase_is_detected_from_each_marker() {
+        // Manifest content markers.
+        for (path, content) in [
+            ("package.json", r#"{"dependencies":{"firebase":"^10.0.0"}}"#),
+            (
+                "package.json",
+                r#"{"dependencies":{"firebase-admin":"12"}}"#,
+            ),
+            (
+                "functions/package.json",
+                r#"{"dependencies":{"firebase-functions":"5"}}"#,
+            ),
+            (
+                "package.json",
+                r#"{"dependencies":{"@react-native-firebase/app":"20"}}"#,
+            ),
+            ("package.json", r#"{"dependencies":{"@angular/fire":"18"}}"#),
+            ("package.json", r#"{"dependencies":{"reactfire":"4"}}"#),
+            ("package.json", r#"{"dependencies":{"firebaseui":"6"}}"#),
+            (
+                "package.json",
+                r#"{"dependencies":{"@firebase/app":"0.10"}}"#,
+            ),
+            ("pubspec.yaml", "dependencies:\n  firebase_core: ^3.0.0\n"),
+            ("pubspec.yaml", "dependencies:\n  cloud_firestore: ^5.0.0\n"),
+            ("pubspec.yaml", "dependencies:\n  firebase_auth: ^5.0.0\n"),
+            (
+                "pubspec.yaml",
+                "dependencies:\n  firebase_storage: ^12.0.0\n",
+            ),
+            (
+                "pubspec.yaml",
+                "dependencies:\n  firebase_database: ^11.0.0\n",
+            ),
+            ("pubspec.yaml", "dependencies:\n  cloud_functions: ^5.0.0\n"),
+        ] {
+            assert!(
+                frameworks_of(path, content).contains("Firebase"),
+                "{path}: {content}"
+            );
+        }
+        // Path and basename markers, at any depth.
+        for path in [
+            "firebase.json",
+            "apps/web/firebase.json",
+            ".firebaserc",
+            "firestore.rules",
+            "storage.rules",
+            "database.rules.json",
+            "firestore.indexes.json",
+            "android/app/google-services.json",
+            "ios/Runner/GoogleService-Info.plist",
+            "lib/firebase_options.dart",
+        ] {
+            assert!(frameworks_of(path, "").contains("Firebase"), "{path}");
+        }
+        // A renamed rules file is recognised by its service header, never by its name.
+        assert!(
+            frameworks_of("rules/prod.rules", "service cloud.firestore {\n}\n")
+                .contains("Firebase")
+        );
+        assert!(
+            frameworks_of("rules/files.rules", "service firebase.storage {\n}\n")
+                .contains("Firebase")
+        );
+    }
+
+    #[test]
+    fn firebase_is_not_detected_from_look_alikes() {
+        for (path, content) in [
+            ("package.json", r#"{"dependencies":{"express":"4"}}"#),
+            (
+                "monitoring/alerts.rules",
+                "groups:\n- name: a\n  rules: []\n",
+            ),
+            (
+                "etc/udev/70-usb.rules",
+                "ACTION==\"add\", SUBSYSTEM==\"usb\"\n",
+            ),
+            ("pubspec.yaml", "dependencies:\n  http: ^1.0.0\n"),
+            ("src/firebase-notes.md", "firebase.json is mentioned here"),
+        ] {
+            assert!(
+                !frameworks_of(path, content).contains("Firebase"),
+                "{path} must not look like Firebase"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flutter_firebase_repo_is_detected_as_dart_plus_firebase() {
+        let stack = detect_stack(
+            "acme/app",
+            &files(&[
+                ("pubspec.yaml", "dependencies:\n  firebase_core: ^3.0.0\n"),
+                ("lib/main.dart", "void main() {}\n"),
+            ]),
+        );
+        assert!(stack.languages.contains(&"Dart".to_string()), "{stack:?}");
+        assert!(
+            stack.frameworks.contains(&"Firebase".to_string()),
+            "{stack:?}"
+        );
+        let domains = domains_for_stack(&stack);
+        assert!(domains.contains(&"firebase".to_string()), "{domains:?}");
+        // Dart takes the default language row (owner decision 2026-10-25), like Kotlin and Swift.
+        assert!(domains.contains(&"api-layer".to_string()), "{domains:?}");
+    }
+
+    #[test]
+    fn a_plain_node_api_does_not_get_the_firebase_domain() {
+        let stack = detect_stack(
+            "acme/api",
+            &files(&[
+                ("package.json", r#"{"dependencies":{"express":"4"}}"#),
+                ("src/index.ts", "export {};\n"),
+            ]),
+        );
+        assert!(!domains_for_stack(&stack).contains(&"firebase".to_string()));
     }
 
     /// Every distinct `domain` present in the REAL shipped corpus, derived the same way
@@ -1047,6 +1240,11 @@ mod tests {
         ),
         ("supabase:exposure", &[("supabase/config.toml", "project_id = \"example\"\n")]),
         ("supabase:realtime", &[("supabase/config.toml", "project_id = \"example\"\n")]),
+        // ── Firebase: the project config alone is a sufficient structural marker ─────────────
+        (
+            "firebase",
+            &[("firebase.json", r#"{"firestore":{"rules":"firestore.rules"}}"#)],
+        ),
     ];
 
     /// req_a6: every corpus domain has a witness repo in [`DOMAIN_WITNESSES`], AND that witness
@@ -1237,6 +1435,11 @@ mod tests {
             "Terragrunt",
             "terragrunt.hcl",
             "terraform { source = \".\" }\n",
+        ),
+        (
+            "Firebase",
+            "firebase.json",
+            r#"{"firestore":{"rules":"firestore.rules"}}"#,
         ),
         ("Bicep", "main.bicep", "param location string\n"),
         ("Pulumi", "Pulumi.yaml", "name: example\nruntime: nodejs\n"),
@@ -1431,6 +1634,94 @@ mod tests {
             rule.is_none_or(|r| !r.recommended),
             "a Python-only repo must not have {ID} suggested: {rule:?}"
         );
+    }
+
+    /// The thirteen Firebase rules (item 24) live in one `firebase` domain, which only a repo with
+    /// a Firebase marker reaches: `firebase.json`, a rules file, a Firebase dependency or a
+    /// FlutterFire package. A Node API, a Vue app and a Python repo get none of them.
+    #[tokio::test]
+    async fn firebase_rules_are_proposed_for_a_firebase_repo_and_not_for_a_plain_node_api() {
+        const IDS: [&str; 13] = [
+            "FIREBASE-RULES-OPEN-1",
+            "FIREBASE-RULES-TEST-MODE-1",
+            "FIREBASE-RULES-AUTH-ONLY-1",
+            "FIREBASE-RULES-OWNERSHIP-1",
+            "FIREBASE-RULES-FIELD-VALIDATION-1",
+            "FIREBASE-RULES-RECURSIVE-WILDCARD-1",
+            "FIREBASE-STORAGE-RULES-OPEN-1",
+            "FIREBASE-RTDB-RULES-OPEN-1",
+            "FIREBASE-ADMIN-CLAIMS-1",
+            "FIREBASE-FUNCTIONS-AUTH-1",
+            "FIREBASE-ADMIN-SDK-CLIENT-1",
+            "FIREBASE-APP-CHECK-1",
+            "FIREBASE-RULES-TESTS-1",
+        ];
+        let Some(corpus) = corpus_domains().await else {
+            return;
+        };
+        if !corpus.contains("firebase") {
+            return;
+        }
+        for (repo, pairs) in [
+            (
+                "acme/web",
+                vec![("firebase.json", "{}"), ("src/index.ts", "export {};")],
+            ),
+            (
+                "acme/flutter",
+                vec![
+                    ("pubspec.yaml", "dependencies:\n  firebase_core: ^3.0.0\n"),
+                    ("lib/main.dart", "void main() {}"),
+                ],
+            ),
+        ] {
+            let repo_files = files(&pairs);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            for id in IDS {
+                let rule = proposed
+                    .iter()
+                    .find(|r| r.id == id)
+                    .unwrap_or_else(|| panic!("{id} must be proposed for {repo}"));
+                assert_eq!(rule.domain, "firebase", "{id}");
+                assert!(
+                    rule.recommended,
+                    "{repo}: {id} is suggested, not merely available"
+                );
+                assert_eq!(rule.repos, vec![repo.to_string()], "{id}");
+            }
+        }
+
+        for (repo, pairs) in [
+            (
+                "acme/node-api",
+                vec![
+                    ("package.json", r#"{"dependencies":{"express":"4"}}"#),
+                    ("src/index.ts", "export {};"),
+                ],
+            ),
+            (
+                "acme/vue-app",
+                vec![
+                    ("package.json", r#"{"dependencies":{"vue":"3"}}"#),
+                    ("src/main.ts", "export {};"),
+                ],
+            ),
+            ("acme/py-app", vec![("app/main.py", "print('hi')")]),
+        ] {
+            let repo_files = files(&pairs);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            for id in IDS {
+                let rule = proposed.iter().find(|r| r.id == id);
+                assert!(
+                    rule.is_none_or(|r| !r.recommended),
+                    "{repo}: {id} must not be suggested for a repo with no Firebase marker"
+                );
+            }
+        }
     }
 
     /// `UI-REACT-HOOKS-LINT-1` lives in `javascript:react`, which the `React` framework label

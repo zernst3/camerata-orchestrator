@@ -23,7 +23,7 @@
 //! calibration-flagged findings. This requires no changes to `Finding`, the adapter, or the
 //! report/template/serializer.
 
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_MEDIUM};
+use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_MEDIUM};
 
 pub const RULE_UI_UTC_DATES: &str = "UI-UTC-DATES-1";
 
@@ -86,6 +86,7 @@ fn violations_in_file(path: &str, content: &str) -> Vec<ArchViolation> {
             if let Some(rel) = code.find(call) {
                 let col_context = &code[rel..];
                 violations.push(ArchViolation {
+                    grade: ViolationGrade::Defect,
                     rule_id: RULE_UI_UTC_DATES.to_string(),
                     file: path.to_string(),
                     line: line_no,

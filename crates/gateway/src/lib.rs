@@ -1796,6 +1796,41 @@ mod tests {
         );
     }
 
+    /// A runtime-built Google key (no 39-character literal in this source).
+    fn google_key_fixture(seed: u64) -> String {
+        format!(
+            "AIza{}",
+            camerata_secrets::fixtures::body(
+                35,
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+                seed
+            )
+        )
+    }
+
+    fn firebase_web_config(key: &str) -> String {
+        format!(
+            "export const firebaseConfig = {{\n  apiKey: \"{key}\",\n  authDomain: \"x.firebaseapp.com\",\n  projectId: \"x\",\n  appId: \"1:2:web:3\"\n}};\n"
+        )
+    }
+
+    #[test]
+    fn sec_no_vendor_token_1_does_not_deny_a_firebase_web_config() {
+        let config = firebase_web_config(&google_key_fixture(1));
+        assert!(arm_sec_no_vendor_token_1("src/firebase.ts", &config).is_ok());
+        // The same key with no Firebase context is still denied.
+        let bare = format!("const k = \"{}\";", google_key_fixture(1));
+        assert!(arm_sec_no_vendor_token_1("src/maps.ts", &bare).is_err());
+    }
+
+    #[test]
+    fn sec_no_hardcoded_secrets_1_does_not_deny_a_firebase_web_config() {
+        let config = firebase_web_config(&google_key_fixture(2));
+        assert!(arm_sec_no_hardcoded_secrets_1("src/firebase.ts", &config).is_ok());
+        let bare = format!("const k = \"{}\";", google_key_fixture(2));
+        assert!(arm_sec_no_hardcoded_secrets_1("src/maps.ts", &bare).is_err());
+    }
+
     #[test]
     fn secret_in_url_catches_templated_query_without_scheme() {
         // The plant: a format string with no literal http(s):// but a `?…&token={…}`.

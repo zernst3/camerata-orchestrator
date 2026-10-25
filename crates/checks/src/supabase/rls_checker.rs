@@ -11,7 +11,8 @@ use super::timeline::{
     is_platform_managed_schema, ProtectionEvent, ProtectionKind, TableState,
 };
 use crate::arch_checker::{
-    ArchChecker, ArchViolation, RepoView, SEVERITY_CRITICAL, SEVERITY_INFO, SEVERITY_MEDIUM,
+    ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_CRITICAL, SEVERITY_INFO,
+    SEVERITY_MEDIUM,
 };
 
 pub const RULE_RLS_ENABLED: &str = "SUPABASE-RLS-ENABLED-1";
@@ -214,6 +215,7 @@ fn platform_owned_info_finding(state: &TableState, name: &str) -> ArchViolation 
         None => (String::new(), 0, String::new()),
     };
     ArchViolation {
+        grade: ViolationGrade::Defect,
         rule_id: RULE_RLS_POLICY_DISABLED.to_string(),
         file,
         line,
@@ -274,6 +276,7 @@ fn check_table(
         let exposed = exposed_schemas.contains(&state.schema);
         if exposed {
             out.push(ArchViolation {
+                grade: ViolationGrade::Defect,
                 rule_id: RULE_RLS_ENABLED.to_string(),
                 file: est_file.clone(),
                 line: est_line,
@@ -298,6 +301,7 @@ fn check_table(
             // POLICY-DISABLED below signal broken INTENT independent of reachability and stay
             // ungated.
             out.push(ArchViolation {
+                grade: ViolationGrade::Defect,
                 rule_id: RULE_RLS_ENABLED.to_string(),
                 file: est_file.clone(),
                 line: est_line,
@@ -316,6 +320,7 @@ fn check_table(
 
     if state.rls_enabled && state.policies.is_empty() {
         out.push(ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: RULE_RLS_NO_POLICY.to_string(),
             file: est_file.clone(),
             line: est_line,
@@ -345,6 +350,7 @@ fn check_table(
             })
             .collect();
         out.push(ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: RULE_RLS_POLICY_DISABLED.to_string(),
             file: est_file.clone(),
             line: est_line,
@@ -442,6 +448,7 @@ fn check_disabled_not_restored(
     };
 
     Some(ArchViolation {
+        grade: ViolationGrade::Defect,
         rule_id: RULE_RLS_DISABLED_NOT_RESTORED.to_string(),
         file: loc.file.clone(),
         line: loc.line,

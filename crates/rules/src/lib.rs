@@ -3296,6 +3296,9 @@ fn domain_to_glob(domain: &str) -> String {
         // Supabase rules span the CLI project config, SQL migrations (RLS/functions),
         // and the JS/TS client code that talks to it (auth/secrets/storage misuse).
         "supabase" => "**/*.{sql,ts,tsx,toml,env}".to_owned(),
+        // Firebase rules span the Security Rules files (`.rules`), the project and Realtime
+        // Database rules JSON, the Cloud Functions (JS/TS) and the Flutter client code.
+        "firebase" => "**/*.{rules,json,js,ts,jsx,tsx,mjs,cjs,dart}".to_owned(),
         "universal" => "**".to_owned(),
         _ => {
             tracing::warn!(domain = %domain, "no file-glob mapping for domain; falling back to **");
@@ -4291,6 +4294,14 @@ mod tests {
 
         let paths = derive_allowed_paths(&["python"]);
         assert!(paths.contains(&"**/*.py".to_string()), "{paths:?}");
+
+        // Firebase rules span the rules files, the project and rules JSON, the Cloud Functions
+        // (JS/TS) and the Flutter client code that carries the Firebase options.
+        let paths = derive_allowed_paths(&["firebase"]);
+        assert!(
+            paths.contains(&"**/*.{rules,json,js,ts,jsx,tsx,mjs,cjs,dart}".to_string()),
+            "{paths:?}"
+        );
     }
 
     #[test]

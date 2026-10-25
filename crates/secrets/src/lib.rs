@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 mod detect;
+mod firebase;
 pub mod fixtures;
 mod json;
 pub mod published;

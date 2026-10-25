@@ -4751,6 +4751,18 @@ fn kind_actionability_rank(f: &Finding) -> u8 {
     }
 }
 
+/// Whether a row is HELD for review rather than asserted: the structured flag, or the
+/// calibration/adapter `needs-review` confidence (the two are a biconditional by construction,
+/// and either alone is enough to hold the row — see `report_export::is_hedged`).
+fn is_held_row(f: &Finding) -> bool {
+    f.needs_review || f.confidence.as_deref() == Some("needs-review")
+}
+
+/// Rank for [`is_held_row`]: an asserted row (`1`) strictly outranks a held one (`0`).
+fn asserted_rank(f: &Finding) -> u8 {
+    u8::from(!is_held_row(f))
+}
+
 /// W7: whether two findings make MERGE-COMPATIBLE kinds of statement. A merge that absorbs a
 /// `Defect` into a `ConventionObserved` primary — or vice versa — is a correctness bug with a
 /// name now that `FindingKind` exists: the absorbed row's statement (there IS a fault / the
@@ -4760,8 +4772,16 @@ fn kind_actionability_rank(f: &Finding) -> u8 {
 /// - two informational rows merge only when they are the SAME rule making the SAME kind of
 ///   statement (informational rows are one-per-rule by construction — A5.3/A5.5 — so
 ///   anything else fusing is two different statements collapsing);
-/// - two actionable rows (Defect/Deviation/legacy-unspecified) merge exactly as before.
+/// - a HELD (needs-review) row never merges with an asserted one, in either direction: the two
+///   make different statements (a fact the checker stands behind, and one it only flags for a
+///   human), and fusing them either hides the asserted defect beneath a held primary or
+///   launders the held one into an assertion. Firebase review, 2026-10-25 (owner call: an
+///   asserted finding is never fused into, or ranked beneath, a held row);
+/// - two actionable rows (Defect/Deviation/legacy-unspecified) otherwise merge exactly as before.
 fn kinds_merge_compatible(a: &Finding, b: &Finding) -> bool {
+    if is_held_row(a) != is_held_row(b) {
+        return false;
+    }
     let a_informational = kind_actionability_rank(a) == 0;
     let b_informational = kind_actionability_rank(b) == 0;
     if a_informational != b_informational {
@@ -4784,6 +4804,8 @@ fn kinds_merge_compatible(a: &Finding, b: &Finding) -> bool {
 /// never be hidden under a `ConventionObserved`/`NoConvention`/`NotAssessed` primary (the
 /// [`kinds_merge_compatible`] guards should keep such a group from ever forming; this key is
 /// the belt-and-braces if one does);
+/// (0b) an ASSERTED row ([`asserted_rank`]) beats a held (needs-review) one, so an asserted
+/// defect is never ranked beneath a held row (same belt-and-braces role as (0));
 /// (1) `FindingClass` — Security beats Hygiene unconditionally, independent of everything else,
 /// so a structural/style row can never absorb and hide a security defect (the P1 regression);
 /// (2) rule specificity via `origin_rank` — Deterministic beats AdoptedAi beats InventedAi.
@@ -4798,9 +4820,12 @@ fn kinds_merge_compatible(a: &Finding, b: &Finding) -> bool {
 /// (now only a tiebreak within one class+origin tier — e.g. two deterministic members, or two AI
 /// members); (4) confidence (a "needs-review" flag ranks last); (5) earliest appearance, the
 /// final deterministic tiebreak so output never depends on hash/iteration order.
-fn primary_rank(f: &Finding, group_len: usize, index: usize) -> (u8, u8, u8, u8, u8, usize) {
+fn primary_rank(f: &Finding, group_len: usize, index: usize) -> (u8, u8, u8, u8, u8, u8, usize) {
     (
         kind_actionability_rank(f),
+        // Firebase review: an asserted row is never ranked beneath a held one, whatever the
+        // class — see `kinds_merge_compatible`, which keeps such a group from forming at all.
+        asserted_rank(f),
         class_rank(finding_class(f)),
         origin_rank(finding_origin(f)),
         severity_rank(&f.severity),
@@ -5160,9 +5185,26 @@ enum Origin {
     InventedAi,
 }
 
+/// A held row produced by a deterministic architectural checker's adapter
+/// (`onboard::arch_violation_to_finding`): it is a preview row from the `camerata-arch` tool and
+/// carries the HELD marker (`needs-review`) with no calibration behind it. The calibration pass
+/// only ever sees AI-pass findings, so no AI-calibrated row has this combination.
+fn is_adapter_held_row(f: &Finding) -> bool {
+    f.preview
+        && f.preview_tool.as_deref() == Some(crate::onboard::ARCH_PREVIEW_TOOL)
+        && f.needs_review
+        && f.confidence.as_deref() == Some("needs-review")
+}
+
 fn finding_origin(f: &Finding) -> Origin {
     if f.rule_id.starts_with("AI-") {
         Origin::InventedAi
+    } else if is_adapter_held_row(f) {
+        // A review-graded row from a deterministic architectural checker carries
+        // `confidence = needs-review` as its HELD marker, not as a calibration verdict: the
+        // AI pipeline never saw it, so it keeps the deterministic tier (and with it the
+        // det+det "two distinct defects" guard).
+        Origin::Deterministic
     } else if f.confidence.is_some() {
         // A non-AI- rule id that calibration touched = an adopted corpus rule from the AI tier.
         Origin::AdoptedAi
@@ -16260,6 +16302,119 @@ mod tests {
             primary_rank(&defect, 2, 1),
             primary_rank(&conv, 2, 0)
         );
+    }
+
+    // ── Firebase review: an asserted defect is never fused into, or ranked beneath, a held row ──
+
+    /// A real adapter row: the deterministic architectural checker's `ArchViolation`, converted
+    /// exactly as the scan converts it, so the merge tests see the production field values.
+    fn adapter_row(
+        grade: camerata_checks::arch_checker::ViolationGrade,
+        rule: &str,
+        line: usize,
+        severity: &'static str,
+    ) -> Finding {
+        crate::onboard::arch_violation_to_finding(
+            "o/r",
+            &camerata_checks::arch_checker::ArchViolation {
+                grade,
+                rule_id: rule.to_string(),
+                file: "firestore.rules".to_string(),
+                line,
+                object: Some("/posts/{id}".to_string()),
+                message: "a fact".to_string(),
+                severity,
+            },
+        )
+    }
+
+    /// A review-graded (held) adapter row and an asserted one on one path: the pair shares the
+    /// captured rules path and sits two lines apart, so before the fix the semantic merge fused
+    /// them and the security-class held row (AUTH-ONLY) became the primary, hiding the asserted
+    /// defect (OPEN) beneath a needs-review row.
+    #[test]
+    fn a_held_adapter_row_and_an_asserted_defect_on_one_path_stay_separate() {
+        use camerata_checks::arch_checker::ViolationGrade::{Defect, Review};
+        let held = adapter_row(Review, "FIREBASE-RULES-AUTH-ONLY-1", 5, "medium");
+        let asserted = adapter_row(Defect, "FIREBASE-RULES-OPEN-1", 6, "high");
+        assert!(held.needs_review && !asserted.needs_review);
+        let out = merge_semantic_groups(vec![held, asserted], &[]);
+        assert_eq!(out.len(), 2, "held and asserted must both survive: {out:?}");
+        let asserted_row = out
+            .iter()
+            .find(|f| f.rule_id == "FIREBASE-RULES-OPEN-1")
+            .expect("the asserted row survives as its own primary");
+        assert!(!asserted_row.needs_review);
+        assert_eq!(asserted_row.severity, "high");
+    }
+
+    /// Two held rows on one path still fuse (the shared object is real evidence of one root
+    /// cause), and the result stays held: fusing must not launder either into an assertion.
+    #[test]
+    fn two_held_adapter_rows_on_one_path_still_merge_and_stay_held() {
+        use camerata_checks::arch_checker::ViolationGrade::Review;
+        let a = adapter_row(Review, "FIREBASE-RULES-AUTH-ONLY-1", 5, "medium");
+        let b = adapter_row(Review, "FIREBASE-RULES-FIELD-VALIDATION-1", 6, "medium");
+        let out = merge_semantic_groups(vec![a, b], &[]);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].needs_review);
+    }
+
+    /// The backstop: should a mixed group ever form, an unhedged row outranks a hedged one even
+    /// when the hedged row wins on class (security) and the unhedged one is hygiene.
+    #[test]
+    fn primary_rank_never_lets_a_hedged_row_outrank_an_unhedged_one() {
+        let mut hedged = site_finding("AI-AUTH-BYPASS-1", "a.rs", 5, "high", "");
+        hedged.confidence = Some("needs-review".to_string());
+        hedged.needs_review = true;
+        let unhedged = site_finding("ARCH-API-VERSIONING-1", "a.rs", 6, "low", "");
+        assert_eq!(finding_class(&hedged), FindingClass::Security);
+        assert_eq!(finding_class(&unhedged), FindingClass::Hygiene);
+        assert!(
+            primary_rank(&unhedged, 2, 1) > primary_rank(&hedged, 2, 0),
+            "an unhedged row must outrank a hedged one: unhedged={:?} hedged={:?}",
+            primary_rank(&unhedged, 2, 1),
+            primary_rank(&hedged, 2, 0)
+        );
+    }
+
+    /// An adapter Review row is produced by a deterministic checker: its `needs-review`
+    /// confidence is the HELD marker, not a calibration verdict, so it is not AI-tier. A
+    /// calibrated AI row with the same confidence still is.
+    #[test]
+    fn an_adapter_review_row_is_deterministic_origin_not_ai() {
+        use camerata_checks::arch_checker::ViolationGrade::{Defect, Review};
+        let held = adapter_row(Review, "FIREBASE-RULES-AUTH-ONLY-1", 5, "medium");
+        assert_eq!(finding_origin(&held), Origin::Deterministic);
+        let asserted = adapter_row(Defect, "FIREBASE-RULES-OPEN-1", 6, "high");
+        assert_eq!(finding_origin(&asserted), Origin::Deterministic);
+        let mut calibrated = site_finding("SEC-NO-RAW-SQL-CONCAT-1", "a.rs", 1, "high", "");
+        calibrated.confidence = Some("needs-review".to_string());
+        calibrated.needs_review = true;
+        assert_eq!(finding_origin(&calibrated), Origin::AdoptedAi);
+    }
+
+    /// Two deterministic rows keep the "two distinct defects" guard when one of them is a held
+    /// adapter row: with nothing shared (different rules, different captured objects), they
+    /// stay two rows rather than being treated as an AI pair that proximity can fuse.
+    #[test]
+    fn a_held_adapter_row_keeps_the_det_det_distinct_defects_guard() {
+        use camerata_checks::arch_checker::ViolationGrade::Review;
+        let mut a = adapter_row(Review, "FIREBASE-RULES-AUTH-ONLY-1", 5, "medium");
+        let mut b = adapter_row(Review, "FIREBASE-RULES-FIELD-VALIDATION-1", 6, "medium");
+        a.captures.clear();
+        b.captures.clear();
+        a.snippet.clear();
+        b.snippet.clear();
+        a.detail = "alpha".to_string();
+        b.detail = "omega".to_string();
+        a.category = Some("authorization".to_string());
+        b.category = Some("authorization".to_string());
+        // Same category and two lines apart would fuse an AI pair only with corroboration; as
+        // deterministic rows they need a shared object, the same rule, or a same-construct
+        // security override, and have none.
+        let out = merge_semantic_groups(vec![a, b], &[]);
+        assert_eq!(out.len(), 2, "{out:?}");
     }
 
     // ── Pass-1 W7: B7 (brace-free construct blindness) + B8 (seed-only clustering) ──

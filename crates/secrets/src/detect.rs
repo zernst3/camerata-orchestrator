@@ -7,6 +7,7 @@ use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use regex::Regex;
 
+use crate::firebase::{TwinContext, LINE_PREFIX_CAP, WINDOW};
 use crate::shapes::{self, is_supabase_dsn, shapes_for_rule, SecretShape};
 use crate::twins::{classify, Twin};
 
@@ -42,6 +43,23 @@ impl SecretMatch {
     }
 }
 
+/// The text around the value at `value_start`: its own line up to the value (capped) and a window
+/// either side. Both are char-boundary safe.
+fn twin_context(text: &str, value_start: usize) -> TwinContext<'_> {
+    let line_start = text[..value_start].rfind('\n').map_or(0, |i| i + 1);
+    let prefix_start = floor_boundary(
+        text,
+        line_start.max(value_start.saturating_sub(LINE_PREFIX_CAP)),
+    );
+    let win_start = floor_boundary(text, value_start.saturating_sub(WINDOW));
+    let win_end = floor_boundary(text, value_start.saturating_add(WINDOW));
+    TwinContext {
+        line_prefix: &text[prefix_start..value_start],
+        window: &text[win_start..win_end],
+        at: value_start - win_start,
+    }
+}
+
 fn push(
     out: &mut Vec<SecretMatch>,
     text: &str,
@@ -52,11 +70,13 @@ fn push(
 ) {
     // The text of the match before the value: for a context shape it holds the identifier.
     let before_value = &text[span.start..value.start];
+    let context = twin_context(text, value.start);
     let twin = classify(
         shape,
         &text[value.clone()],
         before_value,
         jwt_role.as_deref(),
+        &context,
     );
     out.push(SecretMatch {
         start: span.start,

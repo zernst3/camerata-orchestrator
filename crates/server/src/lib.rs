@@ -5669,6 +5669,17 @@ pub async fn load_corpus_for_scan(
 /// constant rather than a retyped literal so the two cannot drift.
 pub const RULE_CORPUS_COVERAGE_TOOL: &str = "rule-corpus";
 
+/// The [`crate::onboard::CoverageNote::tool`] value for the Firebase scope statement. Like
+/// [`RULE_CORPUS_COVERAGE_TOOL`] it is not a tool name: it keys the one written client sentence
+/// `report_export::tool_coverage_disclosures` renders for a repository whose stack includes
+/// Firebase.
+pub const FIREBASE_SCOPE_COVERAGE_TOOL: &str = "firebase-scope";
+
+/// What "Firebase coverage" means in a report (client voice, no dashes): the honest scope of the
+/// Firebase rules, so a reader never mistakes a clean Firebase section for coverage of Dart client
+/// logic or of rules that live only in the console.
+pub const FIREBASE_SCOPE_SENTENCE: &str = "Firebase coverage in this inspection is the security rules files in the repository (Cloud Firestore, Cloud Storage and Realtime Database), the Firebase project configuration, and Cloud Functions written in JavaScript or TypeScript. Dart and Flutter client code was read for committed secrets and by the advisory review, but it was not parsed structurally and no Flutter specific rule was applied. Rules and settings that exist only in the Firebase console are not visible to a repository inspection.";
+
 /// W13 — route a scan's corpus-load failures to the four places built for exactly this, so a
 /// rule that never parsed can no longer disappear.
 ///

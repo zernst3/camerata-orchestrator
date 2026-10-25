@@ -98,7 +98,7 @@
 //! scope line.
 
 use super::splitter::{parse_dollar_tag, split_statements, SqlStatement};
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_HIGH};
+use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_HIGH};
 
 pub const RULE_PRIVILEGED_NO_AUTHZ: &str = "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1";
 
@@ -189,6 +189,7 @@ impl ArchChecker for PrivilegedFunctionNoAuthzChecker {
                     return None;
                 }
                 Some(ArchViolation {
+                    grade: ViolationGrade::Defect,
                     rule_id: RULE_PRIVILEGED_NO_AUTHZ.to_string(),
                     file: f.file.clone(),
                     line: f.line,

@@ -1440,6 +1440,9 @@ pub(crate) fn tool_coverage_disclosures(notes: &[crate::onboard::CoverageNote]) 
                 "Some selected checks had no scan-time preview tool available this run; \
                  they are not reflected in this report and enforce once wired into CI."
                     .to_string()
+            } else if tool == crate::FIREBASE_SCOPE_COVERAGE_TOOL {
+                // Not a tool either: the one written statement of what Firebase coverage is.
+                crate::FIREBASE_SCOPE_SENTENCE.to_string()
             } else if tool == crate::RULE_CORPUS_COVERAGE_TOOL {
                 // Also not a tool name: these notes mean "a rule file in the library could
                 // not be read, so that rule was never applied".
@@ -10016,6 +10019,38 @@ mod tests {
         assert!(
             !line.contains('\u{2014}') && !line.contains('\u{2013}'),
             "{line}"
+        );
+    }
+
+    /// Item 24: a Firebase repository's report states what Firebase coverage means, in the one
+    /// written sentence, once, in both the executive summary and the methodology, with no dash.
+    #[test]
+    fn the_firebase_scope_sentence_reaches_the_summary_and_methodology_verbatim() {
+        let mut report = report_with(vec![], vec![]);
+        report.coverage_notes = vec![CoverageNote {
+            tool: crate::FIREBASE_SCOPE_COVERAGE_TOOL.to_string(),
+            message: "operator note".to_string(),
+        }];
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let line = crate::FIREBASE_SCOPE_SENTENCE;
+        assert_eq!(
+            json.executive_summary
+                .failed_passes
+                .iter()
+                .filter(|n| n.as_str() == line)
+                .count(),
+            1,
+            "{:?}",
+            json.executive_summary.failed_passes
+        );
+        assert!(json.methodology.failed_passes.iter().any(|n| n == line));
+        assert!(
+            !line.contains('\u{2014}') && !line.contains('\u{2013}'),
+            "{line}"
+        );
+        assert!(
+            !line.contains("static-analysis"),
+            "not the generic tool wording"
         );
     }
 

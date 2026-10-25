@@ -48,7 +48,7 @@
 
 use std::collections::HashSet;
 
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_HIGH};
+use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_HIGH};
 use crate::architecture_config::architecture_config_from_files;
 use crate::extract;
 use crate::import_boundary_checker::RULE_STRICT_LAYERING;
@@ -119,6 +119,7 @@ impl ArchChecker for StrictLayeringCallChecker {
                     continue;
                 }
                 out.push(ArchViolation {
+                    grade: ViolationGrade::Defect,
                     rule_id: RULE_STRICT_LAYERING.to_string(),
                     file: path.clone(),
                     line: call.line,

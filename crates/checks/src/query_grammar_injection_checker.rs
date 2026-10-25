@@ -61,7 +61,7 @@
 //! negative on multi-line call arguments or cross-file expressions is explicitly preferred over
 //! a false positive from a more aggressive parser.
 
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_HIGH};
+use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_HIGH};
 
 pub const RULE_QUERY_GRAMMAR_INJECTION: &str = "SEC-NO-QUERY-GRAMMAR-INJECTION-1";
 
@@ -605,6 +605,7 @@ fn violations_in_file(path: &str, content: &str) -> Vec<ArchViolation> {
         ];
         for hit in hits.into_iter().flatten() {
             violations.push(ArchViolation {
+                grade: ViolationGrade::Defect,
                 rule_id: RULE_QUERY_GRAMMAR_INJECTION.to_string(),
                 file: path.to_string(),
                 line: idx + 1,

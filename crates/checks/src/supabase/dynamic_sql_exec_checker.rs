@@ -109,7 +109,9 @@
 //! position corresponds to a `%L`/`%I` placeholder instead.
 
 use super::splitter::{parse_dollar_tag, split_statements, SqlStatement};
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_CRITICAL, SEVERITY_HIGH};
+use crate::arch_checker::{
+    ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_CRITICAL, SEVERITY_HIGH,
+};
 
 pub const RULE_DYNAMIC_SQL_EXEC_INJECTION: &str = "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1";
 
@@ -177,6 +179,7 @@ impl ArchChecker for DynamicSqlExecInjectionChecker {
                     SEVERITY_HIGH
                 };
                 Some(ArchViolation {
+                    grade: ViolationGrade::Defect,
                     rule_id: RULE_DYNAMIC_SQL_EXEC_INJECTION.to_string(),
                     file: f.file.clone(),
                     line: f.line,

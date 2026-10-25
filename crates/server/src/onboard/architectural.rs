@@ -14,7 +14,9 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use camerata_checks::arch_checker::{all_checkers, checker_applies, ArchViolation, RepoView};
+use camerata_checks::arch_checker::{
+    all_checkers, checker_applies, ArchViolation, RepoView, ViolationGrade,
+};
 
 use super::Finding;
 
@@ -59,6 +61,22 @@ pub fn audit_architectural(
     findings
 }
 
+/// How many of `findings` the ledger credits to `rule_id` as emitted: defects and held review
+/// rows. A not-assessed row is neither a finding nor a clean result, so it never counts (and a
+/// rule that only produced one is not credited as "verified clean" by this count alone).
+pub fn emitted_count(findings: &[Finding], rule_id: &str) -> usize {
+    findings
+        .iter()
+        .filter(|f| f.rule_id == rule_id)
+        .filter(|f| {
+            !matches!(
+                f.kind,
+                Some(camerata_api_types::audit::FindingKind::NotAssessed(_))
+            )
+        })
+        .count()
+}
+
 /// Armed rules that reason from the ABSENCE of a reference and so must see reference text
 /// (HTML, single-file components, Markdown, stylesheets, templates, build-runner files) as well
 /// as code: a `<script src>` or a component import is the only evidence a file is still used.
@@ -94,6 +112,10 @@ pub fn architectural_input<'a>(
 const RULES_NEEDING_COMPLETE_SCAN: &[&str] = &[
     camerata_checks::dead_code_checker::RULE_DEAD_CODE,
     camerata_checks::react_hooks_lint_checker::RULE_REACT_HOOKS_LINT,
+    // "No App Check anywhere" and "no rules tests" are true only if the file that has them was
+    // not among the dropped files.
+    camerata_checks::firebase::RULE_APP_CHECK,
+    camerata_checks::firebase::RULE_RULES_TESTS,
 ];
 
 /// Whether `rule_id` is one of the rules an incomplete scan withholds.
@@ -123,6 +145,19 @@ pub fn withhold_on_incomplete_scan<'a>(
 /// simply carry empty `captures`, and the report's generic-fallback wording covers them; this is
 /// deliberately a small, explicit allowlist rather than a guess, so a capture is only ever wired
 /// when we're sure it names the same kind of object the rule's authored text expects.
+/// Firebase rules whose `ArchViolation.object` is a rules path or Realtime Database node.
+const FIREBASE_PATH_RULES: &[&str] = &[
+    camerata_checks::firebase::RULE_OPEN,
+    camerata_checks::firebase::RULE_TEST_MODE,
+    camerata_checks::firebase::RULE_AUTH_ONLY,
+    camerata_checks::firebase::RULE_OWNERSHIP,
+    camerata_checks::firebase::RULE_FIELD_VALIDATION,
+    camerata_checks::firebase::RULE_RECURSIVE_WILDCARD,
+    camerata_checks::firebase::RULE_STORAGE_OPEN,
+    camerata_checks::firebase::RULE_RTDB_OPEN,
+    camerata_checks::firebase::RULE_ADMIN_CLAIMS,
+];
+
 fn capture_token_for(rule_id: &str) -> Option<&'static str> {
     use camerata_checks::supabase::{dynamic_sql_exec_checker, rls_checker, search_path_checker};
     match rule_id {
@@ -137,6 +172,10 @@ fn capture_token_for(rule_id: &str) -> Option<&'static str> {
         id if id == dynamic_sql_exec_checker::RULE_DYNAMIC_SQL_EXEC_INJECTION => {
             Some("function-name")
         }
+        // The rules-file rules name the match path or node (`/orders/{id}`), so a remediation can
+        // say "scope reads on `<path>` to the owner".
+        id if FIREBASE_PATH_RULES.contains(&id) => Some("path"),
+        camerata_checks::firebase::RULE_FUNCTIONS_AUTH => Some("function-name"),
         _ => None,
     }
 }
@@ -171,7 +210,13 @@ pub fn arch_violation_to_finding(repo: &str, violation: &ArchViolation) -> Findi
         capture_token_for(&violation.rule_id),
         violation.object.as_deref(),
     ) {
-        captures.insert(token.to_string(), bare_object_name(object));
+        // A rules path is kept as written; a `schema.object` name is shortened to its object.
+        let value = if token == "path" {
+            object.to_string()
+        } else {
+            bare_object_name(object)
+        };
+        captures.insert(token.to_string(), value);
     }
     let mut finding = Finding {
         repo: repo.to_string(),
@@ -188,6 +233,28 @@ pub fn arch_violation_to_finding(repo: &str, violation: &ArchViolation) -> Findi
         kind: Some(camerata_api_types::audit::FindingKind::Defect),
         ..Finding::default()
     };
+    match violation.grade {
+        ViolationGrade::Defect => {}
+        // A true fact with a legitimate reading: held, not asserted. The two fields are the
+        // biconditional `ai_audit.rs` maintains, and `report_export::is_held_for_review` routes
+        // on either, exactly as it routes a calibration-doubt row.
+        ViolationGrade::Review => {
+            finding.needs_review = true;
+            finding.confidence = Some("needs-review".to_string());
+        }
+        // The checker could not assess this input. An informational row ("armed but not
+        // evaluated"), never a defect and never a clean credit.
+        ViolationGrade::NotAssessed => {
+            finding.kind = Some(camerata_api_types::audit::FindingKind::NotAssessed(
+                camerata_api_types::audit::NotAssessedKind {
+                    reason: camerata_api_types::audit::NotAssessedReason::PassFailed,
+                    reason_detail: violation.message.clone(),
+                },
+            ));
+            finding.severity = camerata_checks::arch_checker::SEVERITY_INFO.to_string();
+            finding.located = violation.line > 0;
+        }
+    }
     // A checker's message or object can quote a literal from the client's code.
     crate::onboard::redact::redact_finding(&mut finding);
     finding
@@ -207,6 +274,7 @@ mod tests {
     #[test]
     fn arch_violation_to_finding_carries_the_provenance_tag() {
         let v = ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: "SUPABASE-RLS-ENABLED-1".to_string(),
             file: "supabase/migrations/20240101000000_init.sql".to_string(),
             line: 3,
@@ -227,9 +295,80 @@ mod tests {
         assert_eq!(f.status, "active");
     }
 
+    fn graded(grade: ViolationGrade, line: usize) -> ArchViolation {
+        ArchViolation {
+            grade,
+            rule_id: "FIREBASE-RULES-OPEN-1".to_string(),
+            file: "firestore.rules".to_string(),
+            line,
+            object: Some("/profiles/{uid}".to_string()),
+            message: "a fact".to_string(),
+            severity: "medium",
+        }
+    }
+
+    #[test]
+    fn a_defect_graded_violation_is_an_unflagged_defect_finding() {
+        let f = arch_violation_to_finding("acme/app", &graded(ViolationGrade::Defect, 4));
+        assert!(!f.needs_review);
+        assert_eq!(f.confidence, None);
+        assert_eq!(f.kind, Some(camerata_api_types::audit::FindingKind::Defect));
+        assert_eq!(f.severity, "medium");
+    }
+
+    #[test]
+    fn a_review_graded_violation_is_held_for_review_not_asserted() {
+        let f = arch_violation_to_finding("acme/app", &graded(ViolationGrade::Review, 4));
+        // The biconditional `ai_audit.rs` maintains, which `is_held_for_review` reads.
+        assert!(f.needs_review);
+        assert_eq!(f.confidence.as_deref(), Some("needs-review"));
+        assert_eq!(f.kind, Some(camerata_api_types::audit::FindingKind::Defect));
+        assert_eq!(f.severity, "medium");
+        assert!(f.preview);
+        assert!(crate::report_export::is_held_for_review(
+            &f,
+            crate::report_export::Disposition::Unresolved
+        ));
+    }
+
+    #[test]
+    fn a_not_assessed_violation_is_a_not_assessed_row_never_a_defect() {
+        use camerata_api_types::audit::{FindingKind, NotAssessedKind, NotAssessedReason};
+        let f = arch_violation_to_finding("acme/app", &graded(ViolationGrade::NotAssessed, 41));
+        assert_eq!(
+            f.kind,
+            Some(FindingKind::NotAssessed(NotAssessedKind {
+                reason: NotAssessedReason::PassFailed,
+                reason_detail: "a fact".to_string(),
+            }))
+        );
+        assert_eq!(f.severity, "info");
+        assert!(f.located);
+        assert!(f.preview);
+        assert!(!f.needs_review);
+        // A not-assessed row with no line is not located.
+        let g = arch_violation_to_finding("acme/app", &graded(ViolationGrade::NotAssessed, 0));
+        assert!(!g.located);
+    }
+
+    #[test]
+    fn the_ledger_counts_defect_and_review_rows_but_never_a_not_assessed_row() {
+        let findings: Vec<Finding> = [
+            ViolationGrade::Defect,
+            ViolationGrade::Review,
+            ViolationGrade::NotAssessed,
+        ]
+        .into_iter()
+        .map(|g| arch_violation_to_finding("acme/app", &graded(g, 4)))
+        .collect();
+        assert_eq!(emitted_count(&findings, "FIREBASE-RULES-OPEN-1"), 2);
+        assert_eq!(emitted_count(&findings, "OTHER-RULE-1"), 0);
+    }
+
     #[test]
     fn arch_violation_to_finding_captures_the_bare_table_name_for_public_schema() {
         let v = ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: "SUPABASE-RLS-ENABLED-1".to_string(),
             file: "supabase/migrations/20240101000000_init.sql".to_string(),
             line: 3,
@@ -247,6 +386,7 @@ mod tests {
     #[test]
     fn arch_violation_to_finding_captures_a_schema_qualified_table_name_for_non_public_schema() {
         let v = ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: "SUPABASE-RLS-NO-POLICY-1".to_string(),
             file: "supabase/migrations/20240101000000_init.sql".to_string(),
             line: 3,
@@ -264,6 +404,7 @@ mod tests {
     #[test]
     fn arch_violation_to_finding_captures_the_function_name_for_search_path() {
         let v = ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: "SUPABASE-FUNC-SEARCH-PATH-1".to_string(),
             file: "supabase/migrations/20240101000000_init.sql".to_string(),
             line: 8,
@@ -333,6 +474,7 @@ mod tests {
     #[test]
     fn arch_violation_to_finding_leaves_captures_empty_for_an_unmapped_rule() {
         let v = ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: "UI-UTC-DATES-1".to_string(),
             file: "src/lib.rs".to_string(),
             line: 1,
@@ -441,6 +583,57 @@ mod tests {
         assert_eq!(
             kept,
             ids(&["ARCH-ONE-IMPORT-PATH-1", "SUPABASE-RLS-ENABLED-1"])
+        );
+    }
+
+    /// "No App Check anywhere" and "no rules tests" are true only if the file that has them was
+    /// not among the dropped files, so a truncated scan withholds both (G12).
+    #[test]
+    fn a_truncated_scan_withholds_the_app_check_and_rules_tests_rules() {
+        use camerata_checks::firebase::{RULE_APP_CHECK, RULE_RULES_TESTS};
+        let armed = ids(&[RULE_APP_CHECK, RULE_RULES_TESTS, "FIREBASE-RULES-OPEN-1"]);
+        assert_eq!(
+            withhold_on_incomplete_scan(&armed, true),
+            ids(&["FIREBASE-RULES-OPEN-1"])
+        );
+        assert!(is_withheld_on_incomplete_scan(RULE_APP_CHECK));
+        assert!(is_withheld_on_incomplete_scan(RULE_RULES_TESTS));
+        assert_eq!(withhold_on_incomplete_scan(&armed, false), armed);
+    }
+
+    #[test]
+    fn firebase_findings_carry_the_path_or_function_as_a_remediation_capture() {
+        for id in [
+            "FIREBASE-RULES-OPEN-1",
+            "FIREBASE-RULES-TEST-MODE-1",
+            "FIREBASE-RULES-AUTH-ONLY-1",
+            "FIREBASE-RULES-OWNERSHIP-1",
+            "FIREBASE-RULES-FIELD-VALIDATION-1",
+            "FIREBASE-RULES-RECURSIVE-WILDCARD-1",
+            "FIREBASE-STORAGE-RULES-OPEN-1",
+            "FIREBASE-RTDB-RULES-OPEN-1",
+            "FIREBASE-ADMIN-CLAIMS-1",
+        ] {
+            assert_eq!(capture_token_for(id), Some("path"), "{id}");
+        }
+        assert_eq!(
+            capture_token_for("FIREBASE-FUNCTIONS-AUTH-1"),
+            Some("function-name")
+        );
+        let v = ArchViolation {
+            grade: ViolationGrade::Review,
+            rule_id: "FIREBASE-RULES-OPEN-1".to_string(),
+            file: "firestore.rules".to_string(),
+            line: 5,
+            object: Some("/profiles/{uid}".to_string()),
+            message: "m".to_string(),
+            severity: "medium",
+        };
+        let f = arch_violation_to_finding("acme/app", &v);
+        // The path is kept as written: it is not a `schema.object` name.
+        assert_eq!(
+            f.captures.get("path").map(String::as_str),
+            Some("/profiles/{uid}")
         );
     }
 

@@ -52,6 +52,8 @@ camerata-check [PATH] [--format human|json] [--config PATH] [--rule-id ID]... [-
   facet; or a finding whose message carries the `[needs review` marker, e.g.
   `ARCH-HANDLER-NO-DB-1`'s attribute/name-fallback tiers). Off by default — a CI gate should
   only hard-fail on deterministic, hard verdicts; that split is the whole point of this system.
+  `--strict` also fails when Firebase rules live only in the console (reported as not assessed),
+  which is intended.
 
 ## Exit codes
 

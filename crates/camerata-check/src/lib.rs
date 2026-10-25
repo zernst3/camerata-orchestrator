@@ -62,7 +62,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use camerata_checks::arch_check_runner::collect_interest_files;
-use camerata_checks::arch_checker::{all_checkers, checker_applies, RepoView};
+use camerata_checks::arch_checker::{all_checkers, checker_applies, RepoView, ViolationGrade};
 use camerata_checks::architecture_config::ARCHITECTURE_CONFIG_PATH;
 
 /// The message-suffix marker that flags a violation as `needs-review` rather than a hard
@@ -139,6 +139,12 @@ pub struct RunReport {
     #[serde(default)]
     pub unsupported_rule_ids: Vec<String>,
     pub violations: Vec<ViolationJson>,
+    /// Inputs a checker could not assess (an unreadable rules file, rules that live only in the
+    /// console). Never a violation and never counted as one, and never clean: a run with any of
+    /// these is not clean, and `--strict` fails on them. Absent in older output
+    /// (`serde(default)`).
+    #[serde(default)]
+    pub not_assessed: Vec<ViolationJson>,
     /// Violations that are hard deterministic verdicts (neither `advisory_coexisting` nor
     /// `[needs review`-marked). This is what a non-`--strict` run fails the build on.
     pub deterministic_count: usize,
@@ -156,11 +162,14 @@ impl RunReport {
     ///   findings alone never fail the build — that's the entire point of keeping the two
     ///   classes separate (see the module doc).
     /// - `strict = true`: non-zero iff ANY violation exists, deterministic or needs-review, or a
-    ///   requested rule could not be evaluated at all ([`Self::unsupported_rule_ids`]): a strict
-    ///   gate must not pass on a rule it never checked.
+    ///   requested rule could not be evaluated at all ([`Self::unsupported_rule_ids`]), or a
+    ///   checker could not assess an input ([`Self::not_assessed`]): a strict gate must not pass
+    ///   on something it never checked.
     pub fn exit_code(&self, strict: bool) -> i32 {
         let should_fail = if strict {
-            !self.violations.is_empty() || !self.unsupported_rule_ids.is_empty()
+            !self.violations.is_empty()
+                || !self.unsupported_rule_ids.is_empty()
+                || !self.not_assessed.is_empty()
         } else {
             self.deterministic_count > 0
         };
@@ -226,6 +235,13 @@ pub fn run(opts: &Options) -> anyhow::Result<RunReport> {
     globs.dedup();
 
     let mut files = collect_interest_files(&opts.repo_root, &globs);
+    let selected_refs: Vec<&dyn camerata_checks::arch_checker::ArchChecker> =
+        selected.iter().map(|c| c.as_ref()).collect();
+    camerata_checks::arch_check_runner::add_named_files(
+        &opts.repo_root,
+        &selected_refs,
+        &mut files,
+    );
     apply_config_override(&mut files, opts.config_override.as_deref())?;
 
     let repo_label = opts.repo_root.display().to_string();
@@ -234,46 +250,99 @@ pub fn run(opts: &Options) -> anyhow::Result<RunReport> {
         files: &files,
     };
 
-    let mut violations = Vec::new();
+    let mut projected = Vec::new();
     for checker in &selected {
         // Zero matching files -> skip; never a false "ran and found nothing" read as "clean"
         // (same "interest_globs, cheap" contract the Layer-2 runner and scan both honor).
         if !checker_applies(checker.as_ref(), &files) {
             continue;
         }
-        let advisory = checker.advisory_coexisting();
-        for v in checker.check(&view) {
-            let needs_review = advisory || message_is_needs_review(&v.message);
-            violations.push(ViolationJson {
-                rule_id: v.rule_id,
-                file: v.file,
-                line: v.line,
-                object: v.object,
-                message: v.message,
-                severity: v.severity.to_string(),
-                needs_review,
-            });
+        let advisory = checker.defects_need_review();
+        projected.extend(
+            checker
+                .check(&view)
+                .into_iter()
+                .map(|v| project(v, advisory)),
+        );
+    }
+    Ok(build_report(
+        repo_label,
+        selected.len(),
+        unmatched_rule_ids,
+        unsupported_rule_ids,
+        projected,
+    ))
+}
+
+/// One checker output, projected into this crate's wire shape and sorted into the list it
+/// belongs on.
+enum Projected {
+    Violation(ViolationJson),
+    NotAssessed(ViolationJson),
+}
+
+/// Project one [`camerata_checks::arch_checker::ArchViolation`]. A held-for-review fact
+/// ([`ViolationGrade::Review`]) is needs-review exactly like an advisory-coexisting checker's
+/// finding; a not-assessed notice is not a violation at all.
+fn project(v: camerata_checks::arch_checker::ArchViolation, advisory: bool) -> Projected {
+    let grade = v.grade;
+    let needs_review =
+        advisory || grade == ViolationGrade::Review || message_is_needs_review(&v.message);
+    let json = ViolationJson {
+        rule_id: v.rule_id,
+        file: v.file,
+        line: v.line,
+        object: v.object,
+        message: v.message,
+        severity: v.severity.to_string(),
+        needs_review,
+    };
+    match grade {
+        ViolationGrade::NotAssessed => Projected::NotAssessed(json),
+        ViolationGrade::Defect | ViolationGrade::Review => Projected::Violation(json),
+    }
+}
+
+fn build_report(
+    repo: String,
+    checkers_run: usize,
+    unmatched_rule_ids: Vec<String>,
+    unsupported_rule_ids: Vec<String>,
+    projected: Vec<Projected>,
+) -> RunReport {
+    let mut violations = Vec::new();
+    let mut not_assessed = Vec::new();
+    for p in projected {
+        match p {
+            Projected::Violation(v) => violations.push(v),
+            Projected::NotAssessed(v) => not_assessed.push(v),
         }
     }
     // Stable, deterministic ordering regardless of checker registration order — a downstream
     // CI script diffing output run-to-run shouldn't see spurious reordering.
-    violations.sort_by(|a, b| (&a.file, a.line, &a.rule_id).cmp(&(&b.file, b.line, &b.rule_id)));
+    let order = |a: &ViolationJson, b: &ViolationJson| {
+        (&a.file, a.line, &a.rule_id).cmp(&(&b.file, b.line, &b.rule_id))
+    };
+    violations.sort_by(order);
+    not_assessed.sort_by(order);
 
     let deterministic_count = violations.iter().filter(|v| !v.needs_review).count();
     let needs_review_count = violations.len() - deterministic_count;
-    // A requested rule that could not be evaluated is never "clean".
-    let clean = violations.is_empty() && unsupported_rule_ids.is_empty();
+    // A requested rule that could not be evaluated, or an input a checker could not assess, is
+    // never "clean".
+    let clean = violations.is_empty() && unsupported_rule_ids.is_empty() && not_assessed.is_empty();
 
-    Ok(RunReport {
-        repo: repo_label,
-        checkers_run: selected.len(),
+    RunReport {
+        repo,
+        checkers_run,
         unmatched_rule_ids,
         unsupported_rule_ids,
         violations,
+        not_assessed,
         deterministic_count,
         needs_review_count,
         clean,
-    })
+    }
 }
 
 /// If `config_override` is given, read it from disk and splice its content into `files` under
@@ -309,13 +378,14 @@ pub fn render_human(report: &RunReport) -> String {
             report.checkers_run, report.repo
         ));
     } else if report.violations.is_empty() {
-        // Nothing found by what ran, but a requested rule was never evaluated: not clean.
+        // Nothing found by what ran, but something was never evaluated: not clean.
         out.push_str(&format!(
             "camerata-check: NOT CLEAN — {} checker(s) ran over {} with no violations, but {} \
-             requested rule(s) were not assessed\n",
+             requested rule(s) and {} input(s) were not assessed\n",
             report.checkers_run,
             report.repo,
-            report.unsupported_rule_ids.len()
+            report.unsupported_rule_ids.len(),
+            report.not_assessed.len()
         ));
     } else {
         out.push_str(&format!(
@@ -346,6 +416,21 @@ pub fn render_human(report: &RunReport) -> String {
                     "{} [{}] [{}]{} — {}\n",
                     v.file, tag, v.rule_id, obj, v.message
                 ));
+            }
+        }
+    }
+    if !report.not_assessed.is_empty() {
+        out.push_str(
+            "\nNot assessed (a checker could not read these inputs; this is not a clean result):\n",
+        );
+        for v in &report.not_assessed {
+            if v.line > 0 {
+                out.push_str(&format!(
+                    "{}:{} [{}] — {}\n",
+                    v.file, v.line, v.rule_id, v.message
+                ));
+            } else {
+                out.push_str(&format!("{} [{}] — {}\n", v.file, v.rule_id, v.message));
             }
         }
     }
@@ -742,6 +827,78 @@ mod tests {
         );
     }
 
+    // ── graded violations (Defect / Review / NotAssessed) ───────────────────────
+
+    fn graded_violation(
+        grade: ViolationGrade,
+        rule: &str,
+    ) -> camerata_checks::arch_checker::ArchViolation {
+        camerata_checks::arch_checker::ArchViolation {
+            grade,
+            rule_id: rule.to_string(),
+            file: "firestore.rules".to_string(),
+            line: 4,
+            object: None,
+            message: "a fact".to_string(),
+            severity: "medium",
+        }
+    }
+
+    fn report_of(grades: &[(ViolationGrade, &str)]) -> RunReport {
+        let projected = grades
+            .iter()
+            .map(|(g, r)| project(graded_violation(*g, r), false))
+            .collect();
+        build_report("r".into(), 1, vec![], vec![], projected)
+    }
+
+    #[test]
+    fn a_review_graded_violation_is_needs_review_and_does_not_fail_a_default_run() {
+        let report = report_of(&[(ViolationGrade::Review, "R-1")]);
+        assert_eq!(report.violations.len(), 1);
+        assert!(report.violations[0].needs_review);
+        assert_eq!(
+            (report.deterministic_count, report.needs_review_count),
+            (0, 1)
+        );
+        assert_eq!(report.exit_code(false), 0);
+        assert_eq!(report.exit_code(true), 1);
+    }
+
+    #[test]
+    fn a_defect_graded_violation_is_deterministic_and_fails_a_default_run() {
+        let report = report_of(&[(ViolationGrade::Defect, "D-1")]);
+        assert_eq!(report.deterministic_count, 1);
+        assert_eq!(report.exit_code(false), 1);
+    }
+
+    #[test]
+    fn a_not_assessed_notice_is_listed_apart_and_is_never_clean() {
+        let report = report_of(&[(ViolationGrade::NotAssessed, "N-1")]);
+        assert!(report.violations.is_empty(), "not a violation");
+        assert_eq!(report.not_assessed.len(), 1);
+        assert!(!report.clean, "an unassessed input is never a clean result");
+        assert_eq!(
+            report.exit_code(false),
+            0,
+            "a default run does not fail on it"
+        );
+        assert_eq!(report.exit_code(true), 1, "a strict run does");
+        let text = render_human(&report);
+        assert!(text.contains("Not assessed"), "{text}");
+        assert!(text.contains("firestore.rules:4"), "{text}");
+        assert!(text.contains("NOT CLEAN"), "{text}");
+    }
+
+    #[test]
+    fn json_without_the_not_assessed_field_still_parses() {
+        let report = report_of(&[(ViolationGrade::Defect, "D-1")]);
+        let mut value = serde_json::to_value(&report).unwrap();
+        value.as_object_mut().unwrap().remove("not_assessed");
+        let back: RunReport = serde_json::from_value(value).unwrap();
+        assert!(back.not_assessed.is_empty());
+    }
+
     // ── rendering ──────────────────────────────────────────────────────────────
 
     #[test]
@@ -752,6 +909,7 @@ mod tests {
             unmatched_rule_ids: vec![],
             unsupported_rule_ids: vec![],
             violations: vec![],
+            not_assessed: vec![],
             deterministic_count: 0,
             needs_review_count: 0,
             clean: true,
@@ -777,6 +935,7 @@ mod tests {
                 severity: "critical".into(),
                 needs_review: false,
             }],
+            not_assessed: vec![],
             deterministic_count: 1,
             needs_review_count: 0,
             clean: false,
@@ -798,6 +957,7 @@ mod tests {
             unmatched_rule_ids: vec!["ARCH-EXACT-DECIMALS-1".into()],
             unsupported_rule_ids: vec![],
             violations: vec![],
+            not_assessed: vec![],
             deterministic_count: 0,
             needs_review_count: 0,
             clean: true,
@@ -824,6 +984,7 @@ mod tests {
                 severity: "critical".into(),
                 needs_review: false,
             }],
+            not_assessed: vec![],
             deterministic_count: 1,
             needs_review_count: 0,
             clean: false,
@@ -900,6 +1061,7 @@ mod tests {
                 severity: "medium".into(),
                 needs_review: true,
             }],
+            not_assessed: vec![],
             deterministic_count: 0,
             needs_review_count: 1,
             clean: false,

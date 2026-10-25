@@ -46,10 +46,52 @@ pub const SEVERITY_MEDIUM: &str = "medium";
 /// no-RLS table in a schema PostgREST does not serve — see `rls_checker`).
 pub const SEVERITY_INFO: &str = "info";
 
+/// How a violation is to be read. A deterministic fact is not always a defect: "anyone can read
+/// this collection" is a true statement about a rules file with a legitimate reading (public
+/// content), and "this rules file could not be parsed" is not a statement about the code at all.
+/// The grade lets a checker state the fact and have the pipeline hold it for review, or report
+/// that it did not assess, instead of asserting a defect it cannot prove.
+///
+/// Every checker that existed before the grade was added emits [`ViolationGrade::Defect`], so its
+/// behaviour is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViolationGrade {
+    /// An objective fault, asserted as a defect (the only grade a checker had before this seam).
+    Defect,
+    /// A true fact with a legitimate reading, held for review rather than asserted: the report
+    /// routes it to the held bucket exactly as a calibration-doubt row, and the write-time gate
+    /// never bounces an agent on it.
+    Review,
+    /// The checker could not assess this input (an unreadable rules file, rules that live only in
+    /// the console). Reported as "not assessed"; never a defect, never a clean credit, never a
+    /// bounce.
+    NotAssessed,
+}
+
+impl ViolationGrade {
+    /// Whether this grade counts toward a rule's emitted-finding total (a defect or a held
+    /// review row; a not-assessed row is neither a finding nor a clean result).
+    pub fn counts_as_finding(self) -> bool {
+        !matches!(self, ViolationGrade::NotAssessed)
+    }
+
+    /// Stable lowercase tag for machine output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ViolationGrade::Defect => "defect",
+            ViolationGrade::Review => "review",
+            ViolationGrade::NotAssessed => "not_assessed",
+        }
+    }
+}
+
 /// One violation found by a deterministic architectural checker. Carries enough to build a
 /// `Finding` on the server side without the adapter having to re-derive anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchViolation {
+    /// How this violation is read: an asserted defect, a fact held for review, or a
+    /// not-assessed notice. Every pre-existing checker emits [`ViolationGrade::Defect`].
+    pub grade: ViolationGrade,
     /// The rule id this violation answers (e.g. `SUPABASE-RLS-ENABLED-1`). Must be one of
     /// the emitting checker's own [`ArchChecker::rule_ids`].
     pub rule_id: String,
@@ -83,6 +125,15 @@ pub trait ArchChecker: Send + Sync {
     /// means skip, never a false "✓ clean" — see [`checker_applies`].
     fn interest_globs(&self) -> &'static [&'static str];
 
+    /// Repo-relative paths this checker needs beyond its static [`Self::interest_globs`],
+    /// decided from the files the globs already collected (a rules file the project config
+    /// names under any name). A worktree loader reads them after the glob walk, so a checker can
+    /// keep its globs narrow without going blind to a renamed file. The default asks for none.
+    fn extra_interest_paths(&self, files: &[(String, String)]) -> Vec<String> {
+        let _ = files;
+        Vec::new()
+    }
+
     /// Build the model from the supplied files and answer every rule this checker owns.
     /// Must never panic — a malformed / adversarial input file should degrade to fewer (or
     /// zero) violations, never a crash that takes the whole scan down with it.
@@ -105,6 +156,15 @@ pub trait ArchChecker: Send + Sync {
     /// checker-owned models" philosophy carried over to this smaller decision.
     fn advisory_coexisting(&self) -> bool {
         false
+    }
+
+    /// Whether a `Defect`-graded finding of this checker is to be read as needs-review by a CI
+    /// consumer (`camerata-check`). The default follows [`Self::advisory_coexisting`]: a checker
+    /// whose findings are advisory by the rule's own design is needs-review in CI. A checker can
+    /// keep its rule ids in the advisory prompt (for the judgment half of a rule) while its
+    /// `Defect` findings are still deterministic facts CI must fail on: it returns `false` here.
+    fn defects_need_review(&self) -> bool {
+        self.advisory_coexisting()
     }
 
     /// Whether the Layer-2 write-time gate ([`crate::arch_check_runner::NativeArchCheckRunner`])
@@ -255,6 +315,10 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
         Box::new(crate::shared_constant_checker::SharedConstantChecker),
         Box::new(crate::dead_code_checker::DeadCodeChecker),
         Box::new(crate::react_hooks_lint_checker::ReactHooksLintChecker),
+        Box::new(crate::firebase::FirebaseRulesChecker::default()),
+        Box::new(crate::firebase::FirebaseFunctionsChecker),
+        Box::new(crate::firebase::FirebaseAdminSdkClientChecker),
+        Box::new(crate::firebase::FirebaseRulesTestsChecker),
     ]
 }
 
@@ -418,6 +482,104 @@ mod tests {
         assert!(!checker_applies(&checker, &empty));
         let with_file = vec![("supabase/config.toml".to_string(), String::new())];
         assert!(checker_applies(&checker, &with_file));
+    }
+
+    /// The seam change (`ViolationGrade`) must not change any checker that existed before it:
+    /// every one still emits `Defect`. Behavioural half: real checkers over a minimal violating
+    /// fixture each. Source half, below: no pre-existing checker constructs another grade.
+    #[test]
+    fn existing_checkers_still_emit_the_defect_grade() {
+        let files = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(p, c)| (p.to_string(), c.to_string()))
+                .collect()
+        };
+        type Case = (Box<dyn ArchChecker>, Vec<(String, String)>);
+        let cases: Vec<Case> = vec![
+            (
+                Box::new(crate::python_testing::PythonTestFileNamingChecker),
+                files(&[("tests/testfoo.py", "def check(): pass\n")]),
+            ),
+            (
+                Box::new(crate::ui_dates::UtcDatesChecker),
+                files(&[("src/a.tsx", "const s = d.toLocaleDateString();\n")]),
+            ),
+            (
+                Box::new(crate::weak_randomness_checker::WeakTokenRandomnessChecker),
+                files(&[(
+                    "src/auth/access.ts",
+                    "const accessToken = Math.random().toString(36);\n",
+                )]),
+            ),
+            (
+                Box::new(crate::supabase::rls_checker::SupabaseRlsChecker),
+                files(&[(
+                    "supabase/migrations/20240101000000_init.sql",
+                    "create table public.profiles (id uuid primary key);\n",
+                )]),
+            ),
+        ];
+        for (checker, fixture) in &cases {
+            let view = RepoView {
+                spec: "t/r",
+                files: fixture,
+            };
+            let violations = checker.check(&view);
+            assert!(
+                !violations.is_empty(),
+                "fixture must violate {:?}",
+                checker.rule_ids()
+            );
+            for v in &violations {
+                assert_eq!(v.grade, ViolationGrade::Defect, "{}", v.rule_id);
+            }
+        }
+    }
+
+    /// Every `grade:` a checker constructs, outside the Firebase module (the only checkers
+    /// allowed to emit another grade), is `Defect`. Counts the sites so a refactor that makes the
+    /// scan see nothing fails instead of passing vacuously.
+    #[test]
+    fn no_pre_existing_checker_constructs_a_non_defect_grade() {
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n == "firebase") {
+                        continue;
+                    }
+                    rs_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rs_files(&root, &mut files);
+        let (mut defect_sites, mut other) = (0usize, Vec::new());
+        for file in files {
+            // This file names the other grades in its own tests and docs.
+            if file.ends_with("arch_checker.rs") || file.ends_with("arch_check_runner.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).unwrap_or_default();
+            for (i, line) in text.lines().enumerate() {
+                if let Some(rest) = line.trim().strip_prefix("grade: ViolationGrade::") {
+                    if rest.starts_with("Defect") {
+                        defect_sites += 1;
+                    } else {
+                        other.push(format!("{}:{}", file.display(), i + 1));
+                    }
+                }
+            }
+        }
+        assert!(defect_sites >= 25, "scan saw only {defect_sites} sites");
+        assert!(
+            other.is_empty(),
+            "non-Defect grades outside firebase: {other:?}"
+        );
     }
 
     #[test]
@@ -636,6 +798,14 @@ allowed_in = ["repositories"]
                 "package.json".to_string(),
                 r#"{"dependencies":{"react":"18"}}"#.to_string(),
             ),
+            // The Firebase checkers answer only for a repo that has what they read: an
+            // Admin SDK import, and a deployed rules file (the conventional name, with no
+            // `firebase.json`, is assessed).
+            (
+                "server/admin.ts".to_string(),
+                "import admin from \"firebase-admin\";\n".to_string(),
+            ),
+            ("firestore.rules".to_string(), String::new()),
         ];
         let repo = RepoView {
             spec: "test/repo",

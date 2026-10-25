@@ -1,0 +1,45 @@
+id = "FIREBASE-RULES-TEST-MODE-1"
+version = 2
+title = "No deployed rule is the test mode scaffold that lets anyone read and write until a fixed date"
+domain = "firebase"
+layer = "platform"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+max_severity = "critical"
+min_severity = "medium"
+default = true
+verification = "grounded"
+qualifies = "Deterministic over the Firestore and Storage rules files the project deploys. An allow whose condition is the console's test mode scaffold, request.time < timestamp.date(Y, M, D) or the timestamp.value form, alone or as one alternative, is reported. A date that has not passed is asserted (critical at the root wildcard, high elsewhere): the template says anyone with the database reference can view, edit and delete all data until then. A date that has passed is held for the client: as written every client request is now denied, which means either the app is down or the rules running in the console are not the rules in the repository, and the repository cannot say which. A time clause with other conditions, a greater than embargo, and a date built from variables are not the scaffold and are not reported. A rules file that firebase.json does not name (found only by its conventional name, or in a repository with no firebase.json) or that sits under an examples, example, samples, sample or docs folder is held for review with the reason stated, never asserted, and a critical severity is lowered to high. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+
+[[sources]]
+url = "https://github.com/firebase/firebase-tools/blob/master/templates/init/firestore/firestore.rules"
+title = "The firebase init Firestore template (the test mode scaffold)"
+
+[[sources]]
+url = "https://firebase.google.com/docs/firestore/quickstart"
+title = "Get started with Cloud Firestore"
+
+[[sources]]
+url = "https://firebase.google.com/docs/rules/insecure-rules"
+title = "Avoid insecure rules"
+
+[decision]
+question = "Do the deployed security rules contain the test mode scaffold?"
+default = "no-test-mode-scaffold-in-deployed-rules"
+why = "The Firebase console offers a test mode that writes a rule allowing everyone to read and write until a date about a month away. It is meant for getting started. A project that keeps it is open to anyone holding the project id until the date, and then either goes down or silently drifts from the rules it believes it has."
+
+[[option]]
+id = "no-test-mode-scaffold-in-deployed-rules"
+label = "No deployed rule is the test mode scaffold that grants access until a fixed date"
+directive = "The rules the project deploys contain no allow statement whose condition is a comparison of request.time with a fixed date. The console's test mode scaffold is replaced, before anyone else uses the app, with rules that name who may read and write each path."
+remediation = "Delete the rule that compares `request.time` with `timestamp.date(...)` on `<path>` and write rules that name who may read and write each collection, starting from the owner only pattern (`request.auth.uid == resource.data.ownerId`). Deploy them and confirm in the emulator that an unauthenticated user and an unrelated signed in user are rejected."
+effort = "low"
+why = "Real rules replace a temporary scaffold, and the app no longer depends on a date."
+
+[[option]]
+id = "test-mode-scaffold-deployed"
+violates = true
+label = "A deployed rule is the test mode scaffold that grants access until a fixed date"
+directive = "Keep the console's test mode rule that allows any request until a fixed date."
+why = "Until the date in the rule, anyone who holds the project id can read, edit and delete all of the data without signing in; after it passes, every client request is denied and the app stops working, or the rules in the console differ from the rules in the repository. The console's own template says the rule is for getting started and leaves the app open to attackers."

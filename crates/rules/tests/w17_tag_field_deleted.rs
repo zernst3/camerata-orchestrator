@@ -159,7 +159,8 @@ fn req_w17_layer_is_untouched_on_every_corpus_rule() {
         ("framework", 114),
         ("language", 91),
         ("library", 34),
-        ("platform", 35),
+        // 35 plus the 13 Firebase rules (MASTER-SEQUENCE item 24), all `platform`.
+        ("platform", 48),
         ("testing", 7),
         ("universal", 136),
     ]

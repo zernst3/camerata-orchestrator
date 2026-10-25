@@ -1785,7 +1785,7 @@ pub async fn audit_repos_with_llm(
                         .iter()
                         .filter(|r| is_ci_tier_rule(r, corpus))
                     {
-                        let emitted = arch.iter().filter(|f| f.rule_id == *rid).count();
+                        let emitted = architectural::emitted_count(&arch, rid);
                         match crate::mechanical_gate::detector_channel(
                             rid,
                             &ledger_checker_rule_ids,
@@ -2327,6 +2327,18 @@ pub async fn audit_repos_with_llm(
         pipeline_ledger.record_stage("structural-needs-review-merge", rows_in, rows_out, acc);
     }
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
+    // A Firebase repository gets the one sentence that says what Firebase coverage is, so a
+    // clean Firebase section is never read as coverage of the Dart client or of console rules.
+    if report
+        .stacks
+        .iter()
+        .any(|s| s.frameworks.iter().any(|f| f == "Firebase"))
+    {
+        report.coverage_notes.push(CoverageNote {
+            tool: crate::FIREBASE_SCOPE_COVERAGE_TOOL.to_string(),
+            message: crate::FIREBASE_SCOPE_SENTENCE.to_string(),
+        });
+    }
     report.test_file_count = test_files_total;
     report.files_excluded = files_excluded_total;
     report.code_chars = code_chars_total;
@@ -3303,6 +3315,15 @@ mod tests {
         // hardcoded ARG/ENV secrets, and its build steps are real audit signal.
         assert!(has_code_ext("Dockerfile"));
         assert!(!has_code_ext("README"));
+    }
+
+    #[test]
+    fn has_code_ext_covers_rules_and_dart() {
+        assert!(has_code_ext("firestore.rules"));
+        assert!(has_code_ext("rules/firestore.prod.rules"));
+        assert!(has_code_ext("lib/main.dart"));
+        assert!(has_code_ext("lib/MAIN.DART"));
+        assert!(!has_code_ext("lib/rules"));
     }
 
     #[test]

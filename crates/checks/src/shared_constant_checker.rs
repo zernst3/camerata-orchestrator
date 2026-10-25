@@ -61,7 +61,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
 
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_MEDIUM};
+use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_MEDIUM};
 use crate::extract::{self, LiteralCtx, LiteralKind, SourceLang};
 
 pub const RULE_SHARED_CONSTANT: &str = "ARCH-SHARED-CONSTANT-1";
@@ -704,6 +704,7 @@ fn judge(
         .map(|(f, l)| (*f, *l))
         .min_by_key(|(f, l)| (*f, *l))?;
     Some(ArchViolation {
+        grade: ViolationGrade::Defect,
         rule_id: RULE_SHARED_CONSTANT.to_string(),
         file: first_file.to_string(),
         line: first_line,
