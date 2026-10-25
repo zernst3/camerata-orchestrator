@@ -1985,6 +1985,24 @@ mod tests {
         );
     }
 
+    /// Whether `path` is readable, tolerating the kernel's transient `EINVAL`.
+    ///
+    /// On macOS, resolving a path THROUGH a symlink while `rename(2)` replaces that symlink can
+    /// fail one lookup with `EINVAL` (observed: ~5% of runs under CPU load). It is not a missing
+    /// tree: the very next lookup resolves, and a genuinely absent tree fails with `ENOENT`
+    /// every time. So only a PERSISTENT failure, or any `NotFound`, counts as a miss.
+    #[cfg(unix)]
+    fn readable_through_a_link_swap(path: &Path) -> bool {
+        for _ in 0..5 {
+            match std::fs::read_to_string(path) {
+                Ok(_) => return true,
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => std::thread::yield_now(),
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+
     /// A reader polling the workspace while it RE-provisions never observes a missing or partial
     /// tree: `node_modules/eslint/package.json` is readable on every single poll, and `eslint`
     /// runs from the same path afterwards.
@@ -2016,7 +2034,7 @@ mod tests {
             std::thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
                     polls.fetch_add(1, Ordering::SeqCst);
-                    if std::fs::read_to_string(&marker).is_err() {
+                    if !readable_through_a_link_swap(&marker) {
                         misses.fetch_add(1, Ordering::SeqCst);
                     }
                     std::thread::sleep(Duration::from_micros(100));
