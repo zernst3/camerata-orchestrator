@@ -201,6 +201,23 @@ fn twin_stripe_webhook_is_silent() {
 }
 
 #[test]
+fn twin_twilio_webhook_is_silent() {
+    // Twilio's signature check is `validateRequest` (the SDK) over the `X-Twilio-Signature` header.
+    for check in [
+        "twilio.validateRequest(token, req.headers[\"x-twilio-signature\"], url, req.body)",
+        "const sig = req.header(\"X-Twilio-Signature\");",
+    ] {
+        let src = format!(
+            "{HEAD_V2}export const smsReply = onRequest(async (req, res) => {{ {check} await db.collection(\"messages\").add(req.body); res.send(1); }});\n"
+        );
+        assert!(
+            auth_rows(&run_functions(&package(&src))).is_empty(),
+            "{check}"
+        );
+    }
+}
+
+#[test]
 fn twin_private_invoker_is_silent() {
     let src = format!(
         "{HEAD_V2}export const internalSync = onRequest({{ invoker: \"private\" }}, async (req, res) => {{ await db.collection(\"x\").add(req.body); res.send(1); }});\n"

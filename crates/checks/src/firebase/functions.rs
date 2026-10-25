@@ -659,6 +659,9 @@ pub(crate) fn handles_webhooks(source: &str) -> bool {
         "timingsafeequal(",
         "x-hub-signature",
         "x-signature",
+        // Twilio: the SDK's signature check and the header it reads.
+        "validaterequest",
+        "x-twilio-signature",
         "svix",
         "hmac",
     ]
