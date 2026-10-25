@@ -40,15 +40,18 @@ const RULE_IDS: &[&str] = &[
     RULE_ADMIN_CLAIMS,
 ];
 
-/// Path globs the checker needs to see: rules files, the project config, and any `.json` (a
-/// renamed Realtime Database rules file is named by `firebase.json`, not by its own name).
+/// Path globs the checker needs to see: rules files, the project config, and the two manifests
+/// whose Firebase entries show that a repository uses Firebase. A renamed Realtime Database rules
+/// file is named by `firebase.json`, not by its own name, and is fetched through
+/// [`ArchChecker::extra_interest_paths`] rather than by taking every `.json` file.
 const INTEREST_GLOBS: &[&str] = &[
     "**/*.rules",
     "**/firebase.json",
     "**/.firebaserc",
     "**/database.rules.json",
     "**/*.rules.json",
-    "**/*.json",
+    "**/google-services.json",
+    "**/package.json",
 ];
 
 /// The checker for the Firebase security-rules rules.
@@ -72,6 +75,15 @@ impl ArchChecker for FirebaseRulesChecker {
 
     fn interest_globs(&self) -> &'static [&'static str] {
         INTEREST_GLOBS
+    }
+
+    /// The rules files `firebase.json` names that the glob walk did not collect.
+    fn extra_interest_paths(&self, files: &[(String, String)]) -> Vec<String> {
+        resolve(files)
+            .missing_named
+            .into_iter()
+            .map(|m| m.path)
+            .collect()
     }
 
     fn check(&self, repo: &RepoView<'_>) -> Vec<ArchViolation> {

@@ -160,3 +160,38 @@ fn a_flutter_app_with_firebase_options_and_no_rules_file_reports_the_gap() {
     assert_eq!(all.len(), 1, "{all:#?}");
     assert_eq!(all[0].grade, ViolationGrade::NotAssessed);
 }
+
+#[test]
+fn the_rules_checker_no_longer_takes_every_json_file() {
+    use crate::arch_checker::matches_any_glob;
+    let globs = FirebaseRulesChecker::default().interest_globs();
+    assert!(!globs.contains(&"**/*.json"), "{globs:?}");
+    for wanted in [
+        "firebase.json",
+        "apps/web/firebase.json",
+        "database.rules.json",
+        "rules/staging.rules.json",
+        "firestore.rules",
+        "google-services.json",
+        "package.json",
+    ] {
+        assert!(matches_any_glob(globs, wanted), "{wanted}");
+    }
+    for unrelated in ["data/huge.json", "tsconfig.json", "locales/en.json"] {
+        assert!(!matches_any_glob(globs, unrelated), "{unrelated}");
+    }
+}
+
+#[test]
+fn the_rules_checker_asks_for_the_rules_files_firebase_json_names_but_the_walk_missed() {
+    let f = files(&[(
+        "apps/web/firebase.json",
+        r#"{ "database": { "rules": "config/db-rules.json" }, "firestore": { "rules": "firestore.rules" } }"#,
+    )]);
+    let mut wanted = FirebaseRulesChecker::default().extra_interest_paths(&f);
+    wanted.sort();
+    assert_eq!(
+        wanted,
+        ["apps/web/config/db-rules.json", "apps/web/firestore.rules"]
+    );
+}

@@ -235,6 +235,13 @@ pub fn run(opts: &Options) -> anyhow::Result<RunReport> {
     globs.dedup();
 
     let mut files = collect_interest_files(&opts.repo_root, &globs);
+    let selected_refs: Vec<&dyn camerata_checks::arch_checker::ArchChecker> =
+        selected.iter().map(|c| c.as_ref()).collect();
+    camerata_checks::arch_check_runner::add_named_files(
+        &opts.repo_root,
+        &selected_refs,
+        &mut files,
+    );
     apply_config_override(&mut files, opts.config_override.as_deref())?;
 
     let repo_label = opts.repo_root.display().to_string();

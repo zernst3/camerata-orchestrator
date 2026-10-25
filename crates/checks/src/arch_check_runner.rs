@@ -89,9 +89,10 @@ impl CheckRunner for NativeArchCheckRunner {
         globs.sort_unstable();
         globs.dedup();
 
-        let files = collect_interest_files(worktree, &globs);
-        let repo_label = worktree.display().to_string();
+        let mut files = collect_interest_files(worktree, &globs);
         let checkers: Vec<&dyn ArchChecker> = armed_checkers.iter().map(|c| c.as_ref()).collect();
+        add_named_files(worktree, &checkers, &mut files);
+        let repo_label = worktree.display().to_string();
         Ok(bounce_outcome(&checkers, &files, &armed, &repo_label))
     }
 }
@@ -183,6 +184,40 @@ pub fn collect_interest_files(worktree: &Path, globs: &[&str]) -> Vec<(String, S
         walk_collect(worktree, worktree, globs, &mut out);
     }
     out
+}
+
+/// Read the files `checkers` ask for beyond their globs ([`ArchChecker::extra_interest_paths`])
+/// and append those not already in `files`. A path that is absolute, climbs out with `..`, or is
+/// not a plain file inside `worktree` (a symlink, a directory) is skipped: the request comes from
+/// file content, so it is never followed outside the tree. One round: a named file does not name
+/// further files.
+pub fn add_named_files(
+    worktree: &Path,
+    checkers: &[&dyn ArchChecker],
+    files: &mut Vec<(String, String)>,
+) {
+    let mut wanted: Vec<String> = checkers
+        .iter()
+        .flat_map(|c| c.extra_interest_paths(files))
+        .collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    for rel in wanted {
+        let path = Path::new(&rel);
+        let plain = path
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !plain || rel.is_empty() || files.iter().any(|(p, _)| *p == rel) {
+            continue;
+        }
+        let full = worktree.join(path);
+        if !std::fs::symlink_metadata(&full).is_ok_and(|m| m.is_file()) {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&full) {
+            files.push((rel, String::from_utf8_lossy(&bytes).into_owned()));
+        }
+    }
 }
 
 fn walk_collect(root: &Path, dir: &Path, globs: &[&str], out: &mut Vec<(String, String)>) {
@@ -659,6 +694,88 @@ mod tests {
         let vs = checker.check(&view);
         assert_eq!(vs.len(), 1, "{vs:#?}");
         assert_eq!(vs[0].file, "package.json");
+    }
+
+    /// The Firebase rules checker no longer reads every `.json` file: a renamed Realtime Database
+    /// rules file is found because `firebase.json` names it, and an unrelated JSON file is not read.
+    fn write_renamed_rtdb_tree(dir: &Path) {
+        for (rel, body) in [
+            (
+                "firebase.json",
+                r#"{ "database": { "rules": "config/db-rules.json" } }"#,
+            ),
+            (
+                "config/db-rules.json",
+                r#"{ "rules": { ".read": true, ".write": true } }"#,
+            ),
+            ("data/huge.json", r#"{ "unrelated": true }"#),
+        ] {
+            let path = dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_renamed_rtdb_rules_file_that_firebase_json_names_is_checked_at_write_time() {
+        let dir = tmpdir();
+        write_renamed_rtdb_tree(dir.path());
+        let role = role_armed_with(&["FIREBASE-RTDB-RULES-OPEN-1"]);
+        let outcome = NativeArchCheckRunner::new()
+            .check(&role, dir.path())
+            .await
+            .expect("must not err");
+        assert_eq!(
+            outcome.violated,
+            vec![RuleId("FIREBASE-RTDB-RULES-OPEN-1".to_string())],
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn the_firebase_rules_checker_collects_what_firebase_json_names_and_no_other_json() {
+        let dir = tmpdir();
+        write_renamed_rtdb_tree(dir.path());
+        let checker = all_checkers()
+            .into_iter()
+            .find(|c| c.rule_ids().contains(&"FIREBASE-RTDB-RULES-OPEN-1"))
+            .expect("registered");
+        let mut files = collect_interest_files(dir.path(), checker.interest_globs());
+        add_named_files(dir.path(), &[checker.as_ref()], &mut files);
+        let mut got: Vec<String> = files.into_iter().map(|(p, _)| p).collect();
+        got.sort();
+        assert_eq!(got, ["config/db-rules.json", "firebase.json"]);
+    }
+
+    #[test]
+    fn a_named_file_outside_the_worktree_is_never_read() {
+        // A path with `..` or an absolute path from a checker is refused, not followed.
+        let outer = tmpdir();
+        let root = outer.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(outer.path().join("secret.txt"), "outside").unwrap();
+        struct Greedy;
+        impl ArchChecker for Greedy {
+            fn rule_ids(&self) -> &'static [&'static str] {
+                &["X-1"]
+            }
+            fn interest_globs(&self) -> &'static [&'static str] {
+                &[]
+            }
+            fn check(&self, _: &RepoView<'_>) -> Vec<ArchViolation> {
+                Vec::new()
+            }
+            fn extra_interest_paths(&self, _: &[(String, String)]) -> Vec<String> {
+                vec![
+                    "../secret.txt".to_string(),
+                    "/etc/hosts".to_string(),
+                    "a/../../secret.txt".to_string(),
+                ]
+            }
+        }
+        let mut files = Vec::new();
+        add_named_files(&root, &[&Greedy], &mut files);
+        assert!(files.is_empty(), "{files:?}");
     }
 
     #[test]

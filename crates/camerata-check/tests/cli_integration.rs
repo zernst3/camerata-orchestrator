@@ -439,6 +439,40 @@ fn a_firestore_rules_file_is_checked_through_the_real_walk_and_fails_ci() {
         .any(|v| v["rule_id"] == "FIREBASE-RULES-OWNERSHIP-1"));
 }
 
+/// A Realtime Database rules file `firebase.json` renames is reached by the real walk even
+/// though the checker's own globs no longer take every `.json` file.
+#[test]
+fn a_renamed_realtime_database_rules_file_is_checked_through_the_real_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("firebase.json"),
+        r#"{ "database": { "rules": "config/db-rules.json" } }"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("config")).unwrap();
+    std::fs::write(
+        dir.path().join("config/db-rules.json"),
+        r#"{ "rules": { ".read": true, ".write": true } }"#,
+    )
+    .unwrap();
+    let output = bin()
+        .arg(dir.path())
+        .arg("--format")
+        .arg("json")
+        .arg("--rule-id")
+        .arg("FIREBASE-RTDB-RULES-OPEN-1")
+        .output()
+        .expect("must run");
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+    assert!(value["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["file"] == "config/db-rules.json"));
+}
+
 #[test]
 fn an_unreadable_rules_file_is_listed_as_not_assessed_and_is_never_clean() {
     let dir = tempfile::tempdir().unwrap();

@@ -125,6 +125,15 @@ pub trait ArchChecker: Send + Sync {
     /// means skip, never a false "✓ clean" — see [`checker_applies`].
     fn interest_globs(&self) -> &'static [&'static str];
 
+    /// Repo-relative paths this checker needs beyond its static [`Self::interest_globs`],
+    /// decided from the files the globs already collected (a rules file the project config
+    /// names under any name). A worktree loader reads them after the glob walk, so a checker can
+    /// keep its globs narrow without going blind to a renamed file. The default asks for none.
+    fn extra_interest_paths(&self, files: &[(String, String)]) -> Vec<String> {
+        let _ = files;
+        Vec::new()
+    }
+
     /// Build the model from the supplied files and answer every rule this checker owns.
     /// Must never panic — a malformed / adversarial input file should degrade to fewer (or
     /// zero) violations, never a crash that takes the whole scan down with it.
