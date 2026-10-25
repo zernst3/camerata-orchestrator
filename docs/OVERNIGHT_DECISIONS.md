@@ -1,7 +1,22 @@
 # Overnight autonomous run — decisions needed + progress log
 
-> ## ▶ RESUME HERE (paused 2026-10-22 at Zach's request, after Wave C)
-> Branch `feat/audit-report-export` is pushed. No agent worktrees are in flight.
+> ## ▶ RESUME HERE (paused 2026-10-25 at Zach's request, after item 24 Firebase)
+> **CURRENT (newest first; older entries below are history):** item 24 Firebase/Firestore
+> coverage is MERGED (13 rules, rules-file reader, apiKey twin; all 11 Fable review items fixed).
+> Token-efficiency ranks 1, 3, 5, 6, the 22a API backend default (CLI and UI halves), eslint
+> EINVAL hardening, and the CLI `bookkeeping_is_never_written...` flake fix are all merged. No
+> agent worktrees are in flight. **WAITING ON ZACH:** (1) the manual check of delete/re-fetch on a
+> THROWAWAY clone (TECHNICAL.md section 7, USER_GUIDE 5a); (2) go/no-go on token-efficiency
+> ranks 4, 7, 8, 9 (protected changes) and the live API fixture runs (they spend tokens); rank 2
+> (batch default) needs grading on those live runs; (3) move the settings JSON out of the repo
+> (see Disk note below); (4) review the Firebase "merge invariant" call in DECISIONS MADE.
+> **NEXT V1 WORK (no approval needed):** review speed-ups (WORK_ORDER_REVIEW_SPEED; timer
+> internal-only with auto-pause and manual override), then W29 Wave D + 22e, corpus text work
+> (items 5, 11, 12, 19) + 22g, engine follow-ups (22c, 22d, 22f, KEV/EPSS + data-as-of stamp, model
+> registry, CI-gate severity bounds, staleness nag, W30 residuals), W27 PDF rebuild (needs Zach's
+> brand assets), 19f grader revision, then the graded accuracy run (item 20).
+>
+> (History) Branch `feat/audit-report-export` is pushed. No agent worktrees are in flight.
 > **Disk:** Full Disk Access granted 2026-10-22 to `/bin/bash` and `cargo-sweep`; the 30-minute
 > guard verified running ("start; free=" in `~/Library/Logs/cargo-disk-guard.log`). OPEN: Zach
 > pasted the settings JSON (hook + deny list) into the REPO's `.claude/settings.json` instead of
