@@ -101,6 +101,12 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-25 (Opus, Firebase spec questions): (1) a Google API key OUTSIDE a Firebase web config
+  keeps today's critical floor finding in V1 (changing an existing floor rule is not V1 scope);
+  making it review-graded high ("restrictions not visible in the repository") is logged as a
+  post-V1 refinement. (2) Dart takes the default language row (proposes api-layer, permissions,
+  integration) like Kotlin and Swift, for consistency. Spec: `docs/design/2026-10-25_firebase-rules.md`.
+
 - 2026-10-24 (Opus, delete/re-fetch review calls): (a) a `repo_path` override may aim deletion at
   any clone whose origin matches the project repo, by design ("it IS that client's code"); the
   dirty/unpushed refusals still apply; USER_GUIDE says so plainly. (b) The deletion record
