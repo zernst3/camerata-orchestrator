@@ -19599,6 +19599,7 @@ mod tests {
                 cache_read_input_tokens: 10,
                 cache_creation_input_tokens: 20,
                 or_cache_discount: None,
+                truncated: false,
             },
         );
         // Gemini-shaped: no cost field, known model id -> derived cost (sonnet 3/15 per Mtok).
@@ -19614,6 +19615,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             },
         );
 

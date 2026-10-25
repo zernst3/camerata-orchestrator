@@ -83,6 +83,7 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
             cache_read_input_tokens: 4_000,
             cache_creation_input_tokens: 2_000,
             or_cache_discount: None,
+            truncated: false,
         },
     );
     let mut with = ScanLedger::new();

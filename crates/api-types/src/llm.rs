@@ -41,6 +41,12 @@ pub struct LlmResponse {
     /// caching not enabled). Use this to track savings in the usage ledger / UI.
     #[serde(default)]
     pub or_cache_discount: Option<f64>,
+    /// True when the model stopped because it reached the request's `max_tokens` (the API's
+    /// `stop_reason == "max_tokens"`), so `text` ends mid-output. The one case where repeating
+    /// the request with a higher cap can recover output that was cut off. `false` when the
+    /// backend gives no stop reason (the CLI path), which means "not known to be truncated".
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 impl LlmResponse {
@@ -83,6 +89,7 @@ mod tests {
             cache_read_input_tokens: cache_read,
             cache_creation_input_tokens: cache_creation,
             or_cache_discount: None,
+            truncated: false,
         }
     }
 

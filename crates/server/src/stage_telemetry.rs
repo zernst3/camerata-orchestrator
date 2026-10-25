@@ -115,11 +115,13 @@ impl StageUsage {
         }
     }
 
-    fn fold_wasted(&mut self, r: &LlmResponse) {
+    fn fold_wasted(&mut self, r: &LlmResponse, share: f64) {
+        let share = share.clamp(0.0, 1.0);
+        let prorate = |tokens: Option<u64>| (tokens.unwrap_or(0) as f64 * share).round() as u64;
         self.wasted_calls += 1;
-        self.wasted_input_tokens += r.input_tokens.unwrap_or(0);
-        self.wasted_output_tokens += r.output_tokens.unwrap_or(0);
-        self.wasted_cost_usd += r.cost_usd.unwrap_or(0.0);
+        self.wasted_input_tokens += prorate(r.input_tokens);
+        self.wasted_output_tokens += prorate(r.output_tokens);
+        self.wasted_cost_usd += r.cost_usd.unwrap_or(0.0) * share;
     }
 
     fn add(&mut self, other: &StageUsage) {
@@ -152,7 +154,15 @@ impl StageMeter {
     /// Mark a completion that [`Self::record`] already counted as one whose output was thrown
     /// away. Adds to the stage's `wasted_*` fields only; the totals are untouched.
     pub fn record_wasted(&self, stage: Stage, r: &LlmResponse) {
-        self.with_stage(stage, |u| u.fold_wasted(r));
+        self.record_wasted_share(stage, r, 1.0);
+    }
+
+    /// Like [`Self::record_wasted`] for a completion only PART of whose output was thrown away
+    /// (a batched fix call where some fixes passed the self-check and some did not): `share` is
+    /// the discarded fraction, clamped to `0.0..=1.0`, and the tokens and cost are prorated by
+    /// it. The call still counts once in `wasted_calls`.
+    pub fn record_wasted_share(&self, stage: Stage, r: &LlmResponse, share: f64) {
+        self.with_stage(stage, |u| u.fold_wasted(r, share));
     }
 
     /// Snapshot, joined to the scan's counted-line total.

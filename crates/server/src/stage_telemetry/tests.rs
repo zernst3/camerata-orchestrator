@@ -17,6 +17,7 @@ fn resp(
         cache_read_input_tokens: cache_read,
         cache_creation_input_tokens: cache_write,
         or_cache_discount: None,
+        truncated: false,
     }
 }
 
@@ -84,6 +85,25 @@ fn wasted_attempts_are_counted_inside_the_totals_and_never_added_twice() {
     assert_eq!(u.wasted_input_tokens, 500);
     assert_eq!(u.wasted_output_tokens, 80);
     assert!((u.wasted_cost_usd - 0.08).abs() < 1e-9);
+}
+
+#[test]
+fn a_partly_discarded_call_prorates_its_wasted_tokens_and_cost() {
+    let meter = StageMeter::default();
+    let r = resp(1000, 400, 0, 0, Some(1.0));
+    meter.record(Stage::FixGeneration, &r);
+    // One of four fixes in the batch was rejected.
+    meter.record_wasted_share(Stage::FixGeneration, &r, 0.25);
+    // A share outside 0..=1 is clamped, never a negative or inflated waste.
+    meter.record_wasted_share(Stage::FixGeneration, &r, 7.0);
+    meter.record_wasted_share(Stage::FixGeneration, &r, -3.0);
+
+    let u = meter.snapshot(1000).stages[0].usage.clone();
+    assert_eq!(u.calls, 1);
+    assert_eq!(u.wasted_calls, 3);
+    assert_eq!(u.wasted_input_tokens, 250 + 1000);
+    assert_eq!(u.wasted_output_tokens, 100 + 400);
+    assert!((u.wasted_cost_usd - (0.25 + 1.0)).abs() < 1e-9);
 }
 
 #[test]

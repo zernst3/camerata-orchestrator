@@ -1253,6 +1253,7 @@ mod tests {
                 cache_read_input_tokens: 4_000,
                 cache_creation_input_tokens: 2_000,
                 or_cache_discount: None,
+                truncated: false,
             },
         );
         let outcome = InspectOutcome {

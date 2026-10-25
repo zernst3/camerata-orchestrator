@@ -255,6 +255,12 @@ impl UsageMeter {
         self.stages.record_wasted(stage, r);
     }
 
+    /// [`Self::record_wasted`] for a completion only partly discarded; see
+    /// [`StageMeter::record_wasted_share`].
+    pub fn record_wasted_share(&self, stage: Stage, r: &crate::llm::LlmResponse, share: f64) {
+        self.stages.record_wasted_share(stage, r, share);
+    }
+
     /// The per-stage telemetry so far, joined to the scan's counted-line total.
     pub fn stage_telemetry(&self, counted_lines: usize) -> StageTelemetry {
         self.stages.snapshot(counted_lines)
@@ -3396,6 +3402,7 @@ async fn run_fix_specifics_round(
             m.record_stage(Stage::FixGeneration, &resp);
         }
         let parsed = parse_fix_specifics(&resp.text);
+        let rejected_before = still_pending.len();
 
         for (pos, &orig_idx) in batch.iter().enumerate() {
             let Some(text) = parsed.get(&pos) else {
@@ -3439,8 +3446,60 @@ async fn run_fix_specifics_round(
             }
             findings[orig_idx].fix_specific = Some(text.clone());
         }
+        // The fixes this call produced that were thrown away (missing, ungrounded,
+        // contradicting, leaking) are tokens spent for nothing: say so in the telemetry, pro rata
+        // for a batch that was only partly rejected.
+        let rejected = still_pending.len() - rejected_before;
+        if rejected > 0 {
+            if let Some(m) = meter {
+                m.record_wasted_share(
+                    Stage::FixGeneration,
+                    &resp,
+                    rejected as f64 / batch.len() as f64,
+                );
+            }
+        }
     }
     still_pending
+}
+
+/// Whether `f` has code around it to ground a fix in: the same window the generation prompt would
+/// show the model ([`fix_context_window`]). Empty for line 0 and for a path that is not among the
+/// scanned files, which is exactly where [`find_ungrounded_identifier`] has only the snippet,
+/// detail and captures to check a fix against.
+fn fix_has_surrounding_code(f: &Finding, files: &[(String, String)]) -> bool {
+    !fix_context_window(files, &f.path, f.line, 8).is_empty()
+}
+
+/// Give every finding in `indices` that has no surrounding code AND whose rule carries an authored
+/// remediation that remediation (instantiated against the finding, redacted), without asking the
+/// model. Returns the indices still needing a model-generated fix, and how many were handled.
+/// A finding with no authored remediation is left in the returned set.
+fn apply_authored_remediation_without_model(
+    findings: &mut [Finding],
+    indices: Vec<usize>,
+    files: &[(String, String)],
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> (Vec<usize>, usize) {
+    let mut remaining = Vec::with_capacity(indices.len());
+    let mut handled = 0usize;
+    for idx in indices {
+        if !fix_has_surrounding_code(&findings[idx], files) {
+            if let Some(fallback) = crate::report_export::resolve_fix(
+                &findings[idx].rule_id,
+                corpus,
+                &findings[idx],
+                None,
+            ) {
+                findings[idx].fix_specific =
+                    Some(camerata_secrets::redact_str(&fallback).into_owned());
+                handled += 1;
+                continue;
+            }
+        }
+        remaining.push(idx);
+    }
+    (remaining, handled)
 }
 
 /// Run the P2 fix-specific generation pass: for every non-dependency finding in `findings`,
@@ -3509,6 +3568,26 @@ pub async fn generate_fix_specifics(
     // The fix prompt carries eight raw lines either side of each finding: redact them.
     let model_files = crate::onboard::redact::files_for_model(files);
     let files = model_files.as_slice();
+
+    // PRE-FILTER (no model call). A finding with no surrounding code to read (line 0, or its file
+    // is not among the scanned files) was the bulk of the fix retries that were paid for and
+    // thrown away: on the hearth sweep 54 of about 125 findings exhausted every retry and 50 of
+    // them fell back to the authored remediation anyway. For those the rule's own authored
+    // remediation, instantiated against the finding's captures, is where they were always going
+    // to end up, so go there directly. Only when that fallback actually exists: skipping the model
+    // for a rule with no authored remediation would leave the row with no fix at all.
+    let (indices, authored_directly) =
+        apply_authored_remediation_without_model(&mut findings, indices, files, corpus);
+    if authored_directly > 0 {
+        eprintln!(
+            "[camerata-server] fix-specific generation: {authored_directly} finding(s) in {repo} \
+             have no surrounding code to ground a model fix in; used the rule's authored \
+             remediation with no model call."
+        );
+    }
+    if indices.is_empty() {
+        return (findings, Vec::new());
+    }
 
     let system = fix_specific_system_prompt();
     // The subset of `indices` still needing a valid fix this round; shrinks as findings
@@ -3781,25 +3860,78 @@ async fn audit_pass(
     if !cache_breakpoints.is_empty() {
         req = req.with_cache_breakpoints(cache_breakpoints);
     }
-    let resp = if let Some((store, key)) = feedback {
+    let mut resp = send_audit_request(llm, req.clone(), feedback, session).await?;
+    if let Some(m) = meter {
+        m.record_stage(Stage::ScanPass, &resp);
+    }
+    // TRUNCATION-ONLY RETRY. A reply cut off at `max_tokens` is the one failure a repeat can
+    // recover: the same request with a higher cap returns the whole answer, where the cut-off
+    // one parses to nothing and the chunk's findings are lost. Any OTHER unusable reply (a
+    // complete answer that is simply not JSON) is NOT retried: the same prompt at the same cap
+    // tends to return the same thing and the spend is paid again. At most one retry, and a retry
+    // that itself fails leaves the pass exactly as it was before this existed: the first
+    // response, parsed as it always was.
+    let mut wasted_counted = false;
+    if resp.truncated {
+        if let Some(m) = meter {
+            m.record_wasted(Stage::ScanPass, &resp);
+        }
+        wasted_counted = true;
+        let retry_cap = req
+            .max_tokens
+            .saturating_mul(2)
+            .min(AGGREGATE_MAX_TOKENS_CEILING);
+        if let Ok(retry) =
+            send_audit_request(llm, req.with_max_tokens(retry_cap), feedback, session).await
+        {
+            if let Some(m) = meter {
+                m.record_stage(Stage::ScanPass, &retry);
+            }
+            resp = retry;
+            wasted_counted = false;
+        }
+    }
+    // Whatever reply the pass ends up using: if it is still unusable (cut off again, or not JSON
+    // at all) its tokens bought nothing, and the telemetry says so.
+    if !wasted_counted && (resp.truncated || scan_output_is_malformed(&resp.text)) {
+        if let Some(m) = meter {
+            m.record_wasted(Stage::ScanPass, &resp);
+        }
+    }
+    let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
+    let needs = parse_needs_files(&resp.text);
+    Ok((f, p, needs))
+}
+
+/// One scan-pass request: streamed into the transcript when feedback is present, else bounded
+/// by the coarse total backstop. Shared by the first attempt and the truncation retry.
+async fn send_audit_request(
+    llm: &dyn LlmPort,
+    req: LlmRequest,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    session: &str,
+) -> anyhow::Result<crate::llm::LlmResponse> {
+    if let Some((store, key)) = feedback {
         // Streaming: the idle/stall timeout lives inside the transport, so this scales with
         // repo size and only a genuine hang (no output for the idle window) aborts. No
         // total-time cap here — a big scan should be allowed to stream as long as it needs.
         let mut on_delta = |t: &str| store.append_output_raw(key, session, t);
-        llm.complete_streaming(req, &mut on_delta).await?
+        llm.complete_streaming(req, &mut on_delta).await
     } else {
         // Non-streaming has no progress signal; bound it with the coarse total backstop.
         let cap = total_backstop();
         tokio::time::timeout(cap, llm.complete(req))
             .await
-            .map_err(|_| anyhow::anyhow!("LLM call exceeded the {}s backstop", cap.as_secs()))??
-    };
-    if let Some(m) = meter {
-        m.record_stage(Stage::ScanPass, &resp);
+            .map_err(|_| anyhow::anyhow!("LLM call exceeded the {}s backstop", cap.as_secs()))?
     }
-    let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
-    let needs = parse_needs_files(&resp.text);
-    Ok((f, p, needs))
+}
+
+/// Whether a scan reply holds no JSON object `parse_ai_findings` could read, i.e. the pass
+/// produced nothing usable. (A reply of `{"findings":[]}` is a well-formed "nothing found", not
+/// this.)
+fn scan_output_is_malformed(text: &str) -> bool {
+    extract_json_object(text)
+        .is_none_or(|json| serde_json::from_str::<serde_json::Value>(json).is_err())
 }
 
 /// The public symbols a file defines (Rust items + TS/JS exports), for the repo map. A
@@ -8309,6 +8441,9 @@ mod stage_telemetry_tests;
 mod cache_schedule_tests;
 
 #[cfg(test)]
+mod retry_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -9663,6 +9798,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         async fn complete_streaming(
@@ -9683,6 +9819,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         fn as_any(&self) -> &dyn std::any::Any {
@@ -9923,6 +10060,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         fn as_any(&self) -> &dyn std::any::Any {
@@ -12555,6 +12693,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         async fn complete_streaming(
@@ -12664,6 +12803,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         async fn complete_streaming(
@@ -16811,6 +16951,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         async fn complete_streaming(
@@ -17138,12 +17279,19 @@ mod tests {
         );
         f.captures
             .insert("table".to_string(), "profiles".to_string());
+        // The finding has surrounding code, so the model IS asked (and its transport is down);
+        // a finding with no code around it skips the model entirely and never reaches this
+        // give-up path (see `retry_tests`).
+        let files = vec![(
+            "supabase/migrations/1.sql".to_string(),
+            "CREATE TABLE profiles (id int);\n".to_string(),
+        )];
 
         let (out, failed_passes) = generate_fix_specifics(
             &FailingCompleter,
             "o/r",
             vec![f],
-            &[],
+            &files,
             None,
             None,
             Some(&corpus),
@@ -17421,6 +17569,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         async fn complete_streaming(

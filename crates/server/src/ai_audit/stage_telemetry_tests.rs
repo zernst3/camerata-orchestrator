@@ -25,6 +25,7 @@ impl LlmPort for UsageStub {
             cache_read_input_tokens: 200,
             cache_creation_input_tokens: 300,
             or_cache_discount: None,
+            truncated: false,
         })
     }
     async fn complete_streaming(
@@ -76,6 +77,7 @@ fn record_stage_keeps_the_aggregate_equal_to_the_sum_of_the_stages() {
         cache_read_input_tokens: 40,
         cache_creation_input_tokens: 20,
         or_cache_discount: None,
+        truncated: false,
     };
     meter.record_stage(Stage::ScanPass, &r(1.0));
     meter.record_stage(Stage::ScanPass, &r(1.0));
@@ -109,6 +111,7 @@ fn a_wasted_attempt_is_attributed_to_its_stage_without_changing_the_aggregate() 
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         or_cache_discount: None,
+        truncated: false,
     };
     meter.record_stage(Stage::FixGeneration, &resp);
     meter.record_wasted(Stage::FixGeneration, &resp);

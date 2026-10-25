@@ -791,6 +791,7 @@ async fn call_openrouter_with_tools(
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         or_cache_discount,
+        truncated: false,
     })
 }
 
@@ -992,6 +993,7 @@ async fn call_anthropic_with_tools(
         cache_read_input_tokens: cache_read,
         cache_creation_input_tokens: cache_creation,
         or_cache_discount: None,
+        truncated: false,
     })
 }
 
@@ -2811,6 +2813,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         async fn complete_streaming(
@@ -2892,6 +2895,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
 
@@ -3401,6 +3405,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         };
         match parse_response(&resp) {
             ParsedResponse::FinalText(t) => assert_eq!(t, "Task complete!"),
@@ -3434,6 +3439,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         };
         match parse_response(&resp) {
             ParsedResponse::ToolCalls { calls, .. } => {
@@ -3468,6 +3474,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         };
         match parse_response(&resp) {
             ParsedResponse::ToolCalls { calls, .. } => {
@@ -3491,6 +3498,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         };
         match parse_response(&resp) {
             ParsedResponse::FinalText(t) => assert_eq!(t, "plain response with no JSON"),
@@ -3967,6 +3975,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         };
         assert!(resp.or_cache_discount.is_none(), "default is None");
 
@@ -4505,6 +4514,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         };
         match parse_response(&resp) {
             ParsedResponse::ToolCalls { calls, .. } => {
