@@ -507,6 +507,19 @@ fix-specific retries paid with no output kept.
   change. These runs spend API tokens.
 - **Slot:** right after 22a (the API backend default), before the review speed-ups, so every
   later live run (including the graded run) is measured at the lower cost.
+- **Spike DONE 2026-10-25** (Fable, read-only): `_workspace/brownfield-audits/SPIKE_TOKEN_EFFICIENCY_RESULTS.md`.
+  Key correction: every sweep ran `backend: cli`, so the "cache writes >> reads" numbers are the
+  Claude Code harness's caching, not Camerata's; one API-backend fixture run is needed for a true
+  baseline. Ranked build plan: (1) per-stage telemetry + one API fixture baseline run; (2) batch
+  API default with per-item re-submission, routing honoured, 1h TTL in batch mode (~50%); (3) cache
+  scheduling fix: warm-then-fan-out, cache the rules block, drop the group label from the prefix
+  (20 to 30% of input, no recall risk); (4) terse scan output (25 to 35%, PROTECTED); (5) result
+  cache keyed with model + prompt version (80 to 90% on reruns); (6) fix-retry pre-filter; (7)
+  domain routing + larger rule batches (PROTECTED, corpus); (8) deterministic pre-filtering
+  (PROTECTED, corpus); (9) pre-flight estimate + budget cap (export touch PROTECTED); (10) Haiku
+  for the fix stage. Ranks 2, 3, 5, 6 need no protected change: roughly 60 to 70% off a first
+  inspection and ~90% off a rerun. Awaiting Zach: go on ranks 4, 7, 8, 9 and on the live API
+  fixture runs (they spend tokens).
 
 ## 3. Explicitly NOT doing
 
