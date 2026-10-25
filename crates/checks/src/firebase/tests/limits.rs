@@ -212,7 +212,7 @@ fn a_file_just_inside_the_allow_cap_is_still_assessed() {
     // One block, one field-validation row however many allows it holds.
     let mut body = String::from("    match /a/{x} {\n");
     for _ in 0..3000 {
-        body.push_str("      allow write: if request.auth.token.admin == true;\n");
+        body.push_str("      allow write: if request.auth.uid == x;\n");
     }
     body.push_str("    }");
     let all = run_small_stack(firestore(&body));

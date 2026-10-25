@@ -138,6 +138,17 @@ impl Cond {
         self.opaque || contains_token(&self.text, token)
     }
 
+    /// The condition gates on a custom claim (`request.auth.token.<claim>`) or on a document
+    /// lookup (`get(`, `getAfter(`, `exists(`, `existsAfter(`): a role check. An opaque
+    /// condition is assumed to.
+    pub fn gated_by_claim_or_lookup(&self) -> bool {
+        self.opaque
+            || self.text.contains("request.auth.token.")
+            || ["get", "getAfter", "exists", "existsAfter"]
+                .iter()
+                .any(|call| calls_function(&self.text, call))
+    }
+
     /// Whether any `||` appears outside a string. An ownership comparison that is one disjunct of
     /// several is not recognised.
     pub fn has_disjunction(&self) -> bool {
@@ -419,6 +430,18 @@ fn split_commas(s: &str) -> Vec<String> {
     }
     parts.push(s[last..].to_string());
     parts
+}
+
+/// Whether `name(` occurs in `s` as a call to a rules-language function: not the tail of a longer
+/// identifier and not a method (`resource.data.get('k', 0)` is a Map method, not `get()`).
+fn calls_function(s: &str, name: &str) -> bool {
+    let call = format!("{name}(");
+    s.match_indices(call.as_str()).any(|(at, _)| {
+        s[..at]
+            .chars()
+            .last()
+            .is_none_or(|c| !is_ident_char(c) && c != '.')
+    })
 }
 
 /// Whether `token` occurs in `s` as a whole token: not glued to a preceding identifier character

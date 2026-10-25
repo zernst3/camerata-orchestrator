@@ -103,7 +103,9 @@ pub(crate) fn field_validation(sites: &[Site<'_>]) -> Vec<ArchViolation> {
             site.grant,
             Grant::Open | Grant::AuthOnly | Grant::TestMode(_) | Grant::Lock
         );
-        if !writes_documents || owned_elsewhere {
+        // A write gated by a custom claim or a document lookup is a role check; which fields such
+        // a writer may set is a judgment, not a fact (owner call, 2026-10-25).
+        if !writes_documents || owned_elsewhere || site.cond.gated_by_claim_or_lookup() {
             continue;
         }
         seen.insert(key);

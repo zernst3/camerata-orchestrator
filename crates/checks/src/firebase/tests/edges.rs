@@ -205,6 +205,60 @@ fn twin_single_type_check_is_silent() {
     assert!(findings(&all).is_empty(), "{all:#?}");
 }
 
+/// Owner call 2026-10-25: a write gated by a custom claim or a document lookup is a role check,
+/// and which fields such a writer may set is a judgment, not a fact the rule can state.
+#[test]
+fn twin_write_gated_by_a_token_claim_is_silent() {
+    for gate in [
+        "request.auth.token.admin == true",
+        "request.auth.token.role == 'editor'",
+        "request.auth.token.email_verified == true && request.auth.uid == uid",
+    ] {
+        let all = run(&firestore(&format!(
+            "    match /articles/{{uid}} {{ allow write: if {gate}; }}"
+        )));
+        assert!(findings(&all).is_empty(), "{gate}: {all:#?}");
+    }
+}
+
+#[test]
+fn twin_write_gated_by_a_document_lookup_is_silent() {
+    for gate in [
+        "get(/databases/$(database)/documents/users/$(request.auth.uid)).data.admin == true",
+        "exists(/databases/$(database)/documents/admins/$(request.auth.uid))",
+        "getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'",
+        "existsAfter(/databases/$(database)/documents/admins/$(request.auth.uid))",
+    ] {
+        let all = run(&firestore(&format!(
+            "    match /stories/{{s}} {{ allow write: if {gate}; }}"
+        )));
+        assert!(
+            rows(&all, RULE_FIELD_VALIDATION, ViolationGrade::Review).is_empty(),
+            "{gate}: {all:#?}"
+        );
+    }
+}
+
+/// A Map `.get(` on the stored document is not a lookup, and a plain owner check is not a role
+/// gate: both still draw the held row.
+#[test]
+fn a_map_get_or_an_owner_check_does_not_silence_field_validation() {
+    for gate in [
+        "resource.data.get('locked', false) == false",
+        "request.auth.uid == uid",
+        "request.auth.tokenless == 1",
+    ] {
+        let all = run(&firestore(&format!(
+            "    match /notes/{{uid}} {{ allow write: if {gate}; }}"
+        )));
+        assert_eq!(
+            rows(&all, RULE_FIELD_VALIDATION, ViolationGrade::Review).len(),
+            1,
+            "{gate}: {all:#?}"
+        );
+    }
+}
+
 #[test]
 fn twin_open_or_auth_only_writes_belong_to_other_rules() {
     let open = run(&firestore("    match /a/{x} { allow write: if true; }"));
