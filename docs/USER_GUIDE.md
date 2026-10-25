@@ -1330,6 +1330,13 @@ arrive asynchronously, needs `--backend api`), `--model` / `--calibration-model`
 the incremental-scan cache and rescan every file, and `--verbose` to print the per-rule coverage
 ledger rather than the concise summary.
 
+To size a repo before quoting it, run `cargo run -p camerata -- count <PATH>` (add `--json` for
+machine-readable output). It uses no model and no network, reads the repo through the inspection's
+own file filter (gitignore, noise denylist, extension allowlist, tracked files), and prints counted
+files and non-blank lines per language, the totals, and how many files and lines were excluded as
+noise. That is the number the inspection is priced on; a plain `cloc` differs because it counts
+generated and vendored files.
+
 ### The three artifacts have three different jobs
 
 - **The PDF is the summary.** It is written to be read by a person who will not open a spreadsheet.

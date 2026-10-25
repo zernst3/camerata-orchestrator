@@ -29,6 +29,7 @@
 use std::path::PathBuf;
 
 use camerata::acceptance::{run_acceptance, AcceptanceResult};
+use camerata::count_cmd::CountArgs;
 use camerata::inspect_cmd::{self, InspectArgs};
 use camerata::integrity_gate_cmd::{self, GateProfile, IntegrityGateArgs, EXIT_GATE_UNAVAILABLE};
 use camerata::release_gate_cmd::{self, ReleaseGateArgs};
@@ -188,6 +189,17 @@ enum Command {
         zip: PathBuf,
     },
 
+    /// Count a repo exactly as the inspection reads it: files and non-blank lines per language,
+    /// plus what the noise filter excluded. No model, no network. This is the number a quote is
+    /// priced on. See `camerata::count_cmd`'s module doc comment.
+    Count {
+        /// The repo (or folder) to count.
+        repo: PathBuf,
+        /// Print JSON instead of the plain-text table.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Corpus staleness watermark (see docs/design/2026-10-20_corpus-staleness-check.md).
     Corpus {
         #[command(subcommand)]
@@ -323,6 +335,13 @@ async fn main() -> anyhow::Result<()> {
             run_integrity_gate_cmd(IntegrityGateArgs { ledger, profile })
         }
         Command::ReleaseGate { zip } => run_release_gate_cmd(&ReleaseGateArgs { zip }),
+        Command::Count { repo, json } => {
+            println!(
+                "{}",
+                camerata::count_cmd::run_count(&CountArgs { repo, json })?
+            );
+            Ok(())
+        }
         Command::Corpus { action } => match action {
             CorpusAction::Check => camerata::corpus_cmd::run_corpus_check().await,
             CorpusAction::Confirm { domain, date } => {

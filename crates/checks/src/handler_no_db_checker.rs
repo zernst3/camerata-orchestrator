@@ -702,4 +702,14 @@ allowed_in = []
         assert_eq!(vs.len(), 1, "{vs:#?}");
         assert_eq!(vs[0].severity, SEVERITY_MEDIUM);
     }
+
+    #[test]
+    fn a_route_attribute_is_recognized_by_its_whole_verb_only() {
+        // The verb at the very start of the attribute text, and after a non-identifier char.
+        assert!(is_route_marker("get(\"/orders\")"));
+        assert!(is_route_marker("#[actix_web::get(\"/orders\")]"));
+        // A verb that is only the tail of a longer identifier is not a route attribute.
+        assert!(!is_route_marker("#[target(x)]"));
+        assert!(!is_route_marker("#[my_get(x)]"));
+    }
 }

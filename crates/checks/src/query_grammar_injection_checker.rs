@@ -919,4 +919,87 @@ mod tests {
         let f = files(vec![("a.ts", "table.or();\n")]);
         assert!(rule_hits(&QueryGrammarInjectionChecker.check(&view(&f))).is_empty());
     }
+
+    // ── mutation-gap tests (docs/plans/2026-10-19_MASTER-SEQUENCE.md section 2b) ────────
+
+    /// The scan gates each checker on its interest globs: if they stopped matching, the checker
+    /// would silently never run on any repo.
+    #[test]
+    fn the_checker_applies_to_every_language_it_reads() {
+        for path in [
+            "a.ts", "a.tsx", "a.js", "a.jsx", "a.py", "a.go", "a.rb", "a.java", "a.cs",
+        ] {
+            let f = files(vec![(path, "x\n")]);
+            assert!(
+                crate::arch_checker::checker_applies(&QueryGrammarInjectionChecker, &f),
+                "{path}"
+            );
+        }
+        let f = files(vec![("a.md", "x\n")]);
+        assert!(!crate::arch_checker::checker_applies(
+            &QueryGrammarInjectionChecker,
+            &f
+        ));
+    }
+
+    #[test]
+    fn a_static_plus_join_of_literals_is_never_flagged() {
+        let f = files(vec![("a.ts", "table.or('a.eq.1,' + 'b.eq.2');\n")]);
+        assert!(rule_hits(&QueryGrammarInjectionChecker.check(&view(&f))).is_empty());
+    }
+
+    #[test]
+    fn a_template_literal_concatenated_with_a_variable_is_flagged() {
+        // Starts with a backtick but is not one template literal: a `+` chain with a variable.
+        let f = files(vec![("a.ts", "table.or(`user_id.eq.` + userId);\n")]);
+        assert_eq!(
+            rule_hits(&QueryGrammarInjectionChecker.check(&view(&f))).len(),
+            1
+        );
+        // Ends with a backtick but does not start with one.
+        let f = files(vec![("a.ts", "table.or(prefix + `.eq.1`);\n")]);
+        assert_eq!(
+            rule_hits(&QueryGrammarInjectionChecker.check(&view(&f))).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_nested_call_in_a_concatenated_argument_does_not_end_the_call_early() {
+        let f = files(vec![("a.ts", "table.or(build(x) + ',status.eq.1');\n")]);
+        assert_eq!(
+            rule_hits(&QueryGrammarInjectionChecker.check(&view(&f))).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_bound_filter_whose_first_argument_has_a_nested_call_is_never_flagged() {
+        let f = files(vec![(
+            "a.ts",
+            "table.filter(col(a) + suffix, 'eq', value);\n",
+        )]);
+        assert!(rule_hits(&QueryGrammarInjectionChecker.check(&view(&f))).is_empty());
+    }
+
+    #[test]
+    fn the_earliest_call_on_a_line_is_the_one_reported() {
+        let f = files(vec![("a.ts", "t.filter(`x.${p}`).or(`y.${q}`);\n")]);
+        let hits = QueryGrammarInjectionChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].object.as_deref(), Some("`x.${p}`"));
+    }
+
+    #[test]
+    fn a_mongo_where_value_with_a_nested_call_is_read_whole() {
+        let f = files(vec![(
+            "a.js",
+            "db.users.find({ $where: build(a, b) + userInput });\n",
+        )]);
+        let hits = QueryGrammarInjectionChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].object.as_deref(), Some("build(a, b) + userInput"));
+    }
 }
