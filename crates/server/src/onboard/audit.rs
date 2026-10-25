@@ -844,9 +844,10 @@ mod p4_context_tests {
                 ),
             ),
             // `.env` itself is a secret-file finding of its own; the example file isolates the key.
+            // A Firebase-named key needs a Firebase sibling beside it, as a real `.env` has.
             (
                 ".env.example".into(),
-                format!("VITE_FIREBASE_API_KEY={key}\n"),
+                format!("VITE_FIREBASE_API_KEY={key}\nVITE_FIREBASE_PROJECT_ID=x\n"),
             ),
         ];
         let findings = audit_files("o/r", &files);
