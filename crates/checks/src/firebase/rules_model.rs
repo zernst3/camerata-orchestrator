@@ -21,11 +21,24 @@ const MAX_COND_DEPTH: usize = 64;
 /// at 20; 5 covers every real helper chain and bounds a hostile file.
 const MAX_INLINE_PASSES: usize = 5;
 
+/// The most bytes an inlined condition may reach. Helper calls multiply (ten calls to a helper
+/// that makes ten calls is a hundred bodies), so the expansion is bounded; past it the condition
+/// is OPAQUE.
+const MAX_INLINED_BYTES: usize = 64 * 1024;
+
 /// A condition after comments are gone, whitespace is dropped, RTDB `===`/`!==` are mapped, and
 /// helper functions are inlined. `None` condition (no `if`) is the text `true`: Firebase says a
 /// missing condition "means the request is always allowed".
+///
+/// A condition whose inlining outgrew [`MAX_INLINED_BYTES`] is **opaque**: it was never read, so
+/// every question about it is answered in the direction that produces no finding (it is not
+/// open, not auth-only, not a test-mode scaffold; it is assumed to read the incoming document,
+/// to pin any field and to hold a disjunction).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Cond(String);
+pub struct Cond {
+    text: String,
+    opaque: bool,
+}
 
 /// A comparison target of `request.auth.uid`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,63 +64,93 @@ impl Cond {
     /// Build a Firestore or Storage condition, inlining the helpers in `scope`.
     pub fn new(raw: Option<&str>, scope: &Scope<'_>) -> Cond {
         let Some(raw) = raw else {
-            return Cond("true".to_string());
+            return Cond::read("true".to_string());
         };
         let normal = normalise(raw);
-        let inlined = inline_calls(&normal, &scope.functions);
-        Cond(normalise(&inlined))
+        match inline_calls(&normal, &scope.functions) {
+            Some(inlined) => Cond::read(normalise(&inlined)),
+            None => Cond::unread(),
+        }
     }
 
     /// Build a Realtime Database condition (`auth` in place of `request.auth`; no functions).
     pub fn rtdb(raw: &str) -> Cond {
-        Cond(normalise(raw))
+        Cond::read(normalise(raw))
     }
 
-    /// The normalised, inlined text.
+    fn read(text: String) -> Cond {
+        if text.len() > MAX_INLINED_BYTES {
+            return Cond::unread();
+        }
+        Cond {
+            text,
+            opaque: false,
+        }
+    }
+
+    fn unread() -> Cond {
+        Cond {
+            text: String::new(),
+            opaque: true,
+        }
+    }
+
+    /// Whether the condition was too large to read (see the type's documentation).
+    pub fn is_opaque(&self) -> bool {
+        self.opaque
+    }
+
+    /// The normalised, inlined text (empty for an opaque condition).
     pub fn text(&self) -> &str {
-        &self.0
+        &self.text
     }
 
     /// Unconditional: `true`, or a disjunction with a `true` member (`x || true`).
     pub fn is_true(&self) -> bool {
-        truthy(&self.0, 0)
+        !self.opaque && truthy(&self.text, 0)
     }
 
     /// Never grants: `false`, or a conjunction with a `false` member.
     pub fn is_false(&self) -> bool {
-        falsy(&self.0, 0)
+        !self.opaque && falsy(&self.text, 0)
     }
 
     /// Exactly "the caller is signed in", and nothing narrower. Any extra conjunct makes it not
     /// auth-only (a rule that also checks `email_verified` is narrower than the docs'
     /// "any authenticated user" shape).
     pub fn is_auth_only(&self) -> bool {
-        auth_only(&self.0, 0)
+        !self.opaque && auth_only(&self.text, 0)
     }
 
     /// The `request.time < timestamp.date(Y, M, D)` scaffold, alone or as a disjunct. Returns the
     /// expiry date.
     pub fn test_mode_expiry(&self) -> Option<NaiveDate> {
-        split_top(strip_parens(&self.0), "||")
+        if self.opaque {
+            return None;
+        }
+        split_top(strip_parens(&self.text), "||")
             .iter()
             .find_map(|member| time_limit(strip_parens(member)))
     }
 
     /// Whether `token` occurs as a whole token (`request.resource.data`, a wildcard name).
     pub fn references(&self, token: &str) -> bool {
-        contains_token(&self.0, token)
+        self.opaque || contains_token(&self.text, token)
     }
 
     /// Whether any `||` appears outside a string. An ownership comparison that is one disjunct of
     /// several is not recognised.
     pub fn has_disjunction(&self) -> bool {
-        !outside_strings_find(&self.0, "||").is_empty()
+        self.opaque || !outside_strings_find(&self.text, "||").is_empty()
     }
 
     /// Every comparison of `request.auth.uid` and what it is compared to.
     pub fn uid_targets(&self, wildcards: &[String]) -> Vec<Target> {
+        if self.opaque {
+            return vec![Target::Other];
+        }
         let mut atoms = Vec::new();
-        let complete = collect_atoms(&self.0, &mut atoms, 0);
+        let complete = collect_atoms(&self.text, &mut atoms, 0);
         let mut targets: Vec<Target> = atoms
             .iter()
             .filter_map(|a| uid_target(a, wildcards))
@@ -122,8 +165,9 @@ impl Cond {
     /// The condition constrains the shape of the incoming document: `keys().hasOnly(`, `.hasAll(`,
     /// `.diff(resource.data).affectedKeys()` or a `request.resource.data.<f> is <type>` check.
     pub fn validates_fields(&self) -> bool {
-        let t = &self.0;
-        t.contains("request.resource.data.keys().hasOnly(")
+        let t = &self.text;
+        self.opaque
+            || t.contains("request.resource.data.keys().hasOnly(")
             || t.contains("request.resource.data.keys().hasAll(")
             || t.contains(".diff(resource.data).affectedKeys()")
             || t.contains("request.resource.data.keys().hasAny(")
@@ -134,7 +178,10 @@ impl Cond {
     /// construct this reader does not model (UNKNOWN, which the false-negative law reads as
     /// pinned so the rules stay silent). `wildcards` are the names the block's path binds.
     pub fn pins_field(&self, f: &str, wildcards: &[String]) -> bool {
-        let t = &self.0;
+        if self.opaque {
+            return true;
+        }
+        let t = &self.text;
         if t.contains(&format!("request.resource.data.{f}==resource.data.{f}"))
             || t.contains(&format!("resource.data.{f}==request.resource.data.{f}"))
         {
@@ -191,7 +238,7 @@ impl Cond {
 
     /// Roles read from documents keyed on the caller's own uid.
     pub fn role_lookups(&self) -> Vec<RoleLookup> {
-        role_lookups(&self.0)
+        role_lookups(&self.text)
     }
 }
 
@@ -392,19 +439,24 @@ fn contains_token(s: &str, token: &str) -> bool {
 
 // ── inlining ────────────────────────────────────────────────────────────────────────────────
 
-fn inline_calls(text: &str, functions: &[&FnDef]) -> String {
+/// The condition with helper calls expanded, or `None` when the expansion outgrows
+/// [`MAX_INLINED_BYTES`] (the condition is then opaque).
+fn inline_calls(text: &str, functions: &[&FnDef]) -> Option<String> {
+    if text.len() > MAX_INLINED_BYTES {
+        return None;
+    }
     let mut current = text.to_string();
     for _ in 0..MAX_INLINE_PASSES {
-        let next = inline_once(&current, functions);
+        let next = inline_once(&current, functions)?;
         if next == current {
             break;
         }
         current = next;
     }
-    current
+    (current.len() <= MAX_INLINED_BYTES).then_some(current)
 }
 
-fn inline_once(text: &str, functions: &[&FnDef]) -> String {
+fn inline_once(text: &str, functions: &[&FnDef]) -> Option<String> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let mut out = String::with_capacity(text.len());
     let mut idx = 0;
@@ -468,11 +520,11 @@ fn inline_once(text: &str, functions: &[&FnDef]) -> String {
                     } else {
                         out.push_str(&body);
                     }
+                    if out.len() > MAX_INLINED_BYTES {
+                        return None;
+                    }
                     // Resume after the closing parenthesis.
-                    idx = chars
-                        .iter()
-                        .position(|(b, _)| *b > close_at)
-                        .unwrap_or(chars.len());
+                    idx = chars.partition_point(|(b, _)| *b <= close_at);
                     continue;
                 }
             }
@@ -480,7 +532,7 @@ fn inline_once(text: &str, functions: &[&FnDef]) -> String {
         out.push_str(name);
         idx = end;
     }
-    out
+    Some(out)
 }
 
 /// The function's return expression with its `let`s and parameters substituted.

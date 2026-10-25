@@ -20,7 +20,7 @@ use super::grant_rules::{self, Owned};
 use super::grants::{sites, LoadedRules};
 use super::rtdb::parse_rtdb;
 use super::rtdb_rules::{self, LoadedRtdb};
-use super::rules_parse::{parse_rules, RulesFile, Service};
+use super::rules_parse::{parse_rules, RulesFile, Service, MAX_ALLOWS_PER_FILE};
 use super::{
     RULE_ADMIN_CLAIMS, RULE_AUTH_ONLY, RULE_FIELD_VALIDATION, RULE_OPEN, RULE_OWNERSHIP,
     RULE_RECURSIVE_WILDCARD, RULE_RTDB_OPEN, RULE_STORAGE_OPEN, RULE_TEST_MODE,
@@ -270,6 +270,12 @@ fn load(files: &[(String, String)], set: &FileSet) -> Loaded {
 fn readable(parsed: &RulesFile) -> Result<Service, (usize, String)> {
     if let Some(first) = parsed.errors.first() {
         return Err((first.line, first.what.clone()));
+    }
+    if parsed.allow_count() > MAX_ALLOWS_PER_FILE {
+        return Err((
+            1,
+            format!("more than {MAX_ALLOWS_PER_FILE} allow statements"),
+        ));
     }
     match &parsed.service {
         Some(s @ (Service::Firestore | Service::Storage)) => Ok(s.clone()),

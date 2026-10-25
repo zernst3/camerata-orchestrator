@@ -6,7 +6,7 @@ use super::{findings, firestore, rows, run};
 use crate::arch_checker::{ArchViolation, ViolationGrade};
 use crate::firebase::grants::covers;
 use crate::firebase::rules_parse::Segment;
-use crate::firebase::RULE_OPEN;
+use crate::firebase::{RULE_FIELD_VALIDATION, RULE_OPEN};
 
 /// Run the rules checker over `files` on a thread with a 2 MiB stack, the tokio worker default.
 fn run_small_stack(files: Vec<(String, String)>) -> Vec<ArchViolation> {
@@ -123,4 +123,103 @@ fn covers_keeps_its_v1_and_v2_meaning_for_a_recursive_wildcard() {
     assert!(!covers(&broad, &[lit("a")], false), "v1: one or more");
     assert!(covers(&broad, &[lit("a"), lit("b"), lit("c")], false));
     assert!(!covers(&broad, &[lit("b")], true));
+}
+
+// ── size caps ───────────────────────────────────────────────────────────────────────────────
+
+use crate::firebase::RULE_AUTH_ONLY;
+
+/// `levels` helper layers, each calling the next `fan` times; the last one is "signed in". The
+/// fully inlined condition is `fan ^ levels` copies of the sign-in check.
+fn helper_pyramid(levels: usize, fan: usize) -> String {
+    let mut out = String::from("    function leaf() { return request.auth != null; }\n");
+    for level in (0..levels).rev() {
+        let next = if level + 1 == levels {
+            "leaf".to_string()
+        } else {
+            format!("f{}", level + 1)
+        };
+        let calls: Vec<String> = (0..fan).map(|_| format!("{next}()")).collect();
+        out.push_str(&format!(
+            "    function f{level}() {{ return {}; }}\n",
+            calls.join(" && ")
+        ));
+    }
+    out
+}
+
+#[test]
+fn a_small_helper_pyramid_is_inlined_and_recognised() {
+    // 4 x 4 = 16 copies of the check: small, so it is read as signed-in-only.
+    let body = format!(
+        "{}    match /a/{{x}} {{ allow read: if f0(); }}",
+        helper_pyramid(2, 4)
+    );
+    let all = run(&firestore(&body));
+    assert_eq!(
+        rows(&all, RULE_AUTH_ONLY, ViolationGrade::Review).len(),
+        1,
+        "{all:#?}"
+    );
+}
+
+#[test]
+fn a_helper_expansion_past_64_kib_is_not_recognised() {
+    // 10^4 copies of a 19-byte check, joined by `&&`: over 200 KiB once inlined.
+    let body = format!(
+        "{}    match /a/{{x}} {{ allow read, write: if f0(); }}",
+        helper_pyramid(4, 10)
+    );
+    let all = run_small_stack(firestore(&body));
+    assert!(
+        rows(&all, RULE_AUTH_ONLY, ViolationGrade::Defect).is_empty()
+            && rows(&all, RULE_AUTH_ONLY, ViolationGrade::Review).is_empty(),
+        "an expansion past the cap is not recognised: {all:#?}"
+    );
+}
+
+#[test]
+fn a_condition_that_was_not_recognised_is_never_claimed_to_skip_the_incoming_document() {
+    let body = format!(
+        "{}    match /a/{{x}} {{ allow update: if f0(); }}",
+        helper_pyramid(4, 10)
+    );
+    let all = run_small_stack(firestore(&body));
+    assert!(findings(&all).is_empty(), "{all:#?}");
+}
+
+fn many_allows(n: usize) -> Vec<(String, String)> {
+    let mut body = String::from(
+        "    function isOwner(u) { return request.auth.uid == u; }\n    match /a/{x} {\n",
+    );
+    for _ in 0..n {
+        body.push_str("      allow read: if isOwner(x) || request.auth.token.admin == true;\n");
+    }
+    body.push_str("    }");
+    firestore(&body)
+}
+
+#[test]
+fn a_file_with_more_than_5000_allows_is_not_assessed() {
+    let all = run_small_stack(many_allows(20_000));
+    assert_eq!(all.len(), 1, "{:#?}", all.len());
+    assert_eq!(all[0].grade, ViolationGrade::NotAssessed);
+    assert!(all[0].message.contains("5000"), "{}", all[0].message);
+}
+
+#[test]
+fn a_file_just_inside_the_allow_cap_is_still_assessed() {
+    // One block, one field-validation row however many allows it holds.
+    let mut body = String::from("    match /a/{x} {\n");
+    for _ in 0..3000 {
+        body.push_str("      allow write: if request.auth.token.admin == true;\n");
+    }
+    body.push_str("    }");
+    let all = run_small_stack(firestore(&body));
+    assert_eq!(
+        rows(&all, RULE_FIELD_VALIDATION, ViolationGrade::Review).len(),
+        1,
+        "{} rows",
+        all.len()
+    );
 }

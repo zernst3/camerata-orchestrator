@@ -172,6 +172,14 @@ impl RulesFile {
     }
 
     /// Every match block with the functions and wildcard names in scope, depth first.
+    /// How many `allow` statements the file holds, in every block.
+    pub fn allow_count(&self) -> usize {
+        fn count(block: &MatchBlock) -> usize {
+            block.allows.len() + block.children.iter().map(count).sum::<usize>()
+        }
+        self.root.iter().map(count).sum()
+    }
+
     pub fn flatten(&self) -> Vec<FlatBlock<'_>> {
         let mut out = Vec::new();
         let scope = Scope {
@@ -482,6 +490,11 @@ fn set_effective_paths(block: &mut MatchBlock, parent: &[Segment]) {
 /// Deepest block nesting read. Real rules nest a handful of levels; the cap keeps the recursive
 /// passes below bounded on a hostile file.
 const MAX_DEPTH: usize = 64;
+
+/// Most `allow` statements one file may hold and still be assessed. Real files hold dozens to a
+/// few hundred; the rules compare allows with each other, so past this the work is not bounded
+/// by anything a real file needs and the file is NOT ASSESSED instead.
+pub(crate) const MAX_ALLOWS_PER_FILE: usize = 5000;
 
 /// Most segments one `match` path may hold. Real paths have a handful; the cap keeps path
 /// comparison ([`super::grants::covers`]) bounded, and a longer path degrades the file to NOT

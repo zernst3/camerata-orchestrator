@@ -7,11 +7,11 @@
 //! better pattern) belong to the advisory tier, which is why the checker keeps these ids in the
 //! advisory prompt.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use super::grants::{changes_data, creates, finding, relative_segments, Grant, Site};
 use super::rules_model::Target;
-use super::rules_parse::{Method, Segment};
+use super::rules_parse::{MatchBlock, Method, Segment};
 use super::{RULE_ADMIN_CLAIMS, RULE_FIELD_VALIDATION, RULE_OWNERSHIP};
 use crate::arch_checker::{ArchViolation, ViolationGrade, SEVERITY_HIGH, SEVERITY_MEDIUM};
 use crate::firebase::rules_parse::Service;
@@ -78,17 +78,20 @@ pub(crate) fn ownership(sites: &[Site<'_>]) -> Vec<ArchViolation> {
 pub(crate) fn field_validation(sites: &[Site<'_>]) -> Vec<ArchViolation> {
     let mut out = Vec::new();
     let mut seen: BTreeSet<(String, usize)> = BTreeSet::new();
+    // Any reference to the incoming document, anywhere in the block, makes it silent: partial
+    // validation is a judgment, not a fact. Read once per block, not once per allow.
+    let mut reads_incoming: HashSet<*const MatchBlock> = HashSet::new();
+    for site in sites {
+        if site.cond.references("request.resource.data") {
+            reads_incoming.insert(std::ptr::from_ref(site.block));
+        }
+    }
     for site in sites.iter().filter(|s| firestore(s)) {
         let key = (site.file.path.clone(), site.block.line);
         if seen.contains(&key) {
             continue;
         }
-        // Any reference to the incoming document, anywhere in the block, makes it silent: partial
-        // validation is a judgment, not a fact.
-        let block_validates = sites
-            .iter()
-            .filter(|b| std::ptr::eq(b.block, site.block))
-            .any(|b| b.cond.references("request.resource.data"));
+        let block_validates = reads_incoming.contains(&std::ptr::from_ref(site.block));
         if block_validates {
             seen.insert(key);
             continue;
