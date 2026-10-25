@@ -17,6 +17,11 @@
 //! - [`edge_rules`]: the deterministic edges of rules 4, 5 and 9 (ownership, field validation,
 //!   admin claims).
 //! - [`rtdb_rules`]: rule 8 and the Realtime Database half of rule 3.
+//! - [`functions`]: finding the Cloud Functions packages and their `onRequest` / `onCall`
+//!   handlers, and the textual body checks (design section 8).
+//! - [`functions_checker`]: rules 10 and 12 (function authentication, App Check).
+//! - [`admin_sdk_checker`]: rule 11 (the Admin SDK in browser code).
+//! - [`rules_tests_checker`]: rule 13 (no rules tests).
 //! - [`rules_checker`]: [`rules_checker::FirebaseRulesChecker`], which runs the rules-file rules
 //!   and owns the degradation contract.
 //!
@@ -25,8 +30,11 @@
 //! rule cannot state such a fact deterministically the finding is review-graded (held, not
 //! asserted) or left to the advisory tier.
 
+pub mod admin_sdk_checker;
 pub mod config;
 pub mod edge_rules;
+pub mod functions;
+pub mod functions_checker;
 pub mod grant_rules;
 pub mod grants;
 pub mod json_lite;
@@ -35,8 +43,12 @@ pub mod rtdb_rules;
 pub mod rules_checker;
 pub mod rules_model;
 pub mod rules_parse;
+pub mod rules_tests_checker;
 
+pub use admin_sdk_checker::FirebaseAdminSdkClientChecker;
+pub use functions_checker::FirebaseFunctionsChecker;
 pub use rules_checker::FirebaseRulesChecker;
+pub use rules_tests_checker::FirebaseRulesTestsChecker;
 
 /// Rule 1: an unconditional grant.
 pub const RULE_OPEN: &str = "FIREBASE-RULES-OPEN-1";
@@ -56,6 +68,14 @@ pub const RULE_STORAGE_OPEN: &str = "FIREBASE-STORAGE-RULES-OPEN-1";
 pub const RULE_RTDB_OPEN: &str = "FIREBASE-RTDB-RULES-OPEN-1";
 /// Rule 9: a role the holder can write themselves.
 pub const RULE_ADMIN_CLAIMS: &str = "FIREBASE-ADMIN-CLAIMS-1";
+/// Rule 10: an HTTP function or callable that acts for a caller it never verified.
+pub const RULE_FUNCTIONS_AUTH: &str = "FIREBASE-FUNCTIONS-AUTH-1";
+/// Rule 11: the Admin SDK imported by browser-bundled code.
+pub const RULE_ADMIN_SDK_CLIENT: &str = "FIREBASE-ADMIN-SDK-CLIENT-1";
+/// Rule 12: no App Check anywhere in a project that initialises the client SDK.
+pub const RULE_APP_CHECK: &str = "FIREBASE-APP-CHECK-1";
+/// Rule 13: deployed security rules with no rules tests.
+pub const RULE_RULES_TESTS: &str = "FIREBASE-RULES-TESTS-1";
 
 #[cfg(test)]
 mod tests;

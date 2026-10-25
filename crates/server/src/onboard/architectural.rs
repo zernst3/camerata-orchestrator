@@ -112,6 +112,10 @@ pub fn architectural_input<'a>(
 const RULES_NEEDING_COMPLETE_SCAN: &[&str] = &[
     camerata_checks::dead_code_checker::RULE_DEAD_CODE,
     camerata_checks::react_hooks_lint_checker::RULE_REACT_HOOKS_LINT,
+    // "No App Check anywhere" and "no rules tests" are true only if the file that has them was
+    // not among the dropped files.
+    camerata_checks::firebase::RULE_APP_CHECK,
+    camerata_checks::firebase::RULE_RULES_TESTS,
 ];
 
 /// Whether `rule_id` is one of the rules an incomplete scan withholds.
@@ -141,6 +145,19 @@ pub fn withhold_on_incomplete_scan<'a>(
 /// simply carry empty `captures`, and the report's generic-fallback wording covers them; this is
 /// deliberately a small, explicit allowlist rather than a guess, so a capture is only ever wired
 /// when we're sure it names the same kind of object the rule's authored text expects.
+/// Firebase rules whose `ArchViolation.object` is a rules path or Realtime Database node.
+const FIREBASE_PATH_RULES: &[&str] = &[
+    camerata_checks::firebase::RULE_OPEN,
+    camerata_checks::firebase::RULE_TEST_MODE,
+    camerata_checks::firebase::RULE_AUTH_ONLY,
+    camerata_checks::firebase::RULE_OWNERSHIP,
+    camerata_checks::firebase::RULE_FIELD_VALIDATION,
+    camerata_checks::firebase::RULE_RECURSIVE_WILDCARD,
+    camerata_checks::firebase::RULE_STORAGE_OPEN,
+    camerata_checks::firebase::RULE_RTDB_OPEN,
+    camerata_checks::firebase::RULE_ADMIN_CLAIMS,
+];
+
 fn capture_token_for(rule_id: &str) -> Option<&'static str> {
     use camerata_checks::supabase::{dynamic_sql_exec_checker, rls_checker, search_path_checker};
     match rule_id {
@@ -155,6 +172,10 @@ fn capture_token_for(rule_id: &str) -> Option<&'static str> {
         id if id == dynamic_sql_exec_checker::RULE_DYNAMIC_SQL_EXEC_INJECTION => {
             Some("function-name")
         }
+        // The rules-file rules name the match path or node (`/orders/{id}`), so a remediation can
+        // say "scope reads on `<path>` to the owner".
+        id if FIREBASE_PATH_RULES.contains(&id) => Some("path"),
+        camerata_checks::firebase::RULE_FUNCTIONS_AUTH => Some("function-name"),
         _ => None,
     }
 }
@@ -189,7 +210,13 @@ pub fn arch_violation_to_finding(repo: &str, violation: &ArchViolation) -> Findi
         capture_token_for(&violation.rule_id),
         violation.object.as_deref(),
     ) {
-        captures.insert(token.to_string(), bare_object_name(object));
+        // A rules path is kept as written; a `schema.object` name is shortened to its object.
+        let value = if token == "path" {
+            object.to_string()
+        } else {
+            bare_object_name(object)
+        };
+        captures.insert(token.to_string(), value);
     }
     let mut finding = Finding {
         repo: repo.to_string(),
@@ -556,6 +583,57 @@ mod tests {
         assert_eq!(
             kept,
             ids(&["ARCH-ONE-IMPORT-PATH-1", "SUPABASE-RLS-ENABLED-1"])
+        );
+    }
+
+    /// "No App Check anywhere" and "no rules tests" are true only if the file that has them was
+    /// not among the dropped files, so a truncated scan withholds both (G12).
+    #[test]
+    fn a_truncated_scan_withholds_the_app_check_and_rules_tests_rules() {
+        use camerata_checks::firebase::{RULE_APP_CHECK, RULE_RULES_TESTS};
+        let armed = ids(&[RULE_APP_CHECK, RULE_RULES_TESTS, "FIREBASE-RULES-OPEN-1"]);
+        assert_eq!(
+            withhold_on_incomplete_scan(&armed, true),
+            ids(&["FIREBASE-RULES-OPEN-1"])
+        );
+        assert!(is_withheld_on_incomplete_scan(RULE_APP_CHECK));
+        assert!(is_withheld_on_incomplete_scan(RULE_RULES_TESTS));
+        assert_eq!(withhold_on_incomplete_scan(&armed, false), armed);
+    }
+
+    #[test]
+    fn firebase_findings_carry_the_path_or_function_as_a_remediation_capture() {
+        for id in [
+            "FIREBASE-RULES-OPEN-1",
+            "FIREBASE-RULES-TEST-MODE-1",
+            "FIREBASE-RULES-AUTH-ONLY-1",
+            "FIREBASE-RULES-OWNERSHIP-1",
+            "FIREBASE-RULES-FIELD-VALIDATION-1",
+            "FIREBASE-RULES-RECURSIVE-WILDCARD-1",
+            "FIREBASE-STORAGE-RULES-OPEN-1",
+            "FIREBASE-RTDB-RULES-OPEN-1",
+            "FIREBASE-ADMIN-CLAIMS-1",
+        ] {
+            assert_eq!(capture_token_for(id), Some("path"), "{id}");
+        }
+        assert_eq!(
+            capture_token_for("FIREBASE-FUNCTIONS-AUTH-1"),
+            Some("function-name")
+        );
+        let v = ArchViolation {
+            grade: ViolationGrade::Review,
+            rule_id: "FIREBASE-RULES-OPEN-1".to_string(),
+            file: "firestore.rules".to_string(),
+            line: 5,
+            object: Some("/profiles/{uid}".to_string()),
+            message: "m".to_string(),
+            severity: "medium",
+        };
+        let f = arch_violation_to_finding("acme/app", &v);
+        // The path is kept as written: it is not a `schema.object` name.
+        assert_eq!(
+            f.captures.get("path").map(String::as_str),
+            Some("/profiles/{uid}")
         );
     }
 

@@ -307,6 +307,9 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
         Box::new(crate::dead_code_checker::DeadCodeChecker),
         Box::new(crate::react_hooks_lint_checker::ReactHooksLintChecker),
         Box::new(crate::firebase::FirebaseRulesChecker::default()),
+        Box::new(crate::firebase::FirebaseFunctionsChecker),
+        Box::new(crate::firebase::FirebaseAdminSdkClientChecker),
+        Box::new(crate::firebase::FirebaseRulesTestsChecker),
     ]
 }
 

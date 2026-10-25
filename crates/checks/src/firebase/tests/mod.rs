@@ -3,8 +3,10 @@
 mod auth_only;
 mod checker;
 mod edges;
+mod functions;
 mod open;
 mod parse;
+mod project_rules;
 mod recursive_wildcard;
 mod rtdb;
 mod storage;
