@@ -21,6 +21,14 @@
 > triage `missed.txt` into "add a test" vs "equivalent mutant". Only the checks crate's own tests
 > run against each mutant (server-level tests that exercise checkers are not counted). Check it is
 > finished (`pgrep -fl cargo-mutants`) before rebuilding in the main checkout.
+> **DONE 2026-10-25 (later):** 22a is complete (new app projects default to the API backend;
+> stored and legacy projects keep their value; no key = Blocked, never a CLI fallback) and eslint
+> runs from the canonical generation path (immune to the macOS symlink-swap EINVAL). OPEN DEFECT:
+> `camerata` (cli) test `inspect_cmd::tests::bookkeeping_is_never_written_into_the_scanned_repo`
+> flaked once in a full run; it reads process env without the `process_env` serial key (the env
+> discipline from item 19a). Fix: give it the key or inject the state dir. Then: Zach's manual
+> check, and token-efficiency build ranks 1, 2, 3, 5, 6 (no protected change); ranks 4, 7, 8, 9
+> and the live API fixture runs await Zach's go.
 > **NEW V1 ITEM 2026-10-25 (Zach):** token efficiency on the API, MASTER-SEQUENCE item 23
 > (spike `_workspace/brownfield-audits/SPIKE_TOKEN_EFFICIENCY.md`, recall first). Slotted right
 > after 22a. Start with the Fable spike (read-only), then build the gaps.
