@@ -64,7 +64,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_MEDIUM};
+use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_MEDIUM};
 use crate::extract::resolver::EcmaResolver;
 use crate::extract::{self, ImportKind, SourceLang};
 
@@ -448,6 +448,7 @@ fn judge_group(origin_file: &str, name: &str, group: &[Usage]) -> Option<ArchVio
         by_target.len(),
     );
     Some(ArchViolation {
+        grade: ViolationGrade::Defect,
         rule_id: RULE_ONE_IMPORT_PATH.to_string(),
         file: first.file.clone(),
         line: first.line,

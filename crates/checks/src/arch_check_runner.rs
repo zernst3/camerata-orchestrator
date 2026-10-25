@@ -39,7 +39,8 @@ use async_trait::async_trait;
 use camerata_core::{CheckOutcome, CheckRunner, Role, RuleId};
 
 use crate::arch_checker::{
-    all_checkers, checker_applies, matches_any_glob, ArchViolation, RepoView,
+    all_checkers, checker_applies, matches_any_glob, ArchChecker, ArchViolation, RepoView,
+    ViolationGrade,
 };
 
 /// Layer-2 runner for the native architectural-checker registry
@@ -90,33 +91,52 @@ impl CheckRunner for NativeArchCheckRunner {
 
         let files = collect_interest_files(worktree, &globs);
         let repo_label = worktree.display().to_string();
-        let view = RepoView {
-            spec: &repo_label,
-            files: &files,
-        };
+        let checkers: Vec<&dyn ArchChecker> = armed_checkers.iter().map(|c| c.as_ref()).collect();
+        Ok(bounce_outcome(&checkers, &files, &armed, &repo_label))
+    }
+}
 
-        let mut outcome = CheckOutcome::clean();
-        for checker in &armed_checkers {
-            // Zero matching files -> skip entirely; never a false "clean" read as "this
-            // checker ran and found nothing" — see `checker_applies`'s own doc.
-            if !checker_applies(checker.as_ref(), &files) {
+/// The Layer-2 outcome for `checkers` over `files`: a violation bounces only when its rule is
+/// armed AND it is graded [`ViolationGrade::Defect`].
+fn bounce_outcome(
+    checkers: &[&dyn ArchChecker],
+    files: &[(String, String)],
+    armed: &HashSet<&str>,
+    repo_label: &str,
+) -> CheckOutcome {
+    let view = RepoView {
+        spec: repo_label,
+        files,
+    };
+    let mut outcome = CheckOutcome::clean();
+    for checker in checkers {
+        // Zero matching files -> skip entirely; never a false "clean" read as "this
+        // checker ran and found nothing" — see `checker_applies`'s own doc.
+        if !checker_applies(*checker, files) {
+            continue;
+        }
+        for violation in checker.check(&view) {
+            // Defensive re-check at the gate boundary: a checker's `check` must only
+            // emit ids from its own `rule_ids()`, but this runner never trusts that
+            // blindly — an un-armed id must never bounce the loop, even on a
+            // hypothetical checker-side bug.
+            if !armed.contains(violation.rule_id.as_str()) {
                 continue;
             }
-            for violation in checker.check(&view) {
-                // Defensive re-check at the gate boundary: a checker's `check` must only
-                // emit ids from its own `rule_ids()`, but this runner never trusts that
-                // blindly — an un-armed id must never bounce the loop, even on a
-                // hypothetical checker-side bug.
-                if !armed.contains(violation.rule_id.as_str()) {
-                    continue;
-                }
-                outcome.push_diagnostics(&format_violation(&violation));
-                outcome.violated.push(RuleId(violation.rule_id.clone()));
+            // Only an asserted defect bounces. A held-for-review fact is a true statement with
+            // a legitimate reading (a public collection, say) and a not-assessed notice is not
+            // a statement about the code at all; a bounce teaches an agent to silence the rule
+            // rather than satisfy it, and bouncing on what the report itself only holds would
+            // contradict the report.
+            if violation.grade != ViolationGrade::Defect {
+                continue;
             }
+            outcome.push_diagnostics(&format_violation(&violation));
+            outcome.violated.push(RuleId(violation.rule_id.clone()));
         }
-        outcome.violated.dedup_by(|a, b| a.0 == b.0);
-        Ok(outcome)
     }
+    outcome.violated.dedup_by(|a, b| a.0 == b.0);
+    outcome
 }
 
 /// Render one [`ArchViolation`] as a human-readable diagnostics line: `file:line [rule_id]
@@ -221,6 +241,74 @@ mod tests {
         let migrations = dir.join("supabase").join("migrations");
         fs::create_dir_all(&migrations).unwrap();
         fs::write(migrations.join(name), sql).unwrap();
+    }
+
+    /// A checker that emits one violation per grade, each under its own rule id.
+    struct GradedChecker;
+    impl ArchChecker for GradedChecker {
+        fn rule_ids(&self) -> &'static [&'static str] {
+            &[
+                "GRADED-DEFECT-1",
+                "GRADED-REVIEW-1",
+                "GRADED-NOT-ASSESSED-1",
+            ]
+        }
+        fn interest_globs(&self) -> &'static [&'static str] {
+            &["**/*.txt"]
+        }
+        fn check(&self, _repo: &RepoView<'_>) -> Vec<ArchViolation> {
+            [
+                ("GRADED-DEFECT-1", ViolationGrade::Defect),
+                ("GRADED-REVIEW-1", ViolationGrade::Review),
+                ("GRADED-NOT-ASSESSED-1", ViolationGrade::NotAssessed),
+            ]
+            .into_iter()
+            .map(|(rule, grade)| ArchViolation {
+                grade,
+                rule_id: rule.to_string(),
+                file: "a.txt".to_string(),
+                line: 1,
+                object: None,
+                message: "m".to_string(),
+                severity: crate::arch_checker::SEVERITY_HIGH,
+            })
+            .collect()
+        }
+    }
+
+    fn graded_outcome() -> CheckOutcome {
+        let files = vec![("a.txt".to_string(), String::new())];
+        let armed: HashSet<&str> = GradedChecker.rule_ids().iter().copied().collect();
+        bounce_outcome(&[&GradedChecker], &files, &armed, "wt")
+    }
+
+    #[test]
+    fn the_write_time_runner_never_bounces_on_a_review_graded_violation() {
+        let outcome = graded_outcome();
+        assert!(
+            !outcome
+                .violated
+                .contains(&RuleId("GRADED-REVIEW-1".to_string())),
+            "a held fact must never bounce an agent: {outcome:?}"
+        );
+        assert!(!outcome.diagnostics.contains("GRADED-REVIEW-1"));
+    }
+
+    #[test]
+    fn the_write_time_runner_never_bounces_on_a_not_assessed_notice() {
+        let outcome = graded_outcome();
+        assert!(!outcome
+            .violated
+            .contains(&RuleId("GRADED-NOT-ASSESSED-1".to_string())));
+    }
+
+    #[test]
+    fn the_write_time_runner_still_bounces_on_a_defect_graded_violation() {
+        let outcome = graded_outcome();
+        assert_eq!(
+            outcome.violated,
+            vec![RuleId("GRADED-DEFECT-1".to_string())]
+        );
     }
 
     const RLS_ENABLED: &str = "SUPABASE-RLS-ENABLED-1";

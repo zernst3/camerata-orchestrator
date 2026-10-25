@@ -12,7 +12,7 @@
 //! `docs/plans/2026-09-30_cycle2-queue-hardening.md` §W1.
 
 use super::timeline::build_timeline_from_globs;
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_HIGH};
+use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_HIGH};
 
 pub const RULE_FUNC_SEARCH_PATH: &str = "SUPABASE-FUNC-SEARCH-PATH-1";
 
@@ -48,6 +48,7 @@ impl ArchChecker for SupabaseFnSearchPathChecker {
                     format!("`{}.{}`", f.schema, f.name)
                 };
                 ArchViolation {
+                    grade: ViolationGrade::Defect,
                     rule_id: RULE_FUNC_SEARCH_PATH.to_string(),
                     file: f.established_at.file.clone(),
                     line: f.established_at.line,

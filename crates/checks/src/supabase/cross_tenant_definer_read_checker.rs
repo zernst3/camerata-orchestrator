@@ -81,7 +81,7 @@
 //! other checker in this corpus.
 
 use super::splitter::{parse_dollar_tag, split_statements, SqlStatement};
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_HIGH};
+use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_HIGH};
 
 pub const RULE_DEFINER_CROSS_TENANT_READ: &str = "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1";
 
@@ -177,6 +177,7 @@ impl ArchChecker for CrossTenantDefinerReadChecker {
                     return None;
                 }
                 Some(ArchViolation {
+                    grade: ViolationGrade::Defect,
                     rule_id: RULE_DEFINER_CROSS_TENANT_READ.to_string(),
                     file: f.file.clone(),
                     line: f.line,

@@ -66,7 +66,9 @@
 //! file/parse the extractor can't handle, yields zero functions/calls — fewer findings, never
 //! a crash and never a fabricated one.
 
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_HIGH, SEVERITY_MEDIUM};
+use crate::arch_checker::{
+    ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_HIGH, SEVERITY_MEDIUM,
+};
 use crate::architecture_config::{architecture_config_from_files, ArchitectureConfig};
 use crate::extract::{self, FunctionSpan, MethodCall};
 
@@ -323,6 +325,7 @@ fn build_violation(
     let object = Some(func.name.clone());
     match verdict {
         Verdict::Deterministic => ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: RULE_HANDLER_NO_DB.to_string(),
             file: path.to_string(),
             line: call.line,
@@ -337,6 +340,7 @@ fn build_violation(
             ),
         },
         Verdict::NeedsReviewAttr(attr) => ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: RULE_HANDLER_NO_DB.to_string(),
             file: path.to_string(),
             line: call.line,
@@ -353,6 +357,7 @@ fn build_violation(
             ),
         },
         Verdict::NeedsReviewName => ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: RULE_HANDLER_NO_DB.to_string(),
             file: path.to_string(),
             line: call.line,

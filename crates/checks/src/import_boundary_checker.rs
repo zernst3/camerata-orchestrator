@@ -70,7 +70,8 @@
 use std::collections::HashSet;
 
 use crate::arch_checker::{
-    matches_any_glob, ArchChecker, ArchViolation, RepoView, SEVERITY_HIGH, SEVERITY_MEDIUM,
+    matches_any_glob, ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_HIGH,
+    SEVERITY_MEDIUM,
 };
 use crate::architecture_config::{
     architecture_config_from_files, architecture_config_or_inferred, inferred_layer_rank,
@@ -205,6 +206,7 @@ fn check_cross_boundary(
             return;
         }
         out.push(ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: RULE_NO_CROSS_BOUNDARY_IMPORTS.to_string(),
             file: edge.from_file.clone(),
             line: edge.line,
@@ -232,6 +234,7 @@ fn check_cross_boundary(
         allowed.join(", ")
     };
     out.push(ArchViolation {
+        grade: ViolationGrade::Defect,
         rule_id: RULE_NO_CROSS_BOUNDARY_IMPORTS.to_string(),
         file: edge.from_file.clone(),
         line: edge.line,
@@ -270,6 +273,7 @@ fn check_api_dtos(cfg: &ArchitectureConfig, edge: &ResolvedImport, out: &mut Vec
         return;
     }
     out.push(ArchViolation {
+        grade: ViolationGrade::Defect,
         rule_id: RULE_API_DTOS.to_string(),
         file: edge.from_file.clone(),
         line: edge.line,
@@ -321,6 +325,7 @@ fn check_strict_layering_import_facet(
                 continue;
             };
             out.push(ArchViolation {
+                grade: ViolationGrade::Defect,
                 rule_id: RULE_STRICT_LAYERING.to_string(),
                 file: path.clone(),
                 line: imp.line,

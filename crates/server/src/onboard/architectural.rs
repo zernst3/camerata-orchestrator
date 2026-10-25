@@ -14,7 +14,9 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use camerata_checks::arch_checker::{all_checkers, checker_applies, ArchViolation, RepoView};
+use camerata_checks::arch_checker::{
+    all_checkers, checker_applies, ArchViolation, RepoView, ViolationGrade,
+};
 
 use super::Finding;
 
@@ -57,6 +59,22 @@ pub fn audit_architectural(
         }
     }
     findings
+}
+
+/// How many of `findings` the ledger credits to `rule_id` as emitted: defects and held review
+/// rows. A not-assessed row is neither a finding nor a clean result, so it never counts (and a
+/// rule that only produced one is not credited as "verified clean" by this count alone).
+pub fn emitted_count(findings: &[Finding], rule_id: &str) -> usize {
+    findings
+        .iter()
+        .filter(|f| f.rule_id == rule_id)
+        .filter(|f| {
+            !matches!(
+                f.kind,
+                Some(camerata_api_types::audit::FindingKind::NotAssessed(_))
+            )
+        })
+        .count()
 }
 
 /// Armed rules that reason from the ABSENCE of a reference and so must see reference text
@@ -188,6 +206,28 @@ pub fn arch_violation_to_finding(repo: &str, violation: &ArchViolation) -> Findi
         kind: Some(camerata_api_types::audit::FindingKind::Defect),
         ..Finding::default()
     };
+    match violation.grade {
+        ViolationGrade::Defect => {}
+        // A true fact with a legitimate reading: held, not asserted. The two fields are the
+        // biconditional `ai_audit.rs` maintains, and `report_export::is_held_for_review` routes
+        // on either, exactly as it routes a calibration-doubt row.
+        ViolationGrade::Review => {
+            finding.needs_review = true;
+            finding.confidence = Some("needs-review".to_string());
+        }
+        // The checker could not assess this input. An informational row ("armed but not
+        // evaluated"), never a defect and never a clean credit.
+        ViolationGrade::NotAssessed => {
+            finding.kind = Some(camerata_api_types::audit::FindingKind::NotAssessed(
+                camerata_api_types::audit::NotAssessedKind {
+                    reason: camerata_api_types::audit::NotAssessedReason::PassFailed,
+                    reason_detail: violation.message.clone(),
+                },
+            ));
+            finding.severity = camerata_checks::arch_checker::SEVERITY_INFO.to_string();
+            finding.located = violation.line > 0;
+        }
+    }
     // A checker's message or object can quote a literal from the client's code.
     crate::onboard::redact::redact_finding(&mut finding);
     finding
@@ -207,6 +247,7 @@ mod tests {
     #[test]
     fn arch_violation_to_finding_carries_the_provenance_tag() {
         let v = ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: "SUPABASE-RLS-ENABLED-1".to_string(),
             file: "supabase/migrations/20240101000000_init.sql".to_string(),
             line: 3,
@@ -227,9 +268,80 @@ mod tests {
         assert_eq!(f.status, "active");
     }
 
+    fn graded(grade: ViolationGrade, line: usize) -> ArchViolation {
+        ArchViolation {
+            grade,
+            rule_id: "FIREBASE-RULES-OPEN-1".to_string(),
+            file: "firestore.rules".to_string(),
+            line,
+            object: Some("/profiles/{uid}".to_string()),
+            message: "a fact".to_string(),
+            severity: "medium",
+        }
+    }
+
+    #[test]
+    fn a_defect_graded_violation_is_an_unflagged_defect_finding() {
+        let f = arch_violation_to_finding("acme/app", &graded(ViolationGrade::Defect, 4));
+        assert!(!f.needs_review);
+        assert_eq!(f.confidence, None);
+        assert_eq!(f.kind, Some(camerata_api_types::audit::FindingKind::Defect));
+        assert_eq!(f.severity, "medium");
+    }
+
+    #[test]
+    fn a_review_graded_violation_is_held_for_review_not_asserted() {
+        let f = arch_violation_to_finding("acme/app", &graded(ViolationGrade::Review, 4));
+        // The biconditional `ai_audit.rs` maintains, which `is_held_for_review` reads.
+        assert!(f.needs_review);
+        assert_eq!(f.confidence.as_deref(), Some("needs-review"));
+        assert_eq!(f.kind, Some(camerata_api_types::audit::FindingKind::Defect));
+        assert_eq!(f.severity, "medium");
+        assert!(f.preview);
+        assert!(crate::report_export::is_held_for_review(
+            &f,
+            crate::report_export::Disposition::Unresolved
+        ));
+    }
+
+    #[test]
+    fn a_not_assessed_violation_is_a_not_assessed_row_never_a_defect() {
+        use camerata_api_types::audit::{FindingKind, NotAssessedKind, NotAssessedReason};
+        let f = arch_violation_to_finding("acme/app", &graded(ViolationGrade::NotAssessed, 41));
+        assert_eq!(
+            f.kind,
+            Some(FindingKind::NotAssessed(NotAssessedKind {
+                reason: NotAssessedReason::PassFailed,
+                reason_detail: "a fact".to_string(),
+            }))
+        );
+        assert_eq!(f.severity, "info");
+        assert!(f.located);
+        assert!(f.preview);
+        assert!(!f.needs_review);
+        // A not-assessed row with no line is not located.
+        let g = arch_violation_to_finding("acme/app", &graded(ViolationGrade::NotAssessed, 0));
+        assert!(!g.located);
+    }
+
+    #[test]
+    fn the_ledger_counts_defect_and_review_rows_but_never_a_not_assessed_row() {
+        let findings: Vec<Finding> = [
+            ViolationGrade::Defect,
+            ViolationGrade::Review,
+            ViolationGrade::NotAssessed,
+        ]
+        .into_iter()
+        .map(|g| arch_violation_to_finding("acme/app", &graded(g, 4)))
+        .collect();
+        assert_eq!(emitted_count(&findings, "FIREBASE-RULES-OPEN-1"), 2);
+        assert_eq!(emitted_count(&findings, "OTHER-RULE-1"), 0);
+    }
+
     #[test]
     fn arch_violation_to_finding_captures_the_bare_table_name_for_public_schema() {
         let v = ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: "SUPABASE-RLS-ENABLED-1".to_string(),
             file: "supabase/migrations/20240101000000_init.sql".to_string(),
             line: 3,
@@ -247,6 +359,7 @@ mod tests {
     #[test]
     fn arch_violation_to_finding_captures_a_schema_qualified_table_name_for_non_public_schema() {
         let v = ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: "SUPABASE-RLS-NO-POLICY-1".to_string(),
             file: "supabase/migrations/20240101000000_init.sql".to_string(),
             line: 3,
@@ -264,6 +377,7 @@ mod tests {
     #[test]
     fn arch_violation_to_finding_captures_the_function_name_for_search_path() {
         let v = ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: "SUPABASE-FUNC-SEARCH-PATH-1".to_string(),
             file: "supabase/migrations/20240101000000_init.sql".to_string(),
             line: 8,
@@ -333,6 +447,7 @@ mod tests {
     #[test]
     fn arch_violation_to_finding_leaves_captures_empty_for_an_unmapped_rule() {
         let v = ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: "UI-UTC-DATES-1".to_string(),
             file: "src/lib.rs".to_string(),
             line: 1,

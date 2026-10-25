@@ -72,7 +72,7 @@ mod config;
 
 use serde_json::Value;
 
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_MEDIUM};
+use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_MEDIUM};
 use crate::extract::paths::is_test_path;
 
 use config::Part;
@@ -356,6 +356,7 @@ impl ArchChecker for ReactHooksLintChecker {
             None => (react_manifest.clone(), react_line),
         };
         vec![ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: RULE_REACT_HOOKS_LINT.to_string(),
             file,
             line,

@@ -44,7 +44,9 @@
 //! different file, is a false negative by design (explicitly preferred over a false positive
 //! per the plan) — completeness-over-precision widens the taint window, not removes its bound.
 
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_HIGH, SEVERITY_MEDIUM};
+use crate::arch_checker::{
+    ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_HIGH, SEVERITY_MEDIUM,
+};
 
 pub const RULE_WEAK_TOKEN_RANDOMNESS: &str = "SEC-NO-WEAK-TOKEN-RANDOMNESS-1";
 
@@ -230,6 +232,7 @@ fn violations_in_file(path: &str, content: &str) -> Vec<ArchViolation> {
             }
             if let Some((severity, named)) = classify_named(&identifiers) {
                 violations.push(ArchViolation {
+                    grade: ViolationGrade::Defect,
                     rule_id: RULE_WEAK_TOKEN_RANDOMNESS.to_string(),
                     file: path.to_string(),
                     line: idx + 1,

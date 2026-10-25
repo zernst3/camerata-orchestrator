@@ -59,7 +59,7 @@ use std::collections::HashSet;
 use syn::visit::Visit;
 use syn::Expr;
 
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_MEDIUM};
+use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_MEDIUM};
 
 pub const RULE_RESOURCE_LIFECYCLE: &str = "ARCH-RESOURCE-LIFECYCLE-1";
 
@@ -299,6 +299,7 @@ impl<'a, 'ast> Visit<'ast> for TerminalCallVisitor<'a> {
 impl<'a> TerminalCallVisitor<'a> {
     fn push(&mut self, node: &syn::ExprMethodCall, method: &str) {
         self.out.push(ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: RULE_RESOURCE_LIFECYCLE.to_string(),
             file: self.path.to_string(),
             line: node.method.span().start().line,

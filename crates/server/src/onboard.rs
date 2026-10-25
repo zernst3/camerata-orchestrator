@@ -1785,7 +1785,7 @@ pub async fn audit_repos_with_llm(
                         .iter()
                         .filter(|r| is_ci_tier_rule(r, corpus))
                     {
-                        let emitted = arch.iter().filter(|f| f.rule_id == *rid).count();
+                        let emitted = architectural::emitted_count(&arch, rid);
                         match crate::mechanical_gate::detector_channel(
                             rid,
                             &ledger_checker_rule_ids,

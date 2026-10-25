@@ -64,6 +64,7 @@ fn floor_snippet_is_redacted_before_the_160_char_cap() {
 fn arch_violation_to_finding_redacts_message_and_object() {
     let p = planted(SecretShape::StripeLiveSecretKey);
     let v = camerata_checks::arch_checker::ArchViolation {
+        grade: camerata_checks::arch_checker::ViolationGrade::Defect,
         rule_id: "SUPABASE-RLS-ENABLED-1".to_string(),
         file: "supabase/migrations/1.sql".to_string(),
         line: 3,

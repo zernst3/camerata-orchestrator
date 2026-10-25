@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 
-use crate::arch_checker::{ArchViolation, SEVERITY_MEDIUM};
+use crate::arch_checker::{ArchViolation, ViolationGrade, SEVERITY_MEDIUM};
 
 use super::{Family, RULE_DEAD_CODE};
 
@@ -86,6 +86,7 @@ pub(super) fn findings(
 
 fn violation(file: &str, line: usize, object: String, message: String) -> ArchViolation {
     ArchViolation {
+        grade: ViolationGrade::Defect,
         rule_id: RULE_DEAD_CODE.to_string(),
         file: file.to_string(),
         line,
