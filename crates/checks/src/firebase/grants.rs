@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 
 use chrono::NaiveDate;
 
+use super::config::Doubt;
 use super::rules_model::Cond;
 use super::rules_parse::{
     render_path, Allow, FlatBlock, MatchBlock, Method, RulesFile, Segment, Service,
@@ -53,6 +54,8 @@ pub(crate) trait Located {
     fn label(&self) -> Option<&str>;
     /// The `firebase.json` beside it could not be read, so the deployed file is unconfirmed.
     fn config_unreadable(&self) -> bool;
+    /// Why this file may not be the deployed one (empty when `firebase.json` names it).
+    fn doubts(&self) -> &[Doubt];
 }
 
 /// A Firestore or Storage rules file that read cleanly, with where it came from.
@@ -60,6 +63,7 @@ pub(crate) struct LoadedRules {
     pub path: String,
     pub label: Option<String>,
     pub config_unreadable: bool,
+    pub doubts: Vec<Doubt>,
     pub service: Service,
     pub parsed: RulesFile,
 }
@@ -73,6 +77,9 @@ impl Located for LoadedRules {
     }
     fn config_unreadable(&self) -> bool {
         self.config_unreadable
+    }
+    fn doubts(&self) -> &[Doubt] {
+        &self.doubts
     }
 }
 
@@ -395,8 +402,11 @@ fn segment_covers(broad: &Segment, narrow: &Segment) -> bool {
 
 // ── findings ────────────────────────────────────────────────────────────────────────────────
 
-/// Build a finding: the body, then the console caveat, then (when it applies) the unreadable
-/// `firebase.json` sentence.
+/// Build a finding: the body, then the console caveat, then (when they apply) the sentences
+/// about a file that may not be the deployed one and about an unreadable `firebase.json`.
+///
+/// A file that may not be the deployed one ([`Located::doubts`]) never yields an asserted
+/// defect: the grade drops to Review and a critical severity to high, and the reason is stated.
 pub(crate) fn finding(
     rule: &'static str,
     file: &impl Located,
@@ -407,18 +417,27 @@ pub(crate) fn finding(
     body: &str,
 ) -> ArchViolation {
     let mut message = format!("{body} {CAVEAT}");
+    for doubt in file.doubts() {
+        message.push(' ');
+        message.push_str(doubt.sentence());
+    }
     if file.config_unreadable() {
         message.push(' ');
         message.push_str(CONFIG_UNREADABLE);
     }
+    let held = !file.doubts().is_empty() && grade == ViolationGrade::Defect;
     ArchViolation {
-        grade,
+        grade: if held { ViolationGrade::Review } else { grade },
         rule_id: rule.to_string(),
         file: file.path().to_string(),
         line,
         object,
         message,
-        severity,
+        severity: if held && severity == crate::arch_checker::SEVERITY_CRITICAL {
+            crate::arch_checker::SEVERITY_HIGH
+        } else {
+            severity
+        },
     }
 }
 

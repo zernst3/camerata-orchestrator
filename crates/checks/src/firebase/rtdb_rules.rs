@@ -7,6 +7,7 @@
 //! say. A grant is therefore reported once, at the node that sets it, and a child that sets
 //! `false` under a granting ancestor is reported as ineffective ("improperly inherited rules").
 
+use super::config::Doubt;
 use super::grants::{finding, is_public_word, severity_rank, whereabouts, Located};
 use super::rtdb::{Key, RtdbFile, RtdbFlat, RtdbNode, RtdbRule};
 use super::rules_model::Cond;
@@ -20,6 +21,7 @@ pub(crate) struct LoadedRtdb {
     pub path: String,
     pub label: Option<String>,
     pub config_unreadable: bool,
+    pub doubts: Vec<Doubt>,
     pub parsed: RtdbFile,
 }
 
@@ -32,6 +34,9 @@ impl Located for LoadedRtdb {
     }
     fn config_unreadable(&self) -> bool {
         self.config_unreadable
+    }
+    fn doubts(&self) -> &[Doubt] {
+        &self.doubts
     }
 }
 

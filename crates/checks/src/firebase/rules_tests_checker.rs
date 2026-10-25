@@ -5,7 +5,7 @@
 //! Tests written against the emulator REST API in another language, or kept in a separate
 //! repository, are invisible; the message says how to close the gap.
 
-use super::config::resolve;
+use super::config::{resolve, Doubt};
 use super::functions::manifest_depends_on;
 use super::RULE_RULES_TESTS;
 use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_MEDIUM};
@@ -48,21 +48,45 @@ impl ArchChecker for FirebaseRulesTestsChecker {
         if has_tests {
             return Vec::new();
         }
-        let deployed: Vec<String> = set
+        // The row says the repository DEPLOYS rules, so it names only files `firebase.json`
+        // confirms. When none is confirmed it is held for review and says why.
+        let confirmed: Vec<_> = set
             .assessed
             .iter()
-            .map(|a| format!("`{}`", a.path))
+            .filter(|a| a.doubts.is_empty())
             .collect();
+        let (grade, listed, doubts) = if confirmed.is_empty() {
+            let mut doubts: Vec<Doubt> = set
+                .assessed
+                .iter()
+                .flat_map(|a| a.doubts.iter().copied())
+                .collect();
+            doubts.sort_unstable();
+            doubts.dedup();
+            (
+                ViolationGrade::Review,
+                set.assessed.iter().collect(),
+                doubts,
+            )
+        } else {
+            (ViolationGrade::Defect, confirmed, Vec::new())
+        };
+        let deployed: Vec<String> = listed.iter().map(|a| format!("`{}`", a.path)).collect();
+        let mut message = format!(
+            "This repository deploys security rules ({}) but has no rules tests: no package depends on `@firebase/rules-unit-testing`, the library Firebase provides to run rules against the emulator. If the rules are tested another way, for example against the emulator from another language or from a separate repository, that is not visible here.",
+            deployed.join(", ")
+        );
+        for doubt in doubts {
+            message.push(' ');
+            message.push_str(doubt.sentence());
+        }
         vec![ArchViolation {
-            grade: ViolationGrade::Defect,
+            grade,
             rule_id: RULE_RULES_TESTS.to_string(),
             file: first.path.clone(),
             line: 0,
             object: None,
-            message: format!(
-                "This repository deploys security rules ({}) but has no rules tests: no package depends on `@firebase/rules-unit-testing`, the library Firebase provides to run rules against the emulator. If the rules are tested another way, for example against the emulator from another language or from a separate repository, that is not visible here.",
-                deployed.join(", ")
-            ),
+            message,
             severity: SEVERITY_MEDIUM,
         }]
     }

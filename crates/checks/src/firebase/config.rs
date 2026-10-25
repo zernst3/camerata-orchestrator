@@ -19,6 +19,41 @@ pub enum RulesKind {
     Rtdb,
 }
 
+/// Why an assessed rules file may not be the one that deploys. Findings from such a file are
+/// review-graded (held, not asserted) and carry the reason (owner call, 2026-10-25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Doubt {
+    /// It sits under an `examples`, `samples` or `docs` folder.
+    ExamplePath,
+    /// No `firebase.json` is in the repository to say what deploys.
+    NoFirebaseJson,
+    /// A `firebase.json` exists but does not reference it: it was found by its conventional name.
+    NotReferenced,
+}
+
+impl Doubt {
+    /// The sentence a finding about such a file ends with.
+    pub fn sentence(self) -> &'static str {
+        match self {
+            Doubt::ExamplePath => "This file is under an examples, samples or docs folder, so it may be illustrative rather than the ruleset that deploys.",
+            Doubt::NoFirebaseJson => "No `firebase.json` in this repository names this file, so it may not be the ruleset that deploys.",
+            Doubt::NotReferenced => "The `firebase.json` beside it does not reference this file, so it may not be the ruleset that deploys.",
+        }
+    }
+}
+
+/// Folders whose rules files are examples, not deployments.
+const EXAMPLE_FOLDERS: &[&str] = &["examples", "example", "samples", "sample", "docs"];
+
+/// Whether `path` sits under a folder named for examples (a directory segment, whole word).
+fn under_example_folder(path: &str) -> bool {
+    let mut segments: Vec<&str> = path.split('/').collect();
+    segments.pop();
+    segments
+        .iter()
+        .any(|s| EXAMPLE_FOLDERS.contains(&s.to_ascii_lowercase().as_str()))
+}
+
 /// One rules file that is assessed as deployed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssessedFile {
@@ -30,6 +65,8 @@ pub struct AssessedFile {
     pub firebase_json: Option<String>,
     /// The `firebase.json` beside it could not be read, so the deployed file is unconfirmed.
     pub config_unreadable: bool,
+    /// Why this file may not be the deployed one; empty when `firebase.json` names it.
+    pub doubts: Vec<Doubt>,
 }
 
 /// A rules file that carries a Firebase `service` header but is not the deployed one.
@@ -181,6 +218,7 @@ pub fn resolve(files: &[(String, String)]) -> FileSet {
                             label: None,
                             firebase_json: Some(config_path.to_string()),
                             config_unreadable: !readable,
+                            doubts: vec![Doubt::NotReferenced],
                         },
                     );
                 }
@@ -198,6 +236,7 @@ pub fn resolve(files: &[(String, String)]) -> FileSet {
                             label,
                             firebase_json: Some(config_path.to_string()),
                             config_unreadable: false,
+                            doubts: Vec::new(),
                         },
                     );
                 } else {
@@ -232,6 +271,7 @@ pub fn resolve(files: &[(String, String)]) -> FileSet {
                     label: None,
                     firebase_json: None,
                     config_unreadable: false,
+                    doubts: vec![Doubt::NoFirebaseJson],
                 },
             );
         }
@@ -253,6 +293,11 @@ pub fn resolve(files: &[(String, String)]) -> FileSet {
                 path: path.to_string(),
                 service,
             });
+        }
+    }
+    for file in &mut set.assessed {
+        if under_example_folder(&file.path) {
+            file.doubts.insert(0, Doubt::ExamplePath);
         }
     }
     set.assessed.sort_by(|a, b| a.path.cmp(&b.path));

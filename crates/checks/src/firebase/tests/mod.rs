@@ -8,6 +8,7 @@ mod limits;
 mod open;
 mod parse;
 mod project_rules;
+mod provenance;
 mod recursive_wildcard;
 mod rtdb;
 mod storage;

@@ -238,6 +238,7 @@ fn load(files: &[(String, String)], set: &FileSet) -> Loaded {
                     path: assessed.path.clone(),
                     label: assessed.label.clone(),
                     config_unreadable: assessed.config_unreadable,
+                    doubts: assessed.doubts.clone(),
                     parsed,
                 }),
                 Some(first) => {
@@ -255,6 +256,7 @@ fn load(files: &[(String, String)], set: &FileSet) -> Loaded {
                 path: assessed.path.clone(),
                 label: assessed.label.clone(),
                 config_unreadable: assessed.config_unreadable,
+                doubts: assessed.doubts.clone(),
                 service,
                 parsed,
             }),
