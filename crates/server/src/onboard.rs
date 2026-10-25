@@ -3306,6 +3306,15 @@ mod tests {
     }
 
     #[test]
+    fn has_code_ext_covers_rules_and_dart() {
+        assert!(has_code_ext("firestore.rules"));
+        assert!(has_code_ext("rules/firestore.prod.rules"));
+        assert!(has_code_ext("lib/main.dart"));
+        assert!(has_code_ext("lib/MAIN.DART"));
+        assert!(!has_code_ext("lib/rules"));
+    }
+
+    #[test]
     fn admissible_text_covers_code_plus_config_plus_dotfiles() {
         // Every has_code_ext path is still admissible.
         assert!(is_admissible_text("src/main.rs"));

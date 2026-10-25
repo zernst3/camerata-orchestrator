@@ -20,6 +20,7 @@ pub(crate) fn lang_for_ext(path: &str) -> Option<&'static str> {
         "rb" => "Ruby",
         "php" => "PHP",
         "swift" => "Swift",
+        "dart" => "Dart",
         "c" | "h" => "C",
         "cpp" => "C++",
         "sql" => "SQL",
@@ -810,6 +811,13 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lang_for_ext_maps_dart() {
+        assert_eq!(lang_for_ext("lib/main.dart"), Some("Dart"));
+        assert_eq!(lang_for_ext("lib/Main.DART"), Some("Dart"));
+        assert_eq!(lang_for_ext("firestore.rules"), None);
+    }
 
     /// A synthetic repo: `(path, content)` pairs, built the shape `detect_stack` consumes.
     fn files(pairs: &[(&str, &str)]) -> Vec<(String, String)> {

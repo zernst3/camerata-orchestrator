@@ -206,6 +206,25 @@ mod tests {
     }
 
     #[test]
+    fn count_reports_dart_as_a_language_and_rules_files_as_other() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        write(dir.path(), "lib/app.dart", "void main() {\n  run();\n}\n"); // 3
+        write(
+            dir.path(),
+            "firestore.rules",
+            "rules_version = '2';\nservice cloud.firestore {\n}\n\n// c\n",
+        ); // other, 4
+        let c = count_repo(dir.path()).unwrap();
+        let dart = c.languages.iter().find(|l| l.language == "Dart").unwrap();
+        assert_eq!((dart.files, dart.lines), (1, 3));
+        // fixture(): config.yaml 3 + .gitignore 2 + secret.env 1 (not a git tree, so counted),
+        // plus the 4 rules lines.
+        assert_eq!(c.other_lines, 3 + 2 + 1 + 4);
+        assert!(c.to_text().contains("Dart"));
+    }
+
+    #[test]
     fn json_has_the_documented_shape() {
         let dir = git_fixture();
         let v = serde_json::to_value(count_repo(dir.path()).unwrap()).unwrap();
