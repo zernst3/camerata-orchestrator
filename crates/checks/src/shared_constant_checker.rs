@@ -500,6 +500,7 @@ fn call_receiver(chain: &str) -> &str {
     let dot = chain.rfind('.');
     let path = chain.rfind("::");
     match (dot, path) {
+        // `p > d` and `p >= d` are the same: `d` indexes a `.` and `p` a `:`, so they never coincide.
         (Some(d), Some(p)) if p > d => &chain[..p],
         (Some(d), _) => &chain[..d],
         (None, Some(p)) => &chain[..p],
