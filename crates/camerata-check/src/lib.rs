@@ -250,7 +250,7 @@ pub fn run(opts: &Options) -> anyhow::Result<RunReport> {
         if !checker_applies(checker.as_ref(), &files) {
             continue;
         }
-        let advisory = checker.advisory_coexisting();
+        let advisory = checker.defects_need_review();
         projected.extend(
             checker
                 .check(&view)

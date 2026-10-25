@@ -149,6 +149,15 @@ pub trait ArchChecker: Send + Sync {
         false
     }
 
+    /// Whether a `Defect`-graded finding of this checker is to be read as needs-review by a CI
+    /// consumer (`camerata-check`). The default follows [`Self::advisory_coexisting`]: a checker
+    /// whose findings are advisory by the rule's own design is needs-review in CI. A checker can
+    /// keep its rule ids in the advisory prompt (for the judgment half of a rule) while its
+    /// `Defect` findings are still deterministic facts CI must fail on: it returns `false` here.
+    fn defects_need_review(&self) -> bool {
+        self.advisory_coexisting()
+    }
+
     /// Whether the Layer-2 write-time gate ([`crate::arch_check_runner::NativeArchCheckRunner`])
     /// may run this checker against an agent's worktree. The default is `true`. A checker that
     /// returns `false` is a SCAN and CI rule only: a violation there would bounce work that is
@@ -297,6 +306,7 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
         Box::new(crate::shared_constant_checker::SharedConstantChecker),
         Box::new(crate::dead_code_checker::DeadCodeChecker),
         Box::new(crate::react_hooks_lint_checker::ReactHooksLintChecker),
+        Box::new(crate::firebase::FirebaseRulesChecker::default()),
     ]
 }
 
