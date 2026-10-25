@@ -1,5 +1,5 @@
 id = "FIREBASE-APP-CHECK-1"
-version = 1
+version = 2
 title = "The app proves its own identity to the backend with App Check, initialised in the client and enforced on the backends that matter"
 domain = "firebase"
 layer = "platform"
@@ -9,7 +9,7 @@ inspectable = true
 max_severity = "low"
 default = true
 verification = "grounded"
-qualifies = "Advisory, absence based, held for the client at a low severity. One row per repository when a Firebase client initialisation exists (initializeApp from the client SDK, or Firebase.initializeApp in Flutter) and no App Check call appears anywhere outside tests (initializeAppCheck, FirebaseAppCheck.instance.activate, enforceAppCheck, request.app or context.app in a callable, X-Firebase-AppCheck, getAppCheck). A backend only repository is silent. Enforcement toggles for Firestore, Storage and Realtime Database live in the Firebase console and are invisible to a repository scan, so the finding says it reflects the repository and is held, never asserted. Withheld on a truncated scan, because the call it looks for may be in a dropped file. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+qualifies = "Advisory, absence based, held for the client at a low severity. One row per repository when a Firebase client initialisation exists (initializeApp from the client SDK, or Firebase.initializeApp in Flutter) and no App Check call appears anywhere outside tests (initializeAppCheck, FirebaseAppCheck.instance.activate, enforceAppCheck, request.app or context.app in a callable, X-Firebase-AppCheck, getAppCheck). A backend only repository is silent. Enforcement toggles for Firestore, Storage and Realtime Database live in the Firebase console and are invisible to a repository scan, so the finding says it reflects the repository and is held, never asserted. Withheld on a truncated scan, because the call it looks for may be in a dropped file."
 
 [[sources]]
 url = "https://firebase.google.com/docs/app-check"

@@ -1642,6 +1642,13 @@ After editing `.camerata/checks.toml`, regenerate the CI workflow by clicking th
 workflow** button in the Rules view (or calling `POST /api/projects/active/generate-ci-workflow`).
 The workflow is derived entirely from the manifest, so regenerating it is always safe to repeat.
 
+### `camerata-check --strict` and Firebase rules kept in the console
+
+`camerata-check --strict` fails when a Firebase project's security rules live only in the
+Firebase console (the repository holds no rules file the project deploys), because those rules
+are reported as not assessed and a strict gate must not pass on something it never checked. That
+is intended; commit the deployed rules file, or run without `--strict`.
+
 ---
 
 ## 15. Tool-version pinning and the drift error

@@ -1,5 +1,5 @@
 id = "FIREBASE-ADMIN-SDK-CLIENT-1"
-version = 1
+version = 2
 title = "The Firebase Admin SDK is imported only by server code, never by code that ships to a browser"
 domain = "firebase"
 layer = "platform"
@@ -11,7 +11,7 @@ max_severity = "high"
 min_severity = "high"
 default = true
 verification = "grounded"
-qualifies = "Structural over JavaScript and TypeScript files. An import of firebase-admin (or a firebase-admin subpath) that is not type only is reported when the file is browser bundled: its nearest package.json depends on a client bundler or single page framework (vite, react-scripts, @angular/core, vue, svelte, parcel, webpack with react) and on no server runtime (next, nuxt, @sveltejs/kit, astro, express, fastify, koa, hono, firebase-functions, remix, nest), or its first statement is the use client directive, or it sits under public, static or www. A fullstack framework keeps server and client code in one package, so for those only the directive flags a file. Type only imports, test files, declaration files and the Functions package are not reported. The service account key file itself is reported by the secrets check. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+qualifies = "Structural over JavaScript and TypeScript files. An import of firebase-admin (or a firebase-admin subpath) that is not type only is reported when the file is browser bundled: its nearest package.json depends on a client bundler or single page framework (vite, react-scripts, @angular/core, vue, svelte, parcel, webpack with react) and on no server runtime (next, nuxt, @sveltejs/kit, astro, express, fastify, koa, hono, firebase-functions, remix, nest), or its first statement is the use client directive, or it sits under public, static or www. A fullstack framework keeps server and client code in one package, so for those only the directive flags a file. Type only imports, test files, declaration files and the Functions package are not reported. A package's own top level scripts, script, tools, bin, server, api, functions, cli, seed, seeds, migrations and emulator folders run under Node and are not reported, nor are *.config.* files. When the only evidence is the package's bundler and the file is outside src/, the row is held for review rather than asserted. The service account key file itself is reported by the secrets check."
 
 [[sources]]
 url = "https://firebase.google.com/docs/admin/setup"

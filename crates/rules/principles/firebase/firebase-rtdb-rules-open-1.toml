@@ -1,5 +1,5 @@
 id = "FIREBASE-RTDB-RULES-OPEN-1"
-version = 1
+version = 2
 title = "No Realtime Database node is unconditionally readable or writable, and no child rule is shadowed by a broader grant"
 domain = "firebase"
 layer = "platform"
@@ -11,7 +11,7 @@ max_severity = "critical"
 min_severity = "medium"
 default = true
 verification = "grounded"
-qualifies = "Deterministic over the Realtime Database rules file the project deploys (database.rules.json, or the file firebase.json names). A node that sets .write to true is asserted: critical at the root, high on a named node (a public counter or presence node is still writable by anyone, and the finding names the node). A .read of true at the root is asserted as high; on a named node it is held for the client and silent under a public word. Because .read and .write cascade and a shallower grant takes precedence, a child that sets false under an ancestor that grants true or signed in only access is reported as having no effect, one row per shadowed node, quoting both lines. The signed in only forms are reported by the signed in only rule. The .validate and .indexOn keys never grant and are ignored. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+qualifies = "Deterministic over the Realtime Database rules file the project deploys (database.rules.json, or the file firebase.json names). A node that sets .write to true is asserted: critical at the root, high on a named node (a public counter or presence node is still writable by anyone, and the finding names the node). A .read of true at the root is asserted as high; on a named node it is held for the client and silent under a public word. Because .read and .write cascade and a shallower grant takes precedence, a child that sets false under an ancestor that grants true or signed in only access is reported as having no effect, one row per shadowed node, quoting both lines. The signed in only forms are reported by the signed in only rule. The .validate and .indexOn keys never grant and are ignored. A rules file that firebase.json does not name (found only by its conventional name, or in a repository with no firebase.json) or that sits under an examples, example, samples, sample or docs folder is held for review with the reason stated, never asserted, and a critical severity is lowered to high. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
 
 [[sources]]
 url = "https://firebase.google.com/docs/rules/insecure-rules"

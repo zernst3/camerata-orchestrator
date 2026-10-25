@@ -1,5 +1,5 @@
 id = "FIREBASE-RULES-RECURSIVE-WILDCARD-1"
-version = 1
+version = 2
 title = "A broad wildcard grant does not override the narrower rules written beneath it"
 domain = "firebase"
 layer = "platform"
@@ -11,7 +11,7 @@ max_severity = "critical"
 min_severity = "medium"
 default = true
 verification = "grounded"
-qualifies = "Deterministic over Firestore and Storage rules the project deploys. A match block with a recursive wildcard (match /{document=**}, or a wildcard in the middle of a path) carrying an allow that is unconditional, signed in only or the test mode scaffold, while the same file has narrower match blocks under that path with stricter conditions on overlapping methods, is reported once, at the grade and severity of the broad grant, with every overridden line listed. This is the single owner of the fact: the open, test mode and signed in rules do not report the same allow again. A recursive wildcard locked with if false, an admin override with a claims condition, and a wildcard with no narrower rules (reported by the open rule) are not reported. In the first rules version a recursive wildcard matches one or more segments, in the second zero or more. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+qualifies = "Deterministic over Firestore and Storage rules the project deploys. A match block with a recursive wildcard (match /{document=**}, or a wildcard in the middle of a path) carrying an allow that is unconditional, signed in only or the test mode scaffold, while the same file has narrower match blocks under that path with stricter conditions on overlapping methods, is reported once, at the grade and severity of the broad grant, with every overridden line listed. This is the single owner of the fact: the open, test mode and signed in rules do not report the same allow again. A recursive wildcard locked with if false, an admin override with a claims condition, and a wildcard with no narrower rules (reported by the open rule) are not reported. In the first rules version a recursive wildcard matches one or more segments, in the second zero or more. A rules file that firebase.json does not name (found only by its conventional name, or in a repository with no firebase.json) or that sits under an examples, example, samples, sample or docs folder is held for review with the reason stated, never asserted, and a critical severity is lowered to high. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
 
 [[sources]]
 url = "https://firebase.google.com/docs/firestore/security/rules-structure"

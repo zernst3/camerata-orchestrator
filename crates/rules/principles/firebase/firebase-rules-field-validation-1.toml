@@ -1,5 +1,5 @@
 id = "FIREBASE-RULES-FIELD-VALIDATION-1"
-version = 1
+version = 2
 title = "Write rules constrain which fields and types a document may contain"
 domain = "firebase"
 layer = "platform"
@@ -10,7 +10,7 @@ cwe = ["CWE-915"]
 max_severity = "low"
 default = true
 verification = "grounded"
-qualifies = "The edge is deterministic and review graded; which fields matter is judged by the semantic pass. A Firestore allow for create, update or write whose condition is not an unconditional or signed in only grant (those belong to their own rules) and never reads the incoming document (request.resource.data) is reported once per match block, as a held finding at a low severity: nothing in the rule constrains the fields or types written. Any reference to the incoming document, even a single type check, makes the block silent, because partial validation is a judgment and not a fact. A write once log whose validation lives in a Cloud Function is still reported and is covered by the held wording. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+qualifies = "The edge is deterministic and review graded; which fields matter is judged by the semantic pass. A Firestore allow for create, update or write whose condition is not an unconditional or signed in only grant (those belong to their own rules) and never reads the incoming document (request.resource.data) is reported once per match block, as a held finding at a low severity: nothing in the rule constrains the fields or types written. Any reference to the incoming document, even a single type check, makes the block silent, because partial validation is a judgment and not a fact. A write gated by a custom claim (request.auth.token.<claim>) or a document lookup (get, getAfter, exists, existsAfter) is a role check and is silent too. A write once log whose validation lives in a Cloud Function is still reported and is covered by the held wording. A rules file that firebase.json does not name (found only by its conventional name, or in a repository with no firebase.json) or that sits under an examples, example, samples, sample or docs folder is held for review with the reason stated, never asserted, and a critical severity is lowered to high. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
 
 [[sources]]
 url = "https://firebase.google.com/docs/firestore/security/rules-fields"

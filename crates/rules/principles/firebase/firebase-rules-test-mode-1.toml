@@ -1,5 +1,5 @@
 id = "FIREBASE-RULES-TEST-MODE-1"
-version = 1
+version = 2
 title = "No deployed rule is the test mode scaffold that lets anyone read and write until a fixed date"
 domain = "firebase"
 layer = "platform"
@@ -10,7 +10,7 @@ max_severity = "critical"
 min_severity = "medium"
 default = true
 verification = "grounded"
-qualifies = "Deterministic over the Firestore and Storage rules files the project deploys. An allow whose condition is the console's test mode scaffold, request.time < timestamp.date(Y, M, D) or the timestamp.value form, alone or as one alternative, is reported. A date that has not passed is asserted (critical at the root wildcard, high elsewhere): the template says anyone with the database reference can view, edit and delete all data until then. A date that has passed is held for the client: as written every client request is now denied, which means either the app is down or the rules running in the console are not the rules in the repository, and the repository cannot say which. A time clause with other conditions, a greater than embargo, and a date built from variables are not the scaffold and are not reported. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+qualifies = "Deterministic over the Firestore and Storage rules files the project deploys. An allow whose condition is the console's test mode scaffold, request.time < timestamp.date(Y, M, D) or the timestamp.value form, alone or as one alternative, is reported. A date that has not passed is asserted (critical at the root wildcard, high elsewhere): the template says anyone with the database reference can view, edit and delete all data until then. A date that has passed is held for the client: as written every client request is now denied, which means either the app is down or the rules running in the console are not the rules in the repository, and the repository cannot say which. A time clause with other conditions, a greater than embargo, and a date built from variables are not the scaffold and are not reported. A rules file that firebase.json does not name (found only by its conventional name, or in a repository with no firebase.json) or that sits under an examples, example, samples, sample or docs folder is held for review with the reason stated, never asserted, and a critical severity is lowered to high. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
 
 [[sources]]
 url = "https://github.com/firebase/firebase-tools/blob/master/templates/init/firestore/firestore.rules"

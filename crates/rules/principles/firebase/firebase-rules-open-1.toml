@@ -1,5 +1,5 @@
 id = "FIREBASE-RULES-OPEN-1"
-version = 1
+version = 2
 title = "Firestore rules grant no unconditional access to private data: an allow with an always true condition appears only on paths whose contents are meant to be public"
 domain = "firebase"
 layer = "platform"
@@ -11,7 +11,7 @@ max_severity = "critical"
 min_severity = "medium"
 default = true
 verification = "grounded"
-qualifies = "Deterministic over the Firestore rules file the project deploys (the file firebase.json names, or the conventional firestore.rules beside it; draft, dev and test rules files are reported as not assessed, never as defects). An allow whose condition is always true (no if clause, if true, or a condition with a true alternative such as request.auth != null || true) is reported. A write side grant (write, update, delete) is asserted as high, critical at the root wildcard that covers every document, and a create only grant as medium. A read grant at the root is asserted as high. A read grant on a named path has a legitimate reading (public content), so it is held for the client to confirm rather than asserted, and it is silent on paths that contain a public word (public, published, static, assets, catalog, faq, announcements, changelog, legal, locales). An if false rule is a lock, not a grant. A condition this check does not recognise exactly is never reported. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+qualifies = "Deterministic over the Firestore rules file the project deploys (the file firebase.json names; the conventional firestore.rules beside a firebase.json that does not name it is held for review; draft, dev and test rules files are reported as not assessed, never as defects). An allow whose condition is always true (no if clause, if true, or a condition with a true alternative such as request.auth != null || true) is reported. A write side grant (write, update, delete) is asserted as high, critical at the root wildcard that covers every document, and a create only grant as medium. A read grant at the root is asserted as high. A read grant on a named path has a legitimate reading (public content), so it is held for the client to confirm rather than asserted, and it is silent on paths that contain a public word (public, published, static, assets, catalog, faq, announcements, changelog, legal, locales). An if false rule is a lock, not a grant. A condition this check does not recognise exactly is never reported. A rules file that firebase.json does not name (found only by its conventional name, or in a repository with no firebase.json) or that sits under an examples, example, samples, sample or docs folder is held for review with the reason stated, never asserted, and a critical severity is lowered to high. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
 
 [[sources]]
 url = "https://firebase.google.com/docs/rules/insecure-rules"

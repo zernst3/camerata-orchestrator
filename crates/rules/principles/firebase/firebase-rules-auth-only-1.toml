@@ -1,5 +1,5 @@
 id = "FIREBASE-RULES-AUTH-ONLY-1"
-version = 1
+version = 2
 title = "No rule grants access on the sole condition that the caller is signed in, except to data that every signed in user is meant to share"
 domain = "firebase"
 layer = "platform"
@@ -11,7 +11,7 @@ max_severity = "high"
 min_severity = "medium"
 default = true
 verification = "grounded"
-qualifies = "Deterministic over Firestore and Realtime Database rules the project deploys (Storage rules are reported by the Storage rule). A condition that is exactly the signed in check (request.auth != null and its spelled out equivalents, or auth != null in Realtime Database) is reported; any extra condition, such as a verified email or a membership lookup, makes it narrower and is not reported, and helper functions are expanded before the check. A grant at the root is asserted as high, a write side grant on a named path is asserted as high, and a read on a named path is held, because shared data among signed in users is a legitimate design. Paths with a public word are silent for reads. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+qualifies = "Deterministic over Firestore and Realtime Database rules the project deploys (Storage rules are reported by the Storage rule). A condition that is exactly the signed in check (request.auth != null and its spelled out equivalents, or auth != null in Realtime Database) is reported; any extra condition, such as a verified email or a membership lookup, makes it narrower and is not reported, and helper functions are expanded before the check. A grant at the root is asserted as high, a write side grant on a named path is asserted as high, and a read on a named path is held, because shared data among signed in users is a legitimate design. Paths with a public word are silent for reads, and a signed in only write there is held at medium (Firebase's own Storage example lets any signed in user write to its public folder). A rules file that firebase.json does not name (found only by its conventional name, or in a repository with no firebase.json) or that sits under an examples, example, samples, sample or docs folder is held for review with the reason stated, never asserted, and a critical severity is lowered to high. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
 
 [[sources]]
 url = "https://firebase.google.com/docs/rules/insecure-rules"

@@ -1,5 +1,5 @@
 id = "FIREBASE-FUNCTIONS-AUTH-1"
-version = 1
+version = 2
 title = "HTTP functions verify the caller's token and callable functions check the caller's auth before privileged work"
 domain = "firebase"
 layer = "platform"
@@ -11,7 +11,7 @@ max_severity = "high"
 min_severity = "medium"
 default = true
 verification = "grounded"
-qualifies = "Structural, review graded, over JavaScript and TypeScript Cloud Functions (Python functions are reported as not assessed). An exported HTTP function (onRequest) is reported when nothing in its package verifies a Firebase ID token or App Check token (verifyIdToken, verifySessionCookie, verifyToken) and the handler writes with the Admin SDK, which bypasses security rules. A callable (onCall) is reported when it never reads request.auth (or context.auth), calls no authentication helper and is not wrapped by one, and either writes with the Admin SDK or builds a document path from the caller's input. It is held, never asserted, because public HTTP endpoints and public callables are legitimate. Webhooks (a module that checks a signature), functions named like health checks or callbacks, functions with a private invoker, read only functions and scheduled or database triggers are not reported. Per route verification inside an Express app is not traced: one verification anywhere in the package silences the rule. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+qualifies = "Structural, review graded, over JavaScript and TypeScript Cloud Functions (Python functions are reported as not assessed). An exported HTTP function (onRequest) is reported when nothing in its package verifies a Firebase ID token or App Check token (verifyIdToken, verifySessionCookie, verifyToken) and the handler writes with the Admin SDK, which bypasses security rules. A callable (onCall) is reported when it never reads request.auth (or context.auth), calls no authentication helper and is not wrapped by one, and either writes with the Admin SDK or builds a document path from the caller's input. It is held, never asserted, because public HTTP endpoints and public callables are legitimate. Webhooks (a module that checks a signature: Stripe constructEvent, Svix, an HMAC, or Twilio's validateRequest and X-Twilio-Signature header), functions named like health checks or callbacks, functions with a private invoker, read only functions and scheduled or database triggers are not reported. Per route verification inside an Express app is not traced: one verification anywhere in the package silences the rule."
 
 [[sources]]
 url = "https://firebase.google.com/docs/auth/admin/verify-id-tokens"

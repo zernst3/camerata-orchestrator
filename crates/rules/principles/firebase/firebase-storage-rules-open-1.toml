@@ -1,5 +1,5 @@
 id = "FIREBASE-STORAGE-RULES-OPEN-1"
-version = 1
+version = 2
 title = "Storage rules let only the owner or an authorised role read and write private files, and public files sit under an explicit public path"
 domain = "firebase"
 layer = "platform"
@@ -11,7 +11,7 @@ max_severity = "critical"
 min_severity = "medium"
 default = true
 verification = "grounded"
-qualifies = "Deterministic over the Cloud Storage rules file the project deploys (service firebase.storage, and the legacy cloud.storage header). An unconditional or signed in only grant on the write side (write, create, update, delete) is asserted as high, critical at the root wildcard for an unconditional grant. An unconditional read at the root is asserted as high; on a named folder it is held for the client, since the docs' own mixed public and private example uses an unconditional read for files meant to be public, and it is silent under public, static and assets folders. A signed in only read at the root is asserted as medium and on a named folder it is held. Conditions on resource.metadata, resource.size or request.resource.contentType are not recognised and are silent. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+qualifies = "Deterministic over the Cloud Storage rules file the project deploys (service firebase.storage, and the legacy cloud.storage header). An unconditional or signed in only grant on the write side (write, create, update, delete) is asserted as high, critical at the root wildcard for an unconditional grant. An unconditional read at the root is asserted as high; on a named folder it is held for the client, since the docs' own mixed public and private example uses an unconditional read for files meant to be public, and it is silent under public, static and assets folders. A signed in only read at the root is asserted as medium and on a named folder it is held. A signed in only write under a public, static or assets folder is held at medium rather than asserted. Conditions on resource.metadata, resource.size or request.resource.contentType are not recognised and are silent. A rules file that firebase.json does not name (found only by its conventional name, or in a repository with no firebase.json) or that sits under an examples, example, samples, sample or docs folder is held for review with the reason stated, never asserted, and a critical severity is lowered to high. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
 # This is the class of the July 2025 Tea app exposure (verification selfies and ID photos in an unsecured Cloud Storage bucket, reported by The Record and others). Context for the reader, not a source.
 
 [[sources]]
