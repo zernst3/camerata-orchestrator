@@ -12,7 +12,9 @@
 //! - [`rtdb`]: Realtime Database rules JSON, with `.read`/`.write` cascade.
 //! - [`config`]: which files are assessed as the deployed rules (`firebase.json` resolution).
 //! - [`grants`]: the shared per-`allow` model, path helpers and message plumbing.
-//! - [`grant_rules`]: rules 1, 2, 3 and 6 (open, test mode, auth only, recursive wildcard).
+//! - [`grant_rules`]: rules 1, 2, 3, 6 and 7 (open, test mode, auth only, recursive wildcard,
+//!   Storage).
+//! - [`rtdb_rules`]: rule 8 and the Realtime Database half of rule 3.
 //! - [`rules_checker`]: [`rules_checker::FirebaseRulesChecker`], which runs the rules-file rules
 //!   and owns the degradation contract.
 //!
@@ -26,6 +28,7 @@ pub mod grant_rules;
 pub mod grants;
 pub mod json_lite;
 pub mod rtdb;
+pub mod rtdb_rules;
 pub mod rules_checker;
 pub mod rules_model;
 pub mod rules_parse;

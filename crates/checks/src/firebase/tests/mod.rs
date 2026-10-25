@@ -5,6 +5,8 @@ mod checker;
 mod open;
 mod parse;
 mod recursive_wildcard;
+mod rtdb;
+mod storage;
 mod test_mode;
 
 use chrono::NaiveDate;
@@ -89,4 +91,15 @@ pub(crate) fn findings(all: &[ArchViolation]) -> Vec<&ArchViolation> {
     all.iter()
         .filter(|v| v.grade != ViolationGrade::NotAssessed)
         .collect()
+}
+
+/// A repository whose `firebase.json` names `database.rules.json`, holding `json`.
+pub(crate) fn rtdb(json: &str) -> Vec<(String, String)> {
+    files(&[
+        (
+            "firebase.json",
+            r#"{ "database": { "rules": "database.rules.json" } }"#,
+        ),
+        ("database.rules.json", json),
+    ])
 }

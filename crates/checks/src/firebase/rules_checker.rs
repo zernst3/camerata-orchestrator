@@ -17,8 +17,13 @@ use chrono::NaiveDate;
 use super::config::{resolve, AssessedFile, FileSet, RulesKind};
 use super::grant_rules::{self, Owned};
 use super::grants::{sites, LoadedRules};
+use super::rtdb::parse_rtdb;
+use super::rtdb_rules::{self, LoadedRtdb};
 use super::rules_parse::{parse_rules, RulesFile, Service};
-use super::{RULE_AUTH_ONLY, RULE_OPEN, RULE_RECURSIVE_WILDCARD, RULE_TEST_MODE};
+use super::{
+    RULE_AUTH_ONLY, RULE_OPEN, RULE_RECURSIVE_WILDCARD, RULE_RTDB_OPEN, RULE_STORAGE_OPEN,
+    RULE_TEST_MODE,
+};
 use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_INFO};
 
 /// Every rule id this checker answers. Kept in step with the rules landed in this module.
@@ -27,6 +32,8 @@ const RULE_IDS: &[&str] = &[
     RULE_TEST_MODE,
     RULE_AUTH_ONLY,
     RULE_RECURSIVE_WILDCARD,
+    RULE_STORAGE_OPEN,
+    RULE_RTDB_OPEN,
 ];
 
 /// Path globs the checker needs to see: rules files, the project config, and any `.json` (a
@@ -66,10 +73,10 @@ impl ArchChecker for FirebaseRulesChecker {
     fn check(&self, repo: &RepoView<'_>) -> Vec<ArchViolation> {
         let set = resolve(repo.files);
         let mut out = coverage_rows(&set);
-        let (loaded, mut degraded) = load(repo.files, &set);
-        out.append(&mut degraded);
+        let mut loaded = load(repo.files, &set);
+        out.append(&mut loaded.rows);
 
-        let all_sites: Vec<_> = loaded.iter().flat_map(sites).collect();
+        let all_sites: Vec<_> = loaded.rules.iter().flat_map(sites).collect();
         let today = self.today();
         let (mut wildcard, owned): (Vec<ArchViolation>, Owned) =
             grant_rules::recursive_wildcard(&all_sites, today);
@@ -77,6 +84,10 @@ impl ArchChecker for FirebaseRulesChecker {
         out.append(&mut grant_rules::open(&all_sites, &owned));
         out.append(&mut grant_rules::test_mode(&all_sites, &owned, today));
         out.append(&mut grant_rules::auth_only(&all_sites, &owned));
+        out.append(&mut grant_rules::storage(&all_sites, &owned));
+        for rtdb in &loaded.rtdb {
+            out.append(&mut rtdb_rules::check(rtdb));
+        }
 
         out.sort_by(|a, b| {
             (&a.file, a.line, &a.rule_id, &a.message)
@@ -100,17 +111,9 @@ impl ArchChecker for FirebaseRulesChecker {
     /// checker cannot answer for it and must not be credited as having run clean.
     fn config_unsatisfied_for(&self, repo: &RepoView<'_>) -> bool {
         let set = resolve(repo.files);
-        let (loaded, _) = load(repo.files, &set);
-        loaded.is_empty() && !has_readable_rtdb(repo.files, &set)
+        let loaded = load(repo.files, &set);
+        loaded.rules.is_empty() && loaded.rtdb.is_empty()
     }
-}
-
-fn has_readable_rtdb(files: &[(String, String)], set: &FileSet) -> bool {
-    set.assessed
-        .iter()
-        .filter(|a| a.kind == RulesKind::Rtdb)
-        .filter_map(|a| files.iter().find(|(p, _)| *p == a.path))
-        .any(|(_, content)| !super::rtdb::parse_rtdb(content).is_degraded())
 }
 
 /// A NOT ASSESSED row.
@@ -180,31 +183,58 @@ fn coverage_rows(set: &FileSet) -> Vec<ArchViolation> {
     rows
 }
 
-/// Read every assessed Firestore / Storage file. Files the reader fully understood are returned;
-/// every other one becomes a NOT ASSESSED row.
-fn load(files: &[(String, String)], set: &FileSet) -> (Vec<LoadedRules>, Vec<ArchViolation>) {
-    let mut loaded = Vec::new();
-    let mut rows = Vec::new();
+/// The assessed files that read cleanly, and one NOT ASSESSED row for every one that did not.
+struct Loaded {
+    rules: Vec<LoadedRules>,
+    rtdb: Vec<LoadedRtdb>,
+    rows: Vec<ArchViolation>,
+}
+
+/// Read every assessed file. Files the reader fully understood are returned; every other one
+/// becomes a NOT ASSESSED row.
+fn load(files: &[(String, String)], set: &FileSet) -> Loaded {
+    let mut loaded = Loaded {
+        rules: Vec::new(),
+        rtdb: Vec::new(),
+        rows: Vec::new(),
+    };
     for assessed in &set.assessed {
-        if assessed.kind == RulesKind::Rtdb {
-            continue;
-        }
         let Some((_, content)) = files.iter().find(|(p, _)| *p == assessed.path) else {
             continue;
         };
+        if assessed.kind == RulesKind::Rtdb {
+            let parsed = parse_rtdb(content);
+            match parsed.errors.first() {
+                None => loaded.rtdb.push(LoadedRtdb {
+                    path: assessed.path.clone(),
+                    label: assessed.label.clone(),
+                    config_unreadable: assessed.config_unreadable,
+                    parsed,
+                }),
+                Some(first) => {
+                    let (line, what) = (first.line, first.what.clone());
+                    loaded
+                        .rows
+                        .push(unreadable_row(assessed, line, &what, RULE_RTDB_OPEN));
+                }
+            }
+            continue;
+        }
         let parsed = parse_rules(content);
         match readable(&parsed) {
-            Ok(service) => loaded.push(LoadedRules {
+            Ok(service) => loaded.rules.push(LoadedRules {
                 path: assessed.path.clone(),
                 label: assessed.label.clone(),
                 config_unreadable: assessed.config_unreadable,
                 service,
                 parsed,
             }),
-            Err((line, what)) => rows.push(unreadable_row(assessed, line, &what)),
+            Err((line, what)) => loaded
+                .rows
+                .push(unreadable_row(assessed, line, &what, RULE_OPEN)),
         }
     }
-    (loaded, rows)
+    loaded
 }
 
 /// The service when the file was fully understood, else the first problem.
@@ -222,13 +252,23 @@ fn readable(parsed: &RulesFile) -> Result<Service, (usize, String)> {
     }
 }
 
-fn unreadable_row(file: &AssessedFile, line: usize, what: &str) -> ArchViolation {
+fn unreadable_row(
+    file: &AssessedFile,
+    line: usize,
+    what: &str,
+    rule: &'static str,
+) -> ArchViolation {
+    let kind = if file.kind == RulesKind::Rtdb {
+        "Realtime Database rules"
+    } else {
+        "Firebase rules file"
+    };
     not_assessed(
-        RULE_OPEN,
+        rule,
         &file.path,
         line,
         format!(
-            "`{}` could not be read as a Firebase rules file (line {line}: {what}), so the Firebase rules checks were not run on it.",
+            "`{}` could not be read as a {kind} (line {line}: {what}), so the Firebase rules checks were not run on it.",
             file.path
         ),
     )

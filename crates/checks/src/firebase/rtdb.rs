@@ -31,6 +31,8 @@ impl Key {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RtdbRule {
     pub cond: Cond,
+    /// The value as written: `true`, `false` or the expression string.
+    pub raw: String,
     pub line: usize,
 }
 
@@ -161,8 +163,11 @@ fn fill(node: &mut RtdbNode, value: &Json, errors: &mut Vec<ParseError>, depth: 
         match member.key.as_str() {
             ".read" | ".write" => {
                 let cond = match &member.value {
-                    Json::Bool(b) => Some(Cond::rtdb(if *b { "true" } else { "false" })),
-                    Json::Str(s) => Some(Cond::rtdb(s)),
+                    Json::Bool(b) => {
+                        let raw = if *b { "true" } else { "false" };
+                        Some((Cond::rtdb(raw), raw.to_string()))
+                    }
+                    Json::Str(s) => Some((Cond::rtdb(s), s.clone())),
                     _ => {
                         errors.push(ParseError {
                             line: member.line,
@@ -171,9 +176,10 @@ fn fill(node: &mut RtdbNode, value: &Json, errors: &mut Vec<ParseError>, depth: 
                         None
                     }
                 };
-                if let Some(cond) = cond {
+                if let Some((cond, raw)) = cond {
                     let rule = RtdbRule {
                         cond,
+                        raw,
                         line: member.line,
                     };
                     if member.key == ".read" {

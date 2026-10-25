@@ -1,4 +1,5 @@
-//! The Firestore grant rules: OPEN (1), TEST-MODE (2), AUTH-ONLY (3) and RECURSIVE-WILDCARD (6).
+//! The grant rules: OPEN (1), TEST-MODE (2), AUTH-ONLY (3), RECURSIVE-WILDCARD (6) and the
+//! Storage grants (7).
 //!
 //! All four read the same `allow` sites. They are separate rules because each states a different
 //! fact, but one allow must never be reported twice: **G7**, one owner per fact. When
@@ -13,7 +14,9 @@ use super::grants::{
     changes_data, covers, creates, finding, join_words, long_date, overlap, reads, severity_rank,
     short_phrase, verbs, write_verbs, Grant, Site,
 };
-use super::{RULE_AUTH_ONLY, RULE_OPEN, RULE_RECURSIVE_WILDCARD, RULE_TEST_MODE};
+use super::{
+    RULE_AUTH_ONLY, RULE_OPEN, RULE_RECURSIVE_WILDCARD, RULE_STORAGE_OPEN, RULE_TEST_MODE,
+};
 use crate::arch_checker::{
     ArchViolation, ViolationGrade, SEVERITY_CRITICAL, SEVERITY_HIGH, SEVERITY_MEDIUM,
 };
@@ -41,21 +44,28 @@ fn scope_phrase(site: &Site<'_>) -> String {
 }
 
 /// What a site grants on the write side and on the read side, as `(severity, grade)`.
-struct Facts {
-    write: Option<&'static str>,
-    read: Option<(&'static str, ViolationGrade)>,
+pub(crate) struct Facts {
+    pub write: Option<&'static str>,
+    pub read: Option<(&'static str, ViolationGrade)>,
 }
 
 /// Which breadth of grant a finding reports.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Breadth {
+pub(crate) enum Breadth {
     Open,
     AuthOnly,
 }
 
-fn facts(site: &Site<'_>, breadth: Breadth) -> Facts {
+/// The write-side and read-side facts of a site, by service.
+///
+/// Firestore: a write that changes or deletes data is high (critical at the root when open); an
+/// open create alone is medium (an anonymous submission box is a real pattern that still needs
+/// validation). Storage: an upload is itself a write of a file anyone can then fetch, so create
+/// counts with the rest. Reads: root grants are asserted, named paths are held for review (G9, G10).
+pub(crate) fn facts(site: &Site<'_>, breadth: Breadth) -> Facts {
     let m = &site.allow.methods;
-    let write = if changes_data(m) {
+    let storage = site.file.service == Service::Storage;
+    let write = if changes_data(m) || (storage && creates(m)) {
         Some(match (breadth, site.root) {
             (Breadth::Open, true) => SEVERITY_CRITICAL,
             _ => SEVERITY_HIGH,
@@ -68,7 +78,14 @@ fn facts(site: &Site<'_>, breadth: Breadth) -> Facts {
     let read = if !reads(m) {
         None
     } else if site.root {
-        Some((SEVERITY_HIGH, ViolationGrade::Defect))
+        // Storage auth-only at the root is the shape of the old default: every file, but the
+        // exposure is to account holders, one step below open.
+        let severity = if storage && breadth == Breadth::AuthOnly {
+            SEVERITY_MEDIUM
+        } else {
+            SEVERITY_HIGH
+        };
+        Some((severity, ViolationGrade::Defect))
     } else if site.public {
         None
     } else {
@@ -103,58 +120,132 @@ fn covering_write_rank(site: &Site<'_>, all: &[Site<'_>], breadth: Breadth) -> u
         .unwrap_or(0)
 }
 
-/// Rules 1 and 3 over the Firestore sites: OPEN and AUTH-ONLY.
-fn breadth_rule(sites: &[Site<'_>], owned: &Owned, breadth: Breadth) -> Vec<ArchViolation> {
-    let (rule, wanted) = match breadth {
-        Breadth::Open => (RULE_OPEN, Grant::Open),
-        Breadth::AuthOnly => (RULE_AUTH_ONLY, Grant::AuthOnly),
+/// The wording inputs shared by the write and read sentences of one site.
+struct Words {
+    where_: String,
+    allow: String,
+    scope: String,
+    path: String,
+}
+
+/// The sentence for a grant's write side. `merged` folds the read verb into the list.
+fn write_body(site: &Site<'_>, breadth: Breadth, w: &Words, merged: bool) -> String {
+    let m = &site.allow.methods;
+    let (where_, allow, scope) = (&w.where_, &w.allow, &w.scope);
+    let storage = site.file.service == Service::Storage;
+    match (storage, breadth) {
+        (false, Breadth::Open) => {
+            let v = if merged {
+                verbs(m, "and")
+            } else {
+                write_verbs(m, "and")
+            };
+            format!("{where_} allows anyone on the internet, signed in or not, to {v} {scope} (`{allow}`).")
+        }
+        (false, Breadth::AuthOnly) if site.root => {
+            let what = short_phrase(m);
+            format!("{where_} lets any signed-in user {what} {scope} (`{allow}`). Anyone who can create an account, including with anonymous or email sign-in, has full access to all users' data.")
+        }
+        (false, Breadth::AuthOnly) => {
+            let v = if merged {
+                verbs(m, "or")
+            } else {
+                write_verbs(m, "or")
+            };
+            format!("{where_} lets any signed-in user {v} any document under `{}`, not only their own (`{allow}`).", w.path)
+        }
+        (true, Breadth::Open) => {
+            let v = storage_verbs(m, merged, "and");
+            format!("{where_} allows anyone on the internet, signed in or not, to {v} {scope} (`{allow}`).")
+        }
+        (true, Breadth::AuthOnly) => {
+            let v = storage_verbs(m, merged, "or");
+            format!(
+                "{where_} lets any signed-in user {v} any file {}, not only their own (`{allow}`).",
+                if site.root {
+                    "in the bucket".to_string()
+                } else {
+                    format!("under `{}`", w.path)
+                }
+            )
+        }
+    }
+}
+
+/// Storage names the write verbs by what a client does to a file: upload, replace, delete.
+fn storage_verbs(
+    methods: &BTreeSet<crate::firebase::rules_parse::Method>,
+    with_read: bool,
+    joiner: &str,
+) -> String {
+    use crate::firebase::rules_parse::Method;
+    let e = super::grants::expand(methods);
+    let mut v = Vec::new();
+    if with_read && (e.contains(&Method::Get) || e.contains(&Method::List)) {
+        v.push("read");
+    }
+    if e.contains(&Method::Create) {
+        v.push("upload");
+    }
+    if e.contains(&Method::Update) {
+        v.push("replace");
+    }
+    if e.contains(&Method::Delete) {
+        v.push("delete");
+    }
+    join_words(&v, joiner)
+}
+
+/// The sentence for a grant's read side.
+fn read_body(site: &Site<'_>, breadth: Breadth, w: &Words) -> String {
+    let (where_, allow, scope, path) = (&w.where_, &w.allow, &w.scope, &w.path);
+    let storage = site.file.service == Service::Storage;
+    match (storage, breadth, site.root) {
+        (false, Breadth::Open, true) => format!("{where_} allows anyone to read {scope} (`{allow}`)."),
+        (false, Breadth::Open, false) => format!("{where_} allows anyone, signed in or not, to read {scope} (`{allow}`). If `{path}` is meant to be public, no change is needed; if it holds email addresses, phone numbers or anything a user expects to be private, scope the read to the owner."),
+        (false, Breadth::AuthOnly, true) => format!("{where_} lets any signed-in user read {scope} (`{allow}`). Anyone who can create an account, including with anonymous or email sign-in, can read all users' data."),
+        (false, Breadth::AuthOnly, false) => format!("{where_} lets any signed-in user read {scope} (`{allow}`). If this collection is shared among all users by design, no change is needed; if it holds per-user data, scope reads to the owner."),
+        (true, Breadth::Open, _) => format!("{where_} lets anyone with the URL read {scope} (`{allow}`). Verification photos, identity documents and private uploads must not be readable this way; public assets belong under an explicit public folder with its own rule."),
+        (true, Breadth::AuthOnly, true) => format!("{where_} lets any signed-in user read {scope} (`{allow}`). Anyone who can create an account, including with anonymous or email sign-in, can fetch every uploaded file."),
+        (true, Breadth::AuthOnly, false) => format!("{where_} lets signed-in users read {scope} (`{allow}`). If this folder is shared among all users by design, no change is needed; if it holds per-user files, scope reads to the owner."),
+    }
+}
+
+/// OPEN and AUTH-ONLY for one service: rules 1 and 3 over Firestore, rule 7 over Storage.
+fn breadth_rule(
+    sites: &[Site<'_>],
+    owned: &Owned,
+    breadth: Breadth,
+    service: &Service,
+) -> Vec<ArchViolation> {
+    let wanted = match breadth {
+        Breadth::Open => Grant::Open,
+        Breadth::AuthOnly => Grant::AuthOnly,
+    };
+    let rule = match (service, breadth) {
+        (Service::Storage, _) => RULE_STORAGE_OPEN,
+        (_, Breadth::Open) => RULE_OPEN,
+        (_, Breadth::AuthOnly) => RULE_AUTH_ONLY,
     };
     let mut out = Vec::new();
     for site in sites {
-        if site.grant != wanted || site.file.service != Service::Firestore || is_owned(owned, site)
-        {
+        if site.grant != wanted || &site.file.service != service || is_owned(owned, site) {
             continue;
         }
         let f = facts(site, breadth);
         let object = Some(site.display_path());
-        let where_ = site.whereabouts(site.allow.line);
-        let allow = site.allow_text();
-        let scope = scope_phrase(site);
+        let words = Words {
+            where_: site.whereabouts(site.allow.line),
+            allow: site.allow_text(),
+            scope: scope_phrase(site),
+            path: site.display_path(),
+        };
         let write_rank = f.write.map(severity_rank);
         let read_rank = f.read.map(|(s, _)| severity_rank(s));
         let merged = matches!((write_rank, read_rank), (Some(w), Some(r)) if w >= r);
-        let m = &site.allow.methods;
 
         if let Some(severity) = f.write {
-            let body = match breadth {
-                Breadth::Open => {
-                    let verbs = if merged {
-                        verbs(m, "and")
-                    } else {
-                        write_verbs(m, "and")
-                    };
-                    format!(
-                        "{where_} allows anyone on the internet, signed in or not, to {verbs} {scope} (`{allow}`)."
-                    )
-                }
-                Breadth::AuthOnly if site.root => {
-                    let what = short_phrase(m);
-                    format!(
-                        "{where_} lets any signed-in user {what} {scope} (`{allow}`). Anyone who can create an account, including with anonymous or email sign-in, has full access to all users' data."
-                    )
-                }
-                Breadth::AuthOnly => {
-                    let verbs = if merged {
-                        verbs(m, "or")
-                    } else {
-                        write_verbs(m, "or")
-                    };
-                    format!(
-                        "{where_} lets any signed-in user {verbs} any document under `{}`, not only their own (`{allow}`).",
-                        site.display_path()
-                    )
-                }
-            };
+            let body = write_body(site, breadth, &words, merged);
             out.push(finding(
                 rule,
                 site.file,
@@ -171,27 +262,13 @@ fn breadth_rule(sites: &[Site<'_>], owned: &Owned, breadth: Breadth) -> Vec<Arch
                 continue;
             }
             // Silent when a write-side finding of the same or higher severity covers this path:
-            // the open read is then a clause of that finding, not a second row.
+            // the read is then a clause of that finding, not a second row.
             if f.write.is_none()
                 && covering_write_rank(site, sites, breadth) >= severity_rank(severity)
             {
                 continue;
             }
-            let path = site.display_path();
-            let body = match (breadth, site.root) {
-                (Breadth::Open, true) => format!(
-                    "{where_} allows anyone to read {scope} (`{allow}`)."
-                ),
-                (Breadth::Open, false) => format!(
-                    "{where_} allows anyone, signed in or not, to read {scope} (`{allow}`). If `{path}` is meant to be public, no change is needed; if it holds email addresses, phone numbers or anything a user expects to be private, scope the read to the owner."
-                ),
-                (Breadth::AuthOnly, true) => format!(
-                    "{where_} lets any signed-in user read {scope} (`{allow}`). Anyone who can create an account, including with anonymous or email sign-in, can read all users' data."
-                ),
-                (Breadth::AuthOnly, false) => format!(
-                    "{where_} lets any signed-in user read {scope} (`{allow}`). If this collection is shared among all users by design, no change is needed; if it holds per-user data, scope reads to the owner."
-                ),
-            };
+            let body = read_body(site, breadth, &words);
             out.push(finding(
                 rule,
                 site.file,
@@ -208,13 +285,25 @@ fn breadth_rule(sites: &[Site<'_>], owned: &Owned, breadth: Breadth) -> Vec<Arch
 
 /// FIREBASE-RULES-OPEN-1.
 pub(crate) fn open(sites: &[Site<'_>], owned: &Owned) -> Vec<ArchViolation> {
-    breadth_rule(sites, owned, Breadth::Open)
+    breadth_rule(sites, owned, Breadth::Open, &Service::Firestore)
 }
 
 /// FIREBASE-RULES-AUTH-ONLY-1 over Firestore (Storage is owned by FIREBASE-STORAGE-RULES-OPEN-1,
-/// Realtime Database by its own rule; one owner per fact).
+/// Realtime Database by its own rule reader; one owner per fact).
 pub(crate) fn auth_only(sites: &[Site<'_>], owned: &Owned) -> Vec<ArchViolation> {
-    breadth_rule(sites, owned, Breadth::AuthOnly)
+    breadth_rule(sites, owned, Breadth::AuthOnly, &Service::Firestore)
+}
+
+/// FIREBASE-STORAGE-RULES-OPEN-1: open and auth-only grants in Storage rules.
+pub(crate) fn storage(sites: &[Site<'_>], owned: &Owned) -> Vec<ArchViolation> {
+    let mut out = breadth_rule(sites, owned, Breadth::Open, &Service::Storage);
+    out.append(&mut breadth_rule(
+        sites,
+        owned,
+        Breadth::AuthOnly,
+        &Service::Storage,
+    ));
+    out
 }
 
 /// FIREBASE-RULES-TEST-MODE-1 over Firestore and Storage.

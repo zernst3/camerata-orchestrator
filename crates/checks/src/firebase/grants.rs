@@ -45,6 +45,15 @@ const PUBLIC_WORDS: &[&str] = &[
     "locales",
 ];
 
+/// Where a rules file came from: enough to word a finding about it.
+pub(crate) trait Located {
+    fn path(&self) -> &str;
+    /// The database, bucket or instance the file belongs to, when `firebase.json` named one.
+    fn label(&self) -> Option<&str>;
+    /// The `firebase.json` beside it could not be read, so the deployed file is unconfirmed.
+    fn config_unreadable(&self) -> bool;
+}
+
 /// A Firestore or Storage rules file that read cleanly, with where it came from.
 pub(crate) struct LoadedRules {
     pub path: String,
@@ -52,6 +61,18 @@ pub(crate) struct LoadedRules {
     pub config_unreadable: bool,
     pub service: Service,
     pub parsed: RulesFile,
+}
+
+impl Located for LoadedRules {
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+    fn config_unreadable(&self) -> bool {
+        self.config_unreadable
+    }
 }
 
 /// What an `allow` grants, by its condition.
@@ -96,10 +117,10 @@ impl Site<'_> {
     }
 }
 
-pub(crate) fn whereabouts(file: &LoadedRules, line: usize) -> String {
-    match &file.label {
-        Some(label) => format!("Line {line} of `{}` (the rules for `{label}`)", file.path),
-        None => format!("Line {line} of `{}`", file.path),
+pub(crate) fn whereabouts(file: &impl Located, line: usize) -> String {
+    match file.label() {
+        Some(label) => format!("Line {line} of `{}` (the rules for `{label}`)", file.path()),
+        None => format!("Line {line} of `{}`", file.path()),
     }
 }
 
@@ -291,10 +312,15 @@ pub(crate) fn display_path(service: &Service, path: &[Segment]) -> String {
     }
 }
 
+/// G5: a path word that marks public content.
+pub(crate) fn is_public_word(word: &str) -> bool {
+    PUBLIC_WORDS.contains(&word.to_ascii_lowercase().as_str())
+}
+
 /// G5: the path carries a word that marks public content.
 pub(crate) fn has_public_segment(path: &[Segment]) -> bool {
     path.iter().any(|s| match s {
-        Segment::Literal(l) => PUBLIC_WORDS.contains(&l.to_ascii_lowercase().as_str()),
+        Segment::Literal(l) => is_public_word(l),
         _ => false,
     })
 }
@@ -339,7 +365,7 @@ fn segment_covers(broad: &Segment, narrow: &Segment) -> bool {
 /// `firebase.json` sentence.
 pub(crate) fn finding(
     rule: &'static str,
-    file: &LoadedRules,
+    file: &impl Located,
     line: usize,
     object: Option<String>,
     severity: &'static str,
@@ -347,14 +373,14 @@ pub(crate) fn finding(
     body: &str,
 ) -> ArchViolation {
     let mut message = format!("{body} {CAVEAT}");
-    if file.config_unreadable {
+    if file.config_unreadable() {
         message.push(' ');
         message.push_str(CONFIG_UNREADABLE);
     }
     ArchViolation {
         grade,
         rule_id: rule.to_string(),
-        file: file.path.clone(),
+        file: file.path().to_string(),
         line,
         object,
         message,
