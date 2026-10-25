@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use camerata_server::ai_audit::{ActualUsage, FailedPass, ScanMode};
-use camerata_server::llm::{resolve_backend, ProjectBackend};
+use camerata_server::llm::{resolve_backend, BackendResolution, ProjectBackend};
 use camerata_server::onboard::{ProposedRule, SelectedRule};
 use camerata_server::report_export::ReportOptions;
 use camerata_server::scan_cache::ScanManifest;
@@ -846,7 +846,12 @@ pub fn require_api_key_for_client_inspection(
     backend: ProjectBackend,
     has_api_key: bool,
 ) -> Result<(), InspectError> {
-    if matches!(backend, ProjectBackend::Api) && !has_api_key {
+    // The decision is the app's own `resolve_backend` (one rule for the CLI and the app); only
+    // the wording is CLI-specific.
+    if matches!(
+        resolve_backend(backend, has_api_key),
+        BackendResolution::Blocked { .. }
+    ) {
         return Err(InspectError::Failed(
             "client inspections run on the Anthropic API, but no API key is configured. Add an \
              Anthropic API key (set ANTHROPIC_API_KEY) and re-run. For an internal benchmark run \

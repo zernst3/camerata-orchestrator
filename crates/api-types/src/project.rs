@@ -52,9 +52,10 @@ pub fn default_routine_secs() -> u64 {
 /// app preference: there are now exactly two backend SETTINGS in the whole app (this type
 /// used for both) and no env-driven third axis.
 ///
-/// - **`Cli`** (the serde default AND the [`Default`] impl) — the Claude Code CLI, i.e. the
-///   operator's own logged-in subscription. No API key needed; a project (or the chat
-///   assistant) "just works" out of the box.
+/// - **`Cli`** (the serde default AND the [`Default`] impl, i.e. the value of an ABSENT
+///   `backend` field in a legacy persisted file, so legacy behavior never changes) — the
+///   Claude Code CLI, i.e. the operator's own logged-in subscription. No API key needed.
+///   A NEW project does not start here: it starts on [`ProjectBackend::for_new_project`].
 /// - **`Api`** — the Anthropic Messages API. Needs `ANTHROPIC_API_KEY` (keychain or env). A
 ///   missing key never falls back to the CLI — `resolve_backend` reports
 ///   `BackendResolution::Blocked` and the caller must not start any model call. This is the
@@ -68,6 +69,14 @@ pub enum ProjectBackend {
 }
 
 impl ProjectBackend {
+    /// The backend a brand-new project starts on: the metered Anthropic API, the compliant
+    /// single-party chain. Deliberately distinct from [`Default`] (`Cli`), which is what a
+    /// legacy persisted project WITHOUT a `backend` field deserializes to, so changing what
+    /// new projects start on never silently switches an existing one.
+    pub fn for_new_project() -> Self {
+        ProjectBackend::Api
+    }
+
     /// The lowercase name this backend serializes as, for the places that record or print it
     /// (the export manifest, the README, the operator report).
     pub fn label(self) -> &'static str {

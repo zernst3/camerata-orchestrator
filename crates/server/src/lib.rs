@@ -17807,8 +17807,8 @@ mod tests {
         let p = state.projects.create("Compliance", vec![]).unwrap();
         assert_eq!(
             p.backend,
-            crate::project::ProjectBackend::Cli,
-            "fresh project defaults to Cli"
+            crate::project::ProjectBackend::Api,
+            "fresh project defaults to Api"
         );
         let app = router(state.clone());
 
@@ -17819,7 +17819,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/projects/{}/backend", p.id))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"backend":"api"}"#))
+                    .body(Body::from(r#"{"backend":"cli"}"#))
                     .unwrap(),
             )
             .await
@@ -17827,28 +17827,28 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["ok"], true);
-        assert_eq!(json["project"]["backend"], "api");
+        assert_eq!(json["project"]["backend"], "cli");
         // Persisted on the store.
         assert_eq!(
             state.projects.get(&p.id).unwrap().backend,
-            crate::project::ProjectBackend::Api
+            crate::project::ProjectBackend::Cli
         );
 
-        // Switching it back to cli round-trips too.
+        // Switching it back to api round-trips too.
         let resp2 = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/projects/{}/backend", p.id))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"backend":"cli"}"#))
+                    .body(Body::from(r#"{"backend":"api"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp2.status(), StatusCode::OK);
         let json2 = body_json(resp2).await;
-        assert_eq!(json2["project"]["backend"], "cli");
+        assert_eq!(json2["project"]["backend"], "api");
     }
 
     /// `POST /api/projects/:id/backend` rejects a bogus backend with `ok: false` (no
@@ -17876,7 +17876,7 @@ mod tests {
         assert_eq!(json["ok"], false);
         assert_eq!(
             state.projects.get(&p.id).unwrap().backend,
-            crate::project::ProjectBackend::Cli
+            crate::project::ProjectBackend::Api
         );
     }
 
@@ -17971,8 +17971,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             p.backend,
-            crate::project::ProjectBackend::Cli,
-            "fresh project defaults to Cli"
+            crate::project::ProjectBackend::Api,
+            "fresh project defaults to Api"
         );
         state
             .projects
@@ -18019,7 +18019,9 @@ mod tests {
             .projects
             .create("Acme", vec!["me/api".to_string()])
             .unwrap();
-        assert_eq!(p.backend, crate::project::ProjectBackend::Cli);
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Cli);
         let app = router(state);
 
         let resp = app
@@ -28281,9 +28283,14 @@ mod tests {
         let api_project = state.projects.create("ApiOnly", vec![]).unwrap();
         assert_eq!(
             api_project.backend,
-            crate::project::ProjectBackend::Cli,
-            "fresh project defaults to Cli"
+            crate::project::ProjectBackend::Api,
+            "fresh project defaults to Api"
         );
+        // A NEW project (default Api) with no key is blocked outright: no CLI fallback.
+        assert!(matches!(
+            resolve_backend_for_project(&state, Some(&api_project)),
+            crate::llm::BackendResolution::Blocked { .. }
+        ));
         let api_project = state
             .projects
             .set_backend(&api_project.id, crate::project::ProjectBackend::Api)
@@ -28309,9 +28316,13 @@ mod tests {
             crate::llm::BackendResolution::Api
         );
 
-        // backend=Cli (the create() default) -> quiet Cli, regardless of the key already
+        // backend=Cli (explicitly chosen) -> quiet Cli, regardless of the key already
         // present from the step above.
         let personal_project = state.projects.create("Personal", vec![]).unwrap();
+        let personal_project = state
+            .projects
+            .set_backend(&personal_project.id, crate::project::ProjectBackend::Cli)
+            .unwrap();
         assert_eq!(
             resolve_backend_for_project(&state, Some(&personal_project)),
             crate::llm::BackendResolution::Cli
