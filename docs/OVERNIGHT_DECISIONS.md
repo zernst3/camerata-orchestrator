@@ -21,6 +21,14 @@
 > triage `missed.txt` into "add a test" vs "equivalent mutant". Only the checks crate's own tests
 > run against each mutant (server-level tests that exercise checkers are not counted). Check it is
 > finished (`pgrep -fl cargo-mutants`) before rebuilding in the main checkout.
+> **DONE 2026-10-25:** provisioning test flake fixed (macOS transient EINVAL on a lookup racing
+> the atomic symlink swap; 150/150 under load) and 22a's CLI half: `camerata inspect` defaults to
+> the API backend, no key = clear error (never a CLI fallback), backend + provider recorded in the
+> manifest and README and checked by the release gate. **OPEN, do next:** (1) 22a UI half: the app's
+> `ProjectBackend::default()` is still `Cli`, so client inspections run from the app still use the
+> subscription; make client projects default to Api (new projects), decide/migrate existing ones,
+> same no-key rule. (2) Harden eslint against the same macOS EINVAL: canonicalize the workspace
+> path once before spawning eslint. Then Zach's manual check of delete/re-fetch.
 > **DONE 2026-10-24 (end of budget):** item 22b `camerata count` (reuses the inspection's
 > `read_local_repo_files`; fixed a double count of tracked noise files) and the 26 major mutation
 > gaps (25 killed, 1 documented equivalent) are MERGED. OPEN DEFECT: the test
