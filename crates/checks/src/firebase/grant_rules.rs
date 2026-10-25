@@ -45,7 +45,7 @@ fn scope_phrase(site: &Site<'_>) -> String {
 
 /// What a site grants on the write side and on the read side, as `(severity, grade)`.
 pub(crate) struct Facts {
-    pub write: Option<&'static str>,
+    pub write: Option<(&'static str, ViolationGrade)>,
     pub read: Option<(&'static str, ViolationGrade)>,
 }
 
@@ -67,11 +67,15 @@ pub(crate) fn facts(site: &Site<'_>, breadth: Breadth) -> Facts {
     let storage = site.file.service == Service::Storage;
     let write = if changes_data(m) || (storage && creates(m)) {
         Some(match (breadth, site.root) {
-            (Breadth::Open, true) => SEVERITY_CRITICAL,
-            _ => SEVERITY_HIGH,
+            (Breadth::Open, true) => (SEVERITY_CRITICAL, ViolationGrade::Defect),
+            // Firebase's own Storage example lets any signed-in user write to its `public`
+            // folder, and the path vocabulary (G5) says the owner meant that content to be
+            // shared: held for review, not asserted.
+            (Breadth::AuthOnly, _) if site.public => (SEVERITY_MEDIUM, ViolationGrade::Review),
+            _ => (SEVERITY_HIGH, ViolationGrade::Defect),
         })
     } else if creates(m) && breadth == Breadth::Open {
-        Some(SEVERITY_MEDIUM)
+        Some((SEVERITY_MEDIUM, ViolationGrade::Defect))
     } else {
         None
     };
@@ -115,7 +119,7 @@ fn covering_write_rank(site: &Site<'_>, all: &[Site<'_>], breadth: Breadth) -> u
                 ) && covers(&s.block.effective_path, &site.block.effective_path, v2))
         })
         .filter_map(|s| facts(s, breadth).write)
-        .map(severity_rank)
+        .map(|(severity, _)| severity_rank(severity))
         .max()
         .unwrap_or(0)
 }
@@ -240,19 +244,25 @@ fn breadth_rule(
             scope: scope_phrase(site),
             path: site.display_path(),
         };
-        let write_rank = f.write.map(severity_rank);
+        let write_rank = f.write.map(|(severity, _)| severity_rank(severity));
         let read_rank = f.read.map(|(s, _)| severity_rank(s));
         let merged = matches!((write_rank, read_rank), (Some(w), Some(r)) if w >= r);
 
-        if let Some(severity) = f.write {
-            let body = write_body(site, breadth, &words, merged);
+        if let Some((severity, grade)) = f.write {
+            let mut body = write_body(site, breadth, &words, merged);
+            if grade == ViolationGrade::Review {
+                body.push_str(&format!(
+                    " The name of `{}` suggests its content is public by design; if every signed-in user is meant to be able to change it, no change is needed.",
+                    words.path
+                ));
+            }
             out.push(finding(
                 rule,
                 site.file,
                 site.allow.line,
                 object.clone(),
                 severity,
-                ViolationGrade::Defect,
+                grade,
                 &body,
             ));
         }
@@ -460,14 +470,14 @@ fn broad_grade(site: &Site<'_>, breadth: Grant) -> Option<(&'static str, Violati
             };
             let f = facts(site, b);
             match (f.write, f.read) {
-                (Some(w), Some((r, g))) => {
+                (Some((w, wg)), Some((r, g))) => {
                     if severity_rank(w) >= severity_rank(r) {
-                        Some((w, ViolationGrade::Defect))
+                        Some((w, wg))
                     } else {
                         Some((r, g))
                     }
                 }
-                (Some(w), None) => Some((w, ViolationGrade::Defect)),
+                (Some(write), None) => Some(write),
                 (None, Some((r, g))) => Some((r, g)),
                 (None, None) => None,
             }

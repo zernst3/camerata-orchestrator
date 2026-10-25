@@ -60,6 +60,55 @@ fn auth_only_write_anywhere_is_high() {
     );
 }
 
+/// Firebase's own Storage example (the "Public" folder with `allow read; allow write: if
+/// request.auth != null`): the vocabulary says the folder is meant to be public, so a signed-in
+/// write there is held for review rather than asserted.
+#[test]
+fn firebase_docs_public_folder_example_is_review_graded_not_a_defect() {
+    let all = run(&storage(
+        "    match /images/{imageId} {\n      allow read: if request.auth != null;\n      allow write: if request.auth != null && request.resource.size < 5 * 1024 * 1024 && request.resource.contentType.matches('image/.*');\n    }\n    match /users/{userId}/{allPaths=**} {\n      allow read, write: if request.auth != null && request.auth.uid == userId;\n    }\n    match /public/{imageId} {\n      allow read;\n      allow write: if request.auth != null;\n    }",
+    ));
+    assert!(
+        rows(&all, RULE_STORAGE_OPEN, ViolationGrade::Defect).is_empty(),
+        "no asserted finding: {all:#?}"
+    );
+    let public: Vec<_> = rows(&all, RULE_STORAGE_OPEN, ViolationGrade::Review)
+        .into_iter()
+        .filter(|v| v.object.as_deref() == Some("/public/{imageId}"))
+        .collect();
+    assert_eq!(public.len(), 1, "{all:#?}");
+    assert_eq!(public[0].severity, SEVERITY_MEDIUM);
+    assert_eq!(public[0].line, 13);
+    assert!(
+        public[0].message.contains("public by design"),
+        "{}",
+        public[0].message
+    );
+}
+
+/// The same fact with the owner's Storage vocabulary: an auth-only update or delete on a path that
+/// is not public stays asserted.
+#[test]
+fn auth_only_replace_and_delete_on_a_non_public_folder_stay_asserted() {
+    let all = run(&storage(
+        "    match /documents/{file} { allow update, delete: if request.auth != null; }",
+    ));
+    let f = rows(&all, RULE_STORAGE_OPEN, ViolationGrade::Defect);
+    assert_eq!(f.len(), 1, "{all:#?}");
+    assert_eq!(f[0].severity, SEVERITY_HIGH);
+}
+
+/// An OPEN write (signed in or not) to a public folder is not softened: only auth-only is.
+#[test]
+fn an_open_write_to_a_public_folder_stays_asserted() {
+    let all = run(&storage(
+        "    match /public/{file} { allow write: if true; }",
+    ));
+    let f = rows(&all, RULE_STORAGE_OPEN, ViolationGrade::Defect);
+    assert_eq!(f.len(), 1, "{all:#?}");
+    assert_eq!(f[0].severity, SEVERITY_HIGH);
+}
+
 #[test]
 fn auth_only_read_at_the_root_is_medium() {
     // The old Storage default, read side.

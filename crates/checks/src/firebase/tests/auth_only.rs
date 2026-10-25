@@ -40,6 +40,39 @@ fn auth_only_write_on_a_collection_is_high() {
 }
 
 #[test]
+fn auth_only_write_on_a_public_path_is_review_graded_medium() {
+    for path in ["/public/{doc}", "/catalog/{item}", "/announcements/{a}"] {
+        let all = run(&firestore(&format!(
+            "    match {path} {{ allow update, delete: if request.auth != null; }}"
+        )));
+        assert!(
+            rows(&all, RULE_AUTH_ONLY, ViolationGrade::Defect).is_empty(),
+            "{path}: {all:#?}"
+        );
+        let f = rows(&all, RULE_AUTH_ONLY, ViolationGrade::Review);
+        assert_eq!(f.len(), 1, "{path}: {all:#?}");
+        assert_eq!(f[0].severity, SEVERITY_MEDIUM);
+        assert!(
+            f[0].message.contains("public by design"),
+            "{}",
+            f[0].message
+        );
+    }
+}
+
+#[test]
+fn auth_only_write_on_a_shared_but_not_public_path_stays_asserted() {
+    let all = run(&firestore(
+        "    match /shared/{doc} { allow update, delete: if request.auth != null; }",
+    ));
+    assert_eq!(
+        rows(&all, RULE_AUTH_ONLY, ViolationGrade::Defect).len(),
+        1,
+        "{all:#?}"
+    );
+}
+
+#[test]
 fn auth_only_read_on_a_collection_is_review_graded_medium() {
     let all = run(&firestore(
         "    match /users/{uid} { allow read: if request.auth != null; }",
