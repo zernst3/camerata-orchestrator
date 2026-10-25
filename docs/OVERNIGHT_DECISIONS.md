@@ -101,6 +101,20 @@ commit sits on the branch ready for review + push.
 
 ## DECISIONS MADE
 
+- 2026-10-25 (Opus, Firebase review calls, all false-positive-safe): (1) auth-only update/delete
+  on shared data stays an ASSERTED defect (true and worth fixing); auth-only writes on a public
+  Storage/Firestore path (Firebase's own docs example) become Review. (2) Rules files that
+  `firebase.json` does not reference, files in repos with no `firebase.json`, and files under
+  examples/samples/docs paths are Review-graded with the reason stated, never asserted critical.
+  (3) The apiKey twin tightens: rule (c) only when the key sits inside the same object/call span as
+  the init call or siblings; rule (b) needs a sibling or init marker and excludes
+  GENAI/GEMINI/MAPS/PLACES/TRANSLATE/VISION/YOUTUBE names; rule (a) keeps `api_key` only alongside
+  google-services.json-only sibling names. (4) FIELD-VALIDATION is silent on writes gated by
+  `request.auth.token.` claims or a `get(`/`exists(` lookup. (5) `camerata-check --strict` failing
+  on console-managed rules is intended; say so in the release note. **Protected-area defect fix
+  (merge/dedup, flagged for Zach to overrule):** an asserted (non-hedged) finding is never fused
+  into or ranked beneath a held (needs-review) row; the narrowest fix that restores that invariant.
+
 - 2026-10-25 (Opus, Firebase spec questions): (1) a Google API key OUTSIDE a Firebase web config
   keeps today's critical floor finding in V1 (changing an existing floor rule is not V1 scope);
   making it review-graded high ("restrictions not visible in the repository") is logged as a
