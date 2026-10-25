@@ -27,6 +27,12 @@ pub(crate) fn lang_for_ext(path: &str) -> Option<&'static str> {
     })
 }
 
+/// Non-blank lines in `content`: the one definition of "a counted line", shared by the
+/// inspection's volume figures and `camerata count`.
+pub(crate) fn non_blank_lines(content: &str) -> usize {
+    content.lines().filter(|l| !l.trim().is_empty()).count()
+}
+
 /// Non-blank source lines in `files`, split by language via [`lang_for_ext`], plus the grand
 /// total across EVERY file — recognized-language extension or not, matching `code_chars`'s
 /// all-files scope (a `.yaml`/`.json` config file still counts toward total code volume even
@@ -41,7 +47,7 @@ pub(crate) fn count_source_lines(
     let mut by_lang: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut total = 0usize;
     for (path, content) in files {
-        let lines = content.lines().filter(|l| !l.trim().is_empty()).count();
+        let lines = non_blank_lines(content);
         total += lines;
         if let Some(lang) = lang_for_ext(path) {
             *by_lang.entry(lang.to_string()).or_insert(0) += lines;

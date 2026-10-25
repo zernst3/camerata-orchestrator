@@ -440,6 +440,9 @@ pub struct ExtractedRepo {
     /// The reference list hit [`HARD_CAP_REFERENCE_FILES`]: some reference text is missing.
     pub reference_truncated: bool,
     pub excluded_noise: usize,
+    /// The paths behind `excluded_noise` (always the same length), so `camerata count` can size
+    /// what the filter dropped without a second walk.
+    pub excluded_noise_paths: Vec<String>,
 }
 
 impl ExtractedRepo {
@@ -501,7 +504,7 @@ fn read_local_repo_files_gitignore(
 ) -> anyhow::Result<ExtractedRepo> {
     let mut files = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut excluded_noise = 0usize;
+    let mut excluded_noise_paths: Vec<String> = Vec::new();
     let mut truncated = false;
     let mut reference = ReferenceSink::new(HARD_CAP_REFERENCE_FILES);
 
@@ -536,12 +539,16 @@ fn read_local_repo_files_gitignore(
         if rel.is_empty() {
             continue;
         }
+        // Every walked file is "seen", admitted or not, so the ls-files union below only
+        // revisits files the walk skipped (gitignored); it must not classify a walked noise or
+        // reference file a second time.
+        seen.insert(rel.clone());
         // Belt-and-suspenders: noise denylist on top of gitignore (catches projects whose
         // build artefacts are not yet gitignored, or repos where target/ was committed).
         let noise = is_noise_path(&rel, extra_dirs);
         let admissible = is_admissible_text(&rel);
         if noise && admissible {
-            excluded_noise += 1;
+            excluded_noise_paths.push(rel.clone());
         }
         if !noise && !admissible {
             reference.offer(&rel, p);
@@ -562,7 +569,6 @@ fn read_local_repo_files_gitignore(
         let Ok(content) = std::fs::read_to_string(p) else {
             continue; // skip non-UTF-8 / unreadable
         };
-        seen.insert(rel.clone());
         files.push((rel, content));
         if files.len() >= HARD_CAP_FILES {
             truncated = true;
@@ -586,7 +592,7 @@ fn read_local_repo_files_gitignore(
                 let noise = is_noise_path(&rel, extra_dirs);
                 let admissible = is_admissible_text(&rel);
                 if noise && admissible {
-                    excluded_noise += 1;
+                    excluded_noise_paths.push(rel.clone());
                 }
                 let full = root.join(&rel);
                 if !noise && !admissible {
@@ -621,7 +627,8 @@ fn read_local_repo_files_gitignore(
         reference_files: reference.files,
         truncated,
         reference_truncated: reference.truncated,
-        excluded_noise,
+        excluded_noise: excluded_noise_paths.len(),
+        excluded_noise_paths,
     })
 }
 
@@ -656,7 +663,7 @@ fn read_local_repo_files_noise_denylist(
     extra_dirs: &[String],
 ) -> anyhow::Result<ExtractedRepo> {
     let mut files = Vec::new();
-    let mut excluded_noise = 0usize;
+    let mut excluded_noise_paths: Vec<String> = Vec::new();
     let mut truncated = false;
     let mut reference = ReferenceSink::new(HARD_CAP_REFERENCE_FILES);
     let mut stack = vec![root.to_path_buf()];
@@ -690,7 +697,7 @@ fn read_local_repo_files_noise_denylist(
             let noise = is_noise_path(&rel, extra_dirs);
             let admissible = is_admissible_text(&rel);
             if noise && admissible {
-                excluded_noise += 1;
+                excluded_noise_paths.push(rel.clone());
             }
             if !noise && !admissible {
                 reference.offer(&rel, &p);
@@ -726,7 +733,8 @@ fn read_local_repo_files_noise_denylist(
         reference_files: reference.files,
         truncated,
         reference_truncated: reference.truncated,
-        excluded_noise,
+        excluded_noise: excluded_noise_paths.len(),
+        excluded_noise_paths,
     })
 }
 
@@ -843,6 +851,29 @@ mod tests {
         expect_bin_scan(&extracted);
         // The gitignore-aware walk sees each file and counts the .NET outputs as noise.
         assert_eq!(extracted.excluded_noise, 2);
+    }
+
+    /// A tracked noise file is seen by the walk AND listed by `git ls-files`; it must still be
+    /// excluded (and counted as excluded) exactly once, so the noise figure is not inflated.
+    #[test]
+    fn a_tracked_noise_file_is_counted_as_excluded_once() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/main.rs", "fn main() {}\n");
+        write(dir.path(), "vendor/dep/lib.js", "var a;\n");
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        let extracted = scan(dir.path());
+        assert_eq!(extracted.excluded_noise, 1);
+        assert_eq!(extracted.excluded_noise_paths, vec!["vendor/dep/lib.js"]);
     }
 
     /// Security-coverage fix: `bin/` used to be pruned wholesale, so a credential committed in

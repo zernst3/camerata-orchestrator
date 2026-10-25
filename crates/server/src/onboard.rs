@@ -19,6 +19,7 @@
 pub mod architectural;
 pub mod audit;
 pub mod clone_advisory;
+pub mod count;
 pub mod files;
 pub mod finding_context;
 pub mod greenfield;
@@ -1603,6 +1604,7 @@ pub async fn audit_repos_with_llm(
                 truncated,
                 reference_truncated,
                 excluded_noise,
+                excluded_noise_paths: _,
             }) => {
                 files_total += files.len();
                 files_excluded_total += excluded_noise;
