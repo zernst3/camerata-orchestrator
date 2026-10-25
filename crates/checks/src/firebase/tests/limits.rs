@@ -1,0 +1,126 @@
+//! Hostile-input bounds: no recursion past a fixed depth and no unbounded work, so one rules file
+//! cannot abort the process that scans it. The reviewer's stress shapes, run on the 2 MiB stack a
+//! tokio worker gets (the process aborts on overflow, so a regression here kills the test binary).
+
+use super::{findings, firestore, rows, run};
+use crate::arch_checker::{ArchViolation, ViolationGrade};
+use crate::firebase::grants::covers;
+use crate::firebase::rules_parse::Segment;
+use crate::firebase::RULE_OPEN;
+
+/// Run the rules checker over `files` on a thread with a 2 MiB stack, the tokio worker default.
+fn run_small_stack(files: Vec<(String, String)>) -> Vec<ArchViolation> {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || run(&files))
+        .expect("spawn")
+        .join()
+        .expect("the checker must finish without panicking or overflowing")
+}
+
+#[test]
+fn an_8000_deep_or_condition_is_not_recognised_and_does_not_abort() {
+    let n = 8000;
+    let body = format!(
+        "    match /a/{{x}} {{ allow read: if {}true{}; }}",
+        "(a||".repeat(n),
+        ")".repeat(n)
+    );
+    let all = run_small_stack(firestore(&body));
+    assert!(
+        rows(&all, RULE_OPEN, ViolationGrade::Defect).is_empty(),
+        "an over-deep condition is not recognised as open"
+    );
+}
+
+#[test]
+fn a_4000_deep_and_condition_is_not_recognised_and_does_not_abort() {
+    let n = 4000;
+    let body = format!(
+        "    match /a/{{x}} {{ allow update: if {}request.auth.uid == request.resource.data.o{}; }}",
+        "(a&&".repeat(n),
+        ")".repeat(n)
+    );
+    let all = run_small_stack(firestore(&body));
+    assert!(findings(&all).is_empty(), "{all:#?}");
+}
+
+#[test]
+fn a_deep_condition_inside_the_cap_is_still_recognised() {
+    // 40 nested disjuncts: real conditions are a handful deep, and 40 is inside the cap.
+    let n = 40;
+    let body = format!(
+        "    match /a/{{x}} {{ allow read, write: if {}true{}; }}",
+        "(a||".repeat(n),
+        ")".repeat(n)
+    );
+    let all = run_small_stack(firestore(&body));
+    assert_eq!(
+        rows(&all, RULE_OPEN, ViolationGrade::Defect).len(),
+        1,
+        "{all:#?}"
+    );
+}
+
+fn lit(s: &str) -> Segment {
+    Segment::Literal(s.to_string())
+}
+
+fn recursive(name: &str) -> Segment {
+    Segment::Wildcard {
+        name: name.to_string(),
+        recursive: true,
+    }
+}
+
+#[test]
+fn covers_on_a_60000_segment_shared_prefix_does_not_abort() {
+    let n = 60_000;
+    let mut broad: Vec<Segment> = (0..n).map(|_| lit("a")).collect();
+    broad.push(recursive("x"));
+    let mut narrow: Vec<Segment> = (0..n).map(|_| lit("a")).collect();
+    narrow.push(lit("b"));
+    let covered = std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || covers(&broad, &narrow, true))
+        .expect("spawn")
+        .join()
+        .expect("covers must not overflow the stack");
+    assert!(!covered, "a path past the cap is not recognised as covered");
+}
+
+#[test]
+fn a_60000_segment_match_path_degrades_the_file_to_not_assessed() {
+    let body = format!(
+        "    match /{{x=**}} {{ allow read: if true; }}\n    match {} {{ allow read: if false; }}",
+        "/a".repeat(60_000)
+    );
+    let all = run_small_stack(firestore(&body));
+    assert_eq!(all.len(), 1, "{all:#?}");
+    assert_eq!(all[0].grade, ViolationGrade::NotAssessed);
+    assert!(all[0].message.contains("64"), "{}", all[0].message);
+}
+
+#[test]
+fn covers_with_many_recursive_wildcards_is_not_exponential() {
+    // Ten recursive wildcards over a 48-segment path: the naive search tries C(48, 10) splits.
+    let broad: Vec<Segment> = (0..10).map(|i| recursive(&format!("w{i}"))).collect();
+    let narrow: Vec<Segment> = (0..48).map(|_| lit("a")).collect();
+    assert!(covers(&broad, &narrow, true));
+    assert!(!covers(&broad, &narrow[..0], false), "v1 needs one segment");
+    let mut tail = broad.clone();
+    tail.push(lit("z"));
+    assert!(
+        !covers(&tail, &narrow, true),
+        "the literal tail never matches"
+    );
+}
+
+#[test]
+fn covers_keeps_its_v1_and_v2_meaning_for_a_recursive_wildcard() {
+    let broad = vec![lit("a"), recursive("r")];
+    assert!(covers(&broad, &[lit("a")], true), "v2: zero or more");
+    assert!(!covers(&broad, &[lit("a")], false), "v1: one or more");
+    assert!(covers(&broad, &[lit("a"), lit("b"), lit("c")], false));
+    assert!(!covers(&broad, &[lit("b")], true));
+}

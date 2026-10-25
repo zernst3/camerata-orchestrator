@@ -4,6 +4,7 @@ mod auth_only;
 mod checker;
 mod edges;
 mod functions;
+mod limits;
 mod open;
 mod parse;
 mod project_rules;

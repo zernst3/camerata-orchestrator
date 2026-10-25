@@ -18,6 +18,7 @@ use chrono::NaiveDate;
 use super::rules_model::Cond;
 use super::rules_parse::{
     render_path, Allow, FlatBlock, MatchBlock, Method, RulesFile, Segment, Service,
+    MAX_PATH_SEGMENTS,
 };
 use crate::arch_checker::{ArchViolation, ViolationGrade};
 
@@ -338,20 +339,42 @@ pub(crate) fn has_public_segment(path: &[Segment]) -> bool {
 
 /// Whether `broad` covers `narrow`: every path `narrow` can match, `broad` also matches. A
 /// recursive wildcard matches one or more segments in `v1` and zero or more in `v2` (G8).
+///
+/// A table over (segments of `broad` left, segments of `narrow` left): no recursion, and at most
+/// `MAX_PATH_SEGMENTS` squared steps however many recursive wildcards `broad` has. A path longer
+/// than the reader admits is not recognised as covered (the safe direction: no finding rests on it).
 pub(crate) fn covers(broad: &[Segment], narrow: &[Segment], v2: bool) -> bool {
-    match broad.first() {
-        None => narrow.is_empty(),
-        Some(Segment::Wildcard {
-            recursive: true, ..
-        }) => {
-            let min = usize::from(!v2);
-            (min..=narrow.len()).any(|k| covers(&broad[1..], &narrow[k..], v2))
-        }
-        Some(b) => match narrow.first() {
-            Some(n) => segment_covers(b, n) && covers(&broad[1..], &narrow[1..], v2),
-            None => false,
-        },
+    if broad.len() > MAX_PATH_SEGMENTS || narrow.len() > MAX_PATH_SEGMENTS {
+        return false;
     }
+    let min = usize::from(!v2);
+    let n = narrow.len();
+    // `next[j]`: `broad[i + 1..]` covers `narrow[j..]`. Start at `i == broad.len()`.
+    let mut next: Vec<bool> = (0..=n).map(|j| j == n).collect();
+    for b in broad.iter().rev() {
+        let mut cur = vec![false; n + 1];
+        match b {
+            Segment::Wildcard {
+                recursive: true, ..
+            } => {
+                // Some k >= j + min with `next[k]`: a suffix-or over `next`.
+                let mut any_from = vec![false; n + 2];
+                for k in (0..=n).rev() {
+                    any_from[k] = any_from[k + 1] || next[k];
+                }
+                for (j, slot) in cur.iter_mut().enumerate() {
+                    *slot = j + min <= n && any_from[j + min];
+                }
+            }
+            other => {
+                for j in 0..n {
+                    cur[j] = segment_covers(other, &narrow[j]) && next[j + 1];
+                }
+            }
+        }
+        next = cur;
+    }
+    next[0]
 }
 
 fn segment_covers(broad: &Segment, narrow: &Segment) -> bool {

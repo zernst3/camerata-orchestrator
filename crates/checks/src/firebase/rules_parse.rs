@@ -483,6 +483,11 @@ fn set_effective_paths(block: &mut MatchBlock, parent: &[Segment]) {
 /// passes below bounded on a hostile file.
 const MAX_DEPTH: usize = 64;
 
+/// Most segments one `match` path may hold. Real paths have a handful; the cap keeps path
+/// comparison ([`super::grants::covers`]) bounded, and a longer path degrades the file to NOT
+/// ASSESSED rather than being half-read.
+pub(crate) const MAX_PATH_SEGMENTS: usize = 64;
+
 fn open_block(file: &mut RulesFile, stack: &mut Vec<(Frame, usize)>, header: &str, line: usize) {
     if stack.len() >= MAX_DEPTH {
         file.errors.push(ParseError {
@@ -755,6 +760,13 @@ fn parse_path(path: &str, line: usize, errors: &mut Vec<ParseError>) -> Vec<Segm
         }
     }
     raw.push(cur);
+    if raw.len() > MAX_PATH_SEGMENTS {
+        errors.push(ParseError {
+            line,
+            what: format!("a match path longer than {MAX_PATH_SEGMENTS} segments"),
+        });
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for (index, seg) in raw.into_iter().enumerate() {
         let seg = seg.trim().to_string();

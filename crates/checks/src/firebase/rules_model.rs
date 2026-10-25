@@ -12,6 +12,11 @@ use chrono::NaiveDate;
 
 use super::rules_parse::{FnDef, Scope};
 
+/// How deep the recognisers follow nested `||`, `&&` and parentheses. Real conditions nest a
+/// handful of levels; past this a condition is NOT RECOGNISED (never an abort: the recognisers
+/// recurse, and a hostile file must not be able to overflow the stack of the process scanning it).
+const MAX_COND_DEPTH: usize = 64;
+
 /// How many times helper calls are expanded. The language forbids recursion and caps call depth
 /// at 20; 5 covers every real helper chain and bounds a hostile file.
 const MAX_INLINE_PASSES: usize = 5;
@@ -65,19 +70,19 @@ impl Cond {
 
     /// Unconditional: `true`, or a disjunction with a `true` member (`x || true`).
     pub fn is_true(&self) -> bool {
-        truthy(&self.0)
+        truthy(&self.0, 0)
     }
 
     /// Never grants: `false`, or a conjunction with a `false` member.
     pub fn is_false(&self) -> bool {
-        falsy(&self.0)
+        falsy(&self.0, 0)
     }
 
     /// Exactly "the caller is signed in", and nothing narrower. Any extra conjunct makes it not
     /// auth-only (a rule that also checks `email_verified` is narrower than the docs'
     /// "any authenticated user" shape).
     pub fn is_auth_only(&self) -> bool {
-        auth_only(&self.0)
+        auth_only(&self.0, 0)
     }
 
     /// The `request.time < timestamp.date(Y, M, D)` scaffold, alone or as a disjunct. Returns the
@@ -102,11 +107,16 @@ impl Cond {
     /// Every comparison of `request.auth.uid` and what it is compared to.
     pub fn uid_targets(&self, wildcards: &[String]) -> Vec<Target> {
         let mut atoms = Vec::new();
-        collect_atoms(&self.0, &mut atoms);
-        atoms
+        let complete = collect_atoms(&self.0, &mut atoms, 0);
+        let mut targets: Vec<Target> = atoms
             .iter()
             .filter_map(|a| uid_target(a, wildcards))
-            .collect()
+            .collect();
+        if !complete {
+            // Part of the condition was not read: say so with a target no rule acts on.
+            targets.push(Target::Other);
+        }
+        targets
     }
 
     /// The condition constrains the shape of the incoming document: `keys().hasOnly(`, `.hasAll(`,
@@ -169,7 +179,10 @@ impl Cond {
         // The key-set forms: negated `hasAny`, `unchangedKeys().hasAll`; anything else that
         // touches a key set and is not modelled is unknown.
         let mut atoms = Vec::new();
-        collect_atoms(t, &mut atoms);
+        if !collect_atoms(t, &mut atoms, 0) {
+            // Nested past the cap: part of the condition was never read, so a pin is unknown.
+            return true;
+        }
         atoms.iter().any(|atom| match key_set_pin(atom, f) {
             KeySetPin::Pins | KeySetPin::Unknown => true,
             KeySetPin::Neutral => false,
@@ -247,10 +260,17 @@ pub fn normalise(raw: &str) -> String {
 }
 
 /// `s` with redundant outer parentheses removed, repeatedly.
+///
+/// At most [`MAX_COND_DEPTH`] layers come off (each costs a scan of the text): what is left is
+/// still parenthesised and therefore not recognised.
 fn strip_parens(s: &str) -> &str {
     let mut s = s;
-    while s.starts_with('(') && s.ends_with(')') && matching_close(s, 0) == Some(s.len() - 1) {
-        s = &s[1..s.len() - 1];
+    for _ in 0..MAX_COND_DEPTH {
+        if s.starts_with('(') && s.ends_with(')') && matching_close(s, 0) == Some(s.len() - 1) {
+            s = &s[1..s.len() - 1];
+        } else {
+            break;
+        }
     }
     s
 }
@@ -548,34 +568,40 @@ fn substitute(text: &str, env: &HashMap<String, String>) -> String {
 
 // ── recognisers ─────────────────────────────────────────────────────────────────────────────
 
-fn truthy(t: &str) -> bool {
+fn truthy(t: &str, depth: usize) -> bool {
+    if depth >= MAX_COND_DEPTH {
+        return false;
+    }
     let t = strip_parens(t);
     if t == "true" {
         return true;
     }
     let ors = split_top(t, "||");
     if ors.len() > 1 {
-        return ors.iter().any(|m| truthy(m));
+        return ors.iter().any(|m| truthy(m, depth + 1));
     }
     let ands = split_top(t, "&&");
     if ands.len() > 1 {
-        return ands.iter().all(|m| truthy(m));
+        return ands.iter().all(|m| truthy(m, depth + 1));
     }
     false
 }
 
-fn falsy(t: &str) -> bool {
+fn falsy(t: &str, depth: usize) -> bool {
+    if depth >= MAX_COND_DEPTH {
+        return false;
+    }
     let t = strip_parens(t);
     if t == "false" {
         return true;
     }
     let ors = split_top(t, "||");
     if ors.len() > 1 {
-        return ors.iter().all(|m| falsy(m));
+        return ors.iter().all(|m| falsy(m, depth + 1));
     }
     let ands = split_top(t, "&&");
     if ands.len() > 1 {
-        return ands.iter().any(|m| falsy(m));
+        return ands.iter().any(|m| falsy(m, depth + 1));
     }
     false
 }
@@ -595,11 +621,14 @@ const AUTH_ATOMS: &[&str] = &[
     "auth.uid!=''",
 ];
 
-fn auth_only(t: &str) -> bool {
+fn auth_only(t: &str, depth: usize) -> bool {
+    if depth >= MAX_COND_DEPTH {
+        return false;
+    }
     let t = strip_parens(t);
     let ors = split_top(t, "||");
     if ors.len() > 1 {
-        return ors.iter().all(|m| auth_only(m));
+        return ors.iter().all(|m| auth_only(m, depth + 1));
     }
     let ands = split_top(t, "&&");
     if ands.len() > 1 {
@@ -648,18 +677,25 @@ fn timestamp_literal(s: &str) -> Option<NaiveDate> {
     None
 }
 
-fn collect_atoms(t: &str, out: &mut Vec<String>) {
+/// Split `t` into its `||`/`&&` operands, recursively. Returns `false` when the nesting passed
+/// [`MAX_COND_DEPTH`] and the rest was left unsplit: the atoms are then incomplete.
+fn collect_atoms(t: &str, out: &mut Vec<String>, depth: usize) -> bool {
+    if depth >= MAX_COND_DEPTH {
+        return false;
+    }
     let t = strip_parens(t);
     for op in ["||", "&&"] {
         let parts = split_top(t, op);
         if parts.len() > 1 {
+            let mut complete = true;
             for p in parts {
-                collect_atoms(&p, out);
+                complete &= collect_atoms(&p, out, depth + 1);
             }
-            return;
+            return complete;
         }
     }
     out.push(t.to_string());
+    true
 }
 
 fn uid_target(atom: &str, wildcards: &[String]) -> Option<Target> {
