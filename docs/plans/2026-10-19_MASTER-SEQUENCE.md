@@ -520,6 +520,16 @@ fix-specific retries paid with no output kept.
   for the fix stage. Ranks 2, 3, 5, 6 need no protected change: roughly 60 to 70% off a first
   inspection and ~90% off a rerun. Awaiting Zach: go on ranks 4, 7, 8, 9 and on the live API
   fixture runs (they spend tokens).
+- **Part 2 built (2026-10-25), ranks 1, 3, 5, 6, no protected area touched, no live model call:**
+  rank 1 per-stage telemetry (operator ledger + end-of-`inspect` table, never in the export; a
+  test pins that) and `camerata cost-regression`; rank 3 warm-then-fan-out scheduling
+  (`warm_schedule`), the group label moved out of the cached prefix, 1h TTL for batch items;
+  rank 5 `AiScanKey` (audit model, calibration model, `AUDIT_PROMPT_SCHEMA_VERSION`, rule
+  directives) in the manifest, `MANIFEST_VERSION` 3; rank 6 truncation-only scan retry and the
+  no-code fix pre-filter. Rules-first prompt order deliberately not built (see
+  `build_pass_prompt`). Still to do with a key: the API-backend fixture baseline run, and
+  recall/decoy confirmation on the five fixtures for ranks 3 and 6. Rank 2 (batch default) and
+  the rest remain unbuilt.
 
 ## 3. Explicitly NOT doing
 
