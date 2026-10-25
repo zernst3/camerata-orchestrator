@@ -141,8 +141,9 @@ pub(crate) fn assemble_package(
 
     // Commit per repo, the corpus digest and the rules-last-reviewed date all come from the one
     // sanctioned provenance bridge (`client_provenance`).
-    let provenance =
+    let mut provenance =
         crate::client_provenance::export_provenance(report, &report_json.cover, corpus);
+    provenance.model = options.model.clone();
     let readme = crate::product_export_readme(stem, &provenance);
 
     Ok(ProductPackage {

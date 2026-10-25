@@ -137,10 +137,11 @@ enum Command {
         /// Where to write the product-export ZIP. Its parent directory must already exist.
         #[arg(long)]
         export: PathBuf,
-        /// `cli` (the operator's own Claude Code subscription, default) or `api` (the
-        /// Anthropic Messages API, needs `ANTHROPIC_API_KEY`) — same compliance-safety
-        /// setting a project's `backend` field carries.
-        #[arg(long, default_value = "cli", value_parser = parse_backend)]
+        /// `api` (the Anthropic Messages API, needs `ANTHROPIC_API_KEY`; the DEFAULT, because
+        /// a client inspection runs on a metered, single-party chain) or `cli` (the operator's
+        /// own Claude Code subscription, for internal benchmark runs only; choose it
+        /// explicitly) — same compliance-safety setting a project's `backend` field carries.
+        #[arg(long, default_value = "api", value_parser = parse_backend)]
         backend: ProjectBackend,
         /// Use the Anthropic Message Batches path (~50% cheaper; latency is not returned
         /// until the whole batch completes). Requires `--backend api` plus a configured key.
@@ -718,7 +719,7 @@ mod cli_parse_tests {
     }
 
     #[test]
-    fn inspect_defaults_backend_to_cli_and_every_flag_to_off() {
+    fn inspect_defaults_backend_to_api_and_every_flag_to_off() {
         let cli = Cli::try_parse_from([
             "camerata",
             "inspect",
@@ -741,7 +742,7 @@ mod cli_parse_tests {
             } => {
                 assert_eq!(repo, PathBuf::from("/tmp/r"));
                 assert_eq!(export, PathBuf::from("/tmp/o.zip"));
-                assert_eq!(backend, ProjectBackend::Cli);
+                assert_eq!(backend, ProjectBackend::Api);
                 assert!(!batch);
                 assert!(model.is_none());
                 assert!(calibration_model.is_none());

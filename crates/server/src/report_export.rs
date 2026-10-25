@@ -90,6 +90,10 @@ pub struct ReportOptions {
     /// behavior for any project this feature hasn't touched.
     #[serde(default)]
     pub chosen_options: std::collections::HashMap<String, String>,
+    /// The backend and provider that ran the inspection, for the manifest and README
+    /// provenance. Server-populated, never client-supplied (`serde(skip)`).
+    #[serde(skip)]
+    pub model: Option<crate::ModelRecord>,
 }
 
 /// Env var carrying the STANDING default for [`ReportOptions::brand`] when the export dialog

@@ -1324,8 +1324,11 @@ from the command line with no server and no UI at all:
 cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip>
 ```
 
-Useful flags: `--backend cli|api` (the same CLI-vs-API compliance setting a project carries; `cli` is
-the default), `--batch` (the Anthropic Message Batches path, roughly half the token cost, results
+Useful flags: `--backend api|cli` (the same API-vs-CLI compliance setting a project carries; `api`, the
+Anthropic API, is the default and needs `ANTHROPIC_API_KEY`: with no key the run fails and tells you to
+add one, it never falls back to the Claude Code subscription; `--backend cli` is an explicit choice for
+internal benchmark runs, and the export's `manifest.json` and `README.txt` record the backend and provider,
+for example `api` / `anthropic`), `--batch` (the Anthropic Message Batches path, roughly half the token cost, results
 arrive asynchronously, needs `--backend api`), `--model` / `--calibration-model`, `--full` to ignore
 the incremental-scan cache and rescan every file, and `--verbose` to print the per-rule coverage
 ledger rather than the concise summary.

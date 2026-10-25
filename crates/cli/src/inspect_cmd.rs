@@ -66,7 +66,8 @@ pub struct InspectArgs {
     pub export: PathBuf,
     /// The compliance-safety backend setting (`docs/design/2026-09-22_per-project-backend.md`)
     /// — resolved against API-key presence via [`resolve_backend`], exactly like a real
-    /// project's `backend` field. Defaults to `Cli` (see `ProjectBackend`'s own `Default`).
+    /// project's `backend` field. The `camerata inspect` flag defaults to `Api` (a client inspection
+    /// runs on the Anthropic API); `Cli` is an explicit choice for internal benchmark runs.
     pub backend: ProjectBackend,
     /// Use the Anthropic Message Batches path (`ScanMode::Batch`): ~50% cheaper, latency is
     /// not returned until the whole batch completes. Requires `backend: Api` plus a
@@ -384,7 +385,7 @@ pub async fn build_product_export_bytes(
     report: &camerata_server::onboard::SealedReport,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Result<(String, Vec<u8>), InspectError> {
-    let released = release_product_export(report, corpus).await?;
+    let released = release_product_export(report, corpus, None).await?;
     Ok((released.stem, released.bytes))
 }
 
@@ -393,11 +394,13 @@ pub async fn build_product_export_bytes(
 async fn release_product_export(
     report: &camerata_server::onboard::SealedReport,
     corpus: Option<&camerata_rules::RuleSet>,
+    model: Option<camerata_server::ModelRecord>,
 ) -> Result<camerata_server::release_gate::ReleasedZip, InspectError> {
     let dispositions: HashMap<String, camerata_server::report_export::DispositionWire> =
         HashMap::new();
     let mut options = ReportOptions::default();
     options.apply_env_defaults();
+    options.model = model;
 
     let package = camerata_server::release_gate::build_product_package(
         report,
@@ -634,7 +637,12 @@ pub async fn run_inspect_with_key_presence(
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
     // `release_product_export` is the release gate: it returns bytes only when every check
     // passed, and `std::fs::write` below runs only on `Ok`, so a blocked export is never on disk.
-    let released = release_product_export(&report, corpus.as_ref()).await?;
+    let released = release_product_export(
+        &report,
+        corpus.as_ref(),
+        Some(camerata_server::ModelRecord::anthropic(args.backend)),
+    )
+    .await?;
     let zip_bytes = released.bytes;
     let release_gate = format!(
         "release gate: passed ({} checks)",
@@ -828,14 +836,37 @@ pub fn render_ledger_summary(
     out.trim_end().to_string()
 }
 
-/// Production entry point: reads the real `ANTHROPIC_API_KEY` presence from the environment
-/// and delegates to [`run_inspect_with_key_presence`]. See that function's doc comment, and
-/// [`validate_args`]'s, for why the key check is a separate, injectable parameter.
+/// The production-only key requirement: a client inspection on the `api` backend with no key
+/// FAILS, naming the fix. It never degrades to a floor-only run or to the CLI backend (an
+/// explicit `--backend cli` is the only way onto the subscription). Pure, so it is testable
+/// without mutating process env. It lives here, not in [`validate_args`], because the
+/// key-presence-injecting entry point deliberately runs `api` without a key to exercise the
+/// deterministic floor with zero API spend.
+pub fn require_api_key_for_client_inspection(
+    backend: ProjectBackend,
+    has_api_key: bool,
+) -> Result<(), InspectError> {
+    if matches!(backend, ProjectBackend::Api) && !has_api_key {
+        return Err(InspectError::Failed(
+            "client inspections run on the Anthropic API, but no API key is configured. Add an \
+             Anthropic API key (set ANTHROPIC_API_KEY) and re-run. For an internal benchmark run \
+             only, choose the Claude Code subscription explicitly with `--backend cli`."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Production entry point: reads the real `ANTHROPIC_API_KEY` presence from the environment,
+/// requires it for the `api` backend ([`require_api_key_for_client_inspection`]) and delegates
+/// to [`run_inspect_with_key_presence`]. See that function's doc comment, and [`validate_args`]'s,
+/// for why the key check is a separate, injectable parameter.
 pub async fn run_inspect(args: InspectArgs) -> Result<InspectOutcome, InspectError> {
     let has_api_key = std::env::var("ANTHROPIC_API_KEY")
         .ok()
         .filter(|k| !k.trim().is_empty())
         .is_some();
+    require_api_key_for_client_inspection(args.backend, has_api_key)?;
     run_inspect_with_key_presence(args, has_api_key).await
 }
 
@@ -952,6 +983,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let args = base_args(dir.path().to_path_buf(), dir.path().to_path_buf());
         assert!(validate_args(&args, false).is_ok());
+    }
+
+    // ── require_api_key_for_client_inspection ────────────────────────────────────────
+
+    #[test]
+    fn api_without_a_key_fails_clearly_and_never_falls_back_to_cli() {
+        let err = require_api_key_for_client_inspection(ProjectBackend::Api, false)
+            .expect_err("api with no key must fail");
+        let text = err.to_string();
+        assert!(text.contains("Anthropic API key"), "{text}");
+        assert!(
+            text.contains("--backend cli"),
+            "names the explicit escape: {text}"
+        );
+    }
+
+    #[test]
+    fn api_with_a_key_and_an_explicit_cli_choice_both_pass() {
+        assert!(require_api_key_for_client_inspection(ProjectBackend::Api, true).is_ok());
+        assert!(require_api_key_for_client_inspection(ProjectBackend::Cli, false).is_ok());
+        assert!(require_api_key_for_client_inspection(ProjectBackend::Cli, true).is_ok());
     }
 
     // ── curated_rule_selection ───────────────────────────────────────────────────────
