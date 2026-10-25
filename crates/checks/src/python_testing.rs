@@ -217,4 +217,22 @@ mod tests {
         assert_eq!(vs.len(), 1, "{vs:#?}");
         assert!(!vs[0].message.is_empty());
     }
+
+    /// The scan gates each checker on its interest globs: if they stopped matching, the checker
+    /// would silently never run on any repo.
+    #[test]
+    fn the_checker_applies_to_python_files_under_a_test_directory_only() {
+        for path in ["tests/a.py", "pkg/test/a.py", "src/tests/unit/a.py"] {
+            let f = files(vec![(path, "x\n")]);
+            assert!(
+                crate::arch_checker::checker_applies(&PythonTestFileNamingChecker, &f),
+                "{path}"
+            );
+        }
+        let f = files(vec![("src/a.py", "x\n"), ("tests/a.txt", "x\n")]);
+        assert!(!crate::arch_checker::checker_applies(
+            &PythonTestFileNamingChecker,
+            &f
+        ));
+    }
 }

@@ -286,4 +286,30 @@ mod tests {
         )]);
         assert!(UtcDatesChecker.check(&view(&f)).is_empty());
     }
+
+    /// The scan gates each checker on its interest globs: if they stopped matching, the checker
+    /// would silently never run on any repo.
+    #[test]
+    fn the_checker_applies_to_every_js_family_file_only() {
+        for path in ["a.ts", "a.tsx", "a.js", "a.jsx"] {
+            let f = files(vec![(path, "x\n")]);
+            assert!(
+                crate::arch_checker::checker_applies(&UtcDatesChecker, &f),
+                "{path}"
+            );
+        }
+        let f = files(vec![("a.py", "x\n")]);
+        assert!(!crate::arch_checker::checker_applies(&UtcDatesChecker, &f));
+    }
+
+    #[test]
+    fn a_lone_slash_or_star_does_not_start_a_comment() {
+        // A division `/` and a multiplication `*` are not comment openers; the call after
+        // them on the same line must still be flagged.
+        let f = files(vec![
+            ("a.ts", "const avg = total / n; x.toLocaleString();\n"),
+            ("b.ts", "const area = w *h; x.toLocaleString();\n"),
+        ]);
+        assert_eq!(UtcDatesChecker.check(&view(&f)).len(), 2);
+    }
 }
