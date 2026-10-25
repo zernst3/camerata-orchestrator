@@ -2327,6 +2327,18 @@ pub async fn audit_repos_with_llm(
         pipeline_ledger.record_stage("structural-needs-review-merge", rows_in, rows_out, acc);
     }
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
+    // A Firebase repository gets the one sentence that says what Firebase coverage is, so a
+    // clean Firebase section is never read as coverage of the Dart client or of console rules.
+    if report
+        .stacks
+        .iter()
+        .any(|s| s.frameworks.iter().any(|f| f == "Firebase"))
+    {
+        report.coverage_notes.push(CoverageNote {
+            tool: crate::FIREBASE_SCOPE_COVERAGE_TOOL.to_string(),
+            message: crate::FIREBASE_SCOPE_SENTENCE.to_string(),
+        });
+    }
     report.test_file_count = test_files_total;
     report.files_excluded = files_excluded_total;
     report.code_chars = code_chars_total;

@@ -76,7 +76,7 @@ impl ArchChecker for FirebaseRulesChecker {
 
     fn check(&self, repo: &RepoView<'_>) -> Vec<ArchViolation> {
         let set = resolve(repo.files);
-        let mut out = coverage_rows(&set);
+        let mut out = coverage_rows(&set, repo.files);
         let mut loaded = load(repo.files, &set);
         out.append(&mut loaded.rows);
 
@@ -138,7 +138,7 @@ fn not_assessed(rule: &'static str, file: &str, line: usize, message: String) ->
 
 /// The rows about the file set itself: unreferenced files, unreadable or incomplete
 /// `firebase.json`, and a repository whose deployed rules are not in it.
-fn coverage_rows(set: &FileSet) -> Vec<ArchViolation> {
+fn coverage_rows(set: &FileSet, files: &[(String, String)]) -> Vec<ArchViolation> {
     let mut rows = Vec::new();
     for path in &set.unreadable_configs {
         rows.push(not_assessed(
@@ -179,7 +179,9 @@ fn coverage_rows(set: &FileSet) -> Vec<ArchViolation> {
             ),
         ));
     }
-    if set.assessed.is_empty() {
+    // "No rules file here" is only worth saying about a repository that shows it uses Firebase:
+    // a rule armed for a whole project must not annotate every other repository in it.
+    if set.assessed.is_empty() && shows_firebase_use(set, files) {
         rows.push(not_assessed(
             RULE_OPEN,
             "",
@@ -188,6 +190,26 @@ fn coverage_rows(set: &FileSet) -> Vec<ArchViolation> {
         ));
     }
     rows
+}
+
+/// Evidence in `files` that the repository uses Firebase, short of a rules file: a project
+/// config, a platform config file, a FlutterFire options file, or a Firebase dependency.
+fn shows_firebase_use(set: &FileSet, files: &[(String, String)]) -> bool {
+    set.has_firebase_json
+        || files.iter().any(|(path, content)| {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            match name {
+                ".firebaserc"
+                | "google-services.json"
+                | "GoogleService-Info.plist"
+                | "firebase_options.dart" => true,
+                "package.json" => ["firebase", "firebase-admin", "firebase-functions"]
+                    .iter()
+                    .any(|dep| super::functions::manifest_depends_on(content, dep)),
+                "pubspec.yaml" => content.contains("firebase_core"),
+                _ => false,
+            }
+        })
 }
 
 /// The assessed files that read cleanly, and one NOT ASSESSED row for every one that did not.

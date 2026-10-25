@@ -405,3 +405,82 @@ fn missing_config_override_path_is_a_run_error_exit_code_2() {
         .failure()
         .code(2);
 }
+
+// ── Firebase rules through the real walk (item 24) ──────────────────────────
+
+/// The Firebase rules checker reads `firestore.rules`, `firebase.json` and `.firebaserc`:
+/// dot and non-code extensions the pruned file walk must reach.
+#[test]
+fn a_firestore_rules_file_is_checked_through_the_real_walk_and_fails_ci() {
+    let repo = server_fixture("firebase-app");
+    let output = bin()
+        .arg(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--rule-id")
+        .arg("FIREBASE-RULES-OPEN-1")
+        .arg("--rule-id")
+        .arg("FIREBASE-RULES-OWNERSHIP-1")
+        .output()
+        .expect("must run");
+    assert_eq!(output.status.code(), Some(1), "defects are deterministic");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let violations = value["violations"].as_array().unwrap();
+    let open = violations
+        .iter()
+        .find(|v| v["rule_id"] == "FIREBASE-RULES-OPEN-1")
+        .unwrap_or_else(|| panic!("open rule missing: {stdout}"));
+    assert_eq!(open["file"], "firestore.rules");
+    assert_eq!(open["line"], 5);
+    assert_eq!(open["needs_review"], false);
+    assert!(violations
+        .iter()
+        .any(|v| v["rule_id"] == "FIREBASE-RULES-OWNERSHIP-1"));
+}
+
+#[test]
+fn an_unreadable_rules_file_is_listed_as_not_assessed_and_is_never_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("firebase.json"),
+        r#"{ "firestore": { "rules": "firestore.rules" } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("firestore.rules"),
+        "service cloud.firestore {\n  match /databases/{d}/documents {\n    deny read;\n  }\n}\n",
+    )
+    .unwrap();
+    let run = |strict: bool| {
+        let mut cmd = bin();
+        cmd.arg(dir.path())
+            .arg("--format")
+            .arg("json")
+            .arg("--rule-id")
+            .arg("FIREBASE-RULES-OPEN-1");
+        if strict {
+            cmd.arg("--strict");
+        }
+        cmd.output().expect("must run")
+    };
+    let default_run = run(false);
+    assert_eq!(default_run.status.code(), Some(0), "not a violation");
+    let value: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&default_run.stdout)).unwrap();
+    assert_eq!(value["clean"], false, "an unassessed input is never clean");
+    assert_eq!(value["violations"].as_array().unwrap().len(), 0);
+    let not_assessed = value["not_assessed"].as_array().unwrap();
+    assert_eq!(not_assessed.len(), 1);
+    assert_eq!(not_assessed[0]["file"], "firestore.rules");
+    assert_eq!(run(true).status.code(), Some(1), "strict fails on it");
+
+    bin()
+        .arg(dir.path())
+        .arg("--rule-id")
+        .arg("FIREBASE-RULES-OPEN-1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Not assessed"))
+        .stdout(predicate::str::contains("NOT CLEAN"));
+}
