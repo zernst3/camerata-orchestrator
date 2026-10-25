@@ -103,6 +103,37 @@ pub(crate) fn detect_frameworks(
             if lc.contains("\"@supabase/") {
                 add("Supabase");
             }
+            // The Firebase client SDK (`"firebase":`, matched with its colon so `firebase-admin`
+            // and `firebase-functions` are matched by their own clauses), the Admin and
+            // Functions SDKs, and the framework bindings.
+            if lc.contains("\"firebase\":")
+                || lc.contains("\"firebase\" :")
+                || lc.contains("\"firebase-admin\"")
+                || lc.contains("\"firebase-functions\"")
+                || lc.contains("\"@react-native-firebase/")
+                || lc.contains("\"@angular/fire\"")
+                || lc.contains("\"reactfire\"")
+                || lc.contains("\"firebaseui\"")
+                || lc.contains("\"@firebase/")
+            {
+                add("Firebase");
+            }
+        }
+        // Flutter: the FlutterFire packages.
+        "pubspec.yaml" => {
+            if [
+                "firebase_core",
+                "cloud_firestore",
+                "firebase_auth",
+                "firebase_storage",
+                "firebase_database",
+                "cloud_functions",
+            ]
+            .iter()
+            .any(|pkg| lc.contains(pkg))
+            {
+                add("Firebase");
+            }
         }
         "requirements.txt" | "pyproject.toml" | "Pipfile" => {
             if lc.contains("django") {
@@ -245,6 +276,26 @@ pub(crate) fn detect_frameworks(
     }
     if path.contains("supabase/migrations/") && file.ends_with(".sql") {
         add("Supabase");
+    }
+    // Firebase: the project config, the rules files and the platform config files are
+    // structural markers at any depth (a monorepo keeps one `firebase.json` per app). A `.rules`
+    // file also used by other tools (udev, Prometheus alerting) counts only when its content
+    // declares a Firebase `service`.
+    if matches!(
+        file,
+        "firebase.json"
+            | ".firebaserc"
+            | "firestore.rules"
+            | "storage.rules"
+            | "database.rules.json"
+            | "firestore.indexes.json"
+            | "google-services.json"
+            | "GoogleService-Info.plist"
+            | "firebase_options.dart"
+    ) || (file.ends_with(".rules")
+        && (lc.contains("service cloud.firestore") || lc.contains("service firebase.storage")))
+    {
+        add("Firebase");
     }
     // CI/CD → `ci-cd`:
     if path.contains(".github/workflows/") {
@@ -465,6 +516,10 @@ const FRAMEWORK_DOMAINS: &[(&str, &[&str])] = &[
             "sql",
         ],
     ),
+    // ── Firebase ────────────────────────────────────────────────────────────────────────────
+    // One flat `firebase` domain holds every Firebase rule (the Functions rules reach JS/TS repos
+    // only through this row; they carry no `extra_domains`, so a plain Express app never sees them).
+    ("Firebase", &["firebase"]),
     // ── Infrastructure-as-code → `iac` ──────────────────────────────────────────────────────
     ("Terraform", &["iac"]),
     ("Terragrunt", &["iac"]),
@@ -825,6 +880,136 @@ mod tests {
             .iter()
             .map(|(p, c)| (p.to_string(), c.to_string()))
             .collect()
+    }
+
+    // ── Firebase stack detection (MASTER-SEQUENCE item 24) ──────────────────────────────────
+
+    fn frameworks_of(path: &str, content: &str) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        detect_frameworks(path, content, &mut out);
+        out
+    }
+
+    #[test]
+    fn firebase_is_detected_from_each_marker() {
+        // Manifest content markers.
+        for (path, content) in [
+            ("package.json", r#"{"dependencies":{"firebase":"^10.0.0"}}"#),
+            (
+                "package.json",
+                r#"{"dependencies":{"firebase-admin":"12"}}"#,
+            ),
+            (
+                "functions/package.json",
+                r#"{"dependencies":{"firebase-functions":"5"}}"#,
+            ),
+            (
+                "package.json",
+                r#"{"dependencies":{"@react-native-firebase/app":"20"}}"#,
+            ),
+            ("package.json", r#"{"dependencies":{"@angular/fire":"18"}}"#),
+            ("package.json", r#"{"dependencies":{"reactfire":"4"}}"#),
+            ("package.json", r#"{"dependencies":{"firebaseui":"6"}}"#),
+            (
+                "package.json",
+                r#"{"dependencies":{"@firebase/app":"0.10"}}"#,
+            ),
+            ("pubspec.yaml", "dependencies:\n  firebase_core: ^3.0.0\n"),
+            ("pubspec.yaml", "dependencies:\n  cloud_firestore: ^5.0.0\n"),
+            ("pubspec.yaml", "dependencies:\n  firebase_auth: ^5.0.0\n"),
+            (
+                "pubspec.yaml",
+                "dependencies:\n  firebase_storage: ^12.0.0\n",
+            ),
+            (
+                "pubspec.yaml",
+                "dependencies:\n  firebase_database: ^11.0.0\n",
+            ),
+            ("pubspec.yaml", "dependencies:\n  cloud_functions: ^5.0.0\n"),
+        ] {
+            assert!(
+                frameworks_of(path, content).contains("Firebase"),
+                "{path}: {content}"
+            );
+        }
+        // Path and basename markers, at any depth.
+        for path in [
+            "firebase.json",
+            "apps/web/firebase.json",
+            ".firebaserc",
+            "firestore.rules",
+            "storage.rules",
+            "database.rules.json",
+            "firestore.indexes.json",
+            "android/app/google-services.json",
+            "ios/Runner/GoogleService-Info.plist",
+            "lib/firebase_options.dart",
+        ] {
+            assert!(frameworks_of(path, "").contains("Firebase"), "{path}");
+        }
+        // A renamed rules file is recognised by its service header, never by its name.
+        assert!(
+            frameworks_of("rules/prod.rules", "service cloud.firestore {\n}\n")
+                .contains("Firebase")
+        );
+        assert!(
+            frameworks_of("rules/files.rules", "service firebase.storage {\n}\n")
+                .contains("Firebase")
+        );
+    }
+
+    #[test]
+    fn firebase_is_not_detected_from_look_alikes() {
+        for (path, content) in [
+            ("package.json", r#"{"dependencies":{"express":"4"}}"#),
+            (
+                "monitoring/alerts.rules",
+                "groups:\n- name: a\n  rules: []\n",
+            ),
+            (
+                "etc/udev/70-usb.rules",
+                "ACTION==\"add\", SUBSYSTEM==\"usb\"\n",
+            ),
+            ("pubspec.yaml", "dependencies:\n  http: ^1.0.0\n"),
+            ("src/firebase-notes.md", "firebase.json is mentioned here"),
+        ] {
+            assert!(
+                !frameworks_of(path, content).contains("Firebase"),
+                "{path} must not look like Firebase"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flutter_firebase_repo_is_detected_as_dart_plus_firebase() {
+        let stack = detect_stack(
+            "acme/app",
+            &files(&[
+                ("pubspec.yaml", "dependencies:\n  firebase_core: ^3.0.0\n"),
+                ("lib/main.dart", "void main() {}\n"),
+            ]),
+        );
+        assert!(stack.languages.contains(&"Dart".to_string()), "{stack:?}");
+        assert!(
+            stack.frameworks.contains(&"Firebase".to_string()),
+            "{stack:?}"
+        );
+        let domains = domains_for_stack(&stack);
+        assert!(domains.contains(&"firebase".to_string()), "{domains:?}");
+        // Dart takes the default language row (owner decision 2026-10-25), like Kotlin and Swift.
+        assert!(domains.contains(&"api-layer".to_string()), "{domains:?}");
+    }
+
+    #[test]
+    fn a_plain_node_api_does_not_get_the_firebase_domain() {
+        let stack = detect_stack(
+            "acme/api",
+            &files(&[
+                ("package.json", r#"{"dependencies":{"express":"4"}}"#),
+                ("src/index.ts", "export {};\n"),
+            ]),
+        );
+        assert!(!domains_for_stack(&stack).contains(&"firebase".to_string()));
     }
 
     /// Every distinct `domain` present in the REAL shipped corpus, derived the same way
@@ -1245,6 +1430,11 @@ mod tests {
             "Terragrunt",
             "terragrunt.hcl",
             "terraform { source = \".\" }\n",
+        ),
+        (
+            "Firebase",
+            "firebase.json",
+            r#"{"firestore":{"rules":"firestore.rules"}}"#,
         ),
         ("Bicep", "main.bicep", "param location string\n"),
         ("Pulumi", "Pulumi.yaml", "name: example\nruntime: nodejs\n"),
