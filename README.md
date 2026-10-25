@@ -8,6 +8,25 @@ I set out to build Camerata because managing multiple AI agents across multiple 
 
 Camerata is an all-Rust, governed multi-agent engineering platform. This README leads with what runs and is defensible today, and is explicit about what is built but staged. The intended reader is the person who will clone the repo and check, so the line between "proven" and "built but not yet validated live" is drawn deliberately, not blurred.
 
+### By the numbers
+
+I architected Camerata and orchestrated its build: supervised AI agents wrote the code, working under the same deterministic governance rules Camerata itself enforces. Every architectural decision, review gate and scope call is mine. In roughly four and a half months:
+
+| | |
+|---|---|
+| Rust | about 410,000 lines across 28 crates (about 305,000 lines of code once comments and blank lines are set aside) |
+| Tests | 7,600+ automated tests; test code is roughly 45% of all code |
+| Test quality | mutation testing on the deterministic checkers: the suite catches 97.9% of deliberately injected faults |
+| Rule library | 424 rules across 21 domains, each one versioned and locked by content hash so no rule can change silently |
+| Commits | 1,800+, every merge gated on formatting, zero-warning lints and the full test suite |
+
+What I am proudest of is the discipline behind those numbers, not the numbers themselves:
+
+- **False negative, never false positive.** A finding a client cannot verify is worse than a missed one. Every deterministic detector ships with a positive test and a "safe twin" test that proves it stays quiet on the look-alike case, and before any detector merges, a second model is set loose to try to break it.
+- **Deterministic first, AI second.** Wherever a question has a provable answer, code answers it. AI review covers the judgment calls, and no AI-raised candidate becomes a finding without passing through calibration, deduplication and per-rule severity bounds; anything the engine is unsure of is held for human review rather than shipped.
+- **Nothing sensitive leaves the building.** Client secrets are redacted the moment a finding is created and before any code reaches a model, and a release gate scans every string of every file in a deliverable before it exists. If one secret survives, the export fails.
+- **Benchmarked, not vibed.** The engine is measured against answer keys on real-world repositories, and its cost is tracked per stage so efficiency work never trades away recall.
+
 The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a Dioxus desktop app), then walk **Onboard repos → Governed Development**.
 
 ```text
