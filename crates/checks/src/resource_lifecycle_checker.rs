@@ -494,4 +494,35 @@ mod tests {
             .collect();
         assert!(ids.contains(RULE_RESOURCE_LIFECYCLE), "{ids:?}");
     }
+
+    // ── mutation-gap tests (docs/plans/2026-10-19_MASTER-SEQUENCE.md section 2b) ────────
+
+    #[test]
+    fn kill_on_drop_false_does_not_protect_an_inline_chain() {
+        let f = files(vec![(
+            "src/x.rs",
+            "async fn run() {\n    let _ = Command::new(\"ls\").kill_on_drop(false).spawn();\n}\n",
+        )]);
+        assert_eq!(ResourceLifecycleChecker.check(&view(&f)).len(), 1);
+    }
+
+    #[test]
+    fn kill_on_drop_false_does_not_protect_a_tracked_variable() {
+        let f = files(vec![(
+            "src/x.rs",
+            "async fn run() {\n    let mut cmd = Command::new(\"ls\");\n    cmd.kill_on_drop(false);\n    let _ = cmd.spawn();\n}\n",
+        )]);
+        assert_eq!(ResourceLifecycleChecker.check(&view(&f)).len(), 1);
+    }
+
+    #[test]
+    fn a_variable_with_a_type_annotation_is_still_tracked() {
+        let f = files(vec![(
+            "src/x.rs",
+            "async fn run() {\n    let mut cmd: Command = Command::new(\"ls\");\n    let _ = cmd.spawn();\n}\n",
+        )]);
+        let vs = ResourceLifecycleChecker.check(&view(&f));
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].line, 3);
+    }
 }
