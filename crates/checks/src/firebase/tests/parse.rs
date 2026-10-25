@@ -469,16 +469,16 @@ fn field_recognisers_read_the_incoming_and_stored_documents() {
     assert!(cond("request.resource.data.keys().hasOnly(['a', 'b'])").validates_fields());
     assert!(cond("request.resource.data.name is string").validates_fields());
     assert!(!cond("request.auth.uid == userId").validates_fields());
-    assert!(cond("request.resource.data.role == resource.data.role").pins_field("role"));
+    assert!(cond("request.resource.data.role == resource.data.role").pins_field("role", &[]));
     assert!(cond(
         "request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName'])"
     )
-    .pins_field("role"));
+    .pins_field("role", &[]));
     assert!(!cond(
         "request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'role'])"
     )
-    .pins_field("role"));
-    assert!(!cond("request.auth.uid == userId").pins_field("role"));
+    .pins_field("role", &[]));
+    assert!(!cond("request.auth.uid == userId").pins_field("role", &[]));
     let lookups = cond(
         "get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'",
     )

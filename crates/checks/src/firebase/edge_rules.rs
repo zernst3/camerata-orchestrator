@@ -47,7 +47,11 @@ pub(crate) fn ownership(sites: &[Site<'_>]) -> Vec<ArchViolation> {
         if incoming.is_empty() || incoming.len() != targets.len() {
             continue;
         }
-        let Some(field) = incoming.iter().copied().find(|f| !site.cond.pins_field(f)) else {
+        let Some(field) = incoming
+            .iter()
+            .copied()
+            .find(|f| !site.cond.pins_field(f, &site.wildcards))
+        else {
             continue;
         };
         let path = site.display_path();
@@ -188,7 +192,7 @@ fn owner_can_write_role(site: &Site<'_>, collection: &str, field: &str) -> bool 
     if !(creates(m) || updates(m) || changes_data(m)) {
         return false;
     }
-    if site.cond.pins_field(field) {
+    if site.cond.pins_field(field, &site.wildcards) {
         return false;
     }
     let owner_satisfies = match site.grant {

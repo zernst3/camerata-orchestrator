@@ -80,6 +80,77 @@ fn twin_disjunction_is_not_recognised() {
     assert!(findings(&all).is_empty(), "{all:#?}");
 }
 
+/// Reviewer probe `fp_probes` line 10: the incoming owner field is itself pinned to the path
+/// wildcard, so a caller cannot choose it.
+#[test]
+fn twin_incoming_owner_pinned_to_the_path_wildcard_is_silent() {
+    for pin in [
+        "request.resource.data.uid == userId",
+        "userId == request.resource.data.uid",
+    ] {
+        let all = run(&firestore(&format!(
+            "    match /profiles/{{userId}} {{ allow update: if request.auth.uid == request.resource.data.uid && {pin}; }}"
+        )));
+        assert!(findings(&all).is_empty(), "{pin}: {all:#?}");
+    }
+}
+
+/// Reviewer probe `fp_probes` line 14: `!...affectedKeys().hasAny(['authorId'])` keeps the owner
+/// field out of the changed keys.
+#[test]
+fn twin_negated_affected_keys_has_any_pins_the_owner_field_is_silent() {
+    let all = run(&firestore(
+        "    match /posts/{postId} { allow update: if request.auth.uid == request.resource.data.authorId && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['authorId']); }",
+    ));
+    assert!(findings(&all).is_empty(), "{all:#?}");
+}
+
+/// Reviewer probe `fp_probes` line 18: `unchangedKeys().hasAll(['ownerId'])` says the same.
+#[test]
+fn twin_unchanged_keys_has_all_pins_the_owner_field_is_silent() {
+    let all = run(&firestore(
+        "    match /notes/{noteId} { allow update: if request.auth.uid == request.resource.data.ownerId && request.resource.data.diff(resource.data).unchangedKeys().hasAll(['ownerId']); }",
+    ));
+    assert!(findings(&all).is_empty(), "{all:#?}");
+}
+
+/// The law: a key-set construct the recogniser does not model is UNKNOWN, so the rule stays
+/// silent rather than assert that the owner field is unpinned.
+#[test]
+fn twin_unmodelled_key_set_construct_is_silent() {
+    for extra in [
+        "request.resource.data.diff(resource.data).affectedKeys().size() == 0",
+        "!request.resource.data.diff(resource.data).affectedKeys().hasAny(protectedFields())",
+        "request.resource.data.diff(resource.data).affectedKeys().hasOnly(allowedFields())",
+        "!(request.resource.data.diff(resource.data).affectedKeys().hasAny(['authorId']) || request.auth.token.admin == true)",
+    ] {
+        let all = run(&firestore(&format!(
+            "    match /posts/{{postId}} {{ allow update: if request.auth.uid == request.resource.data.authorId && {extra}; }}"
+        )));
+        assert!(rows(&all, RULE_OWNERSHIP, ViolationGrade::Defect).is_empty(), "{extra}: {all:#?}");
+    }
+}
+
+/// The modelled key-set forms only pin what they name: a negated `hasAny` over OTHER fields, or
+/// a non-negated one, leaves the owner field free, so the finding stands.
+#[test]
+fn key_set_checks_that_do_not_exclude_the_owner_field_do_not_silence_it() {
+    for extra in [
+        "!request.resource.data.diff(resource.data).affectedKeys().hasAny(['title'])",
+        "request.resource.data.diff(resource.data).affectedKeys().hasAny(['authorId'])",
+        "request.resource.data.diff(resource.data).affectedKeys().hasOnly(['authorId', 'title'])",
+    ] {
+        let all = run(&firestore(&format!(
+            "    match /posts/{{postId}} {{ allow update: if request.auth.uid == request.resource.data.authorId && {extra}; }}"
+        )));
+        assert_eq!(
+            rows(&all, RULE_OWNERSHIP, ViolationGrade::Defect).len(),
+            1,
+            "{extra}: {all:#?}"
+        );
+    }
+}
+
 // ── FIELD-VALIDATION ────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -247,6 +318,50 @@ fn twin_lookup_keyed_on_another_document_is_silent() {
     let all = run(&firestore(
         "    match /users/{uid} { allow write: if request.auth.uid == uid; }\n    match /reports/{r} { allow write: if get(/databases/$(database)/documents/users/$(request.resource.data.ownerId)).data.role == 'admin'; }",
     ));
+    assert!(
+        rows(&all, RULE_ADMIN_CLAIMS, ViolationGrade::Defect).is_empty(),
+        "{all:#?}"
+    );
+}
+
+/// Reviewer probe `fp_probes` lines 27 and 28: `!...keys().hasAny(['role'])` on create and
+/// `!...affectedKeys().hasAny(['role'])` on update both keep the holder from writing `role`.
+#[test]
+fn twin_owner_write_with_negated_has_any_over_role_is_silent() {
+    let all = run(&firestore(&format!(
+        "    match /users/{{uid}} {{\n      allow read: if request.auth.uid == uid;\n      allow create: if request.auth.uid == uid && !request.resource.data.keys().hasAny(['role']);\n      allow update: if request.auth.uid == uid && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']);\n    }}\n    match /reports/{{r}} {{ allow write: if {ADMIN_LOOKUP}; }}"
+    )));
+    assert!(
+        rows(&all, RULE_ADMIN_CLAIMS, ViolationGrade::Defect).is_empty(),
+        "{all:#?}"
+    );
+}
+
+/// The pin must name the role field and be negated: another field, or a plain `hasAny`, leaves
+/// the role writable, so the finding stands.
+#[test]
+fn owner_write_whose_has_any_does_not_exclude_the_role_still_fires() {
+    for guard in [
+        "!request.resource.data.keys().hasAny(['displayName'])",
+        "request.resource.data.keys().hasAny(['role'])",
+    ] {
+        let all = run(&firestore(&format!(
+            "    match /users/{{uid}} {{ allow create: if request.auth.uid == uid && {guard}; }}\n    match /reports/{{r}} {{ allow write: if {ADMIN_LOOKUP}; }}"
+        )));
+        assert_eq!(
+            rows(&all, RULE_ADMIN_CLAIMS, ViolationGrade::Defect).len(),
+            1,
+            "{guard}: {all:#?}"
+        );
+    }
+}
+
+/// The law again, for the role: an unmodelled key-set construct is UNKNOWN, so stay silent.
+#[test]
+fn twin_owner_write_with_unmodelled_key_set_construct_is_silent() {
+    let all = run(&firestore(&format!(
+        "    match /users/{{uid}} {{ allow update: if request.auth.uid == uid && !request.resource.data.diff(resource.data).affectedKeys().hasAny(privilegedFields()); }}\n    match /reports/{{r}} {{ allow write: if {ADMIN_LOOKUP}; }}"
+    )));
     assert!(
         rows(&all, RULE_ADMIN_CLAIMS, ViolationGrade::Defect).is_empty(),
         "{all:#?}"

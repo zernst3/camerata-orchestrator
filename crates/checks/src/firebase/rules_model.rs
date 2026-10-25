@@ -120,8 +120,10 @@ impl Cond {
             || incoming_type_check(t)
     }
 
-    /// The condition keeps field `f` from being changed by the caller.
-    pub fn pins_field(&self, f: &str) -> bool {
+    /// The condition keeps field `f` from being changed by the caller, or uses a key-set
+    /// construct this reader does not model (UNKNOWN, which the false-negative law reads as
+    /// pinned so the rules stay silent). `wildcards` are the names the block's path binds.
+    pub fn pins_field(&self, f: &str, wildcards: &[String]) -> bool {
         let t = &self.0;
         if t.contains(&format!("request.resource.data.{f}==resource.data.{f}"))
             || t.contains(&format!("resource.data.{f}==request.resource.data.{f}"))
@@ -136,6 +138,10 @@ impl Cond {
                 .next()
                 .is_some_and(|c| c == '\'' || c == '"')
         }) {
+            return true;
+        }
+        // The field is forced to the path wildcard: `request.resource.data.f == userId`.
+        if wildcards.iter().any(|w| pinned_to_wildcard(t, f, w)) {
             return true;
         }
         // `!('f' in request.resource.data)` and the `.keys()` spelling.
@@ -160,7 +166,14 @@ impl Cond {
                 from = start;
             }
         }
-        false
+        // The key-set forms: negated `hasAny`, `unchangedKeys().hasAll`; anything else that
+        // touches a key set and is not modelled is unknown.
+        let mut atoms = Vec::new();
+        collect_atoms(t, &mut atoms);
+        atoms.iter().any(|atom| match key_set_pin(atom, f) {
+            KeySetPin::Pins | KeySetPin::Unknown => true,
+            KeySetPin::Neutral => false,
+        })
     }
 
     /// Roles read from documents keyed on the caller's own uid.
@@ -693,6 +706,126 @@ fn incoming_type_check(t: &str) -> bool {
         let after_field = rest.trim_start_matches(|c: char| is_ident_char(c));
         after_field.starts_with(" is ")
     })
+}
+
+/// `request.resource.data.<f> == <wildcard>` (either order, optionally `string(<wildcard>)`): the
+/// field is forced to the path's own id, so the caller cannot choose it.
+fn pinned_to_wildcard(t: &str, f: &str, wildcard: &str) -> bool {
+    let incoming = format!("request.resource.data.{f}");
+    [
+        format!("{incoming}=={wildcard}"),
+        format!("{wildcard}=={incoming}"),
+        format!("{incoming}==string({wildcard})"),
+        format!("string({wildcard})=={incoming}"),
+    ]
+    .iter()
+    .any(|form| {
+        t.match_indices(form.as_str()).any(|(at, _)| {
+            let before_ok = t[..at]
+                .chars()
+                .last()
+                .is_none_or(|c| !is_ident_char(c) && c != '.');
+            let after_ok = t[at + form.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !is_ident_char(c) && c != '.');
+            before_ok && after_ok
+        })
+    })
+}
+
+/// What one conjunct says about a field's key-set protection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeySetPin {
+    /// A modelled form that keeps the field from changing.
+    Pins,
+    /// A modelled form that says nothing about this field, or no key-set construct at all.
+    Neutral,
+    /// A key-set construct this reader does not model: the pin is unknown.
+    Unknown,
+}
+
+/// The receiver of a key-set call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeySetReceiver {
+    Affected,
+    Unchanged,
+    Keys,
+}
+
+/// Classify one conjunct (`atom`) for field `f`. Modelled: `!X.affectedKeys().hasAny([..f..])`,
+/// `!X.keys().hasAny([..f..])` and `X.unchangedKeys().hasAll([..f..])` pin `f`; `hasOnly` is
+/// decided by the caller. Any other mention of `affectedKeys`, `unchangedKeys` or `hasAny` is
+/// unknown.
+fn key_set_pin(atom: &str, f: &str) -> KeySetPin {
+    let mentions = |needle: &str| atom.contains(needle);
+    if !(mentions("affectedKeys") || mentions("unchangedKeys") || mentions(".hasAny(")) {
+        return KeySetPin::Neutral;
+    }
+    let (negated, core) = strip_negation(atom);
+    let Some((receiver, method, list)) = key_set_call(core) else {
+        return KeySetPin::Unknown;
+    };
+    let Some(list) = list else {
+        // A non-literal argument (`hasAny(fields())`): the members are not visible.
+        return KeySetPin::Unknown;
+    };
+    let named = list.iter().any(|i| i == f);
+    match (receiver, method, negated) {
+        (KeySetReceiver::Affected | KeySetReceiver::Keys, "hasAny", true) if named => {
+            KeySetPin::Pins
+        }
+        (KeySetReceiver::Unchanged, "hasAll", false) if named => KeySetPin::Pins,
+        // Modelled, but says nothing that pins `f`: the other fields, a plain `hasAny`, the
+        // `hasOnly` allowlist (decided by the caller).
+        (_, "hasAny" | "hasAll" | "hasOnly", _) => KeySetPin::Neutral,
+        _ => KeySetPin::Unknown,
+    }
+}
+
+/// `core` without leading `!`s (their parity) and the parentheses around what is left.
+fn strip_negation(atom: &str) -> (bool, &str) {
+    let mut negated = false;
+    let mut core = strip_parens(atom);
+    while let Some(rest) = core.strip_prefix('!') {
+        negated = !negated;
+        core = strip_parens(rest);
+    }
+    (negated, core)
+}
+
+/// A key-set call that ends `core`: `<receiver>.<method>([..])`. The list is `None` when the
+/// argument is not a literal list.
+fn key_set_call(core: &str) -> Option<(KeySetReceiver, &'static str, Option<Vec<String>>)> {
+    for method in ["hasAny", "hasAll", "hasOnly"] {
+        let needle = format!(".{method}(");
+        let Some(at) = core.rfind(&needle) else {
+            continue;
+        };
+        let receiver_text = &core[..at];
+        let args = core[at + needle.len()..].strip_suffix(')')?;
+        let receiver = if receiver_text.ends_with(".affectedKeys()") {
+            KeySetReceiver::Affected
+        } else if receiver_text.ends_with(".unchangedKeys()") {
+            KeySetReceiver::Unchanged
+        } else if receiver_text.ends_with(".keys()") {
+            KeySetReceiver::Keys
+        } else {
+            return None;
+        };
+        // The receiver may not itself contain another key-set call (a chain this reader does
+        // not model).
+        if receiver_text.matches("Keys()").count() + receiver_text.matches(".keys()").count() > 1 {
+            return None;
+        }
+        let list = args
+            .strip_prefix('[')
+            .and_then(|r| r.strip_suffix(']'))
+            .filter(|inner| !inner.contains('[') && !inner.contains(']'))
+            .map(list_items);
+        return Some((receiver, method, list));
+    }
+    None
 }
 
 /// The quoted items of a list body (`'a','b'`).
