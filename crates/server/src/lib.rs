@@ -91,6 +91,7 @@ pub mod scan_routing;
 pub mod scan_tools;
 pub mod scope_registration;
 pub mod severity_bounds;
+pub mod stage_telemetry;
 pub mod stall_sweep;
 /// Excel workbook export (product-export, Pass C): `build_workbook`, the Excel sibling of
 /// `report_export::build_report_json`. See the module doc comment and
@@ -139,6 +140,7 @@ pub mod usage_ledger;
 /// funnels through `vcs_choke` so a project's configured process rules are actually enforced
 /// (HARD-BLOCK on violation), not merely configurable via the bypass endpoint.
 pub mod vcs_choke;
+pub mod warm_schedule;
 pub mod workflow_gen;
 pub mod workitems;
 pub mod workspace;
@@ -19597,6 +19599,7 @@ mod tests {
                 cache_read_input_tokens: 10,
                 cache_creation_input_tokens: 20,
                 or_cache_discount: None,
+                truncated: false,
             },
         );
         // Gemini-shaped: no cost field, known model id -> derived cost (sonnet 3/15 per Mtok).
@@ -19612,6 +19615,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             },
         );
 

@@ -72,6 +72,7 @@ impl LlmPort for StubModel {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         })
     }
 

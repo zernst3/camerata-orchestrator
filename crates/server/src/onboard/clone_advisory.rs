@@ -40,6 +40,7 @@ use camerata_checks::clone_rules::{
 use crate::ai_audit::{scaled_max_tokens, FailedPass, UsageMeter};
 use crate::llm::{LlmPort, LlmRequest};
 use crate::scan_ledger::{RuleTier, ScanLedger};
+use crate::stage_telemetry::Stage;
 use crate::transcript::{AgentTranscript, TranscriptStore};
 
 use super::Finding;
@@ -315,7 +316,7 @@ async fn judge_rule(
             }
         };
         if let Some(m) = meter {
-            m.record(&response);
+            m.record_stage(Stage::CloneJudge, &response);
         }
         append(feedback, session, &response.text);
         let asked: HashSet<&str> = batch.iter().map(|c| c.id.as_str()).collect();

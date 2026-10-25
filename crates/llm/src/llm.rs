@@ -594,6 +594,7 @@ async fn read_cli_stream(
         cache_read_input_tokens: usage_cache_read,
         cache_creation_input_tokens: usage_cache_creation,
         or_cache_discount: None,
+        truncated: false,
     })
 }
 
@@ -830,6 +831,45 @@ pub use camerata_api_types::llm::LlmResponse;
 /// fields so it reflects all input-side billing; absent fields are treated as zero only
 /// when `input_tokens` itself is present. `cache_read` and `cache_creation` are always
 /// returned separately so the meter can track savings independently.
+/// Build an [`LlmResponse`] from an Anthropic Messages-shaped object: the body of a real-time
+/// `/v1/messages` reply, or the `message` of a succeeded Message Batches row. One parser for both
+/// so the two can never disagree about what a response means.
+///
+/// `text` concatenates the content's text blocks; cost is computed from usage times the model's
+/// list price (the API reports no dollar figure); `truncated` is `stop_reason == "max_tokens"`.
+fn messages_response(msg: &serde_json::Value, model: &str, backend: &str) -> LlmResponse {
+    let text = msg["content"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&msg["usage"]);
+    let cost_usd = compute_cost_usd(
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read,
+        cache_creation,
+    );
+    LlmResponse {
+        text,
+        model: model.to_string(),
+        backend: backend.to_string(),
+        cost_usd,
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens: cache_read,
+        cache_creation_input_tokens: cache_creation,
+        or_cache_discount: None,
+        truncated: msg["stop_reason"].as_str() == Some("max_tokens"),
+    }
+}
+
 fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>, u64, u64) {
     let base = usage["input_tokens"].as_u64();
     let cache_read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
@@ -931,6 +971,8 @@ pub(crate) fn shared_http_client() -> &'static reqwest::Client {
 /// at ~0.1x. 1h only pays for itself when a chunk's rule-batches are spread more than 5
 /// minutes apart (large sequential scans, slow batch-mode turnaround) — the default stays
 /// at 5m so a typical fast-parallel scan isn't paying the 2x write premium for no benefit.
+/// Message Batches are the exception: their items run minutes to hours apart, so
+/// [`build_batch_item`] always requests 1h.
 ///
 /// NEEDS LIVE-KEY VERIFICATION: confirm against the current Anthropic API docs that a bare
 /// `"ttl": "1h"` field (no beta header) is accepted now that extended cache TTL has GA'd —
@@ -1448,37 +1490,7 @@ impl Llm {
         }
         let v: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse API JSON: {e}"))?;
-        // content is an array of blocks; concatenate the text blocks.
-        let out = v["content"]
-            .as_array()
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter_map(|b| b["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("")
-            })
-            .unwrap_or_default();
-        let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&v["usage"]);
-        // The API doesn't bill back a dollar figure, so compute it from usage × list price.
-        let cost_usd = compute_cost_usd(
-            model,
-            input_tokens,
-            output_tokens,
-            cache_read,
-            cache_creation,
-        );
-        Ok(LlmResponse {
-            text: out,
-            model: model.to_string(),
-            backend: "api".to_string(),
-            cost_usd,
-            input_tokens,
-            output_tokens,
-            cache_read_input_tokens: cache_read,
-            cache_creation_input_tokens: cache_creation,
-            or_cache_discount: None,
-        })
+        Ok(messages_response(&v, model, "api"))
     }
 }
 
@@ -1591,13 +1603,13 @@ pub async fn exact_input_token_count(llm: &Llm, req: &LlmRequest, model: &str) -
 /// split into cached segment blocks plus a final uncached suffix block. The system prompt
 /// is forwarded verbatim (the batch API accepts the same `system` field as the messages
 /// API).
+///
+/// Batch items always use the 1-hour cache TTL ([`CacheTtl::OneHour`]): Anthropic processes a
+/// batch over minutes to hours, so the 5-minute default would have expired before most items
+/// ran and every item would re-write the prefix it was meant to read. Real-time requests keep
+/// the 5-minute default (see [`CacheTtl::from_env`]).
 pub fn build_batch_item(custom_id: impl Into<String>, req: &LlmRequest, model: &str) -> BatchItem {
-    let content = cached_user_content(
-        &req.prompt,
-        &req.cache_breakpoints,
-        true,
-        CacheTtl::from_env(),
-    );
+    let content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, CacheTtl::OneHour);
     BatchItem {
         custom_id: custom_id.into(),
         params: BatchItemParams {
@@ -1857,39 +1869,10 @@ pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultR
         if result_type == "succeeded" {
             // The response mirrors the /v1/messages response shape.
             let msg = &v["result"]["message"];
-            let model_id = msg["model"].as_str().unwrap_or("").to_string();
-            let out = msg["content"]
-                .as_array()
-                .map(|blocks| {
-                    blocks
-                        .iter()
-                        .filter_map(|b| b["text"].as_str())
-                        .collect::<Vec<_>>()
-                        .join("")
-                })
-                .unwrap_or_default();
-            let (input_tokens, output_tokens, cache_read, cache_creation) =
-                usage_tokens(&msg["usage"]);
-            let cost_usd = compute_cost_usd(
-                &model_id,
-                input_tokens,
-                output_tokens,
-                cache_read,
-                cache_creation,
-            );
+            let model_id = msg["model"].as_str().unwrap_or("");
             rows.push(BatchResultRow {
                 custom_id,
-                response: Some(LlmResponse {
-                    text: out,
-                    model: model_id,
-                    backend: "api/batch".to_string(),
-                    cost_usd,
-                    input_tokens,
-                    output_tokens,
-                    cache_read_input_tokens: cache_read,
-                    cache_creation_input_tokens: cache_creation,
-                    or_cache_discount: None,
-                }),
+                response: Some(messages_response(msg, model_id, "api/batch")),
                 error: None,
             });
         } else {
@@ -2149,6 +2132,11 @@ impl OpenRouterCompleter {
             }
         }
 
+        // OpenAI-compatible stop signal: `finish_reason == "length"` is the output cap.
+        let truncated = v["choices"]
+            .as_array()
+            .and_then(|choices| choices.first())
+            .is_some_and(|choice| choice["finish_reason"].as_str() == Some("length"));
         Ok(LlmResponse {
             text: output,
             model: model_returned,
@@ -2159,6 +2147,7 @@ impl OpenRouterCompleter {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount,
+            truncated,
         })
     }
 }
@@ -2853,6 +2842,77 @@ mod tests {
         assert!(arr[2].get("cache_control").is_none());
     }
 
+    // ── Truncation signal: `stop_reason == "max_tokens"` ───────────────────────────────
+
+    fn message_with_stop(stop_reason: Option<&str>) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "model": "claude-sonnet-5",
+            "content": [{"type": "text", "text": "{\"findings\":[{\"path\":\"a.rs\""}],
+            "usage": {"input_tokens": 100, "output_tokens": 8192},
+        });
+        if let Some(s) = stop_reason {
+            v["stop_reason"] = serde_json::json!(s);
+        }
+        v
+    }
+
+    #[test]
+    fn a_max_tokens_stop_reason_marks_the_response_truncated() {
+        let r = messages_response(
+            &message_with_stop(Some("max_tokens")),
+            "claude-sonnet-5",
+            "api",
+        );
+        assert!(r.truncated);
+        assert_eq!(r.output_tokens, Some(8192));
+        assert_eq!(r.backend, "api");
+    }
+
+    #[test]
+    fn any_other_or_missing_stop_reason_is_not_truncated() {
+        for stop in [
+            Some("end_turn"),
+            Some("stop_sequence"),
+            Some("tool_use"),
+            None,
+        ] {
+            let r = messages_response(&message_with_stop(stop), "claude-sonnet-5", "api");
+            assert!(!r.truncated, "{stop:?}");
+        }
+    }
+
+    #[test]
+    fn a_truncated_batch_item_is_marked_truncated() {
+        let line = |stop: &str| {
+            format!(
+                r#"{{"custom_id":"c0-b0","result":{{"type":"succeeded","message":{{"model":"claude-sonnet-5","content":[{{"type":"text","text":"x"}}],"stop_reason":"{stop}","usage":{{"input_tokens":1,"output_tokens":2}}}}}}}}"#
+            )
+        };
+        let truncated = parse_batch_results_jsonl(&line("max_tokens")).unwrap();
+        assert!(truncated[0].response.as_ref().unwrap().truncated);
+        let complete = parse_batch_results_jsonl(&line("end_turn")).unwrap();
+        assert!(!complete[0].response.as_ref().unwrap().truncated);
+        assert_eq!(complete[0].response.as_ref().unwrap().backend, "api/batch");
+    }
+
+    /// Batch items are processed over minutes to hours, so the default 5-minute cache entry would
+    /// have expired before most items ran. Batch mode therefore always asks for the 1-hour TTL,
+    /// without the operator having to set `CAMERATA_ANTHROPIC_CACHE_TTL_1H`. (The real-time path
+    /// keeps its 5-minute default: its requests are minutes apart at most.) The builder reads no
+    /// environment, so this holds whatever the process env says.
+    #[test]
+    fn build_batch_item_caches_for_one_hour() {
+        let req = LlmRequest::new("static prefix\ndynamic suffix")
+            .with_cache_breakpoints(vec!["static prefix\n".len()])
+            .with_model("claude-sonnet-5");
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
+        let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
+        let arr = content.as_array().expect("cached content is an array");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(arr[0]["cache_control"]["ttl"], "1h");
+        assert!(arr[1].get("cache_control").is_none());
+    }
+
     /// The SAME repo-map segment, unmodified, appears byte-for-byte across two prompts
     /// built for different chunk indices — this identity is exactly what lets the
     /// repo-map cache breakpoint hit across chunks. (Regression guard for the old prefix
@@ -2948,6 +3008,7 @@ malformed line, not json
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     or_cache_discount: None,
+                    truncated: false,
                 }),
                 error: None,
             },
@@ -2968,6 +3029,7 @@ malformed line, not json
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     or_cache_discount: None,
+                    truncated: false,
                 }),
                 error: None,
             },

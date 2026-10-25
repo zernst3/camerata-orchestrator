@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::llm::{Llm, LlmPort, LlmRequest};
 use crate::onboard::{Finding, MergedLocation, ProposedRule, RuleOptionView};
+use crate::stage_telemetry::{Stage, StageMeter, StageTelemetry};
 
 // ════════════════════════════════════════════════════════════════════════════════════
 // AUDIT-INTEGRATED ALTERNATIVE RECOMMENDATION (docs/design/2026-09-22_audit-integrated-
@@ -234,11 +235,40 @@ pub struct UsageMeter {
     /// Tokens written to the prompt cache (billed at ~1.25× input rate, one-time per TTL).
     /// Populated only when the API backend is active with prompt caching enabled.
     cache_creation_input_tokens: AtomicU64,
+    /// The same calls split by pipeline stage (operator telemetry; never exported — see
+    /// [`crate::stage_telemetry`]). Always updated together with the aggregate above.
+    stages: StageMeter,
 }
 
 impl UsageMeter {
-    /// Fold one completion's reported usage in. Missing fields are simply not counted.
-    pub fn record(&self, r: &crate::llm::LlmResponse) {
+    /// Fold one completion into the aggregate AND into `stage`'s own row. Every model call
+    /// names its stage, so the per-stage table can never drift from the aggregate.
+    pub fn record_stage(&self, stage: Stage, r: &crate::llm::LlmResponse) {
+        self.stages.record(stage, r);
+        self.record(r);
+    }
+
+    /// Mark a completion already passed to [`Self::record_stage`] as one whose output was
+    /// thrown away (a rejected fix, a truncated pass that had to be repeated), so the table
+    /// can show how much of a stage's spend bought nothing. Does not touch the aggregate.
+    pub fn record_wasted(&self, stage: Stage, r: &crate::llm::LlmResponse) {
+        self.stages.record_wasted(stage, r);
+    }
+
+    /// [`Self::record_wasted`] for a completion only partly discarded; see
+    /// [`StageMeter::record_wasted_share`].
+    pub fn record_wasted_share(&self, stage: Stage, r: &crate::llm::LlmResponse, share: f64) {
+        self.stages.record_wasted_share(stage, r, share);
+    }
+
+    /// The per-stage telemetry so far, joined to the scan's counted-line total.
+    pub fn stage_telemetry(&self, counted_lines: usize) -> StageTelemetry {
+        self.stages.snapshot(counted_lines)
+    }
+
+    /// Fold one completion's reported usage into the aggregate. Missing fields are simply not
+    /// counted. Private: callers go through [`Self::record_stage`].
+    fn record(&self, r: &crate::llm::LlmResponse) {
         if let Some(i) = r.input_tokens {
             self.input_tokens.fetch_add(i, Ordering::Relaxed);
         }
@@ -409,6 +439,18 @@ pub fn build_digest(files: &[(String, String)]) -> String {
     }
     out
 }
+
+/// The version of the question the scan asks the model: [`audit_system_prompt`], the pass prompt
+/// layout ([`build_pass_prompt`]) and its task lines, and the rules-block format
+/// ([`build_rules_block`]). It is part of the incremental cache key
+/// ([`crate::scan_cache::AiScanKey`]): carried findings answered an older question once this
+/// moves, so they are re-scanned instead of reused.
+///
+/// BUMP IT whenever any of those change what the model is asked, including a wording tweak (the
+/// system prompt is pinned by a test that fails until you do). Do NOT bump it for a pure
+/// scheduling or billing change (cache breakpoints, concurrency, the position of a label line),
+/// which leave the answer the model gives unchanged.
+pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 1;
 
 /// The system prompt: what to look for, what NOT to (the mechanical tier is already
 /// covered), and the STRICT JSON schema to return.
@@ -2134,7 +2176,7 @@ pub async fn verify_findings(
             let mut on_delta = |_: &str| {};
             if let Ok(resp) = llm.complete_streaming(build_req(), &mut on_delta).await {
                 if let Some(m) = meter {
-                    m.record(&resp);
+                    m.record_stage(Stage::Calibration, &resp);
                 }
                 if let Some((store, key)) = feedback {
                     // Single-pass (the common case) records the raw response as-is, so the
@@ -2935,7 +2977,7 @@ async fn recommend_alternatives(
         }
         let resp = resp_result?;
         if let Some(m) = meter {
-            m.record(&resp);
+            m.record_stage(Stage::Alternatives, &resp);
         }
         recommendations.extend(parse_alternative_recommendations(&resp.text, alt_chunk));
     }
@@ -3357,9 +3399,10 @@ async fn run_fix_specifics_round(
             }
         };
         if let Some(m) = meter {
-            m.record(&resp);
+            m.record_stage(Stage::FixGeneration, &resp);
         }
         let parsed = parse_fix_specifics(&resp.text);
+        let rejected_before = still_pending.len();
 
         for (pos, &orig_idx) in batch.iter().enumerate() {
             let Some(text) = parsed.get(&pos) else {
@@ -3403,8 +3446,60 @@ async fn run_fix_specifics_round(
             }
             findings[orig_idx].fix_specific = Some(text.clone());
         }
+        // The fixes this call produced that were thrown away (missing, ungrounded,
+        // contradicting, leaking) are tokens spent for nothing: say so in the telemetry, pro rata
+        // for a batch that was only partly rejected.
+        let rejected = still_pending.len() - rejected_before;
+        if rejected > 0 {
+            if let Some(m) = meter {
+                m.record_wasted_share(
+                    Stage::FixGeneration,
+                    &resp,
+                    rejected as f64 / batch.len() as f64,
+                );
+            }
+        }
     }
     still_pending
+}
+
+/// Whether `f` has code around it to ground a fix in: the same window the generation prompt would
+/// show the model ([`fix_context_window`]). Empty for line 0 and for a path that is not among the
+/// scanned files, which is exactly where [`find_ungrounded_identifier`] has only the snippet,
+/// detail and captures to check a fix against.
+fn fix_has_surrounding_code(f: &Finding, files: &[(String, String)]) -> bool {
+    !fix_context_window(files, &f.path, f.line, 8).is_empty()
+}
+
+/// Give every finding in `indices` that has no surrounding code AND whose rule carries an authored
+/// remediation that remediation (instantiated against the finding, redacted), without asking the
+/// model. Returns the indices still needing a model-generated fix, and how many were handled.
+/// A finding with no authored remediation is left in the returned set.
+fn apply_authored_remediation_without_model(
+    findings: &mut [Finding],
+    indices: Vec<usize>,
+    files: &[(String, String)],
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> (Vec<usize>, usize) {
+    let mut remaining = Vec::with_capacity(indices.len());
+    let mut handled = 0usize;
+    for idx in indices {
+        if !fix_has_surrounding_code(&findings[idx], files) {
+            if let Some(fallback) = crate::report_export::resolve_fix(
+                &findings[idx].rule_id,
+                corpus,
+                &findings[idx],
+                None,
+            ) {
+                findings[idx].fix_specific =
+                    Some(camerata_secrets::redact_str(&fallback).into_owned());
+                handled += 1;
+                continue;
+            }
+        }
+        remaining.push(idx);
+    }
+    (remaining, handled)
 }
 
 /// Run the P2 fix-specific generation pass: for every non-dependency finding in `findings`,
@@ -3473,6 +3568,26 @@ pub async fn generate_fix_specifics(
     // The fix prompt carries eight raw lines either side of each finding: redact them.
     let model_files = crate::onboard::redact::files_for_model(files);
     let files = model_files.as_slice();
+
+    // PRE-FILTER (no model call). A finding with no surrounding code to read (line 0, or its file
+    // is not among the scanned files) was the bulk of the fix retries that were paid for and
+    // thrown away: on the hearth sweep 54 of about 125 findings exhausted every retry and 50 of
+    // them fell back to the authored remediation anyway. For those the rule's own authored
+    // remediation, instantiated against the finding's captures, is where they were always going
+    // to end up, so go there directly. Only when that fallback actually exists: skipping the model
+    // for a rule with no authored remediation would leave the row with no fix at all.
+    let (indices, authored_directly) =
+        apply_authored_remediation_without_model(&mut findings, indices, files, corpus);
+    if authored_directly > 0 {
+        eprintln!(
+            "[camerata-server] fix-specific generation: {authored_directly} finding(s) in {repo} \
+             have no surrounding code to ground a model fix in; used the rule's authored \
+             remediation with no model call."
+        );
+    }
+    if indices.is_empty() {
+        return (findings, Vec::new());
+    }
 
     let system = fix_specific_system_prompt();
     // The subset of `indices` still needing a valid fix this round; shrinks as findings
@@ -3640,7 +3755,7 @@ fn parse_needs_files(raw: &str) -> Vec<String> {
 /// the repo map) could never do, since that made the "static" prefix differ at ~byte 30 on
 /// every chunk.
 ///
-/// The chunk segment (label + digest) is stable across THIS chunk's rule-batches only, so
+/// The chunk segment (the digest) is stable across THIS chunk's rule-batches only, so
 /// its breakpoint is worth adding when there's more than one rule-batch (`n_b > 1`) — that's
 /// the existing parallel-mode win (a chunk's digest re-read across rule-batch 2, 3, ...).
 /// When `n_b <= 1` (batch mode's default: `BATCH_RULE_BATCH_SIZE = usize::MAX`, i.e. every
@@ -3670,8 +3785,25 @@ fn cache_breakpoints_for_pass(
 ///
 /// Prompt shape (cache-aware ordering, shared content first):
 ///   `Repository: {repo}\n\n{repo_map}` (IDENTICAL across every chunk)
-///   + `({label} {ci+1}/{n_c})\n\n{digest}\n\n` (stable across this chunk's rule-batches)
-///   + `{task_line}\n\n{rules_block}` (varies every rule-batch, never cached)
+///   + `{digest}\n\n` (stable across this chunk's rule-batches AND across routing groups)
+///   + `({label} {ci+1}/{n_c})\n\n{task_line}\n\n{rules_block}` (varies per pass, never cached)
+///
+/// The group label and chunk index used to head the digest segment, inside the cached prefix.
+/// `label` differs per routing group (`pass[all]`, `pass[web]`), so a second group scanning the
+/// same files could never read the first group's digest even though the digest bytes were
+/// identical (`SPIKE_TOKEN_EFFICIENCY_RESULTS.md`, "Why cache writes far exceed reads", fact 4).
+/// It now leads the uncached suffix. This is a MOVE of one line, nothing added or removed:
+/// `cache_schedule_tests::the_prompt_carries_exactly_the_same_parts_as_before_only_the_label_line_moved`
+/// pins it against the previous layout.
+///
+/// # Why the rules block is not cached
+///
+/// The digest leads and the rules trail because the digest is the larger share and is the one
+/// reused the most: a chunk's digest (up to 350K chars) is re-read by every one of its
+/// rule-batches, while a rule-batch's rules (a few thousand tokens) could be re-read only across
+/// chunks, and only if the rules LED the prompt, which would also move the rules away from the
+/// code they are checked against. A breakpoint after the rules would cache a prefix no other
+/// request shares. Rules-first is therefore not built; see the telemetry before revisiting.
 ///
 /// Returns `(prompt, cache_breakpoints)`.
 #[allow(clippy::too_many_arguments)]
@@ -3687,11 +3819,14 @@ fn build_pass_prompt(
     rules_block: &str,
 ) -> (String, Vec<usize>) {
     let repo_map_prefix = format!("Repository: {repo}\n\n{repo_map}");
-    let chunk_segment = format!("({label} {}/{n_c})\n\n{digest}\n\n", ci + 1);
-    let static_prefix = format!("{repo_map_prefix}{chunk_segment}");
+    let digest_segment = format!("{digest}\n\n");
+    let static_prefix = format!("{repo_map_prefix}{digest_segment}");
     let cache_breakpoints =
         cache_breakpoints_for_pass(repo_map_prefix.len(), static_prefix.len(), n_b);
-    let prompt = format!("{static_prefix}{task_line}\n\n{rules_block}");
+    let prompt = format!(
+        "{static_prefix}({label} {}/{n_c})\n\n{task_line}\n\n{rules_block}",
+        ci + 1
+    );
     (prompt, cache_breakpoints)
 }
 
@@ -3725,25 +3860,78 @@ async fn audit_pass(
     if !cache_breakpoints.is_empty() {
         req = req.with_cache_breakpoints(cache_breakpoints);
     }
-    let resp = if let Some((store, key)) = feedback {
+    let mut resp = send_audit_request(llm, req.clone(), feedback, session).await?;
+    if let Some(m) = meter {
+        m.record_stage(Stage::ScanPass, &resp);
+    }
+    // TRUNCATION-ONLY RETRY. A reply cut off at `max_tokens` is the one failure a repeat can
+    // recover: the same request with a higher cap returns the whole answer, where the cut-off
+    // one parses to nothing and the chunk's findings are lost. Any OTHER unusable reply (a
+    // complete answer that is simply not JSON) is NOT retried: the same prompt at the same cap
+    // tends to return the same thing and the spend is paid again. At most one retry, and a retry
+    // that itself fails leaves the pass exactly as it was before this existed: the first
+    // response, parsed as it always was.
+    let mut wasted_counted = false;
+    if resp.truncated {
+        if let Some(m) = meter {
+            m.record_wasted(Stage::ScanPass, &resp);
+        }
+        wasted_counted = true;
+        let retry_cap = req
+            .max_tokens
+            .saturating_mul(2)
+            .min(AGGREGATE_MAX_TOKENS_CEILING);
+        if let Ok(retry) =
+            send_audit_request(llm, req.with_max_tokens(retry_cap), feedback, session).await
+        {
+            if let Some(m) = meter {
+                m.record_stage(Stage::ScanPass, &retry);
+            }
+            resp = retry;
+            wasted_counted = false;
+        }
+    }
+    // Whatever reply the pass ends up using: if it is still unusable (cut off again, or not JSON
+    // at all) its tokens bought nothing, and the telemetry says so.
+    if !wasted_counted && (resp.truncated || scan_output_is_malformed(&resp.text)) {
+        if let Some(m) = meter {
+            m.record_wasted(Stage::ScanPass, &resp);
+        }
+    }
+    let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
+    let needs = parse_needs_files(&resp.text);
+    Ok((f, p, needs))
+}
+
+/// One scan-pass request: streamed into the transcript when feedback is present, else bounded
+/// by the coarse total backstop. Shared by the first attempt and the truncation retry.
+async fn send_audit_request(
+    llm: &dyn LlmPort,
+    req: LlmRequest,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    session: &str,
+) -> anyhow::Result<crate::llm::LlmResponse> {
+    if let Some((store, key)) = feedback {
         // Streaming: the idle/stall timeout lives inside the transport, so this scales with
         // repo size and only a genuine hang (no output for the idle window) aborts. No
         // total-time cap here — a big scan should be allowed to stream as long as it needs.
         let mut on_delta = |t: &str| store.append_output_raw(key, session, t);
-        llm.complete_streaming(req, &mut on_delta).await?
+        llm.complete_streaming(req, &mut on_delta).await
     } else {
         // Non-streaming has no progress signal; bound it with the coarse total backstop.
         let cap = total_backstop();
         tokio::time::timeout(cap, llm.complete(req))
             .await
-            .map_err(|_| anyhow::anyhow!("LLM call exceeded the {}s backstop", cap.as_secs()))??
-    };
-    if let Some(m) = meter {
-        m.record(&resp);
+            .map_err(|_| anyhow::anyhow!("LLM call exceeded the {}s backstop", cap.as_secs()))?
     }
-    let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
-    let needs = parse_needs_files(&resp.text);
-    Ok((f, p, needs))
+}
+
+/// Whether a scan reply holds no JSON object `parse_ai_findings` could read, i.e. the pass
+/// produced nothing usable. (A reply of `{"findings":[]}` is a well-formed "nothing found", not
+/// this.)
+fn scan_output_is_malformed(text: &str) -> bool {
+    extract_json_object(text)
+        .is_none_or(|json| serde_json::from_str::<serde_json::Value>(json).is_err())
 }
 
 /// The public symbols a file defines (Rust items + TS/JS exports), for the repo map. A
@@ -3926,20 +4114,31 @@ async fn run_passes(
     usize,
     Option<anyhow::Error>,
 ) {
-    use futures::stream::StreamExt;
     let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
     let n_c = chunks.len();
     let n_b = batches.len();
-    let work: Vec<(usize, usize)> = (0..n_c)
-        .flat_map(|c| (0..n_b).map(move |b| (c, b)))
+    // Chunk-major work order, scheduled WARM-THEN-FAN-OUT: a chunk is one cache-prefix group
+    // (its rule-batches all share the repo map and the chunk's digest), so its first rule-batch
+    // runs and returns before its siblings start and read the cache entry it wrote. Without
+    // this the first `concurrency` rule-batches of a chunk all went out together and ALL missed
+    // the cache and wrote the same prefix at 1.25x (SPIKE_TOKEN_EFFICIENCY_RESULTS.md, item 3).
+    // Scheduling only: every (chunk, rule-batch) pair still runs exactly once with the same
+    // prompt.
+    let jobs: Vec<crate::warm_schedule::ScheduledJob<(usize, usize)>> = (0..n_c)
+        .flat_map(|c| {
+            (0..n_b).map(move |b| crate::warm_schedule::ScheduledJob {
+                group: c,
+                payload: (c, b),
+            })
+        })
         .collect();
     type PassOut = (
         usize,
         usize,
         anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)>,
     );
-    let results: Vec<PassOut> = futures::stream::iter(work)
-        .map(|(ci, bi)| {
+    let results: Vec<PassOut> =
+        crate::warm_schedule::run_warm_then_fan_out(jobs, concurrency, |(ci, bi)| {
             let digest = &digests[ci];
             let batch = batches[bi];
             async move {
@@ -4015,8 +4214,6 @@ async fn run_passes(
                 (ci, bi, r)
             }
         })
-        .buffer_unordered(concurrency.max(1))
-        .collect()
         .await;
 
     let mut findings = Vec::new();
@@ -4299,7 +4496,7 @@ async fn run_passes_batch(
         match all_responses.get(&custom_id) {
             Some(resp) => {
                 if let Some(m) = meter {
-                    m.record(resp);
+                    m.record_stage(Stage::ScanPass, resp);
                 }
                 let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
                 let needs = parse_needs_files(&resp.text);
@@ -7949,7 +8146,7 @@ async fn run_prose_lens(
     match resp {
         Ok(r) => {
             if let Some(m) = meter {
-                m.record(&r);
+                m.record_stage(Stage::DeepTier, &r);
             }
             match lens {
                 DeepLens::Soc2Gap => {
@@ -8103,7 +8300,7 @@ async fn run_security_passes(
                             .map_err(|_| anyhow::anyhow!("security pass exceeded the {}s backstop", cap.as_secs()))??
                     };
                     if let Some(m) = meter {
-                        m.record(&resp);
+                        m.record_stage(Stage::DeepTier, &resp);
                     }
                     let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
                     let needs = parse_needs_files(&resp.text);
@@ -8236,6 +8433,15 @@ pub async fn run_deep_tier(
 
 #[cfg(test)]
 mod redaction_tests;
+
+#[cfg(test)]
+mod stage_telemetry_tests;
+
+#[cfg(test)]
+mod cache_schedule_tests;
+
+#[cfg(test)]
+mod retry_tests;
 
 #[cfg(test)]
 mod tests {
@@ -9087,12 +9293,17 @@ mod tests {
             prompt.starts_with(&format!("Repository: {repo}\n\n{repo_map}")),
             "prompt must lead with the shared repo-map segment: {prompt:?}"
         );
-        // The chunk label + digest come AFTER the repo map now, not embedded in front of it.
+        // The digest follows the repo map; the chunk label no longer sits in the cached prefix
+        // at all (it leads the uncached suffix, after the digest).
         let repo_map_prefix = format!("Repository: {repo}\n\n{repo_map}");
         let rest = &prompt[repo_map_prefix.len()..];
         assert!(
-            rest.starts_with("(parallel 1/3)"),
-            "chunk label trails the repo map: {rest:?}"
+            rest.starts_with("DIGEST-0"),
+            "the digest follows the repo map: {rest:?}"
+        );
+        assert!(
+            rest.contains("DIGEST-0\n\n(parallel 1/3)\n\nTASK"),
+            "the label leads the varying suffix: {rest:?}"
         );
     }
 
@@ -9150,10 +9361,12 @@ mod tests {
         );
         assert_eq!(bps.len(), 2, "n_b > 1 keeps both breakpoints");
         assert!(bps[0] < bps[1], "breakpoints are ascending");
-        // The segment between the two breakpoints is the chunk label + digest.
+        // The segment between the two breakpoints is the digest alone; the label is in the
+        // uncached suffix so routing groups over the same files share it.
         let digest_segment = &prompt[bps[0]..bps[1]];
-        assert!(digest_segment.contains("(parallel 3/5)"));
+        assert!(!digest_segment.contains("(parallel 3/5)"));
         assert!(digest_segment.contains("DIGEST-2"));
+        assert!(prompt[bps[1]..].contains("(parallel 3/5)"));
         // The suffix (after the last breakpoint) is the varying task line + rules — the
         // rules must NEVER leak into a cached segment.
         let suffix = &prompt[bps[1]..];
@@ -9585,6 +9798,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         async fn complete_streaming(
@@ -9605,6 +9819,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         fn as_any(&self) -> &dyn std::any::Any {
@@ -9845,6 +10060,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         fn as_any(&self) -> &dyn std::any::Any {
@@ -12477,6 +12693,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         async fn complete_streaming(
@@ -12586,6 +12803,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         async fn complete_streaming(
@@ -16733,6 +16951,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         async fn complete_streaming(
@@ -17060,12 +17279,19 @@ mod tests {
         );
         f.captures
             .insert("table".to_string(), "profiles".to_string());
+        // The finding has surrounding code, so the model IS asked (and its transport is down);
+        // a finding with no code around it skips the model entirely and never reaches this
+        // give-up path (see `retry_tests`).
+        let files = vec![(
+            "supabase/migrations/1.sql".to_string(),
+            "CREATE TABLE profiles (id int);\n".to_string(),
+        )];
 
         let (out, failed_passes) = generate_fix_specifics(
             &FailingCompleter,
             "o/r",
             vec![f],
-            &[],
+            &files,
             None,
             None,
             Some(&corpus),
@@ -17343,6 +17569,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         async fn complete_streaming(

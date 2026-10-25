@@ -340,6 +340,45 @@ async fn rescan_changes_falls_back_to_full_when_rules_changed() {
     );
 }
 
+/// Carried findings answered a question put to a particular model. If the model is different now,
+/// the delta must not hand the old model's answers back as if they were current.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn rescan_changes_falls_back_to_full_when_the_model_changed() {
+    let rig = rig();
+    first_inspection(&rig).await;
+    // The project's audit step now runs on a different model.
+    rig.fx
+        .state
+        .projects
+        .set_step_model(
+            &rig.fx.project_id,
+            crate::project::StepKind::Audit,
+            "claude-opus-5".to_string(),
+        )
+        .expect("the project exists");
+
+    change_and_rescan(&rig).await;
+
+    let prompts = rig.prompts();
+    assert!(prompts.contains(CHANGED_MARKER_NEW));
+    assert!(
+        prompts.contains(STABLE_MARKER),
+        "a changed model means a full re-scan, so the stable file is audited again"
+    );
+    let latest = rig.fx.state.inspections.latest(&rig.fx.project_id).unwrap();
+    assert!(
+        latest
+            .report
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("model, prompt or rule wording changed"),
+        "{:?}",
+        latest.report.message
+    );
+}
+
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn rescan_changes_nothing_changed_returns_without_a_job() {

@@ -201,6 +201,22 @@ enum Command {
         json: bool,
     },
 
+    /// Compare two inspections of the SAME fixture: exit 1 when cost per 1K counted lines rose
+    /// more than the threshold, 2 when the pair cannot be compared (a ledger missing, or carrying
+    /// no telemetry), 0 otherwise. Reads the operator ledgers `camerata inspect` persists. No
+    /// model, no network. See `camerata::cost_regression_cmd`'s module doc comment.
+    CostRegression {
+        /// The previous run's ledger (the path `camerata inspect` printed as `integrity ledger`).
+        #[arg(long)]
+        baseline: PathBuf,
+        /// The new run's ledger.
+        #[arg(long)]
+        current: PathBuf,
+        /// Allowed rise in cost per 1K counted lines, in percent.
+        #[arg(long, default_value_t = camerata_server::stage_telemetry::DEFAULT_COST_REGRESSION_PCT)]
+        threshold_pct: f64,
+    },
+
     /// Corpus staleness watermark (see docs/design/2026-10-20_corpus-staleness-check.md).
     Corpus {
         #[command(subcommand)]
@@ -343,6 +359,15 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::CostRegression {
+            baseline,
+            current,
+            threshold_pct,
+        } => run_cost_regression_cmd(&camerata::cost_regression_cmd::CostRegressionArgs {
+            baseline,
+            current,
+            threshold_pct,
+        }),
         Command::Corpus { action } => match action {
             CorpusAction::Check => camerata::corpus_cmd::run_corpus_check().await,
             CorpusAction::Confirm { domain, date } => {
@@ -364,6 +389,23 @@ fn run_release_gate_cmd(args: &ReleaseGateArgs) -> anyhow::Result<()> {
         Err(e) => {
             eprintln!("camerata release-gate: {e}");
             std::process::exit(release_gate_cmd::EXIT_GATE_UNAVAILABLE);
+        }
+    }
+}
+
+/// `cost-regression`'s handler: the verdict to stdout, exit 0 within / 1 regressed / 2 the pair
+/// could not be compared (see `camerata::cost_regression_cmd`).
+fn run_cost_regression_cmd(
+    args: &camerata::cost_regression_cmd::CostRegressionArgs,
+) -> anyhow::Result<()> {
+    match camerata::cost_regression_cmd::run_cost_regression(args) {
+        Ok(result) => {
+            println!("{}", result.render());
+            std::process::exit(camerata::cost_regression_cmd::exit_code(&result));
+        }
+        Err(e) => {
+            eprintln!("camerata cost-regression: {e}");
+            std::process::exit(camerata::cost_regression_cmd::EXIT_CHECK_UNAVAILABLE);
         }
     }
 }

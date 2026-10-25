@@ -221,6 +221,10 @@ pub async fn rescan_changes(
         // `matches_rules` fails and it does a full re-scan, which is the right answer.
         rules_fingerprint: entry.rules_fingerprint.clone(),
         ai_covered: ai_covered(&entry.report),
+        // The question the inspection's AI findings answered. An inspection that predates the
+        // key has none, so the engine re-scans in full rather than trust answers it cannot
+        // place.
+        ai_key: entry.report.ledger.ai_key().cloned().unwrap_or_default(),
         clone_verdicts: state
             .scan_cache
             .get(&project.id)

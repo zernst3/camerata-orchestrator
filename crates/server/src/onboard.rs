@@ -1450,9 +1450,19 @@ pub async fn audit_repos_with_llm(
     // blocked, or AI-errored run carries an empty/stale-shaped `findings` set that must never be
     // mistaken for "the AI looked and found nothing" — so it is filtered out here exactly like a
     // rule-set mismatch is, and every file is treated as changed (a full AI audit) below.
-    let effective_prior = incremental_prior.filter(|m| m.matches_rules(&rules_fp) && m.ai_covered);
-    let mut manifest_builder =
-        crate::scan_cache::ManifestBuilder::new().with_rules_fingerprint(rules_fp.clone());
+    //
+    // It must ALSO have answered the same question: the key covers the resolved audit model, the
+    // calibration model, the prompt-schema version and every selected rule's directive text. A
+    // changed model, prompt or directive re-scans instead of reusing the stale answer.
+    let ai_key = crate::scan_cache::AiScanKey::new(
+        &crate::ai_audit::resolve_audit_model(model),
+        calibration_model,
+        selected,
+    );
+    let effective_prior = incremental_prior.filter(|m| m.is_reusable_baseline(&rules_fp, &ai_key));
+    let mut manifest_builder = crate::scan_cache::ManifestBuilder::new()
+        .with_rules_fingerprint(rules_fp.clone())
+        .with_ai_key(ai_key.clone());
     let mut all_findings = Vec::new();
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
@@ -1973,10 +1983,18 @@ pub async fn audit_repos_with_llm(
                 // file set as repo-map context (cheap symbol list) so cross-file rules keep
                 // their architectural view even when only changed bodies are sent.
                 let part = crate::scan_cache::partition(effective_prior, spec, &files);
-                if incremental_prior.is_some() && effective_prior.is_none() {
-                    notes.push(format!(
-                        "{spec}: rule selection changed since last scan — full re-scan"
-                    ));
+                if let (Some(prior), None) = (incremental_prior, effective_prior) {
+                    // The prior matched on schema, rule selection and AI coverage, so what
+                    // differs is the question it answered (model, prompt, rule wording).
+                    let question_changed =
+                        prior.is_current() && prior.matches_rules(&rules_fp) && prior.ai_covered;
+                    notes.push(if question_changed {
+                        format!(
+                            "{spec}: model, prompt or rule wording changed since last scan — full re-scan"
+                        )
+                    } else {
+                        format!("{spec}: rule selection changed since last scan — full re-scan")
+                    });
                 }
                 if effective_prior.is_some() && part.unchanged_count > 0 {
                     notes.push(format!(
@@ -2344,6 +2362,18 @@ pub async fn audit_repos_with_llm(
         }
     }
     report.ledger = pipeline_ledger;
+    // The question this scan's AI findings answered, kept on the (persisted) inspection so the
+    // delta rescan can prove its carried findings are still current. See `ScanLedger::ai_key`.
+    report.ledger.record_ai_key(ai_key);
+    // Operator telemetry: the per-stage split of the spend, joined to the SAME counted-line
+    // total `camerata count` prints (it comes from the same file filter). Lives on the ledger,
+    // never on a client export. Skipped when no model ran, so a deterministic-only scan carries
+    // no empty record.
+    if report.actual_usage.as_ref().is_some_and(|u| u.calls > 0) {
+        report
+            .ledger
+            .record_stage_telemetry(meter.stage_telemetry(code_lines_total));
+    }
     // W6: never a silent omission — surface every failed/timed-out pass so the export's
     // methodology and summary can disclose it explicitly instead of shipping quietly
     // incomplete.
@@ -5215,6 +5245,13 @@ mod tests {
         };
         let mut b = crate::scan_cache::ManifestBuilder::new()
             .with_rules_fingerprint(rules_fp)
+            // The question the prior answered: the model `audit_repos` will resolve for
+            // `model: None`, no calibration pick, no rules.
+            .with_ai_key(crate::scan_cache::AiScanKey::new(
+                &crate::ai_audit::resolve_audit_model(None),
+                None,
+                &[],
+            ))
             .with_ai_covered(true); // the healthy case: AI ran and completed last time
         b.record_repo(
             "me/api",
@@ -5267,6 +5304,70 @@ mod tests {
             manifest.ai_covered,
             "an AI-on run with no fatal AI error must stamp ai_covered = true again"
         );
+    }
+
+    /// Rank 5: through `audit_repos`, a prior whose rules, content and AI coverage all match but
+    /// whose AI findings were produced by ANOTHER MODEL (or under another prompt version) is not
+    /// a usable baseline: the scan says so and re-scans in full. `run_ai_review` stays off to keep
+    /// this network-free; the note is pushed before that gate, exactly as in
+    /// `ai_covered_false_prior_is_ignored_even_when_rules_match`.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_prior_from_another_model_or_prompt_version_is_not_reused() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let rules_fp = crate::scan_cache::rules_fingerprint(std::iter::empty());
+        let current = crate::scan_cache::AiScanKey::new("claude-sonnet-5", None, &[]);
+        let other_model = crate::scan_cache::AiScanKey::new("claude-opus-5", None, &[]);
+        let other_prompt = crate::scan_cache::AiScanKey {
+            prompt_schema_version: current.prompt_schema_version + 1,
+            ..current.clone()
+        };
+
+        for (label, prior_key) in [("model", other_model), ("prompt version", other_prompt)] {
+            let (dir, sources) = scratch_repo_with_secret();
+            let content = std::fs::read_to_string(dir.path().join("config.rs")).unwrap();
+            let mut b = crate::scan_cache::ManifestBuilder::new()
+                .with_rules_fingerprint(rules_fp.clone())
+                .with_ai_key(prior_key)
+                .with_ai_covered(true);
+            b.record_repo("me/api", &[("config.rs".to_string(), content)], &[]);
+            let prior = b.finish();
+
+            let (report, manifest) = audit_repos(
+                &sources,
+                &[],
+                Vec::new(),
+                Some("claude-sonnet-5"),
+                None,
+                crate::ai_audit::ScanMode::Parallel,
+                false,
+                None,
+                None,
+                Some(&prior),
+                false,
+                true,
+                false,
+                true,
+                None,
+                crate::llm::BackendResolution::Api,
+                None,
+                &std::collections::HashMap::new(),
+            )
+            .await;
+
+            let msg = report.message.unwrap_or_default();
+            assert!(
+                msg.contains("model, prompt or rule wording changed")
+                    && msg.contains("full re-scan"),
+                "a prior from another {label} must not be reused: {msg}"
+            );
+            assert!(
+                !msg.contains("reused from cache"),
+                "nothing may be served from the stale prior ({label}): {msg}"
+            );
+            // The fresh manifest is stamped with TODAY's question.
+            assert_eq!(manifest.ai_key, current, "{label}");
+        }
     }
 
     /// The self-heal in practice, exercised through `audit_repos`: a manifest deserialized from
