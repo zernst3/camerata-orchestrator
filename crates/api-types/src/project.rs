@@ -79,7 +79,10 @@ impl ProjectBackend {
 
     /// The lowercase name this backend serializes as, for the places that record or print it
     /// (the export manifest, the README, the operator report).
-    pub fn label(self) -> &'static str {
+    ///
+    /// Named `wire_name`, not `label`: an inherent `label` would shadow the UI's
+    /// `ProjectBackendExt::label` ("CLI" / "API") at every call site.
+    pub fn wire_name(self) -> &'static str {
         match self {
             ProjectBackend::Cli => "cli",
             ProjectBackend::Api => "api",

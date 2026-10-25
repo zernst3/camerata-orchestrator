@@ -16990,7 +16990,7 @@ impl ModelRecord {
 
     pub fn new(backend: crate::llm::ProjectBackend, provider: &str) -> Self {
         Self {
-            backend: backend.label().to_string(),
+            backend: backend.wire_name().to_string(),
             provider: provider.to_string(),
         }
     }
