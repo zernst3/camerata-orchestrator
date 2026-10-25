@@ -144,6 +144,114 @@ fn twin_admin_sdk_in_a_test_or_declaration_file_is_silent() {
     assert!(admin(&f).is_empty());
 }
 
+/// Reviewer case `adminsdk_vite_scripts`: a Vite package's own scripts, seed data and server
+/// folders run under Node, not in the bundle.
+#[test]
+fn twin_admin_sdk_in_script_and_server_folders_of_a_vite_app_is_silent() {
+    for path in [
+        "scripts/setAdminClaim.ts",
+        "script/run.ts",
+        "tools/grant.ts",
+        "bin/cli.mjs",
+        "server/index.ts",
+        "api/users.ts",
+        "functions/index.ts",
+        "cli/main.ts",
+        "seed/seed.mjs",
+        "seeds/users.ts",
+        "migrations/001.ts",
+        "emulator/boot.ts",
+    ] {
+        let f = files(&[
+            ("package.json", VITE_APP),
+            (path, "import admin from \"firebase-admin\";\n"),
+        ]);
+        assert!(admin(&f).is_empty(), "{path}: {:#?}", admin(&f));
+    }
+}
+
+/// Reviewer case `adminsdk_vite_vercel_api`: a Vercel `api/` function beside a Vite app.
+#[test]
+fn twin_admin_sdk_in_a_vercel_api_function_beside_a_vite_app_is_silent() {
+    let f = files(&[
+        (
+            "package.json",
+            r#"{ "dependencies": { "firebase": "10", "react": "18", "firebase-admin": "12" }, "devDependencies": { "vite": "5", "@vercel/node": "3" } }"#,
+        ),
+        (
+            "api/users.ts",
+            "import { getAuth } from \"firebase-admin/auth\"; export default async function handler(req, res) { res.json(await getAuth().listUsers()); }",
+        ),
+        ("src/App.tsx", "export default () => null;"),
+    ]);
+    assert!(admin(&f).is_empty(), "{:#?}", admin(&f));
+}
+
+#[test]
+fn twin_admin_sdk_in_a_tool_config_file_is_silent() {
+    let f = files(&[
+        ("package.json", VITE_APP),
+        ("vite.config.ts", "import admin from \"firebase-admin\";\n"),
+        ("jest.config.js", "import admin from \"firebase-admin\";\n"),
+    ]);
+    assert!(admin(&f).is_empty(), "{:#?}", admin(&f));
+}
+
+/// The exempt folder is the package's TOP-LEVEL folder: `src/server/` is inside the bundle.
+#[test]
+fn admin_sdk_in_a_server_named_folder_under_src_is_still_high() {
+    let f = files(&[
+        ("package.json", VITE_APP),
+        (
+            "src/server/db.ts",
+            "import admin from \"firebase-admin\";\n",
+        ),
+    ]);
+    let all = admin(&f);
+    assert_eq!(all.len(), 1, "{all:#?}");
+    assert_eq!(all[0].grade, ViolationGrade::Defect);
+}
+
+/// A file outside `src/` in a manifest with no server runtime might still be a script the
+/// bundler never sees, so it is held for review rather than asserted.
+#[test]
+fn admin_sdk_outside_src_in_a_browser_package_is_a_review_row() {
+    let f = files(&[
+        ("package.json", VITE_APP),
+        ("lib/admin.ts", "import admin from \"firebase-admin\";\n"),
+    ]);
+    let all = admin(&f);
+    assert_eq!(all.len(), 1, "{all:#?}");
+    assert_eq!(all[0].grade, ViolationGrade::Review);
+    assert_eq!(all[0].severity, SEVERITY_MEDIUM);
+    assert!(
+        all[0].message.contains("outside `src/`"),
+        "{}",
+        all[0].message
+    );
+    assert!(all[0].message.contains("`vite` in `package.json`"));
+}
+
+/// A monorepo package is judged from its own root: its top-level folder is relative to the
+/// package, not to the repository.
+#[test]
+fn the_exempt_folder_is_relative_to_the_package_root() {
+    let f = files(&[
+        ("apps/web/package.json", VITE_APP),
+        (
+            "apps/web/scripts/grant.ts",
+            "import admin from \"firebase-admin\";\n",
+        ),
+        (
+            "apps/web/src/db.ts",
+            "import admin from \"firebase-admin\";\n",
+        ),
+    ]);
+    let all = admin(&f);
+    assert_eq!(all.len(), 1, "{all:#?}");
+    assert_eq!(all[0].file, "apps/web/src/db.ts");
+}
+
 #[test]
 fn the_admin_sdk_checker_is_not_applicable_without_an_import() {
     let f = files(&[("package.json", VITE_APP), ("src/a.ts", "export {};\n")]);
