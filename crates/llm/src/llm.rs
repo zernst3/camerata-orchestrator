@@ -931,6 +931,8 @@ pub(crate) fn shared_http_client() -> &'static reqwest::Client {
 /// at ~0.1x. 1h only pays for itself when a chunk's rule-batches are spread more than 5
 /// minutes apart (large sequential scans, slow batch-mode turnaround) — the default stays
 /// at 5m so a typical fast-parallel scan isn't paying the 2x write premium for no benefit.
+/// Message Batches are the exception: their items run minutes to hours apart, so
+/// [`build_batch_item`] always requests 1h.
 ///
 /// NEEDS LIVE-KEY VERIFICATION: confirm against the current Anthropic API docs that a bare
 /// `"ttl": "1h"` field (no beta header) is accepted now that extended cache TTL has GA'd —
@@ -1591,13 +1593,13 @@ pub async fn exact_input_token_count(llm: &Llm, req: &LlmRequest, model: &str) -
 /// split into cached segment blocks plus a final uncached suffix block. The system prompt
 /// is forwarded verbatim (the batch API accepts the same `system` field as the messages
 /// API).
+///
+/// Batch items always use the 1-hour cache TTL ([`CacheTtl::OneHour`]): Anthropic processes a
+/// batch over minutes to hours, so the 5-minute default would have expired before most items
+/// ran and every item would re-write the prefix it was meant to read. Real-time requests keep
+/// the 5-minute default (see [`CacheTtl::from_env`]).
 pub fn build_batch_item(custom_id: impl Into<String>, req: &LlmRequest, model: &str) -> BatchItem {
-    let content = cached_user_content(
-        &req.prompt,
-        &req.cache_breakpoints,
-        true,
-        CacheTtl::from_env(),
-    );
+    let content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, CacheTtl::OneHour);
     BatchItem {
         custom_id: custom_id.into(),
         params: BatchItemParams {
@@ -2851,6 +2853,24 @@ mod tests {
         // Block 3: the varying task line + rules — never cached.
         assert_eq!(arr[2]["text"], suffix);
         assert!(arr[2].get("cache_control").is_none());
+    }
+
+    /// Batch items are processed over minutes to hours, so the default 5-minute cache entry would
+    /// have expired before most items ran. Batch mode therefore always asks for the 1-hour TTL,
+    /// without the operator having to set `CAMERATA_ANTHROPIC_CACHE_TTL_1H`. (The real-time path
+    /// keeps its 5-minute default: its requests are minutes apart at most.) The builder reads no
+    /// environment, so this holds whatever the process env says.
+    #[test]
+    fn build_batch_item_caches_for_one_hour() {
+        let req = LlmRequest::new("static prefix\ndynamic suffix")
+            .with_cache_breakpoints(vec!["static prefix\n".len()])
+            .with_model("claude-sonnet-5");
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
+        let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
+        let arr = content.as_array().expect("cached content is an array");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(arr[0]["cache_control"]["ttl"], "1h");
+        assert!(arr[1].get("cache_control").is_none());
     }
 
     /// The SAME repo-map segment, unmodified, appears byte-for-byte across two prompts

@@ -140,6 +140,7 @@ pub mod usage_ledger;
 /// funnels through `vcs_choke` so a project's configured process rules are actually enforced
 /// (HARD-BLOCK on violation), not merely configurable via the bypass endpoint.
 pub mod vcs_choke;
+pub mod warm_schedule;
 pub mod workflow_gen;
 pub mod workitems;
 pub mod workspace;

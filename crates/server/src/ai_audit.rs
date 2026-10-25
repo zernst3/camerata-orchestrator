@@ -3664,7 +3664,7 @@ fn parse_needs_files(raw: &str) -> Vec<String> {
 /// the repo map) could never do, since that made the "static" prefix differ at ~byte 30 on
 /// every chunk.
 ///
-/// The chunk segment (label + digest) is stable across THIS chunk's rule-batches only, so
+/// The chunk segment (the digest) is stable across THIS chunk's rule-batches only, so
 /// its breakpoint is worth adding when there's more than one rule-batch (`n_b > 1`) — that's
 /// the existing parallel-mode win (a chunk's digest re-read across rule-batch 2, 3, ...).
 /// When `n_b <= 1` (batch mode's default: `BATCH_RULE_BATCH_SIZE = usize::MAX`, i.e. every
@@ -3694,8 +3694,25 @@ fn cache_breakpoints_for_pass(
 ///
 /// Prompt shape (cache-aware ordering, shared content first):
 ///   `Repository: {repo}\n\n{repo_map}` (IDENTICAL across every chunk)
-///   + `({label} {ci+1}/{n_c})\n\n{digest}\n\n` (stable across this chunk's rule-batches)
-///   + `{task_line}\n\n{rules_block}` (varies every rule-batch, never cached)
+///   + `{digest}\n\n` (stable across this chunk's rule-batches AND across routing groups)
+///   + `({label} {ci+1}/{n_c})\n\n{task_line}\n\n{rules_block}` (varies per pass, never cached)
+///
+/// The group label and chunk index used to head the digest segment, inside the cached prefix.
+/// `label` differs per routing group (`pass[all]`, `pass[web]`), so a second group scanning the
+/// same files could never read the first group's digest even though the digest bytes were
+/// identical (`SPIKE_TOKEN_EFFICIENCY_RESULTS.md`, "Why cache writes far exceed reads", fact 4).
+/// It now leads the uncached suffix. This is a MOVE of one line, nothing added or removed:
+/// `cache_schedule_tests::the_prompt_carries_exactly_the_same_parts_as_before_only_the_label_line_moved`
+/// pins it against the previous layout.
+///
+/// # Why the rules block is not cached
+///
+/// The digest leads and the rules trail because the digest is the larger share and is the one
+/// reused the most: a chunk's digest (up to 350K chars) is re-read by every one of its
+/// rule-batches, while a rule-batch's rules (a few thousand tokens) could be re-read only across
+/// chunks, and only if the rules LED the prompt, which would also move the rules away from the
+/// code they are checked against. A breakpoint after the rules would cache a prefix no other
+/// request shares. Rules-first is therefore not built; see the telemetry before revisiting.
 ///
 /// Returns `(prompt, cache_breakpoints)`.
 #[allow(clippy::too_many_arguments)]
@@ -3711,11 +3728,14 @@ fn build_pass_prompt(
     rules_block: &str,
 ) -> (String, Vec<usize>) {
     let repo_map_prefix = format!("Repository: {repo}\n\n{repo_map}");
-    let chunk_segment = format!("({label} {}/{n_c})\n\n{digest}\n\n", ci + 1);
-    let static_prefix = format!("{repo_map_prefix}{chunk_segment}");
+    let digest_segment = format!("{digest}\n\n");
+    let static_prefix = format!("{repo_map_prefix}{digest_segment}");
     let cache_breakpoints =
         cache_breakpoints_for_pass(repo_map_prefix.len(), static_prefix.len(), n_b);
-    let prompt = format!("{static_prefix}{task_line}\n\n{rules_block}");
+    let prompt = format!(
+        "{static_prefix}({label} {}/{n_c})\n\n{task_line}\n\n{rules_block}",
+        ci + 1
+    );
     (prompt, cache_breakpoints)
 }
 
@@ -3950,20 +3970,31 @@ async fn run_passes(
     usize,
     Option<anyhow::Error>,
 ) {
-    use futures::stream::StreamExt;
     let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
     let n_c = chunks.len();
     let n_b = batches.len();
-    let work: Vec<(usize, usize)> = (0..n_c)
-        .flat_map(|c| (0..n_b).map(move |b| (c, b)))
+    // Chunk-major work order, scheduled WARM-THEN-FAN-OUT: a chunk is one cache-prefix group
+    // (its rule-batches all share the repo map and the chunk's digest), so its first rule-batch
+    // runs and returns before its siblings start and read the cache entry it wrote. Without
+    // this the first `concurrency` rule-batches of a chunk all went out together and ALL missed
+    // the cache and wrote the same prefix at 1.25x (SPIKE_TOKEN_EFFICIENCY_RESULTS.md, item 3).
+    // Scheduling only: every (chunk, rule-batch) pair still runs exactly once with the same
+    // prompt.
+    let jobs: Vec<crate::warm_schedule::ScheduledJob<(usize, usize)>> = (0..n_c)
+        .flat_map(|c| {
+            (0..n_b).map(move |b| crate::warm_schedule::ScheduledJob {
+                group: c,
+                payload: (c, b),
+            })
+        })
         .collect();
     type PassOut = (
         usize,
         usize,
         anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)>,
     );
-    let results: Vec<PassOut> = futures::stream::iter(work)
-        .map(|(ci, bi)| {
+    let results: Vec<PassOut> =
+        crate::warm_schedule::run_warm_then_fan_out(jobs, concurrency, |(ci, bi)| {
             let digest = &digests[ci];
             let batch = batches[bi];
             async move {
@@ -4039,8 +4070,6 @@ async fn run_passes(
                 (ci, bi, r)
             }
         })
-        .buffer_unordered(concurrency.max(1))
-        .collect()
         .await;
 
     let mut findings = Vec::new();
@@ -8265,6 +8294,9 @@ mod redaction_tests;
 mod stage_telemetry_tests;
 
 #[cfg(test)]
+mod cache_schedule_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -9114,12 +9146,17 @@ mod tests {
             prompt.starts_with(&format!("Repository: {repo}\n\n{repo_map}")),
             "prompt must lead with the shared repo-map segment: {prompt:?}"
         );
-        // The chunk label + digest come AFTER the repo map now, not embedded in front of it.
+        // The digest follows the repo map; the chunk label no longer sits in the cached prefix
+        // at all (it leads the uncached suffix, after the digest).
         let repo_map_prefix = format!("Repository: {repo}\n\n{repo_map}");
         let rest = &prompt[repo_map_prefix.len()..];
         assert!(
-            rest.starts_with("(parallel 1/3)"),
-            "chunk label trails the repo map: {rest:?}"
+            rest.starts_with("DIGEST-0"),
+            "the digest follows the repo map: {rest:?}"
+        );
+        assert!(
+            rest.contains("DIGEST-0\n\n(parallel 1/3)\n\nTASK"),
+            "the label leads the varying suffix: {rest:?}"
         );
     }
 
@@ -9177,10 +9214,12 @@ mod tests {
         );
         assert_eq!(bps.len(), 2, "n_b > 1 keeps both breakpoints");
         assert!(bps[0] < bps[1], "breakpoints are ascending");
-        // The segment between the two breakpoints is the chunk label + digest.
+        // The segment between the two breakpoints is the digest alone; the label is in the
+        // uncached suffix so routing groups over the same files share it.
         let digest_segment = &prompt[bps[0]..bps[1]];
-        assert!(digest_segment.contains("(parallel 3/5)"));
+        assert!(!digest_segment.contains("(parallel 3/5)"));
         assert!(digest_segment.contains("DIGEST-2"));
+        assert!(prompt[bps[1]..].contains("(parallel 3/5)"));
         // The suffix (after the last breakpoint) is the varying task line + rules — the
         // rules must NEVER leak into a cached segment.
         let suffix = &prompt[bps[1]..];
