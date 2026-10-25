@@ -801,4 +801,75 @@ mod p4_context_tests {
         assert!(!f.captures.contains_key("secret-kind"));
         assert!(!f.captures.contains_key("gitignore-status"));
     }
+
+    fn firebase_key() -> String {
+        format!(
+            "AIza{}",
+            camerata_secrets::fixtures::body(
+                35,
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+                77
+            )
+        )
+    }
+
+    /// The Firebase web `apiKey` is public by design: it must not produce a critical floor row in
+    /// any of the five places Firebase puts it (item 24, the apiKey twin).
+    #[test]
+    fn a_firebase_web_config_in_client_code_produces_no_floor_finding() {
+        let key = firebase_key();
+        let files: Vec<(String, String)> = vec![
+            (
+                "src/firebase.ts".into(),
+                format!(
+                    "export const firebaseConfig = {{\n  apiKey: \"{key}\",\n  authDomain: \"x.firebaseapp.com\",\n  projectId: \"x\",\n  appId: \"1:2:web:3\"\n}};\n"
+                ),
+            ),
+            (
+                "lib/firebase_options.dart".into(),
+                format!(
+                    "static const FirebaseOptions web = FirebaseOptions(\n  apiKey: '{key}',\n  appId: '1:2:web:3',\n  messagingSenderId: '1',\n  projectId: 'x',\n);\n"
+                ),
+            ),
+            (
+                "android/app/google-services.json".into(),
+                format!(
+                    "{{\n  \"project_info\": {{ \"project_id\": \"x\" }},\n  \"client\": [{{\n    \"client_info\": {{ \"mobilesdk_app_id\": \"1:2:android:3\" }},\n    \"api_key\": [{{ \"current_key\": \"{key}\" }}]\n  }}]\n}}\n"
+                ),
+            ),
+            (
+                "ios/Runner/GoogleService-Info.plist".into(),
+                format!(
+                    "<dict>\n\t<key>API_KEY</key>\n\t<string>{key}</string>\n\t<key>GOOGLE_APP_ID</key>\n\t<string>1:2:ios:3</string>\n\t<key>PROJECT_ID</key>\n\t<string>x</string>\n</dict>\n"
+                ),
+            ),
+            // `.env` itself is a secret-file finding of its own; the example file isolates the key.
+            (
+                ".env.example".into(),
+                format!("VITE_FIREBASE_API_KEY={key}\n"),
+            ),
+        ];
+        let findings = audit_files("o/r", &files);
+        let sec: Vec<_> = findings
+            .iter()
+            .filter(|f| f.rule_id.starts_with("SEC-"))
+            .collect();
+        assert!(sec.is_empty(), "{sec:#?}");
+    }
+
+    /// The floor is unchanged for a Google key outside a Firebase configuration (owner decision
+    /// 2026-10-25: it keeps today's critical finding).
+    #[test]
+    fn a_google_key_outside_a_firebase_config_keeps_the_critical_floor_finding() {
+        let files = vec![(
+            "src/maps.ts".to_string(),
+            format!("export const MAPS_KEY = \"{}\";\n", firebase_key()),
+        )];
+        let findings = audit_files("o/r", &files);
+        let hit = findings
+            .iter()
+            .find(|f| f.rule_id == "SEC-NO-VENDOR-TOKEN-1")
+            .expect("a bare Google key is still a floor finding");
+        assert_eq!(hit.severity, "critical");
+    }
 }
