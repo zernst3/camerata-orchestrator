@@ -1,0 +1,46 @@
+id = "FIREBASE-RTDB-RULES-OPEN-1"
+version = 1
+title = "No Realtime Database node is unconditionally readable or writable, and no child rule is shadowed by a broader grant"
+domain = "firebase"
+layer = "platform"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-284"]
+max_severity = "critical"
+min_severity = "medium"
+default = true
+verification = "grounded"
+qualifies = "Deterministic over the Realtime Database rules file the project deploys (database.rules.json, or the file firebase.json names). A node that sets .write to true is asserted: critical at the root, high on a named node (a public counter or presence node is still writable by anyone, and the finding names the node). A .read of true at the root is asserted as high; on a named node it is held for the client and silent under a public word. Because .read and .write cascade and a shallower grant takes precedence, a child that sets false under an ancestor that grants true or signed in only access is reported as having no effect, one row per shadowed node, quoting both lines. The signed in only forms are reported by the signed in only rule. The .validate and .indexOn keys never grant and are ignored. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+
+[[sources]]
+url = "https://firebase.google.com/docs/rules/insecure-rules"
+title = "Avoid insecure rules"
+
+[[sources]]
+url = "https://firebase.google.com/docs/database/security"
+title = "Understand Firebase Realtime Database Security Rules"
+
+[[sources]]
+url = "https://firebase.google.com/docs/database/security/rules-conditions"
+title = "Realtime Database: Use conditions in rules"
+
+[decision]
+question = "Is any Realtime Database node open to anyone, or shadowed by a broader grant?"
+default = "no-realtime-database-node-is-unconditionally-readable-or-writable"
+why = "Realtime Database rules cascade: a read or write grant at a parent applies to every child, and a child rule can only add access. A true grant therefore opens the whole subtree to anyone who holds the database URL, and a child that says false does nothing. Firebase's guide calls this improperly inherited rules."
+
+[[option]]
+id = "no-realtime-database-node-is-unconditionally-readable-or-writable"
+label = "No Realtime Database node is unconditionally readable or writable"
+directive = "Realtime Database rules name who may read and write each node, scoped under the signed in user's own node (for example $uid with auth.uid === $uid). No parent grants access that a child is meant to take back, because a child can only add access, never remove it."
+remediation = "On `<path>`, replace `true` with a condition that names the caller (for example `auth != null && auth.uid === $uid`) and scope each user's data under a `$uid` node. Remove grants on a parent that a child rule is meant to override, since a child can only add access. Deploy and confirm in the emulator that an unauthenticated request is rejected."
+effort = "low"
+why = "Scoping access to the caller's own node keeps the cascade working for the project instead of against it."
+
+[[option]]
+id = "a-realtime-database-node-is-open"
+violates = true
+label = "A Realtime Database node is readable or writable by anyone"
+directive = "Set read or write to true on a node, or rely on a child rule to take back access a parent grants."
+why = "Anyone who holds the database URL can read or overwrite the data under the node with no sign in, and a child rule that denies access has no effect because rules at a child path can only grant more access, never less."

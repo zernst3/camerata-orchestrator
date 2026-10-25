@@ -1,0 +1,44 @@
+id = "FIREBASE-APP-CHECK-1"
+version = 1
+title = "The app proves its own identity to the backend with App Check, initialised in the client and enforced on the backends that matter"
+domain = "firebase"
+layer = "platform"
+enforcement = "structured"
+kind = "defect"
+inspectable = true
+max_severity = "low"
+default = true
+verification = "grounded"
+qualifies = "Advisory, absence based, held for the client at a low severity. One row per repository when a Firebase client initialisation exists (initializeApp from the client SDK, or Firebase.initializeApp in Flutter) and no App Check call appears anywhere outside tests (initializeAppCheck, FirebaseAppCheck.instance.activate, enforceAppCheck, request.app or context.app in a callable, X-Firebase-AppCheck, getAppCheck). A backend only repository is silent. Enforcement toggles for Firestore, Storage and Realtime Database live in the Firebase console and are invisible to a repository scan, so the finding says it reflects the repository and is held, never asserted. Withheld on a truncated scan, because the call it looks for may be in a dropped file. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+
+[[sources]]
+url = "https://firebase.google.com/docs/app-check"
+title = "Firebase App Check"
+
+[[sources]]
+url = "https://firebase.google.com/docs/app-check/cloud-functions"
+title = "Enable App Check enforcement for Cloud Functions"
+
+[[sources]]
+url = "https://firebase.google.com/docs/functions/callable"
+title = "Call functions from your app"
+
+[decision]
+question = "Does the app use App Check to protect its backends?"
+default = "app-check-protects-the-backends-that-matter"
+why = "Security rules decide what a user may do, not whether the caller is your app. App Check lets Firebase backends reject requests that do not come from your registered app, which limits scraping and abuse from scripts and cloned clients. Firebase's callable guide says to enable it before launch."
+
+[[option]]
+id = "app-check-protects-the-backends-that-matter"
+label = "App Check is initialised in the client and enforced on the backends that matter"
+directive = "The client initialises App Check (initializeAppCheck on the web, FirebaseAppCheck.instance.activate in Flutter), callable functions set enforceAppCheck, and enforcement is switched on for Firestore, Storage and Realtime Database once legitimate clients attach tokens."
+remediation = "Initialise App Check in the client (`initializeAppCheck` on the web, `FirebaseAppCheck.instance.activate` in Flutter) and set `enforceAppCheck: true` on callable functions. Then switch on enforcement for Firestore, Storage and Realtime Database in the Firebase console, after the console's request metrics show your legitimate clients attaching tokens."
+effort = "medium"
+why = "Backends then answer only requests that come from your registered app."
+
+[[option]]
+id = "no-app-check-anywhere"
+violates = true
+label = "App Check is not used anywhere in the project"
+directive = "Initialise the Firebase client SDK without App Check and leave function endpoints open to any caller."
+why = "Requests from scripts and cloned apps that are not your app reach the backends the same as requests from your app, so abusive traffic and scraping are limited only by the security rules and quotas."

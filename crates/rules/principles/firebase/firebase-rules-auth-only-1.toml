@@ -1,0 +1,42 @@
+id = "FIREBASE-RULES-AUTH-ONLY-1"
+version = 1
+title = "No rule grants access on the sole condition that the caller is signed in, except to data that every signed in user is meant to share"
+domain = "firebase"
+layer = "platform"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-284"]
+max_severity = "high"
+min_severity = "medium"
+default = true
+verification = "grounded"
+qualifies = "Deterministic over Firestore and Realtime Database rules the project deploys (Storage rules are reported by the Storage rule). A condition that is exactly the signed in check (request.auth != null and its spelled out equivalents, or auth != null in Realtime Database) is reported; any extra condition, such as a verified email or a membership lookup, makes it narrower and is not reported, and helper functions are expanded before the check. A grant at the root is asserted as high, a write side grant on a named path is asserted as high, and a read on a named path is held, because shared data among signed in users is a legitimate design. Paths with a public word are silent for reads. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+
+[[sources]]
+url = "https://firebase.google.com/docs/rules/insecure-rules"
+title = "Avoid insecure rules"
+
+[[sources]]
+url = "https://firebase.google.com/docs/rules/basics"
+title = "Basic Security Rules"
+
+[decision]
+question = "Does any rule grant access to private data to every signed in user?"
+default = "signed-in-is-not-the-only-condition-on-private-data"
+why = "Anyone can create an account, including an anonymous one, so a rule whose only condition is that the caller is signed in protects nothing from a motivated stranger. Firebase's guide lists access for any authenticated user as an insecure pattern for all three products, and shows the owner only version as the fix."
+
+[[option]]
+id = "signed-in-is-not-the-only-condition-on-private-data"
+label = "No rule on private data grants access on the sole condition that the caller is signed in"
+directive = "Rules on private or per user data name the owner or a role, not only the presence of a signed in user. A signed in only condition appears only on data that every account holder is meant to share."
+remediation = "On `<path>`, replace the signed in only condition with one that compares the caller to the document owner (`request.auth.uid == resource.data.ownerId`) or to a role from a custom claim, and keep a signed in only condition only where every account holder is meant to have access. Deploy and confirm in the emulator that a second signed in user is rejected for the first user's documents."
+effort = "low"
+why = "Naming the owner or a role keeps one user's data out of reach of every other account, and the change is one condition per path."
+
+[[option]]
+id = "any-signed-in-user-reaches-private-data"
+violates = true
+label = "Any signed in user can reach private data because the only condition is that the caller is signed in"
+directive = "Grant access to any caller who is signed in, with no check of which user they are."
+why = "Anyone who can create an account, including with anonymous or email sign in, can read or change every other user's data under the path. Firebase's guide lists access for any authenticated user among the rules not to rely on."

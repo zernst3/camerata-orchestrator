@@ -1,0 +1,46 @@
+id = "FIREBASE-RULES-OPEN-1"
+version = 1
+title = "Firestore rules grant no unconditional access to private data: an allow with an always true condition appears only on paths whose contents are meant to be public"
+domain = "firebase"
+layer = "platform"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-284"]
+max_severity = "critical"
+min_severity = "medium"
+default = true
+verification = "grounded"
+qualifies = "Deterministic over the Firestore rules file the project deploys (the file firebase.json names, or the conventional firestore.rules beside it; draft, dev and test rules files are reported as not assessed, never as defects). An allow whose condition is always true (no if clause, if true, or a condition with a true alternative such as request.auth != null || true) is reported. A write side grant (write, update, delete) is asserted as high, critical at the root wildcard that covers every document, and a create only grant as medium. A read grant at the root is asserted as high. A read grant on a named path has a legitimate reading (public content), so it is held for the client to confirm rather than asserted, and it is silent on paths that contain a public word (public, published, static, assets, catalog, faq, announcements, changelog, legal, locales). An if false rule is a lock, not a grant. A condition this check does not recognise exactly is never reported. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+
+[[sources]]
+url = "https://firebase.google.com/docs/rules/insecure-rules"
+title = "Avoid insecure rules"
+
+[[sources]]
+url = "https://firebase.google.com/docs/firestore/security/get-started"
+title = "Get started with Cloud Firestore Security Rules"
+
+[[sources]]
+url = "https://firebase.google.com/docs/firestore/security/rules-structure"
+title = "Structuring Cloud Firestore Security Rules"
+
+[decision]
+question = "Does any Firestore rule grant access to private data with an unconditional true condition?"
+default = "no-unconditional-grant-on-private-data"
+why = "Firestore rules are the only access control between a client holding the project id and the database. A rule whose condition is always true lets anyone on the internet use it with no sign in. Firebase's own guide lists allow read, write: if true among the rules never to use in production. The legitimate use is a collection whose contents are public on purpose, which is why a named path read is held for confirmation rather than asserted, while a write grant, or a read at the root, has no public reading."
+
+[[option]]
+id = "no-unconditional-grant-on-private-data"
+label = "No Firestore rule grants read or write access with an unconditional `true` condition except on paths whose contents are meant to be public"
+directive = "No Firestore allow statement carries an always true condition (an if true, no if clause, or a condition with a true alternative) except on paths whose contents are meant to be public, such as a public collection. Every other rule names who may use it: the signed in owner, a verified role, or a stated property of the document."
+remediation = "Replace the unconditional condition on `<path>` with one that names who may use it, for example `request.auth != null && request.auth.uid == resource.data.ownerId` for documents that belong to a user, and keep `if true` only on collections that are meant to be public. Deploy the changed rules and confirm in the emulator that an unauthenticated request to `<path>` is now rejected."
+effort = "low"
+why = "A rule that names its caller keeps private data private even when the project id is public, and the change is a single condition per path."
+
+[[option]]
+id = "unconditional-grant-on-user-data"
+violates = true
+label = "A Firestore rule grants access to user data with an unconditional `true` condition"
+directive = "Grant read and write access to documents with an unconditional true condition, with no check of who is asking."
+why = "Anyone holding the project id can read, change or delete the documents under the path, with no sign in. Firebase's own guide lists `allow read, write: if true` under rules never to use in production."

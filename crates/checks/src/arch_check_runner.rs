@@ -606,10 +606,15 @@ mod tests {
     #[test]
     fn every_other_registered_checker_still_runs_at_write_time() {
         for checker in all_checkers() {
-            let scan_and_ci_only = checker
-                .rule_ids()
-                .iter()
-                .any(|id| matches!(*id, "ARCH-DEAD-CODE-1" | "UI-REACT-HOOKS-LINT-1"));
+            let scan_and_ci_only = checker.rule_ids().iter().any(|id| {
+                matches!(
+                    *id,
+                    "ARCH-DEAD-CODE-1"
+                        | "UI-REACT-HOOKS-LINT-1"
+                        | "FIREBASE-FUNCTIONS-AUTH-1"
+                        | "FIREBASE-RULES-TESTS-1"
+                )
+            });
             assert_eq!(
                 checker.runs_at_write_time(),
                 !scan_and_ci_only,

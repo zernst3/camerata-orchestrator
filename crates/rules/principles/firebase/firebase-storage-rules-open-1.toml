@@ -1,0 +1,43 @@
+id = "FIREBASE-STORAGE-RULES-OPEN-1"
+version = 1
+title = "Storage rules let only the owner or an authorised role read and write private files, and public files sit under an explicit public path"
+domain = "firebase"
+layer = "platform"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-284"]
+max_severity = "critical"
+min_severity = "medium"
+default = true
+verification = "grounded"
+qualifies = "Deterministic over the Cloud Storage rules file the project deploys (service firebase.storage, and the legacy cloud.storage header). An unconditional or signed in only grant on the write side (write, create, update, delete) is asserted as high, critical at the root wildcard for an unconditional grant. An unconditional read at the root is asserted as high; on a named folder it is held for the client, since the docs' own mixed public and private example uses an unconditional read for files meant to be public, and it is silent under public, static and assets folders. A signed in only read at the root is asserted as medium and on a named folder it is held. Conditions on resource.metadata, resource.size or request.resource.contentType are not recognised and are silent. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+# This is the class of the July 2025 Tea app exposure (verification selfies and ID photos in an unsecured Cloud Storage bucket, reported by The Record and others). Context for the reader, not a source.
+
+[[sources]]
+url = "https://firebase.google.com/docs/rules/insecure-rules"
+title = "Avoid insecure rules"
+
+[[sources]]
+url = "https://firebase.google.com/docs/storage/security/rules-conditions"
+title = "Cloud Storage: Use conditions in Security Rules"
+
+[decision]
+question = "Can anyone, or any signed in user, read or write private files in Cloud Storage?"
+default = "private-files-are-readable-only-by-authorized-users"
+why = "A Storage rule that does not consider request.auth is a public rule, in Firebase's own words, and a signed in only rule is open to anyone who can make an account. Files such as identity documents and private uploads exposed that way can be downloaded by strangers who learn the path. Public assets belong under an explicit public folder with a rule of their own."
+
+[[option]]
+id = "private-files-are-readable-only-by-authorized-users"
+label = "Storage rules grant reads and writes on private files only to the owner or an authorized role, and public files sit under an explicit public path"
+directive = "Storage rules for private files check the caller against the owner (request.auth.uid == userId) or a role. Files that are meant to be public sit under an explicit public folder with its own rule, and no rule outside that folder reads or writes on an unconditional or signed in only condition."
+remediation = "On `<path>`, replace the unconditional or signed in only condition with an owner check (`request.auth.uid == userId`) for the folder that holds per user files, and move files that really are public under an explicit public folder with its own rule. Deploy and confirm that an unauthenticated request and a second signed in user cannot fetch or upload to `<path>`."
+effort = "low"
+why = "Owner checks keep private uploads private, and an explicit public folder makes the intent of every open rule visible."
+
+[[option]]
+id = "private-files-are-publicly-readable-or-writable"
+violates = true
+label = "Private files are readable or writable by anyone, or by any signed in user"
+directive = "Allow reads and writes on stored files without checking which user owns them."
+why = "Anyone with a file's URL can fetch it, and anyone, or any account holder, can upload, replace or delete files under the path. Verification photos, identity documents and private uploads exposed this way are downloadable by strangers; Firebase's guide treats a Storage rule that does not consider the caller as a public rule."

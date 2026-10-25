@@ -1240,6 +1240,11 @@ mod tests {
         ),
         ("supabase:exposure", &[("supabase/config.toml", "project_id = \"example\"\n")]),
         ("supabase:realtime", &[("supabase/config.toml", "project_id = \"example\"\n")]),
+        // ── Firebase: the project config alone is a sufficient structural marker ─────────────
+        (
+            "firebase",
+            &[("firebase.json", r#"{"firestore":{"rules":"firestore.rules"}}"#)],
+        ),
     ];
 
     /// req_a6: every corpus domain has a witness repo in [`DOMAIN_WITNESSES`], AND that witness
@@ -1629,6 +1634,94 @@ mod tests {
             rule.is_none_or(|r| !r.recommended),
             "a Python-only repo must not have {ID} suggested: {rule:?}"
         );
+    }
+
+    /// The thirteen Firebase rules (item 24) live in one `firebase` domain, which only a repo with
+    /// a Firebase marker reaches: `firebase.json`, a rules file, a Firebase dependency or a
+    /// FlutterFire package. A Node API, a Vue app and a Python repo get none of them.
+    #[tokio::test]
+    async fn firebase_rules_are_proposed_for_a_firebase_repo_and_not_for_a_plain_node_api() {
+        const IDS: [&str; 13] = [
+            "FIREBASE-RULES-OPEN-1",
+            "FIREBASE-RULES-TEST-MODE-1",
+            "FIREBASE-RULES-AUTH-ONLY-1",
+            "FIREBASE-RULES-OWNERSHIP-1",
+            "FIREBASE-RULES-FIELD-VALIDATION-1",
+            "FIREBASE-RULES-RECURSIVE-WILDCARD-1",
+            "FIREBASE-STORAGE-RULES-OPEN-1",
+            "FIREBASE-RTDB-RULES-OPEN-1",
+            "FIREBASE-ADMIN-CLAIMS-1",
+            "FIREBASE-FUNCTIONS-AUTH-1",
+            "FIREBASE-ADMIN-SDK-CLIENT-1",
+            "FIREBASE-APP-CHECK-1",
+            "FIREBASE-RULES-TESTS-1",
+        ];
+        let Some(corpus) = corpus_domains().await else {
+            return;
+        };
+        if !corpus.contains("firebase") {
+            return;
+        }
+        for (repo, pairs) in [
+            (
+                "acme/web",
+                vec![("firebase.json", "{}"), ("src/index.ts", "export {};")],
+            ),
+            (
+                "acme/flutter",
+                vec![
+                    ("pubspec.yaml", "dependencies:\n  firebase_core: ^3.0.0\n"),
+                    ("lib/main.dart", "void main() {}"),
+                ],
+            ),
+        ] {
+            let repo_files = files(&pairs);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            for id in IDS {
+                let rule = proposed
+                    .iter()
+                    .find(|r| r.id == id)
+                    .unwrap_or_else(|| panic!("{id} must be proposed for {repo}"));
+                assert_eq!(rule.domain, "firebase", "{id}");
+                assert!(
+                    rule.recommended,
+                    "{repo}: {id} is suggested, not merely available"
+                );
+                assert_eq!(rule.repos, vec![repo.to_string()], "{id}");
+            }
+        }
+
+        for (repo, pairs) in [
+            (
+                "acme/node-api",
+                vec![
+                    ("package.json", r#"{"dependencies":{"express":"4"}}"#),
+                    ("src/index.ts", "export {};"),
+                ],
+            ),
+            (
+                "acme/vue-app",
+                vec![
+                    ("package.json", r#"{"dependencies":{"vue":"3"}}"#),
+                    ("src/main.ts", "export {};"),
+                ],
+            ),
+            ("acme/py-app", vec![("app/main.py", "print('hi')")]),
+        ] {
+            let repo_files = files(&pairs);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            for id in IDS {
+                let rule = proposed.iter().find(|r| r.id == id);
+                assert!(
+                    rule.is_none_or(|r| !r.recommended),
+                    "{repo}: {id} must not be suggested for a repo with no Firebase marker"
+                );
+            }
+        }
     }
 
     /// `UI-REACT-HOOKS-LINT-1` lives in `javascript:react`, which the `React` framework label

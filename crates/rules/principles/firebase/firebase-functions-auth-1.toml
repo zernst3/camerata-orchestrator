@@ -1,0 +1,46 @@
+id = "FIREBASE-FUNCTIONS-AUTH-1"
+version = 1
+title = "HTTP functions verify the caller's token and callable functions check the caller's auth before privileged work"
+domain = "firebase"
+layer = "platform"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-306"]
+max_severity = "high"
+min_severity = "medium"
+default = true
+verification = "grounded"
+qualifies = "Structural, review graded, over JavaScript and TypeScript Cloud Functions (Python functions are reported as not assessed). An exported HTTP function (onRequest) is reported when nothing in its package verifies a Firebase ID token or App Check token (verifyIdToken, verifySessionCookie, verifyToken) and the handler writes with the Admin SDK, which bypasses security rules. A callable (onCall) is reported when it never reads request.auth (or context.auth), calls no authentication helper and is not wrapped by one, and either writes with the Admin SDK or builds a document path from the caller's input. It is held, never asserted, because public HTTP endpoints and public callables are legitimate. Webhooks (a module that checks a signature), functions named like health checks or callbacks, functions with a private invoker, read only functions and scheduled or database triggers are not reported. Per route verification inside an Express app is not traced: one verification anywhere in the package silences the rule. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+
+[[sources]]
+url = "https://firebase.google.com/docs/auth/admin/verify-id-tokens"
+title = "Verify ID Tokens"
+
+[[sources]]
+url = "https://github.com/firebase/functions-samples/blob/main/Node-1st-gen/authorized-https-endpoint/functions/index.js"
+title = "Official sample: an HTTPS endpoint protected by a Firebase ID token"
+
+[[sources]]
+url = "https://firebase.google.com/docs/functions/callable"
+title = "Call functions from your app"
+
+[decision]
+question = "Do HTTP and callable functions verify the caller before acting with elevated privileges?"
+default = "functions-verify-the-caller-before-privileged-work"
+why = "The Admin SDK ignores security rules, so a function that writes with it is the only check between a caller and the data. An HTTP function is reachable by anyone who knows its URL, and a callable receives the caller's token but only rejects an anonymous caller if the handler says so. Firebase documents the verification for both."
+
+[[option]]
+id = "functions-verify-the-caller-before-privileged-work"
+label = "HTTP functions verify a Firebase ID token or App Check token before acting, and callable functions check `request.auth` before privileged work"
+directive = "An HTTP function that acts with the Admin SDK reads the Authorization bearer ID token and verifies it (verifyIdToken), answering 403 on failure, or verifies an App Check token. A callable function rejects a caller whose request.auth is missing, with an HttpsError, before it writes or reads by a caller supplied id. Functions that are public on purpose, such as webhooks, verify a signature instead."
+remediation = "In `<function-name>`, verify the caller before writing: for an HTTP function read the Authorization bearer ID token and call `verifyIdToken`, answering 403 if it fails; for a callable function throw an `HttpsError('unauthenticated', ...)` when `request.auth` is missing. If the function is meant to be public, limit what it can write and say so in a comment. Deploy and confirm an unauthenticated call is rejected."
+effort = "medium"
+why = "Verifying the caller turns an open endpoint into one that acts only for known users."
+
+[[option]]
+id = "functions-act-for-unverified-callers"
+violates = true
+label = "Functions perform privileged work for callers they never verified"
+directive = "Let an HTTP or callable function write with the Admin SDK without checking who is calling it."
+why = "Anyone who knows the function's URL can call it, and the function writes with the Admin SDK, which bypasses security rules, so a stranger can create, change or delete data the rules would have protected."

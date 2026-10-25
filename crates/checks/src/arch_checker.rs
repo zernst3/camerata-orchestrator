@@ -789,6 +789,14 @@ allowed_in = ["repositories"]
                 "package.json".to_string(),
                 r#"{"dependencies":{"react":"18"}}"#.to_string(),
             ),
+            // The Firebase checkers answer only for a repo that has what they read: an
+            // Admin SDK import, and a deployed rules file (the conventional name, with no
+            // `firebase.json`, is assessed).
+            (
+                "server/admin.ts".to_string(),
+                "import admin from \"firebase-admin\";\n".to_string(),
+            ),
+            ("firestore.rules".to_string(), String::new()),
         ];
         let repo = RepoView {
             spec: "test/repo",
