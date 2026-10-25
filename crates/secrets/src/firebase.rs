@@ -5,10 +5,20 @@
 //! them in your code or configuration files". A Google API key with NO Firebase context is a
 //! Google Cloud key (a Maps browser key is public by design, an unrestricted server key with
 //! billing attached is a real exposure) and the repository cannot show the restriction, so it
-//! keeps its finding. Recognition is therefore content-only and conservative: the key must sit
-//! on a Firebase-config key name beside Firebase sibling keys, or on an identifier that names
-//! Firebase, or in a key-value position beside a Firebase initialisation call. Anything that does
-//! not match exactly stays a secret (a false negative on the twin is a finding, never a miss).
+//! keeps its finding. Recognition is therefore content-only and conservative, three exact shapes:
+//!
+//! - (a) a Firebase-config key name (`apiKey`, `api_key`, `current_key`, `API_KEY`) beside at
+//!   least two Firebase sibling keys; the snake_case `api_key` and `current_key` also need a
+//!   name only a `google-services.json` carries (`mobilesdk_app_id`, `gcm_defaultSenderId`,
+//!   `firebase_url`), because `project_id` and `storage_bucket` sit in any Google Cloud config;
+//! - (b) an identifier that names Firebase (and no other Google product: not Gemini, Maps,
+//!   Places, Translate, Vision or YouTube), beside a Firebase sibling key or an initialisation
+//!   call;
+//! - (c) a key-value position INSIDE the `{}` or `()` span of a Firebase initialisation call or
+//!   config object, beside a sibling in the same span. A value that no span encloses never fires.
+//!
+//! Anything that does not match exactly stays a secret (a false negative on the twin is a
+//! finding, never a miss).
 
 use std::sync::OnceLock;
 
@@ -52,6 +62,22 @@ const SIBLING_KEYS: &[&str] = &[
     "BUNDLE_ID",
 ];
 
+/// Sibling names only a `google-services.json` carries. `project_id` and `storage_bucket` are in
+/// every Google Cloud config, so they cannot tell a Firebase file from a generic one.
+const GOOGLE_SERVICES_ONLY: &[&str] = &["mobilesdk_app_id", "gcm_defaultSenderId", "firebase_url"];
+
+/// Google products whose keys are billed server credentials, never the Firebase web key. An
+/// identifier naming one of them is not a Firebase config key whatever else it names.
+const OTHER_GOOGLE_PRODUCTS: &[&str] = &[
+    "GENAI",
+    "GEMINI",
+    "MAPS",
+    "PLACES",
+    "TRANSLATE",
+    "VISION",
+    "YOUTUBE",
+];
+
 /// Calls and names that mark a Firebase initialisation.
 const INIT_MARKERS: &[&str] = &[
     "initializeApp(",
@@ -65,7 +91,7 @@ fn re_config_key_prefix() -> &'static Regex {
     RE.get_or_init(|| {
         // The name is not the tail of a longer identifier (`GOOGLE_MAPS_API_KEY`, `mapsApiKey`).
         Regex::new(
-            r#"(?:^|[^A-Za-z0-9_])(?:apiKey|api_key|current_key|API_KEY)\s*["']?\s*[:=]\s*["']?$"#,
+            r#"(?:^|[^A-Za-z0-9_])(apiKey|api_key|current_key|API_KEY)\s*["']?\s*[:=]\s*["']?$"#,
         )
         .expect("re_config_key_prefix must compile")
     })
@@ -81,7 +107,7 @@ fn re_plist_key_prefix() -> &'static Regex {
 fn re_firebase_named_prefix() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r#"(?i)[A-Za-z0-9_]*FIREBASE[A-Za-z0-9_]*\s*["']?\s*[:=]\s*["']?$"#)
+        Regex::new(r#"(?i)([A-Za-z0-9_]*FIREBASE[A-Za-z0-9_]*)\s*["']?\s*[:=]\s*["']?$"#)
             .expect("re_firebase_named_prefix must compile")
     })
 }
@@ -89,30 +115,89 @@ fn re_firebase_named_prefix() -> &'static Regex {
 fn re_key_value_prefix() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r#"[A-Za-z_][A-Za-z0-9_]*\s*["']?\s*[:=]\s*["']?$"#)
+        Regex::new(r#"([A-Za-z_][A-Za-z0-9_]*)\s*["']?\s*[:=]\s*["']?$"#)
             .expect("re_key_value_prefix must compile")
+    })
+}
+
+fn re_firebase_named_sibling() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // `VITE_FIREBASE_PROJECT_ID`, `firebaseProjectId`: the sibling of a Firebase-named key
+        // carries the same prefix, so the plain sibling list (whole words) cannot see it.
+        Regex::new(
+            r"(?i)FIREBASE[A-Za-z0-9_]*(?:project_?id|auth_?domain|storage_?bucket|app_?id|messaging_?sender_?id|measurement_?id|database_?url)",
+        )
+        .expect("re_firebase_named_sibling must compile")
     })
 }
 
 /// True when `ctx` shows the value is the `apiKey` of a Firebase app configuration.
 pub(crate) fn is_firebase_web_api_key(ctx: &TwinContext<'_>) -> bool {
     let before_value = ctx.window.get(..ctx.at).unwrap_or("");
-    // (b) The identifier names Firebase: the name is the context, no siblings needed.
-    if re_firebase_named_prefix().is_match(ctx.line_prefix) {
-        return true;
+    // (b) The identifier names Firebase (and no other Google product), beside a Firebase sibling
+    // key or an initialisation call.
+    if let Some(name) = captured(re_firebase_named_prefix(), ctx.line_prefix) {
+        if !names_another_google_product(name)
+            && (firebase_named_sibling_count(span_or_window(ctx)) + sibling_count(ctx, false) >= 1
+                || has_init_marker(ctx.window))
+        {
+            return true;
+        }
     }
     // (a) A Firebase-config key name beside Firebase sibling keys.
-    let named_key = re_config_key_prefix().is_match(ctx.line_prefix)
-        || re_plist_key_prefix().is_match(before_value);
-    if named_key && sibling_count(ctx, ctx.line_prefix.contains("current_key")) >= 2 {
-        return true;
+    let config_name = captured(re_config_key_prefix(), ctx.line_prefix).or_else(|| {
+        re_plist_key_prefix()
+            .is_match(before_value)
+            .then_some("API_KEY")
+    });
+    if let Some(name) = config_name {
+        // `current_key` is nested in an object of its own in `google-services.json`; every other
+        // name reads its own enclosing span.
+        let whole_window = name == "current_key";
+        let span = if whole_window {
+            ctx.window
+        } else {
+            span_or_window(ctx)
+        };
+        let google_services_name = matches!(name, "api_key" | "current_key");
+        if sibling_count_in(span) >= 2
+            && (!google_services_name
+                || GOOGLE_SERVICES_ONLY
+                    .iter()
+                    .any(|key| contains_word(span, key)))
+        {
+            return true;
+        }
     }
-    // (c) A key-value position beside a Firebase initialisation call and at least one sibling.
-    re_key_value_prefix().is_match(ctx.line_prefix)
-        && INIT_MARKERS
-            .iter()
-            .any(|marker| ctx.window.contains(marker))
-        && sibling_count(ctx, false) >= 1
+    // (c) A key-value position inside the span of a Firebase initialisation call or config
+    // object, beside at least one sibling in that span.
+    captured(re_key_value_prefix(), ctx.line_prefix).is_some_and(|name| {
+        !names_another_google_product(name)
+            && inside_init_span(ctx.window, ctx.at)
+            && sibling_count(ctx, false) >= 1
+    })
+}
+
+/// Group 1 of the first match of `re` in `text`.
+fn captured<'t>(re: &Regex, text: &'t str) -> Option<&'t str> {
+    re.captures(text)?.get(1).map(|m| m.as_str())
+}
+
+fn names_another_google_product(identifier: &str) -> bool {
+    let upper = identifier.to_ascii_uppercase();
+    OTHER_GOOGLE_PRODUCTS
+        .iter()
+        .any(|word| upper.contains(word))
+}
+
+fn has_init_marker(text: &str) -> bool {
+    INIT_MARKERS.iter().any(|marker| text.contains(marker))
+}
+
+/// The smallest span around the value, or the whole window when no span encloses it.
+fn span_or_window<'a>(ctx: &TwinContext<'a>) -> &'a str {
+    enclosing_span(ctx.window, ctx.at).unwrap_or(ctx.window)
 }
 
 /// Distinct Firebase sibling keys that count for the value at `ctx.at`. They are read from the
@@ -125,22 +210,47 @@ fn sibling_count(ctx: &TwinContext<'_>, whole_window: bool) -> usize {
     let span = if whole_window {
         ctx.window
     } else {
-        enclosing_span(ctx.window, ctx.at)
+        span_or_window(ctx)
     };
+    sibling_count_in(span)
+}
+
+fn sibling_count_in(span: &str) -> usize {
     SIBLING_KEYS
         .iter()
         .filter(|key| contains_word(span, key))
         .count()
 }
 
-/// The smallest balanced `{...}` or `(...)` span of `window` that contains byte `at`, or the whole
-/// window when none does. Strings (`'`, `"`, backtick) and comments are skipped; an unclosed
-/// opener or a missing closer runs to the window's edge.
-fn enclosing_span(window: &str, at: usize) -> &str {
+/// Firebase-prefixed sibling variables in `span` (`VITE_FIREBASE_PROJECT_ID`).
+fn firebase_named_sibling_count(span: &str) -> usize {
+    re_firebase_named_sibling().find_iter(span).count()
+}
+
+/// Whether byte `at` of `window` sits inside the `()` of a Firebase initialisation call
+/// (`initializeApp(`, `FirebaseOptions(`) or inside the `{}` assigned to a `firebaseConfig`
+/// binding. A value that no span encloses is not inside anything.
+fn inside_init_span(window: &str, at: usize) -> bool {
+    open_brackets(window, at).iter().any(|&open| {
+        let before = &window[..open];
+        match window.as_bytes()[open] {
+            b'(' => INIT_MARKERS
+                .iter()
+                .any(|marker| marker.ends_with('(') && window[..=open].ends_with(marker)),
+            _ => {
+                let line = before.rsplit('\n').next().unwrap_or(before);
+                line.contains("firebaseConfig") && line.contains('=')
+            }
+        }
+    })
+}
+
+/// Byte offsets of the brackets (`{` or `(`) still open at byte `at`, outermost first. Strings
+/// (`'`, `"`, backtick) and comments are skipped.
+fn open_brackets(window: &str, at: usize) -> Vec<usize> {
     let bytes = window.as_bytes();
     let mut open: Vec<usize> = Vec::new();
     let mut i = 0;
-    let mut start = 0;
     while i < at.min(bytes.len()) {
         match bytes[i] {
             b'{' | b'(' => open.push(i),
@@ -154,12 +264,15 @@ fn enclosing_span(window: &str, at: usize) -> &str {
         }
         i += 1;
     }
-    if let Some(&last) = open.last() {
-        start = last;
-    }
-    if open.is_empty() {
-        return window;
-    }
+    open
+}
+
+/// The smallest balanced `{...}` or `(...)` span of `window` that contains byte `at`, or `None`
+/// when none does. Strings (`'`, `"`, backtick) and comments are skipped; a missing closer runs
+/// to the window's edge.
+fn enclosing_span(window: &str, at: usize) -> Option<&str> {
+    let bytes = window.as_bytes();
+    let start = *open_brackets(window, at).last()?;
     // Forward from the value to the closer that matches the opener.
     let mut depth = 0usize;
     let mut j = at.min(bytes.len());
@@ -168,7 +281,7 @@ fn enclosing_span(window: &str, at: usize) -> &str {
             b'{' | b'(' => depth += 1,
             b'}' | b')' => {
                 if depth == 0 {
-                    return window.get(start..=j).unwrap_or(window);
+                    return window.get(start..=j);
                 }
                 depth -= 1;
             }
@@ -179,7 +292,7 @@ fn enclosing_span(window: &str, at: usize) -> &str {
         }
         j += 1;
     }
-    window.get(start..).unwrap_or(window)
+    window.get(start..)
 }
 
 /// Index of the closing quote of the string opened at `from` (or the last byte when unclosed).

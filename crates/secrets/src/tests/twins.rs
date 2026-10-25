@@ -538,16 +538,23 @@ fn a_readable_name_on_a_code_constant_identifier_stays_readable() {
 
 // ---- Firebase web `apiKey` (item 24): public by design, so a safe twin -----------------------
 
-/// A runtime-built `AIza` key: the repository holds no 39-character literal.
+/// A runtime-built `AIza` key: the repository holds no 39-character literal. It ends on a letter
+/// or digit, because the shape is word-bounded (`\b`) and a key ending in `-` or `_` is not
+/// matched as a Google key at all.
 fn google_key(seed: u64) -> String {
-    format!(
+    let mut key = format!(
         "AIza{}",
         body(
             35,
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-",
             seed
         )
-    )
+    );
+    if key.ends_with(['-', '_']) {
+        key.pop();
+        key.push('x');
+    }
+    key
 }
 
 fn assert_firebase_twin(text: &str) {
@@ -607,9 +614,13 @@ fn twin_firebase_api_key_in_google_service_info_plist_stays_readable() {
 
 #[test]
 fn twin_firebase_named_env_var_stays_readable() {
-    assert_firebase_twin(&format!("VITE_FIREBASE_API_KEY={}", google_key(106)));
+    // A Firebase-named key needs a sibling Firebase key (or an init call) beside it.
     assert_firebase_twin(&format!(
-        "{{ \"EXPO_PUBLIC_FIREBASE_API_KEY\": \"{}\" }}",
+        "VITE_FIREBASE_API_KEY={}\nVITE_FIREBASE_PROJECT_ID=x\n",
+        google_key(106)
+    ));
+    assert_firebase_twin(&format!(
+        "{{ \"EXPO_PUBLIC_FIREBASE_API_KEY\": \"{}\", \"EXPO_PUBLIC_FIREBASE_PROJECT_ID\": \"x\" }}",
         google_key(107)
     ));
 }
@@ -651,7 +662,9 @@ fn not_a_twin_maps_key_in_its_own_object_beside_a_firebase_config_is_a_secret() 
 fn not_a_twin_env_maps_key_beside_a_firebase_env_key_is_a_secret() {
     let firebase = google_key(112);
     let maps = google_key(113);
-    let text = format!("VITE_FIREBASE_API_KEY={firebase}\nVITE_GOOGLE_MAPS_KEY={maps}\n");
+    let text = format!(
+        "VITE_FIREBASE_API_KEY={firebase}\nVITE_FIREBASE_PROJECT_ID=x\nVITE_GOOGLE_MAPS_KEY={maps}\n"
+    );
     assert_google_secret(&text, &maps);
 }
 
@@ -690,4 +703,131 @@ fn not_a_twin_a_longer_key_name_is_not_a_firebase_config_key() {
         &format!("const c = {{ projectId: \"x\", appId: \"y\", googleMapsApiKey: \"{key}\" }};"),
         &key,
     );
+}
+
+// ---- Adversarial review (2026-10-25): real keys the first apiKey twin let through ------------
+
+/// `secrets/functions_index.js`: a Cloud Functions file whose Geocoding key sits after, and
+/// outside, the `initializeApp({ databaseURL })` call. No `{}`/`()` span encloses the value.
+#[test]
+fn not_a_twin_server_key_outside_the_admin_init_call_is_a_secret() {
+    let key = google_key(121);
+    let text = format!(
+        "const admin = require(\"firebase-admin\");\nadmin.initializeApp({{ databaseURL: \"https://acme.firebaseio.com\" }});\nconst GEOCODE_KEY = \"{key}\";\nexports.geocode = async (addr) => fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${{addr}}&key=${{GEOCODE_KEY}}`);\n"
+    );
+    assert_google_secret(&text, &key);
+}
+
+/// `secrets/mixed_object.ts`: the Firebase key in the init call is a twin; the Places key on the
+/// next statement is not.
+#[test]
+fn not_a_twin_second_key_after_the_init_call_is_a_secret() {
+    let firebase = google_key(122);
+    let places = google_key(123);
+    let text = format!(
+        "import {{ initializeApp }} from \"firebase/app\";\nconst app = initializeApp({{\n  apiKey: \"{firebase}\",\n  projectId: \"acme\",\n}});\nexport const PLACES_KEY = \"{places}\";\n"
+    );
+    assert_google_secret(&text, &places);
+    assert_eq!(
+        detect_all(&text).len(),
+        2,
+        "the init-call key is still a twin"
+    );
+}
+
+/// `secrets/server_sa_near_config.ts`: a Cloud Translation key with billing attached, one line
+/// below a real web config and its init call.
+#[test]
+fn not_a_twin_server_key_after_a_web_config_is_a_secret() {
+    let firebase = google_key(124);
+    let translate = google_key(125);
+    let text = format!(
+        "import {{ initializeApp }} from \"firebase/app\";\nexport const firebaseConfig = {{ apiKey: \"{firebase}\", projectId: \"acme\", appId: \"1:2:web:3\" }};\ninitializeApp(firebaseConfig);\n// server side key for Cloud Translation, billing attached\nconst TRANSLATE_KEY = \"{translate}\";\n"
+    );
+    assert_google_secret(&text, &translate);
+}
+
+/// `secrets/gcp_config.json`: `api_key` beside `project_id` and `storage_bucket` is a generic GCP
+/// config, not a `google-services.json` (which also carries `mobilesdk_app_id`).
+#[test]
+fn not_a_twin_api_key_in_a_gcp_config_without_google_services_names_is_a_secret() {
+    let key = google_key(126);
+    let text = format!(
+        "{{\n  \"project_id\": \"acme-prod\",\n  \"api_key\": \"{key}\",\n  \"storage_bucket\": \"acme-exports\",\n  \"billing_account\": \"0123-4567\"\n}}\n"
+    );
+    assert_google_secret(&text, &key);
+}
+
+/// `secrets/env.firebase`: a Gemini key under a Firebase-named variable is a billed AI key.
+#[test]
+fn not_a_twin_firebase_named_genai_key_is_a_secret() {
+    let key = google_key(127);
+    assert_google_secret(
+        &format!("FIREBASE_GENAI_API_KEY={key}\nFIREBASE_PROJECT_ID=acme\n"),
+        &key,
+    );
+    // Every excluded product word, whatever sits beside it.
+    for word in [
+        "GENAI",
+        "GEMINI",
+        "MAPS",
+        "PLACES",
+        "TRANSLATE",
+        "VISION",
+        "YOUTUBE",
+    ] {
+        assert_google_secret(
+            &format!("FIREBASE_{word}_KEY={key}\nFIREBASE_PROJECT_ID=acme\nFIREBASE_APP_ID=1\n"),
+            &key,
+        );
+    }
+}
+
+/// Rule (b) needs a sibling Firebase key or an init call: the name alone is not enough.
+#[test]
+fn not_a_twin_firebase_named_key_with_no_sibling_or_init_call_is_a_secret() {
+    let key = google_key(128);
+    assert_google_secret(&format!("FIREBASE_API_KEY={key}\n"), &key);
+    assert_google_secret(
+        &format!("{{ \"EXPO_PUBLIC_FIREBASE_API_KEY\": \"{key}\" }}"),
+        &key,
+    );
+}
+
+/// An init call beside a Firebase-named key is the other accepted anchor for rule (b).
+#[test]
+fn twin_firebase_named_key_beside_an_init_call_stays_readable() {
+    let key = google_key(129);
+    assert_firebase_twin(&format!(
+        "initializeApp(firebaseConfig);\nVITE_FIREBASE_API_KEY={key}\n"
+    ));
+}
+
+/// `current_key` keeps its documented whole-window reading (google-services.json nests the key in
+/// an object of its own), but the window must still hold a `google-services.json`-only name: a
+/// padded file with generic `PROJECT_ID` and `STORAGE_BUCKET` lines far away is not one.
+#[test]
+fn not_a_twin_current_key_with_only_generic_siblings_in_the_window_is_a_secret() {
+    let key = google_key(130);
+    let text = format!("PROJECT_ID\nx\nx\nx\ncurrent_key: \"{key}\"\ny\ny\nSTORAGE_BUCKET\n");
+    assert_google_secret(&text, &key);
+}
+
+/// Rule (c) fires only inside the init call's own span: the same key-value shape after the call
+/// has closed is not beside it.
+#[test]
+fn not_a_twin_key_value_after_the_init_call_has_closed_is_a_secret() {
+    let key = google_key(131);
+    let text =
+        format!("initializeApp({{ projectId: \"x\" }});\nconst cfg = {{ key: \"{key}\" }};\n");
+    assert_google_secret(&text, &key);
+}
+
+/// And inside the init call, with a sibling, a differently named key is still the web config.
+#[test]
+fn twin_key_value_inside_the_init_call_with_a_sibling_stays_readable() {
+    let key = google_key(132);
+    assert_firebase_twin(&format!(
+        "initializeApp({{ key: \"{key}\", projectId: \"x\" }});"
+    ));
 }
