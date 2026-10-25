@@ -87,6 +87,11 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
     );
     let mut with = ScanLedger::new();
     with.record_stage_telemetry(meter.snapshot(400));
+    with.record_ai_key(camerata_server::scan_cache::AiScanKey::new(
+        "claude-sonnet-5",
+        None,
+        &[],
+    ));
     assert!(with.stage_telemetry().is_some());
 
     let (report_with, findings_with) = exported(report(with));
@@ -96,6 +101,9 @@ fn recording_stage_telemetry_changes_nothing_in_the_client_export() {
     assert_eq!(findings_with, findings_without, "findings.json changed");
     for term in [
         "stage_telemetry",
+        "ai_key",
+        "directives_fingerprint",
+        "prompt_schema_version",
         "cache_creation",
         "wasted",
         "cost_per_1k",

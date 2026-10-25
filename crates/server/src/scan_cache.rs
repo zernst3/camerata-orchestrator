@@ -35,7 +35,61 @@ use crate::onboard::Finding;
 /// that, so a secret value sits in it on disk; [`ScanCacheStore::load_or_new`] drops every
 /// non-current manifest and rewrites the file at once, so the raw content is gone on first
 /// start rather than on the next scan.
-pub(crate) const MANIFEST_VERSION: u32 = 2;
+///
+/// Version 3: carried AI findings are keyed by the question they answered ([`AiScanKey`]: the
+/// model, the calibration model, the prompt-schema version and the rule directives), not only
+/// by file fingerprint and rule ids. A version 2 manifest has no such key, so it cannot be shown
+/// to still answer the current question and is dropped, which costs one full scan after the
+/// upgrade.
+pub(crate) const MANIFEST_VERSION: u32 = 3;
+
+/// The question a set of AI findings answered: everything besides the file content and the rule
+/// ids that decides what the model would say today. A carried-forward finding is reusable only
+/// when today's key equals the key it was produced under; otherwise the file is re-scanned.
+///
+/// Before this key the cache matched on the file fingerprint and the rule ids alone, so
+/// switching the model, editing the audit prompt, or choosing a different option (a different
+/// directive) for the same rule id all silently served the previous answer.
+///
+/// Lives on the manifest, never on a client export.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiScanKey {
+    /// The RESOLVED audit model (see [`crate::ai_audit::resolve_audit_model`]).
+    pub audit_model: String,
+    /// The calibration model pick; empty when the audit model calibrates. Carried findings keep
+    /// the severity and confidence calibration gave them.
+    pub calibration_model: String,
+    /// [`crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION`] when the findings were produced. `0` only
+    /// for a manifest that predates the key, which never matches a real one.
+    pub prompt_schema_version: u32,
+    /// Order-independent digest of every selected rule's id AND directive text, which is what the
+    /// audit prompt actually asks.
+    pub directives_fingerprint: String,
+}
+
+impl AiScanKey {
+    /// The key a scan running now would produce. `audit_model` must already be resolved.
+    pub fn new(
+        audit_model: &str,
+        calibration_model: Option<&str>,
+        rules: &[crate::onboard::SelectedRule],
+    ) -> Self {
+        let mut parts: Vec<String> = rules
+            .iter()
+            .map(|r| format!("{}\u{1f}{}", r.id, r.directive))
+            .collect();
+        parts.sort_unstable();
+        Self {
+            audit_model: audit_model.to_string(),
+            calibration_model: calibration_model.unwrap_or_default().to_string(),
+            prompt_schema_version: crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION,
+            directives_fingerprint: format!(
+                "{:016x}",
+                crate::suppression::fnv1a(&parts.join("\u{1e}"))
+            ),
+        }
+    }
+}
 
 /// Fingerprint a file's EXACT content with the stable FNV-1a hash the suppression baseline uses.
 ///
@@ -83,6 +137,10 @@ pub struct ScanManifest {
     /// a prior manifest) — no migration or manual cache-bust needed.
     #[serde(default)]
     pub ai_covered: bool,
+    /// The question [`Self::findings`] answered (see [`AiScanKey`]). Defaults to the empty key,
+    /// which matches no real scan, so a manifest without it is simply not reused.
+    #[serde(default)]
+    pub ai_key: AiScanKey,
     /// The clone-candidate judge's verdicts (Wave C, `onboard::clone_advisory`), keyed by the
     /// CONTENT of the question so an unchanged family on a re-scan is never re-billed. Persisted
     /// beside the file fingerprints in the app data directory, never in the client's repository.
@@ -118,6 +176,17 @@ impl ScanManifest {
     /// Whether this manifest can be reused for a scan running under `rules_fp`.
     pub fn matches_rules(&self, rules_fp: &str) -> bool {
         self.rules_fingerprint == rules_fp
+    }
+
+    /// Whether this manifest's carried AI findings may be reused by a scan running under
+    /// `rules_fp` and `ai_key`: current schema, same rule selection, the AI review actually
+    /// completed, and the findings answered the same question (model, prompt, rule text). The one
+    /// place the reuse decision is made.
+    pub fn is_reusable_baseline(&self, rules_fp: &str, ai_key: &AiScanKey) -> bool {
+        self.is_current()
+            && self.matches_rules(rules_fp)
+            && self.ai_covered
+            && self.ai_key == *ai_key
     }
 
     /// The fingerprint recorded for a file on the last scan, if any.
@@ -213,6 +282,7 @@ pub struct ManifestBuilder {
     files: BTreeMap<String, BTreeMap<String, String>>,
     findings: Vec<Finding>,
     ai_covered: bool,
+    ai_key: AiScanKey,
     clone_verdicts: crate::onboard::clone_advisory::VerdictCache,
 }
 
@@ -234,6 +304,14 @@ impl ManifestBuilder {
     /// manifest that is correctly treated as "no AI baseline" rather than silently trusted.
     pub fn with_ai_covered(mut self, covered: bool) -> Self {
         self.ai_covered = covered;
+        self
+    }
+
+    /// Stamp the question this scan's AI findings answered (see [`AiScanKey`]). Defaults to the
+    /// empty key when never called, which no real scan matches, so a caller that forgets this
+    /// stamp produces a manifest that is never reused rather than one that is wrongly trusted.
+    pub fn with_ai_key(mut self, key: AiScanKey) -> Self {
+        self.ai_key = key;
         self
     }
 
@@ -271,6 +349,7 @@ impl ManifestBuilder {
             files: self.files,
             findings: self.findings,
             ai_covered: self.ai_covered,
+            ai_key: self.ai_key,
             clone_verdicts: self.clone_verdicts,
         }
     }
@@ -465,6 +544,8 @@ impl ScanCacheStore {
 
 pub mod state_dir;
 
+#[cfg(test)]
+mod ai_key_tests;
 #[cfg(test)]
 mod redaction_tests;
 #[cfg(test)]
@@ -1003,6 +1084,7 @@ mod tests {
             },
             findings: vec![],
             ai_covered: true,
+            ai_key: AiScanKey::default(),
             clone_verdicts: Default::default(),
         };
 

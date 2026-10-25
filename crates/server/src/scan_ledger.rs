@@ -362,6 +362,13 @@ pub struct ScanLedger {
     /// field existed.
     #[serde(default)]
     stage_telemetry: Option<crate::stage_telemetry::StageTelemetry>,
+    /// The question this scan's AI findings answered (model, prompt version, rule text). The
+    /// delta rescan rebuilds its prior manifest from a stored inspection, and the inspection
+    /// carries this ledger, so this is how the rebuilt prior proves its carried findings still
+    /// answer today's question. `None` for a ledger written before the key existed; the rescan
+    /// then re-scans in full. Operator-only, like [`Self::stage_telemetry`].
+    #[serde(default)]
+    ai_key: Option<crate::scan_cache::AiScanKey>,
 }
 
 /// The facts about a scan's INPUT, recorded so the integrity gate can judge them.
@@ -561,6 +568,16 @@ impl ScanLedger {
     /// Record the scan's per-stage cost telemetry. Overwrites: one scan, one record.
     pub fn record_stage_telemetry(&mut self, telemetry: crate::stage_telemetry::StageTelemetry) {
         self.stage_telemetry = Some(telemetry);
+    }
+
+    /// Record the question this scan's AI findings answered. See [`Self::ai_key`].
+    pub fn record_ai_key(&mut self, key: crate::scan_cache::AiScanKey) {
+        self.ai_key = Some(key);
+    }
+
+    /// The question this scan's AI findings answered, when it recorded one.
+    pub fn ai_key(&self) -> Option<&crate::scan_cache::AiScanKey> {
+        self.ai_key.as_ref()
     }
 
     /// The scan's per-stage cost telemetry, when it recorded any.

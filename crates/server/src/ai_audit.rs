@@ -434,6 +434,18 @@ pub fn build_digest(files: &[(String, String)]) -> String {
     out
 }
 
+/// The version of the question the scan asks the model: [`audit_system_prompt`], the pass prompt
+/// layout ([`build_pass_prompt`]) and its task lines, and the rules-block format
+/// ([`build_rules_block`]). It is part of the incremental cache key
+/// ([`crate::scan_cache::AiScanKey`]): carried findings answered an older question once this
+/// moves, so they are re-scanned instead of reused.
+///
+/// BUMP IT whenever any of those change what the model is asked, including a wording tweak (the
+/// system prompt is pinned by a test that fails until you do). Do NOT bump it for a pure
+/// scheduling or billing change (cache breakpoints, concurrency, the position of a label line),
+/// which leave the answer the model gives unchanged.
+pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 1;
+
 /// The system prompt: what to look for, what NOT to (the mechanical tier is already
 /// covered), and the STRICT JSON schema to return.
 pub fn audit_system_prompt() -> String {
