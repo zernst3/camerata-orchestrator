@@ -69,8 +69,9 @@ pub enum ProjectBackend {
 
 impl ProjectBackend {
     /// The lowercase name this backend serializes as, for the places that record or print it
-    /// (the export manifest, the README, the operator report).
-    pub fn label(self) -> &'static str {
+    /// (the export manifest, the README, the operator report). Deliberately NOT named `label`:
+    /// an inherent `label` would shadow the UI's display-label extension ("CLI" / "API").
+    pub fn provenance_name(self) -> &'static str {
         match self {
             ProjectBackend::Cli => "cli",
             ProjectBackend::Api => "api",

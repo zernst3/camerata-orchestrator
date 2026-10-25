@@ -16978,7 +16978,7 @@ pub struct ProvenanceRepo {
 /// README or the release gate's agreement check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelRecord {
-    /// `ProjectBackend::label()`: `api` or `cli`.
+    /// `ProjectBackend::provenance_name()`: `api` or `cli`.
     pub backend: String,
     /// The model provider, e.g. [`ModelRecord::ANTHROPIC`].
     pub provider: String,
@@ -16990,7 +16990,7 @@ impl ModelRecord {
 
     pub fn new(backend: crate::llm::ProjectBackend, provider: &str) -> Self {
         Self {
-            backend: backend.label().to_string(),
+            backend: backend.provenance_name().to_string(),
             provider: provider.to_string(),
         }
     }
