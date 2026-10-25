@@ -1283,4 +1283,91 @@ mod tests {
         let vs = rule_hits(&hits);
         assert_eq!(vs.len(), 1, "{vs:#?}");
     }
+
+    // ── mutation-gap tests (docs/plans/2026-10-19_MASTER-SEQUENCE.md section 2b) ────────
+
+    /// The scan gates each checker on its interest globs: if they stopped matching, the checker
+    /// would silently never run on any repo.
+    #[test]
+    fn the_checker_applies_to_every_language_it_reads() {
+        for path in [
+            "a.ts", "a.tsx", "a.js", "a.jsx", "a.py", "a.go", "a.rb", "a.java", "a.cs",
+        ] {
+            let f = files(vec![(path, "x\n")]);
+            assert!(
+                crate::arch_checker::checker_applies(&WeakTokenRandomnessChecker, &f),
+                "{path}"
+            );
+        }
+        let f = files(vec![("a.md", "x\n")]);
+        assert!(!crate::arch_checker::checker_applies(
+            &WeakTokenRandomnessChecker,
+            &f
+        ));
+    }
+
+    #[test]
+    fn a_credential_named_sibling_field_does_not_taint_an_unrelated_random_value() {
+        // The random value is `widgetIndex`'s; `sessionToken: raw` on the same line is not its
+        // consumer. Forward taint only follows LATER lines.
+        let f = files(vec![(
+            "src/ui/widget.ts",
+            "const o = { sessionToken: raw, widgetIndex: Math.random() };\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        assert!(rule_hits(&hits).is_empty(), "{hits:#?}");
+    }
+
+    #[test]
+    fn a_later_standalone_use_is_found_past_a_longer_identifier_that_contains_the_name() {
+        let f = files(vec![(
+            "src/links/build.ts",
+            "const raw = Math.random();\nconst rawId = 1, shareToken = 'x_' + raw;\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].object.as_deref(), Some("shareToken"));
+    }
+
+    #[test]
+    fn the_earliest_entropy_source_on_a_line_is_the_one_reported() {
+        let f = files(vec![(
+            "src/auth/token.ts",
+            "const sessionToken = Math.random().toString(36) + Date.now();\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert!(vs[0].message.contains("`Math.random`"), "{}", vs[0].message);
+        assert!(!vs[0].message.contains("`Date.now`"), "{}", vs[0].message);
+    }
+
+    #[test]
+    fn a_line_that_starts_with_an_equals_sign_does_not_panic_or_flag() {
+        let f = files(vec![("a.js", "const token\n=Math.random();\n")]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        assert!(rule_hits(&hits).is_empty(), "{hits:#?}");
+    }
+
+    #[test]
+    fn a_path_separator_before_the_call_does_not_hide_the_assignment_target() {
+        let f = files(vec![("a.rb", "reset_token = Kernel::rand(1000)\n")]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].object.as_deref(), Some("reset_token"));
+    }
+
+    #[test]
+    fn code_after_a_block_comment_that_ends_in_slashes_is_still_scanned() {
+        // The comment is `/* a//*/`: its last two characters before `*/` are `//`, which must not
+        // be re-read as a line comment that swallows the code after it.
+        let f = files(vec![(
+            "a.js",
+            "/* a//*/ const sessionToken = Math.random();\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        assert_eq!(rule_hits(&hits).len(), 1, "{hits:#?}");
+    }
 }
