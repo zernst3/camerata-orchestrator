@@ -1133,8 +1133,20 @@ mod tests {
     /// put 174,236 characters of prior output into a hearth audit prompt. This is the half
     /// that stops it being written there at all, so a client running an audit does not find
     /// two unexplained vendor-named files in their `git status` afterwards.
+    ///
+    /// The state dir is process environment (`CAMERATA_STATE_DIR`, `HOME`, `XDG_CACHE_HOME`),
+    /// and the `redaction_tests` in this same binary mutate `HOME`. The test therefore takes the
+    /// workspace `process_env` key and pins the state dir with an `EnvGuard`, so the three
+    /// `state_dir::dir()` reads below can never straddle another test's mutation (it flaked
+    /// once in a full run, ~5% of isolated loops, before this).
     #[test]
+    #[serial_test::serial(process_env)]
     fn bookkeeping_is_never_written_into_the_scanned_repo() {
+        let state = tempfile::tempdir().expect("state dir");
+        let _state = camerata_test_env::EnvGuard::set(
+            camerata_server::scan_cache::state_dir::STATE_DIR_ENV,
+            state.path(),
+        );
         let repo = PathBuf::from("/Users/someone/clients/acme-platform");
         for path in [manifest_cache_path(&repo), ledger_path(&repo)] {
             assert!(
