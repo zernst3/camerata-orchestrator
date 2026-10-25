@@ -391,6 +391,8 @@ pub struct ReadmeProvenance {
     pub engine_version: Option<String>,
     pub corpus_version: Option<String>,
     pub rules_last_reviewed: Option<String>,
+    pub model_backend: Option<String>,
+    pub model_provider: Option<String>,
     /// The checks named by the `Release checks:` line, when it says they all passed.
     pub release_checks: Option<Vec<String>>,
 }
@@ -417,6 +419,10 @@ pub fn parse_readme_provenance(readme: &str) -> ReadmeProvenance {
             p.corpus_version = Some(v.to_string());
         } else if let Some(v) = line.strip_prefix("Rules last reviewed on ") {
             p.rules_last_reviewed = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix("Model backend: ") {
+            p.model_backend = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix("Model provider: ") {
+            p.model_provider = Some(v.to_string());
         } else if let Some(v) = line.strip_prefix("Release checks: ") {
             p.release_checks = v
                 .strip_suffix(" (all passed)")
@@ -479,6 +485,12 @@ pub fn verify_readme_provenance(readme: &str, manifest: &Value) -> Vec<Problem> 
     }
     if parsed.rules_last_reviewed != manifest_str(manifest, "rules_last_reviewed") {
         mismatch("Rules last reviewed");
+    }
+    if parsed.model_backend != manifest_str(manifest, "model_backend") {
+        mismatch("Model backend");
+    }
+    if parsed.model_provider != manifest_str(manifest, "model_provider") {
+        mismatch("Model provider");
     }
     let manifest_checks: Option<Vec<String>> = manifest["inspection"]["release_checks"]
         .as_array()

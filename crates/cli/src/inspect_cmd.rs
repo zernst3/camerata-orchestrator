@@ -385,7 +385,7 @@ pub async fn build_product_export_bytes(
     report: &camerata_server::onboard::SealedReport,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Result<(String, Vec<u8>), InspectError> {
-    let released = release_product_export(report, corpus).await?;
+    let released = release_product_export(report, corpus, None).await?;
     Ok((released.stem, released.bytes))
 }
 
@@ -394,11 +394,13 @@ pub async fn build_product_export_bytes(
 async fn release_product_export(
     report: &camerata_server::onboard::SealedReport,
     corpus: Option<&camerata_rules::RuleSet>,
+    model: Option<camerata_server::ModelRecord>,
 ) -> Result<camerata_server::release_gate::ReleasedZip, InspectError> {
     let dispositions: HashMap<String, camerata_server::report_export::DispositionWire> =
         HashMap::new();
     let mut options = ReportOptions::default();
     options.apply_env_defaults();
+    options.model = model;
 
     let package = camerata_server::release_gate::build_product_package(
         report,
@@ -635,7 +637,12 @@ pub async fn run_inspect_with_key_presence(
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
     // `release_product_export` is the release gate: it returns bytes only when every check
     // passed, and `std::fs::write` below runs only on `Ok`, so a blocked export is never on disk.
-    let released = release_product_export(&report, corpus.as_ref()).await?;
+    let released = release_product_export(
+        &report,
+        corpus.as_ref(),
+        Some(camerata_server::ModelRecord::anthropic(args.backend)),
+    )
+    .await?;
     let zip_bytes = released.bytes;
     let release_gate = format!(
         "release gate: passed ({} checks)",

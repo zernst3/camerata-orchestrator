@@ -329,3 +329,93 @@ fn the_sanctioned_date_reaches_the_package_and_no_maintenance_text_comes_with_it
         }
     }
 }
+
+// ---- model backend and provider (MASTER-SEQUENCE 22a) -----------------------------------------
+
+/// Build the manifest `Value` and README for a provenance, through the real zip assembly.
+fn manifest_and_readme(
+    provenance: &camerata_server::ManifestProvenance,
+) -> (serde_json::Value, String) {
+    let readme = product_export_readme("acme", provenance);
+    let zip = build_product_zip(
+        "acme",
+        b"%PDF-1.7 stand-in",
+        b"PK stand-in",
+        b"{}",
+        &readme,
+        &[],
+        provenance,
+    )
+    .expect("zip assembles");
+    let entries = zip_text_entries(&zip);
+    let manifest = &entries
+        .iter()
+        .find(|(n, _)| n == "manifest.json")
+        .unwrap()
+        .1;
+    (serde_json::from_str(manifest).unwrap(), readme)
+}
+
+fn provenance_with(
+    model: Option<camerata_server::ModelRecord>,
+) -> camerata_server::ManifestProvenance {
+    let report = default_report();
+    let json = cover_of(&report);
+    let mut provenance = export_provenance_with(&report, &json.cover, None, None);
+    provenance.model = model;
+    provenance
+}
+
+#[test]
+fn the_manifest_and_readme_carry_the_backend_and_provider() {
+    let provenance = provenance_with(Some(camerata_server::ModelRecord::anthropic(
+        camerata_server::llm::ProjectBackend::Api,
+    )));
+    let (manifest, readme) = manifest_and_readme(&provenance);
+
+    assert_eq!(manifest["inspection"]["model_backend"], "api");
+    assert_eq!(manifest["inspection"]["model_provider"], "anthropic");
+    assert!(readme.contains("Model backend: api\n"), "{readme}");
+    assert!(readme.contains("Model provider: anthropic\n"), "{readme}");
+    assert!(
+        camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty(),
+        "the gate's provenance agreement check passes"
+    );
+}
+
+#[test]
+fn a_future_provider_is_recorded_the_same_way() {
+    let provenance = provenance_with(Some(camerata_server::ModelRecord::new(
+        camerata_server::llm::ProjectBackend::Api,
+        "bedrock",
+    )));
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    assert_eq!(manifest["inspection"]["model_provider"], "bedrock");
+    assert!(readme.contains("Model provider: bedrock\n"), "{readme}");
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+}
+
+#[test]
+fn the_gate_catches_a_readme_that_disagrees_with_the_manifest_on_the_backend() {
+    let provenance = provenance_with(Some(camerata_server::ModelRecord::anthropic(
+        camerata_server::llm::ProjectBackend::Api,
+    )));
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    let tampered = readme.replace("Model backend: api", "Model backend: cli");
+    let problems = camerata_server::release_gate::verify_readme_provenance(&tampered, &manifest);
+    assert!(
+        problems
+            .iter()
+            .any(|p| format!("{p:?}").contains("Model backend")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn an_unrecorded_backend_is_null_in_the_manifest_and_absent_from_the_readme() {
+    let provenance = provenance_with(None);
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    assert!(manifest["inspection"]["model_backend"].is_null());
+    assert!(!readme.contains("Model backend"), "{readme}");
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+}

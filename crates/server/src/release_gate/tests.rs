@@ -105,6 +105,36 @@ fn released() -> ReleasedZip {
     release(package()).expect("a clean package must clear the gate")
 }
 
+/// 22a: the backend and provider in `ReportOptions` reach the package's provenance, and the
+/// released package (gate included) states them in the manifest and the README alike.
+#[test]
+fn the_backend_and_provider_in_the_options_reach_the_manifest_and_readme() {
+    let sealed = sealed_report();
+    let options = ReportOptions {
+        model: Some(crate::ModelRecord::anthropic(
+            crate::llm::ProjectBackend::Api,
+        )),
+        ..ReportOptions::default()
+    };
+    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let data = render_data_json(&json).expect("data.json renders");
+    let package = assemble_package(
+        &sealed,
+        &HashMap::new(),
+        None,
+        &options,
+        STEM,
+        (json, data, STAND_IN_PDF.to_vec()),
+    )
+    .expect("the package assembles");
+    assert!(package.readme.contains("Model backend: api\n"));
+    assert!(package.readme.contains("Model provider: anthropic\n"));
+    let manifest = package.provenance.inspection_json();
+    assert_eq!(manifest["model_backend"], "api");
+    assert_eq!(manifest["model_provider"], "anthropic");
+    release(package).expect("the gate's agreement check passes with the model lines");
+}
+
 fn blocked(package: ProductPackage) -> GateFailure {
     match release(package) {
         Err(ReleaseError::Blocked(failure)) => failure,

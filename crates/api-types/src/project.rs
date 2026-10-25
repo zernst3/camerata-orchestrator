@@ -67,6 +67,17 @@ pub enum ProjectBackend {
     Api,
 }
 
+impl ProjectBackend {
+    /// The lowercase name this backend serializes as, for the places that record or print it
+    /// (the export manifest, the README, the operator report).
+    pub fn label(self) -> &'static str {
+        match self {
+            ProjectBackend::Cli => "cli",
+            ProjectBackend::Api => "api",
+        }
+    }
+}
+
 /// Per-project Layer-3 (agentic code-review) configuration (R7).
 ///
 /// Default: off, using the project's `balanced` tier model when enabled.

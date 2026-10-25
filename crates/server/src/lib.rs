@@ -16783,6 +16783,9 @@ async fn export_product(
     // `resolve_fix`'s chosen-option fallback (audit-integrated alternatives) — server-
     // populated, never client-supplied. Covers all three artifacts built below.
     req.options.chosen_options = project_chosen_options(&project);
+    // The backend the project's scans ran on, recorded in the manifest and README. Server-
+    // populated, never client-supplied.
+    req.options.model = Some(ModelRecord::anthropic(project.backend));
 
     // ONE assembly (`release_gate::build_product_package`) and ONE path to zip bytes
     // (`release_gate::release`), shared by this handler, `camerata inspect --export` and the
@@ -16967,6 +16970,37 @@ pub struct ProvenanceRepo {
     pub dirty: bool,
 }
 
+/// Which model backend and provider produced an inspection, recorded in the export so a client
+/// can see the chain their code went through (`api` / `anthropic` for a client inspection).
+///
+/// `provider` is an open string, not an enum: a future Bedrock-served run is recorded by
+/// constructing `ModelRecord::new(backend, "bedrock")`, with no change to the manifest, the
+/// README or the release gate's agreement check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRecord {
+    /// `ProjectBackend::label()`: `api` or `cli`.
+    pub backend: String,
+    /// The model provider, e.g. [`ModelRecord::ANTHROPIC`].
+    pub provider: String,
+}
+
+impl ModelRecord {
+    /// The Anthropic provider (the Messages API, and Claude Code, which is Anthropic's too).
+    pub const ANTHROPIC: &'static str = "anthropic";
+
+    pub fn new(backend: crate::llm::ProjectBackend, provider: &str) -> Self {
+        Self {
+            backend: backend.label().to_string(),
+            provider: provider.to_string(),
+        }
+    }
+
+    /// `backend` served by Anthropic: today's only provider.
+    pub fn anthropic(backend: crate::llm::ProjectBackend) -> Self {
+        Self::new(backend, Self::ANTHROPIC)
+    }
+}
+
 /// Provenance for the product ZIP's `manifest.json` `inspection` block (design:
 /// `docs/design/2026-10-20_machine-readable-exports.md`). The hard fields are `Option` so the
 /// manifest's SHAPE is always complete even when a value was not recorded. `engine_version` is
@@ -16989,6 +17023,9 @@ pub struct ManifestProvenance {
     /// (assembled in [`crate::client_provenance`]). `None` while any used rule has never
     /// been reviewed: an honest absence, never a fabricated date.
     pub rules_last_reviewed: Option<String>,
+    /// The model backend and provider that ran the inspection. `None` when the caller did not
+    /// record one (an honest absence: `null` in the manifest, no README line).
+    pub model: Option<ModelRecord>,
 }
 
 impl ManifestProvenance {
@@ -17047,6 +17084,8 @@ impl ManifestProvenance {
             "engine_version": self.engine_version(),
             "corpus_version": self.corpus_version,
             "rules_last_reviewed": self.rules_last_reviewed,
+            "model_backend": self.model.as_ref().map(|m| &m.backend),
+            "model_provider": self.model.as_ref().map(|m| &m.provider),
             "release_checks": Self::release_checks(),
         })
     }
@@ -17089,6 +17128,10 @@ impl ManifestProvenance {
         }
         if let Some(reviewed) = &self.rules_last_reviewed {
             out.push_str(&format!("Rules last reviewed on {reviewed}\n"));
+        }
+        if let Some(model) = &self.model {
+            out.push_str(&format!("Model backend: {}\n", model.backend));
+            out.push_str(&format!("Model provider: {}\n", model.provider));
         }
         out.push_str(&format!(
             "Release checks: {} (all passed)\n",
