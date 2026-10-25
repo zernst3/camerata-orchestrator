@@ -778,6 +778,7 @@ dependencies = [
  "camerata-liveness",
  "camerata-rules",
  "camerata-secrets",
+ "chrono",
  "fs2",
  "proc-macro2",
  "quote",

@@ -84,6 +84,11 @@ pub mod import_boundary_checker;
 /// Row Level Security and `SECURITY DEFINER` search_path hygiene. See `supabase/mod.rs`.
 pub mod supabase;
 
+/// Firebase / Firestore coverage (MASTER-SEQUENCE item 24): the rules-file reader, the rule
+/// checkers and Cloud Functions recognition. See `firebase/mod.rs` and
+/// `docs/design/2026-10-25_firebase-rules.md`.
+pub mod firebase;
+
 /// Pass 4a "Group A" — cheap architectural checkers on the [`arch_checker`] seam that need
 /// no AST, no new dependencies, and no config: pure path/naming logic over the Python test
 /// tree. See `docs/design/2026-07-27_ast-extractor-layer.md` §4.
