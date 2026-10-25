@@ -95,6 +95,10 @@ pub(crate) struct Site<'a> {
     pub file: &'a LoadedRules,
     pub block: &'a MatchBlock,
     pub allow: &'a Allow,
+    /// The condition after normalisation and helper inlining.
+    pub cond: Cond,
+    /// The wildcard names the block's path binds (`userId`).
+    pub wildcards: Vec<String>,
     pub grant: Grant,
     pub root: bool,
     pub public: bool,
@@ -145,6 +149,8 @@ pub(crate) fn sites<'a>(file: &'a LoadedRules) -> Vec<Site<'a>> {
                 file,
                 block,
                 allow,
+                cond,
+                wildcards: scope.wildcards.clone(),
                 grant,
                 root,
                 public,
@@ -297,18 +303,23 @@ pub(crate) fn is_root(service: &Service, path: &[Segment]) -> bool {
 /// The path without the service prefix a reader never writes (`/databases/{d}/documents` or
 /// `/b/{bucket}/o`), so `/{document=**}` and `/orders/{id}` read as the client wrote them.
 pub(crate) fn display_path(service: &Service, path: &[Segment]) -> String {
+    render_path(relative_segments(service, path))
+}
+
+/// The path segments without the service prefix (`/databases/{d}/documents` or `/b/{bucket}/o`).
+pub(crate) fn relative_segments<'p>(service: &Service, path: &'p [Segment]) -> &'p [Segment] {
     let (first, third) = match service {
         Service::Firestore => ("databases", "documents"),
         Service::Storage => ("b", "o"),
-        Service::Other(_) => return render_path(path),
+        Service::Other(_) => return path,
     };
     match path {
         [Segment::Literal(a), Segment::Wildcard { .. }, Segment::Literal(b), rest @ ..]
             if a == first && b == third =>
         {
-            render_path(rest)
+            rest
         }
-        _ => render_path(path),
+        _ => path,
     }
 }
 

@@ -2,6 +2,7 @@
 
 mod auth_only;
 mod checker;
+mod edges;
 mod open;
 mod parse;
 mod recursive_wildcard;
@@ -102,4 +103,12 @@ pub(crate) fn rtdb(json: &str) -> Vec<(String, String)> {
         ),
         ("database.rules.json", json),
     ])
+}
+
+/// The findings (Defect or Review rows) of one rule: a rules file can legitimately raise several
+/// rules at once, so each rule's tests look at their own.
+pub(crate) fn of<'a>(all: &'a [ArchViolation], rule: &str) -> Vec<&'a ArchViolation> {
+    all.iter()
+        .filter(|v| v.rule_id == rule && v.grade != ViolationGrade::NotAssessed)
+        .collect()
 }

@@ -128,6 +128,16 @@ impl Cond {
         {
             return true;
         }
+        // The field is forced to a constant: `request.resource.data.f == 'user'`.
+        let constant = format!("request.resource.data.{f}==");
+        if t.match_indices(&constant).any(|(at, _)| {
+            t[at + constant.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c == '\'' || c == '"')
+        }) {
+            return true;
+        }
         // `!('f' in request.resource.data)` and the `.keys()` spelling.
         for q in ['\'', '"'] {
             if t.contains(&format!("!({q}{f}{q} in request.resource.data"))

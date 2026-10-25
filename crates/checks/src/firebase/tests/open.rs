@@ -1,6 +1,6 @@
 //! FIREBASE-RULES-OPEN-1 (design section 7.1).
 
-use super::{files, findings, firestore, rows, run, storage};
+use super::{files, firestore, of, rows, run, storage};
 use crate::arch_checker::{ViolationGrade, SEVERITY_CRITICAL, SEVERITY_HIGH, SEVERITY_MEDIUM};
 use crate::firebase::RULE_OPEN;
 
@@ -9,7 +9,7 @@ fn open_write_on_a_collection_is_high() {
     let all = run(&firestore(
         "    match /orders/{id} { allow read, write: if true; }",
     ));
-    let f = findings(&all);
+    let f = of(&all, RULE_OPEN);
     assert_eq!(f.len(), 1, "{f:#?}");
     assert_eq!(f[0].rule_id, RULE_OPEN);
     assert_eq!(f[0].grade, ViolationGrade::Defect);
@@ -32,7 +32,7 @@ fn open_read_and_write_at_the_root_is_critical() {
     let all = run(&firestore(
         "    match /{document=**} { allow read, write: if true; }",
     ));
-    let f = findings(&all);
+    let f = of(&all, RULE_OPEN);
     assert_eq!(f.len(), 1, "{f:#?}");
     assert_eq!(f[0].severity, SEVERITY_CRITICAL);
     assert_eq!(f[0].grade, ViolationGrade::Defect);
@@ -45,7 +45,7 @@ fn open_create_only_is_medium() {
     let all = run(&firestore(
         "    match /submissions/{id} {\n      allow create: if true;\n      allow read: if request.auth.uid == resource.data.uid;\n    }",
     ));
-    let f = findings(&all);
+    let f = of(&all, RULE_OPEN);
     assert_eq!(f.len(), 1, "{f:#?}");
     assert_eq!(f[0].severity, SEVERITY_MEDIUM);
     assert_eq!(f[0].grade, ViolationGrade::Defect);
@@ -57,7 +57,7 @@ fn open_read_at_the_root_is_high_and_asserted() {
     let all = run(&firestore(
         "    match /{document=**} { allow read: if true; }",
     ));
-    let f = findings(&all);
+    let f = of(&all, RULE_OPEN);
     assert_eq!(f.len(), 1, "{f:#?}");
     assert_eq!(f[0].severity, SEVERITY_HIGH);
     assert_eq!(f[0].grade, ViolationGrade::Defect);
@@ -71,7 +71,7 @@ fn open_read_on_a_collection_is_review_graded_medium() {
     let all = run(&firestore(
         "    match /profiles/{uid} {\n      allow read: if true;\n      allow write: if request.auth.uid == uid;\n    }",
     ));
-    let f = findings(&all);
+    let f = of(&all, RULE_OPEN);
     assert_eq!(f.len(), 1, "{f:#?}");
     assert_eq!(f[0].grade, ViolationGrade::Review);
     assert_eq!(f[0].severity, SEVERITY_MEDIUM);
@@ -88,7 +88,7 @@ fn open_read_beside_open_write_in_the_same_block_is_one_row() {
     let all = run(&firestore(
         "    match /orders/{id} {\n      allow read: if true;\n      allow write: if true;\n    }",
     ));
-    let f = findings(&all);
+    let f = of(&all, RULE_OPEN);
     assert_eq!(
         f.len(),
         1,
@@ -103,7 +103,7 @@ fn or_true_makes_a_grant_unconditional() {
     let all = run(&firestore(
         "    match /orders/{id} { allow write: if request.auth != null || true; }",
     ));
-    let f = findings(&all);
+    let f = of(&all, RULE_OPEN);
     assert_eq!(f.len(), 1, "{f:#?}");
     assert_eq!(f[0].rule_id, RULE_OPEN);
     assert_eq!(f[0].severity, SEVERITY_HIGH);
@@ -122,7 +122,7 @@ fn twin_public_collection_read_is_silent() {
         "    match /catalog/{item} { allow read: if true; }",
     ] {
         let all = run(&firestore(body));
-        assert!(findings(&all).is_empty(), "{body}: {all:#?}");
+        assert!(of(&all, RULE_OPEN).is_empty(), "{body}: {all:#?}");
     }
 }
 
@@ -131,7 +131,7 @@ fn twin_locked_mode_default_is_silent() {
     let all = run(&firestore(
         "    match /{document=**} { allow read, write: if false; }",
     ));
-    assert!(findings(&all).is_empty(), "{all:#?}");
+    assert!(of(&all, RULE_OPEN).is_empty(), "{all:#?}");
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn twin_unrecognised_condition_is_silent() {
     let all = run(&firestore(
         "    match /posts/{id} { allow read: if resource.data.visibility == 'public'; }",
     ));
-    assert!(findings(&all).is_empty(), "{all:#?}");
+    assert!(of(&all, RULE_OPEN).is_empty(), "{all:#?}");
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn twin_draft_and_test_rules_files_produce_no_defect() {
     ]);
     let all = run(&f);
     assert!(
-        findings(&all).is_empty(),
+        of(&all, RULE_OPEN).is_empty(),
         "no defect from a draft or test file: {all:#?}"
     );
     let notes = rows(&all, RULE_OPEN, ViolationGrade::NotAssessed);
@@ -193,7 +193,7 @@ fn findings_are_sorted_and_stable() {
     let first = run(&firestore(body));
     let second = run(&firestore(body));
     assert_eq!(first, second);
-    let lines: Vec<usize> = findings(&first).iter().map(|v| v.line).collect();
+    let lines: Vec<usize> = super::findings(&first).iter().map(|v| v.line).collect();
     let mut sorted = lines.clone();
     sorted.sort_unstable();
     assert_eq!(lines, sorted);
@@ -212,7 +212,7 @@ fn a_named_database_is_named_in_the_finding() {
         ),
     ]);
     let all = run(&f);
-    let found = findings(&all);
+    let found = of(&all, RULE_OPEN);
     assert_eq!(found.len(), 1);
     assert!(
         found[0].message.contains("the rules for `analytics`"),

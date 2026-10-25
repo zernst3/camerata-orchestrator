@@ -1,6 +1,6 @@
 //! FIREBASE-RULES-RECURSIVE-WILDCARD-1 (design section 7.6).
 
-use super::{findings, firestore, rows, run, storage};
+use super::{firestore, of, rows, run, storage};
 use crate::arch_checker::{ViolationGrade, SEVERITY_CRITICAL, SEVERITY_HIGH};
 use crate::firebase::{RULE_AUTH_ONLY, RULE_OPEN, RULE_RECURSIVE_WILDCARD, RULE_TEST_MODE};
 
@@ -9,7 +9,7 @@ const THREE_NARROWER: &str = "    match /{document=**} { allow read, write: if r
 #[test]
 fn broad_auth_only_grant_lists_every_overridden_narrower_rule() {
     let all = run(&firestore(THREE_NARROWER));
-    let f = findings(&all);
+    let f = of(&all, RULE_RECURSIVE_WILDCARD);
     assert_eq!(f.len(), 1, "exactly one row, no AUTH-ONLY row: {f:#?}");
     assert_eq!(f[0].rule_id, RULE_RECURSIVE_WILDCARD);
     assert_eq!(f[0].line, 4);
@@ -29,7 +29,7 @@ fn broad_open_grant_with_narrower_rules_is_critical_and_owns_the_fact() {
     let all = run(&firestore(
         "    match /{document=**} { allow read, write: if true; }\n    match /users/{uid} { allow write: if request.auth.uid == uid; }",
     ));
-    let f = findings(&all);
+    let f = of(&all, RULE_RECURSIVE_WILDCARD);
     assert_eq!(f.len(), 1, "{f:#?}");
     assert_eq!(f[0].rule_id, RULE_RECURSIVE_WILDCARD);
     assert_eq!(f[0].severity, SEVERITY_CRITICAL);
@@ -41,7 +41,7 @@ fn broad_test_mode_grant_with_narrower_rules() {
     let all = run(&firestore(
         "    match /{document=**} { allow read, write: if request.time < timestamp.date(2026, 12, 31); }\n    match /users/{uid} { allow write: if request.auth.uid == uid; }",
     ));
-    let f = findings(&all);
+    let f = of(&all, RULE_RECURSIVE_WILDCARD);
     assert_eq!(f.len(), 1, "{f:#?}");
     assert_eq!(f[0].rule_id, RULE_RECURSIVE_WILDCARD);
     assert_eq!(f[0].severity, SEVERITY_CRITICAL);
@@ -53,7 +53,7 @@ fn twin_recursive_wildcard_locked_with_false_is_silent() {
     let all = run(&firestore(
         "    match /{document=**} { allow read, write: if false; }\n    match /users/{uid} { allow read, write: if request.auth.uid == uid; }",
     ));
-    assert!(findings(&all).is_empty(), "{all:#?}");
+    assert!(of(&all, RULE_RECURSIVE_WILDCARD).is_empty(), "{all:#?}");
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn twin_recursive_wildcard_alone_is_reported_by_open_not_here() {
     let all = run(&firestore(
         "    match /{document=**} { allow read, write: if true; }",
     ));
-    let f = findings(&all);
+    let f = super::findings(&all);
     assert_eq!(f.len(), 1, "{f:#?}");
     assert_eq!(f[0].rule_id, RULE_OPEN);
 }
@@ -71,7 +71,7 @@ fn twin_admin_override_with_a_claims_condition_is_silent() {
     let all = run(&firestore(
         "    match /{document=**} { allow read, write: if request.auth.token.admin == true; }\n    match /users/{uid} { allow read, write: if request.auth.uid == uid; }",
     ));
-    assert!(findings(&all).is_empty(), "{all:#?}");
+    assert!(of(&all, RULE_RECURSIVE_WILDCARD).is_empty(), "{all:#?}");
 }
 
 #[test]

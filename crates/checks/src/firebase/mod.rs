@@ -14,6 +14,8 @@
 //! - [`grants`]: the shared per-`allow` model, path helpers and message plumbing.
 //! - [`grant_rules`]: rules 1, 2, 3, 6 and 7 (open, test mode, auth only, recursive wildcard,
 //!   Storage).
+//! - [`edge_rules`]: the deterministic edges of rules 4, 5 and 9 (ownership, field validation,
+//!   admin claims).
 //! - [`rtdb_rules`]: rule 8 and the Realtime Database half of rule 3.
 //! - [`rules_checker`]: [`rules_checker::FirebaseRulesChecker`], which runs the rules-file rules
 //!   and owns the degradation contract.
@@ -24,6 +26,7 @@
 //! asserted) or left to the advisory tier.
 
 pub mod config;
+pub mod edge_rules;
 pub mod grant_rules;
 pub mod grants;
 pub mod json_lite;

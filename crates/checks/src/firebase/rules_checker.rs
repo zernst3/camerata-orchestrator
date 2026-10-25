@@ -15,14 +15,15 @@
 use chrono::NaiveDate;
 
 use super::config::{resolve, AssessedFile, FileSet, RulesKind};
+use super::edge_rules;
 use super::grant_rules::{self, Owned};
 use super::grants::{sites, LoadedRules};
 use super::rtdb::parse_rtdb;
 use super::rtdb_rules::{self, LoadedRtdb};
 use super::rules_parse::{parse_rules, RulesFile, Service};
 use super::{
-    RULE_AUTH_ONLY, RULE_OPEN, RULE_RECURSIVE_WILDCARD, RULE_RTDB_OPEN, RULE_STORAGE_OPEN,
-    RULE_TEST_MODE,
+    RULE_ADMIN_CLAIMS, RULE_AUTH_ONLY, RULE_FIELD_VALIDATION, RULE_OPEN, RULE_OWNERSHIP,
+    RULE_RECURSIVE_WILDCARD, RULE_RTDB_OPEN, RULE_STORAGE_OPEN, RULE_TEST_MODE,
 };
 use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_INFO};
 
@@ -34,6 +35,9 @@ const RULE_IDS: &[&str] = &[
     RULE_RECURSIVE_WILDCARD,
     RULE_STORAGE_OPEN,
     RULE_RTDB_OPEN,
+    RULE_OWNERSHIP,
+    RULE_FIELD_VALIDATION,
+    RULE_ADMIN_CLAIMS,
 ];
 
 /// Path globs the checker needs to see: rules files, the project config, and any `.json` (a
@@ -85,6 +89,9 @@ impl ArchChecker for FirebaseRulesChecker {
         out.append(&mut grant_rules::test_mode(&all_sites, &owned, today));
         out.append(&mut grant_rules::auth_only(&all_sites, &owned));
         out.append(&mut grant_rules::storage(&all_sites, &owned));
+        out.append(&mut edge_rules::ownership(&all_sites));
+        out.append(&mut edge_rules::field_validation(&all_sites));
+        out.append(&mut edge_rules::admin_claims(&all_sites));
         for rtdb in &loaded.rtdb {
             out.append(&mut rtdb_rules::check(rtdb));
         }
