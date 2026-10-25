@@ -21,6 +21,11 @@
 > triage `missed.txt` into "add a test" vs "equivalent mutant". Only the checks crate's own tests
 > run against each mutant (server-level tests that exercise checkers are not counted). Check it is
 > finished (`pgrep -fl cargo-mutants`) before rebuilding in the main checkout.
+> **IN FLIGHT 2026-10-24 (end of the weekly budget):** a Sonnet agent in a worktree under
+> `.claude/worktrees/agent-*` (find it with `git worktree list`) is building item 22b
+> `camerata count`, then the 26 major mutation gaps, committing each green step. It may have been
+> cut off when the budget ran out. NEXT SESSION: check that worktree's commits, run the full gate,
+> merge what is green (`scripts/remove-merged-worktree.sh <id>` after), and resume the rest.
 > **STATUS 2026-10-24 (stopped for Zach's manual check):** BOTH client-trust blockers are done
 > and pushed: secret redaction + release gate, and delete + re-fetch client source (Fable-reviewed:
 > 3 HIGH defects fixed, incl. emit-local resurrection; deletion refuses during scans and governed
