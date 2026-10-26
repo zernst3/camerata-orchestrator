@@ -376,6 +376,54 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    resolve-now story flowing into the dev layer. Triage/Process is **not required** to finish
    onboarding.
 
+   **Code viewer.** To read the code a finding is about without leaving the app, press **O** while
+   the detail pane has focus, or click **Code**, or the `path:line` tag in the pane, or **Open in
+   viewer** at the top of the full-detail modal's code section. The whole file opens over the Queue,
+   as it was at the commit that was inspected, scrolled so the finding's line sits in the upper third.
+   The table and the pane stay where they were underneath. Closing (Esc, the close button, or a click
+   outside) puts focus back on the pane, on the finding you last viewed.
+
+   - **What you see.** A header with `owner/repo @ commit`, the path, `line L of N` and `finding K of M
+     in this file`. Line numbers on the left. The finding's enclosing function or statement has a soft
+     band, and its line is highlighted with a left edge in the severity colour. Other findings in the
+     same file have a dot in the gutter (and on a thin strip at the right edge, which shows the whole
+     file): a solid dot is an open finding, a hollow dot is one you have already decided, and a number
+     shows when several findings cite the same line. Click a solid dot to go to that finding. A line
+     over 2,000 characters is cut with `... (N more chars)`. Everything shown has been through the
+     secret redactor.
+   - **Which version of the code.** If the commit that was inspected is not in this clone, or the
+     inspection recorded no commit, the viewer shows the working tree and an amber banner says so. If
+     the repo's source was deleted from this machine it shows `Source deleted on <date>, re-fetch to
+     view` and no code. A file too large to view (over 4 MB) offers **Show the enclosing block**
+     instead, which opens the full-detail modal. A missing or binary file gives its reason. Files
+     between 400 KB and 4 MB are loaded 800 lines at a time and the next page loads as you scroll.
+   - **Deciding without leaving the code.** `C`, `T`, `I` and `F` do exactly what they do in the pane:
+     `C` and `T` apply at once with the five-second Undo (shown at the bottom of the viewer), and `I`
+     and `F` ask for a reason first (Enter commits, Esc cancels, and a blank reason is refused). After
+     a decision the viewer moves to the next undecided finding in the same file, and when the file is
+     finished to the next row of the Queue.
+   - **One cursor.** The viewer does not keep its own current finding. Moving in the viewer moves the
+     Queue's cursor, so the pane underneath always describes the finding the viewer is on. Findings
+     that are not rows of the table on screen (already decided, or hidden by a filter) are skipped
+     by `]` and `[`, and their dots do nothing when clicked.
+
+   | Key | What it does |
+   |---|---|
+   | `Esc` | Close the viewer (an open prompt closes first) |
+   | `C` `T` | Confirm, tech debt (applied at once, 5 second undo) |
+   | `I` `F` | Ignore, false positive (asks for a reason) |
+   | `Down` `Up` `J` `K` | Next or previous row in the Queue |
+   | `]` `[` | Next or previous finding in this file (no wrap; the status line says when you reach the end) |
+   | `}` `{` | Next or previous file in this rule group, on its first undecided finding |
+   | `.` | Back to the line of this finding |
+   | `G` | Go to a line (Enter jumps, Esc cancels) |
+   | `Backspace` `Alt+Left` | Back to where you were before the last go-to-line |
+   | `PgUp` `PgDn` `Home` `End` | Scroll; the cursor stays |
+   | `?` | Show or hide this list |
+
+   Keys that hold Ctrl, Alt or Cmd are left alone (except `Alt+Left`), so copying code with Cmd-C
+   works. While a reason prompt or the go-to-line field is open, every key is text.
+
    **Scan-time deterministic preview.** For each **mechanical** rule you selected that maps to a tool
    Camerata can drive (clippy, ruff, eslint, semgrep), the deterministic scan **runs that tool itself**
    with a Camerata-supplied config and folds the results into triage as **preview findings** — even if

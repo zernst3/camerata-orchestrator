@@ -6572,4 +6572,121 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 }
 .chat-clear-btn:hover { color: var(--ink-soft); border-color: var(--ink-faint); }
 
+/* ── The in-app code viewer (cockpit/viewer.rs; WORK_ORDER_REVIEW_SPEED.md A.1 to A.9) ──
+   A full-window overlay over the Queue. Colours are the theme's own variables, so a dark or
+   light pass changes it with the rest of the app. `--code-line-h` is set inline from
+   `CODE_LINE_H_PX`: scrollTop maps to a line by arithmetic, so the line height is FIXED. */
+.cv-overlay { z-index: 1090; padding: 14px; align-items: stretch; justify-content: stretch; }
+.cv-panel {
+  --cv-sev: var(--ink-faint);
+  display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; min-height: 0;
+  background: #16130f; color: var(--ink); border-radius: var(--r-md); box-shadow: var(--shadow-pop);
+  border: 1px solid var(--line); outline: none; overflow: hidden;
+}
+.cv-panel:focus { border-color: var(--accent); }
+.cv-empty { align-items: center; justify-content: center; gap: 10px; }
+.cv-head {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid var(--line); font-size: 12px;
+}
+.cv-repo, .cv-rev, .cv-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.cv-repo { color: var(--ink-soft); }
+.cv-rev { color: var(--ink-faint); }
+.cv-path { color: var(--ink); font-weight: 700; }
+.cv-sep { color: var(--ink-faint); }
+.cv-pos { color: var(--ink-soft); }
+.cv-rule { margin-left: auto; font-weight: 700; color: var(--ink-soft); }
+.cv-rule.critical { color: var(--danger-color); }
+.cv-rule.high { color: var(--warning-color); }
+.cv-rule.medium { color: var(--accent); }
+.cv-close { margin-left: 4px; }
+.cv-banner { padding: 6px 12px; font-size: 12px; border-bottom: 1px solid var(--line); }
+.cv-banner-amber { color: var(--warning-color); background: var(--accent-wash); border-bottom-color: var(--warning-color); }
+.cv-banner-muted { color: var(--ink-faint); }
+.cv-status { padding: 4px 12px; font-size: 12px; color: var(--accent); border-bottom: 1px solid var(--line); }
+.cv-note { padding: 18px 16px; font-size: 13px; color: var(--ink-soft); overflow: auto; }
+.cv-note-text { margin: 0 0 10px; color: var(--ink); }
+.cv-note-btn { margin-bottom: 10px; }
+.cv-deleted .cv-note-text { color: var(--warning-color); }
+
+/* The body: the scroll container and the minimap strip beside it. */
+.cv-body { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
+.cv-scroll { flex: 1 1 auto; min-width: 0; overflow: auto; }
+.cv-lines {
+  min-width: max-content; box-sizing: content-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+}
+.cv-line {
+  display: flex; align-items: stretch; height: var(--code-line-h); line-height: var(--code-line-h);
+  white-space: pre; --cv-sev: var(--ink-faint);
+}
+/* The enclosing block is a soft band; the violation line is the strong highlight with a left
+   border in the finding's severity colour. */
+.cv-line-band { background: var(--accent-wash); }
+.cv-line-hit { background: rgba(202, 138, 4, 0.30); box-shadow: inset 3px 0 0 var(--cv-sev); }
+.cv-line-cursor { outline: 1px dotted var(--ink-faint); outline-offset: -1px; }
+.cv-gutter {
+  position: sticky; left: 0; z-index: 1; flex: 0 0 22px; display: flex; align-items: center;
+  justify-content: center; background: #16130f;
+}
+.cv-num {
+  position: sticky; left: 22px; z-index: 1; flex: 0 0 auto; min-width: 52px; padding: 0 10px;
+  text-align: right; color: var(--ink-faint); background: #16130f; user-select: none; cursor: pointer;
+}
+.cv-num:hover { color: var(--ink); }
+.cv-code { flex: 1 0 auto; padding: 0 16px 0 8px; color: var(--ink); }
+.cv-more { color: var(--ink-faint); font-style: italic; }
+
+/* Severity colours: the ones the Severity badge uses. */
+.cv-sev-critical { --cv-sev: var(--danger-color); }
+.cv-sev-high { --cv-sev: var(--warning-color); }
+.cv-sev-medium { --cv-sev: var(--accent); }
+.cv-sev-low { --cv-sev: var(--ink-faint); }
+
+/* Other findings in this file: a solid dot while open, hollow once decided. */
+.cv-mark {
+  position: relative; width: 10px; height: 10px; padding: 0; border-radius: 50%;
+  border: 2px solid var(--cv-sev); background: var(--cv-sev); cursor: pointer;
+}
+.cv-mark:disabled { cursor: default; }
+.cv-mark-hollow { background: transparent; }
+.cv-count {
+  position: absolute; left: 9px; top: -7px; font-size: 9px; line-height: 1; color: var(--ink);
+  background: #16130f; border-radius: 6px; padding: 1px 3px;
+}
+
+/* The minimap: the same dots at file scale. */
+.cv-minimap { position: relative; flex: 0 0 14px; background: #120f0c; border-left: 1px solid var(--line); }
+.cv-mini {
+  position: absolute; left: 3px; width: 8px; height: 8px; border-radius: 50%;
+  border: 2px solid var(--cv-sev); background: var(--cv-sev);
+}
+.cv-mini.cv-mark-hollow { background: transparent; }
+.cv-mini-cur { position: absolute; left: 0; width: 14px; height: 2px; background: var(--ink); }
+
+/* Syntax tokens, on the theme's own variables. */
+.tok-keyword { color: var(--accent); }
+.tok-string { color: var(--good); }
+.tok-comment { color: var(--ink-faint); font-style: italic; }
+.tok-number { color: var(--warning-color); }
+.tok-function { color: var(--accent-ink); font-weight: 600; }
+.tok-type { color: var(--ink-soft); font-weight: 600; }
+.tok-variable { color: var(--ink); }
+.tok-property { color: var(--ink-soft); }
+.tok-punctuation { color: var(--ink-faint); }
+.tok-operator { color: var(--ink-soft); }
+
+.cv-help { padding: 8px 14px; border-top: 1px solid var(--line); font-size: 12px; }
+.cv-help table { border-collapse: collapse; }
+.cv-help td { padding: 2px 14px 2px 0; color: var(--ink-soft); }
+.cv-help-keys { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); white-space: nowrap; }
+.cv-undo, .cv-prompt, .cv-goto { margin: 0; border-radius: 0; border-left: 0; border-right: 0; padding: 6px 12px; }
+.cv-goto { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); }
+.cv-goto-input { width: 140px; }
+.cv-goto-error { color: var(--warning-color); font-size: 12px; }
+.cv-keys { padding: 5px 12px; font-size: 11px; border-top: 1px solid var(--line); color: var(--ink-faint); }
+.cv-keys.armed { color: var(--ink-soft); }
+.finding-ctx-door { margin: 6px 0; }
+.pane-code-link { cursor: pointer; background: transparent; }
+.pane-code-link:hover { border-color: var(--accent); color: var(--ink); }
 "#;

@@ -3055,6 +3055,27 @@ keyword tokenizer for SQL); `highlight` is `ok`, `plain` or `skipped`. The CPU w
 blocking pool under timeouts; if the block and highlight stage is slow the lines come back plain
 (`skipped`, no `block`). Read-only; `no-store`.
 
+**The code viewer UI** (`crates/ui/src/cockpit/viewer.rs`; every judgment in
+`camerata_ui_core::viewer`). `CodeViewer` is props-only and SSR-tested; `CodeViewerHost` owns the
+signals and I/O and is mounted by `FindingsTable` while the viewer is open, keyed by the focused
+finding's key. There is one cursor: the host is handed the finding the Queue's `RowCursor` is on, and
+every navigation (`]` `[` `}` `{`, `J` `K`, arrows, a gutter dot, go-to-line history) writes a
+finding key back to that cursor, expanding the two chorale groups that hide the row if needed. A
+disposition key calls the same `apply_disposition` callback the pane's keys and buttons call; the
+viewer adds its own reason prompt (the pane's would steal focus) and the advance rule
+(`advance_after_disposition`). Keys: `viewer_command(focus, key, mods)` is a whitelist like
+`pane_command` and asks `pane_command` for the disposition keys and arrows, so those cannot drift;
+`SHARED_KEYS` and a test pin the only keys the two maps share; `KEY_ROWS` feeds the `?` list and a
+test checks it equals what the map answers. The pane's `O` is `PaneCommand::OpenCode`. The client
+cache (`ViewerCache`) is an LRU of 8 files keyed by `(repo, sha, path)`, holds only git reads, and is
+provided as context by the results view; the next file in the current group is prefetched. Lines are
+virtualised (`virtual_range`: the viewport plus 150 lines each side at a fixed `--code-line-h`, with
+padding standing in for the rest, so the DOM holds a few hundred `.cv-line` nodes for any file); a
+file delivered as a window pages by refetching with a new `around` (`page_request`). The inspected
+commit comes from the report's `audited_refs`; a repo without one is read at the commit the server
+recorded for the project. Not built yet: the hover popover, in-file search, symbol references and
+the permalink (work order steps A.5 and A.6).
+
 Every parser that recurses over a client file (syn, the tree-sitter walkers, the clone tokenizer,
 the enclosing-block resolver) sits behind one bracket-depth guard, `camerata_checks::extract::nesting`:
 nesting deeper than 64 (Rust) or 400 (TS, JS, Python) is treated as unparseable instead of

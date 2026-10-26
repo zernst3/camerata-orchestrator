@@ -3328,6 +3328,7 @@ pub mod rules;
 pub mod scan;
 pub mod table;
 pub mod uow;
+pub mod viewer;
 
 pub use live_run::*;
 pub use rules::*;
