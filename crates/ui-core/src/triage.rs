@@ -1463,6 +1463,9 @@ pub enum PaneCommand {
     PromptFor(TriageState),
     /// Move the row cursor.
     MoveFocus(FocusMove),
+    /// Open the in-app code viewer on the focused finding. Moves no row and writes nothing,
+    /// so it needs no undo and no reason.
+    OpenCode,
 }
 
 /// The single-key hotkey for a disposition, or `None` for a state that has none.
@@ -1530,6 +1533,11 @@ pub fn pane_command(focus: PaneFocus, key: &str, mods: KeyMods) -> Option<PaneCo
         return None;
     }
     let pressed = key.to_ascii_lowercase();
+    // `O` opens the code viewer. It is not a disposition, so it is matched before the
+    // hotkey loop and can never collide with one (`state_hotkey` has no `o`).
+    if pressed == "o" {
+        return Some(PaneCommand::OpenCode);
+    }
     let state = TriageState::all()
         .into_iter()
         .find(|s| state_hotkey(*s) == Some(pressed.as_str()))?;
@@ -3440,6 +3448,43 @@ mod tests {
             Some(PaneCommand::Dispose(TriageState::Confirmed)),
             "shift is how a capital C is typed, not a modifier that cancels it"
         );
+    }
+
+    /// Code viewer A.1: `O` opens the viewer, scoped exactly like the disposition keys. Held
+    /// with a modifier, or typed while a reason prompt or anything outside the pane has focus,
+    /// it is nothing (a stray `o` in a reason is text).
+    #[test]
+    fn o_opens_the_code_viewer_under_the_same_scope_as_the_disposition_keys() {
+        let m = KeyMods::none();
+        for key in ["o", "O"] {
+            assert_eq!(
+                pane_command(PaneFocus::Cursor, key, m),
+                Some(PaneCommand::OpenCode)
+            );
+        }
+        for focus in [PaneFocus::ReasonPrompt, PaneFocus::Elsewhere] {
+            assert_eq!(pane_command(focus, "o", m), None, "{focus:?}");
+        }
+        for mods in [
+            KeyMods {
+                ctrl: true,
+                ..KeyMods::none()
+            },
+            KeyMods {
+                alt: true,
+                ..KeyMods::none()
+            },
+            KeyMods {
+                meta: true,
+                ..KeyMods::none()
+            },
+        ] {
+            assert_eq!(pane_command(PaneFocus::Cursor, "o", mods), None);
+        }
+        // It is not a disposition: no state has `o` for a hotkey.
+        assert!(TriageState::all()
+            .into_iter()
+            .all(|s| state_hotkey(s) != Some("o")));
     }
 
     /// req_pass2_11: the keys the pane does not claim stay unclaimed, so Tab, Escape, Enter
