@@ -26,6 +26,10 @@ use super::{
 };
 
 pub(crate) fn parse(source: &str) -> Option<Tree> {
+    // The walkers recurse once per nesting level; see `nesting`.
+    if !super::nesting::parseable(super::SourceLang::Python, source) {
+        return None;
+    }
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_python::LANGUAGE.into())

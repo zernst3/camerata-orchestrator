@@ -16,18 +16,31 @@
 //! # The contract: never panic, never delay
 //!
 //! A source that fails to highlight (a query that does not compile, a parse the highlighter
-//! gives up on, anything that panics) yields plain lines with [`HighlightStatus::Plain`]. A
-//! highlight that takes longer than [`DEFAULT_BUDGET`] (250 ms) is abandoned (the one-time query compile is not counted) and reports
+//! gives up on, anything that panics) yields plain lines with [`HighlightStatus::Plain`].
+//!
+//! The time budget is enforced three ways, because tree-sitter's cost on pathological input
+//! (hundreds of thousands of nested brackets, a multi-megabyte minified line) is super-linear
+//! and is spent inside the parse, not between events: (1) a structural pre-guard reports
+//! [`HighlightStatus::Skipped`] before any parse for a source nested deeper than
+//! [`MAX_HIGHLIGHT_NESTING`] or with a line longer than [`MAX_HIGHLIGHT_LINE_BYTES`]; (2) a
+//! watchdog thread flips tree-sitter's cancellation flag when the budget expires, which stops
+//! the parse and the query matching; (3) the event loop checks the clock as well. A highlight
+//! that takes longer than [`DEFAULT_BUDGET`] (250 ms, not counting the one-time query compile)
+//! is abandoned (the one-time query compile is not counted) and reports
 //! [`HighlightStatus::Skipped`], so opening a file never waits on a pathological input. Pure
 //! and read-only: no filesystem, no process, no network.
 
 use std::ops::Range;
 use std::panic::AssertUnwindSafe;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
 
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
+use super::nesting::{
+    longest_line, max_bracket_depth, MAX_HIGHLIGHT_LINE_BYTES, MAX_HIGHLIGHT_NESTING,
+};
 use super::{lang_for_path, SourceLang};
 
 /// How long a highlight may run before it is abandoned and the file shown plain.
@@ -148,6 +161,13 @@ pub fn highlight_with_budget(
     let Some(lang) = lang else {
         return plain(HighlightStatus::Plain);
     };
+    if let HighlightLang::Source(l) = lang {
+        if max_bracket_depth(l, source) > MAX_HIGHLIGHT_NESTING
+            || longest_line(source) > MAX_HIGHLIGHT_LINE_BYTES
+        {
+            return plain(HighlightStatus::Skipped);
+        }
+    }
     let spans = std::panic::catch_unwind(AssertUnwindSafe(|| match lang {
         HighlightLang::Source(l) => tree_sitter_spans(l, source, budget),
         HighlightLang::Sql => sql::spans(source, Instant::now(), budget),
@@ -343,21 +363,48 @@ fn tree_sitter_spans(lang: SourceLang, source: &str, budget: Duration) -> Result
     // Compiling a grammar's queries happens once per process and is not the file's cost, so the
     // clock starts after it.
     let config = config_for(lang).ok_or(Abandon::Failed)?;
+    let cancel = AtomicUsize::new(0);
+    let (done, wait) = mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        // The watchdog: when the budget runs out before the work signals it is done (by
+        // dropping `done`), it cancels the parse and query matching tree-sitter is inside.
+        let flag = &cancel;
+        scope.spawn(move || {
+            if wait.recv_timeout(budget) == Err(mpsc::RecvTimeoutError::Timeout) {
+                flag.store(1, Ordering::SeqCst);
+            }
+        });
+        let result = spans_with_cancel(config, source, budget, flag);
+        drop(done);
+        result
+    })
+}
+
+fn spans_with_cancel(
+    config: &HighlightConfiguration,
+    source: &str,
+    budget: Duration,
+    cancel: &AtomicUsize,
+) -> Result<Spans, Abandon> {
     let started = Instant::now();
-    if started.elapsed() > budget {
-        return Err(Abandon::OverBudget);
-    }
+    let abandon = |_| {
+        if cancel.load(Ordering::SeqCst) != 0 {
+            Abandon::OverBudget
+        } else {
+            Abandon::Failed
+        }
+    };
     let mut highlighter = Highlighter::new();
     let events = highlighter
-        .highlight(config, source.as_bytes(), None, |_| None)
-        .map_err(|_| Abandon::Failed)?;
+        .highlight(config, source.as_bytes(), Some(cancel), |_| None)
+        .map_err(abandon)?;
     let mut spans: Spans = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
     for event in events {
         if started.elapsed() > budget {
             return Err(Abandon::OverBudget);
         }
-        match event.map_err(|_| Abandon::Failed)? {
+        match event.map_err(abandon)? {
             HighlightEvent::HighlightStart(h) => stack.push(h.0),
             HighlightEvent::HighlightEnd => {
                 stack.pop();
@@ -804,5 +851,54 @@ mod tests {
     #[test]
     fn constant_builtin_index_matches_its_name() {
         assert_eq!(RECOGNIZED[CONSTANT_BUILTIN].0, "constant.builtin");
+    }
+
+    fn nested(open: &str, close: &str, n: usize) -> String {
+        format!("{}{}\n", open.repeat(n), close.repeat(n))
+    }
+
+    #[test]
+    fn pathologically_deep_input_is_skipped_quickly() {
+        for (path, open, close) in [("a.js", "[", "]"), ("a.rs", "(", ")"), ("a.py", "[", "]")] {
+            let src = nested(open, close, 100_000);
+            let t = Instant::now();
+            let h = highlight(highlight_lang_for_path(path), &src);
+            assert_eq!(h.status, HighlightStatus::Skipped, "{path}");
+            assert!(h.lines.iter().all(Vec::is_empty));
+            assert!(
+                t.elapsed() < Duration::from_secs(1),
+                "{path}: {:?}",
+                t.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    fn a_multi_megabyte_minified_line_is_skipped_quickly() {
+        let line = format!("var a=[{}];", "1,".repeat(2_000_000));
+        assert!(line.len() > 4_000_000);
+        let t = Instant::now();
+        let h = highlight(highlight_lang_for_path("a.min.js"), &line);
+        assert_eq!(h.status, HighlightStatus::Skipped);
+        assert_eq!(h.lines.len(), 1);
+        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn the_watchdog_cancels_a_parse_the_guards_did_not_catch() {
+        // Straight into the tree-sitter path, past the structural guard: only the cancellation
+        // flag can stop this (it takes minutes uncancelled).
+        let src = nested("[", "]", 200_000);
+        let t = Instant::now();
+        let r = tree_sitter_spans(SourceLang::JavaScript, &src, Duration::from_millis(100));
+        assert!(matches!(r, Err(Abandon::OverBudget)));
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn ordinary_code_just_under_the_guards_still_highlights() {
+        let src = format!("var a = {};\n", nested("[", "]", 900).trim());
+        let h = highlight(highlight_lang_for_path("a.js"), &src);
+        assert_eq!(h.status, HighlightStatus::Highlighted);
     }
 }

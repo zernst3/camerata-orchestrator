@@ -29,6 +29,7 @@ pub mod clone;
 pub mod ecma;
 pub mod enclosing;
 pub mod highlight;
+pub mod nesting;
 pub mod paths;
 pub mod python;
 pub mod resolver;
