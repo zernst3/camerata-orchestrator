@@ -30285,6 +30285,11 @@ mod tests {
         state
             .settings
             .set_repo_path(repo, Some(tmp.path().to_string_lossy().into_owned()));
+        // The shared code resolver only reads repos a project owns.
+        state
+            .projects
+            .create("Finding context fixture", vec![repo.to_string()])
+            .expect("project");
         (state, tmp)
     }
 
