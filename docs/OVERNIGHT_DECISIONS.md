@@ -12,8 +12,13 @@
 > (see Disk note below); (4) review the Firebase "merge invariant" call in DECISIONS MADE.
 > **NEXT V1 WORK (no approval needed):** review speed-ups (WORK_ORDER_REVIEW_SPEED; timer
 > internal-only with auto-pause and manual override). Build-order step 1 (source-file endpoint +
-> highlighter) MERGED 2026-10-26; next is step 2 (the viewer overlay: A.1, A.4, A.7, A.8, A.9 and
-> `viewer_command` in ui-core). Worktree agents start from stale `main`: every brief must reset to
+> highlighter) and step 2 (viewer overlay, navigation, in-viewer dispositions) MERGED 2026-10-26;
+> next is step 3 (A.5 popover, A.6 search / symbol refs / permalink). **Viewer manual check for
+> Zach** (only a real window can confirm; add to the delete/re-fetch session): `O` and the three
+> click doors open it; Esc returns focus to the pane on the last-viewed finding; a row click after
+> closing lands (ghost-click); scroll feel and the upper-third landing; sticky gutter, minimap, look;
+> five-second undo from inside the viewer; paging a 400 KB to 4 MB file while scrolling; Esc closes
+> the `?` key list first; Esc from the viewer with the pane's reason prompt open keeps the prompt. Worktree agents start from stale `main`: every brief must reset to
 > `feat/audit-report-export` first. Then W29 Wave D + 22e, corpus text work
 > (items 5, 11, 12, 19) + 22g, engine follow-ups (22c, 22d, 22f, KEV/EPSS + data-as-of stamp, model
 > registry, CI-gate severity bounds, staleness nag, W30 residuals), W27 PDF rebuild (needs Zach's
