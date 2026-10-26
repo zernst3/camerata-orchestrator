@@ -281,7 +281,6 @@ mod tests {
 /// test process, so a regression here fails loudly rather than quietly.
 #[cfg(test)]
 mod abort_tests {
-    use super::*;
     use crate::extract::clone::{tokens, TokenMode};
     use crate::extract::enclosing::{enclosing_block, BlockKind};
     use crate::extract::{
