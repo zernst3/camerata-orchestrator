@@ -11,7 +11,10 @@
 > (batch default) needs grading on those live runs; (3) move the settings JSON out of the repo
 > (see Disk note below); (4) review the Firebase "merge invariant" call in DECISIONS MADE.
 > **NEXT V1 WORK (no approval needed):** review speed-ups (WORK_ORDER_REVIEW_SPEED; timer
-> internal-only with auto-pause and manual override), then W29 Wave D + 22e, corpus text work
+> internal-only with auto-pause and manual override). Build-order step 1 (source-file endpoint +
+> highlighter) MERGED 2026-10-26; next is step 2 (the viewer overlay: A.1, A.4, A.7, A.8, A.9 and
+> `viewer_command` in ui-core). Worktree agents start from stale `main`: every brief must reset to
+> `feat/audit-report-export` first. Then W29 Wave D + 22e, corpus text work
 > (items 5, 11, 12, 19) + 22g, engine follow-ups (22c, 22d, 22f, KEV/EPSS + data-as-of stamp, model
 > registry, CI-gate severity bounds, staleness nag, W30 residuals), W27 PDF rebuild (needs Zach's
 > brand assets), 19f grader revision, then the graded accuracy run (item 20).
@@ -115,6 +118,21 @@ commit sits on the branch ready for review + push.
   these fields, so (b) as a standalone chore and (b) as sweep output are separate questions.
 
 ## DECISIONS MADE
+
+- 2026-10-26 (Opus, code viewer step 1 review calls): (1) ONE status vocabulary for
+  `finding-context` and `source-file` (`FindingContextOutcome`), following the SHIPPED
+  finding-context semantics: no recorded commit = `ok` + `source: "working_tree"`; missing object =
+  `commit_unavailable`; the UI keys its amber banner on `source == "working_tree"` (the work order's
+  A.2 step 3 wording is superseded). (2) Both endpoints now refuse any `repo` that is not an exact
+  `owner/name` owned by a project (closed a pre-existing workspace escape that could read any file
+  on the machine). (3) Shared bracket-depth guard before every recursive parse of client files
+  (Rust over 64, JS/TS/Python over 400 = treated as unparseable; text checks still run). Measured
+  headroom: the deepest of this repo's 613 Rust files is 35. Scan behaviour change: such a file
+  yields no AST extraction instead of aborting the whole process. Follow-up to verify in the
+  graded run: that an unparseable file is visible in Coverage, not silently clean.
+  (4) Symlink and submodule blobs at the inspected sha read as `file_missing` (shared).
+- 2026-10-26 (Zach): README screenshots deferred, not vital. Note for any retry: this Mac blocks
+  screen capture from the session, so it needs Zach's screenshots or a Screen Recording grant.
 
 - 2026-10-25 (Opus, Firebase review calls, all false-positive-safe): (1) auth-only update/delete
   on shared data stays an ASSERTED defect (true and worth fixing); auth-only writes on a public
