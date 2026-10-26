@@ -17,7 +17,7 @@
 //!
 //! A source that fails to highlight (a query that does not compile, a parse the highlighter
 //! gives up on, anything that panics) yields plain lines with [`HighlightStatus::Plain`]. A
-//! highlight that takes longer than [`DEFAULT_BUDGET`] (250 ms) is abandoned and reports
+//! highlight that takes longer than [`DEFAULT_BUDGET`] (250 ms) is abandoned (the one-time query compile is not counted) and reports
 //! [`HighlightStatus::Skipped`], so opening a file never waits on a pathological input. Pure
 //! and read-only: no filesystem, no process, no network.
 
@@ -148,10 +148,9 @@ pub fn highlight_with_budget(
     let Some(lang) = lang else {
         return plain(HighlightStatus::Plain);
     };
-    let started = Instant::now();
     let spans = std::panic::catch_unwind(AssertUnwindSafe(|| match lang {
-        HighlightLang::Source(l) => tree_sitter_spans(l, source, started, budget),
-        HighlightLang::Sql => sql::spans(source, started, budget),
+        HighlightLang::Source(l) => tree_sitter_spans(l, source, budget),
+        HighlightLang::Sql => sql::spans(source, Instant::now(), budget),
     }));
     match spans {
         Ok(Ok(spans)) => Highlighted {
@@ -340,13 +339,11 @@ fn build_config(
     Some(config)
 }
 
-fn tree_sitter_spans(
-    lang: SourceLang,
-    source: &str,
-    started: Instant,
-    budget: Duration,
-) -> Result<Spans, Abandon> {
+fn tree_sitter_spans(lang: SourceLang, source: &str, budget: Duration) -> Result<Spans, Abandon> {
+    // Compiling a grammar's queries happens once per process and is not the file's cost, so the
+    // clock starts after it.
     let config = config_for(lang).ok_or(Abandon::Failed)?;
+    let started = Instant::now();
     if started.elapsed() > budget {
         return Err(Abandon::OverBudget);
     }

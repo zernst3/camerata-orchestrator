@@ -1299,6 +1299,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
         .route("/api/onboard/finding-context", get(onboard_finding_context))
+        .route("/api/onboard/source-file", get(onboard_source_file))
         .route("/api/onboard/finding-fix", get(onboard_finding_fix))
         .route("/api/git/detect-repo", post(detect_repo))
         .route("/api/gate-probe", post(gate_probe))
@@ -7277,6 +7278,19 @@ async fn onboard_finding_context(
     axum::extract::Query(q): axum::extract::Query<crate::client_source::read::FindingContextParams>,
 ) -> Response {
     crate::client_source::read::finding_context(&state, q).await
+}
+
+/// `GET /api/onboard/source-file` — the whole file (or an 800-line window) behind the in-app code
+/// viewer, read from the inspected commit through git objects, redacted line by line and
+/// highlighted server-side (`WORK_ORDER_REVIEW_SPEED.md` A.2 / A.3). Shares the finding-context
+/// resolver (`client_source::read::source_for_read`), path jail and redactor; a deleted source
+/// answers `status: "source_deleted"` with the date and reads nothing. Read-only; the response
+/// is never cached by the webview. Shape and statuses: `onboard::source_file` module docs.
+async fn onboard_source_file(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<crate::onboard::source_file::SourceFileParams>,
+) -> Response {
+    crate::onboard::source_file::source_file(&state, q).await
 }
 
 /// Query parameters for `GET /api/onboard/finding-fix`.

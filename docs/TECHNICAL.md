@@ -3038,6 +3038,18 @@ tree, so a finding shows the code the inspection saw. Statuses added to the cont
 `source_deleted` (with the date) and `commit_unavailable` (the one labelled working-tree fallback).
 Responses are `Cache-Control: no-store`.
 
+**Reading a whole file for the code viewer** (`GET /api/onboard/source-file?repo&path[&sha][&around]`,
+`onboard/source_file.rs`): the same resolver (`source_for_read`), path jail (400 `path_traversal`) and
+redactor as finding-context, but returns the file, not one block. Up to 400 KB whole; up to 4 MB an
+800-line window centred on `around` (`window {from, to, total_lines}`); above that `too_large`, or
+`not_utf8`. Statuses: `ok` (from the commit, `source: "git"`), `commit_unavailable` (no commit
+recorded or object missing: the working tree, `source: "working_tree"`, lines still returned),
+`source_deleted` (date in `deleted_at`, nothing read), `file_missing`. Body: `language`, `block`
+(enclosing block of `around`), `classes` (the ten token classes) and `lines`, each line a list of
+`[class index or null, text]` segments highlighted server-side by `camerata_checks::extract::highlight`
+(tree-sitter for rs/ts/tsx/js/py, a keyword tokenizer for SQL); `highlight` is `ok`, `plain` or
+`skipped` (over 250 ms). Read-only; `no-store`.
+
 **UI** (`crates/ui/src/source_ui.rs`, `workspace.rs`, pure logic in `camerata_ui_core::source`): the
 Workspace repo card has four states, a Danger zone with the typed confirmation, the re-fetch dialog and
 "Rescan changes"; every control that needs the source shows the same explanation (`scan_block_text`)
