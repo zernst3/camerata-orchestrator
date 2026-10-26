@@ -452,3 +452,76 @@ async fn reading_never_changes_the_checkout() {
         head
     );
 }
+
+/// The `repo` parameter becomes a directory under the workspace root. A traversal, an absolute
+/// path or a repo no project owns must never reach the filesystem, on EITHER code endpoint.
+#[tokio::test]
+async fn a_repo_that_escapes_the_workspace_is_refused_on_both_endpoints() {
+    let fx = fixture();
+    fx.inspect_at(&fx.head);
+    let outside = fx.root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("passwd"), "root:x:0:0\n").unwrap();
+    let absolute = outside.to_string_lossy().replace('/', "%2F");
+    let repos = [
+        "..%2Foutside".to_string(),
+        "..%2F..%2Fwork%2Facme%2Fapp".to_string(),
+        "acme%2F..%2F..%2Foutside".to_string(),
+        absolute,
+        "acme%2Fapp%2Fextra".to_string(),
+        "%2F".to_string(),
+        "acme%2F".to_string(),
+        // Well formed, but no project owns it.
+        "acme%2Funknown".to_string(),
+        "evil%2Fapp".to_string(),
+    ];
+    WORKING_TREE_READS.with(|c| c.set(0));
+    for repo in &repos {
+        for path in ["passwd", "src%2Fmain.rs"] {
+            for endpoint in [
+                format!("/api/onboard/source-file?repo={repo}&path={path}"),
+                format!("/api/onboard/finding-context?repo={repo}&path={path}&line=1"),
+            ] {
+                let (status, _, json) = get(&fx, &endpoint).await;
+                assert_eq!(status, StatusCode::OK, "{endpoint}: {json}");
+                assert_eq!(json["status"], "file_missing", "{endpoint}: {json}");
+                assert!(json.get("lines").is_none(), "{endpoint}: {json}");
+            }
+        }
+    }
+    assert_eq!(
+        WORKING_TREE_READS.with(std::cell::Cell::get),
+        0,
+        "a refused repo must not read the filesystem"
+    );
+    // The legitimate repo still reads.
+    let (_, _, ok) = get(&fx, &uri("src/main.rs", "")).await;
+    assert_eq!(ok["status"], "ok");
+}
+
+#[test]
+fn owner_name_is_exactly_one_plain_pair() {
+    use crate::client_source::read::is_owner_name;
+    for good in ["acme/app", "a-b/c_d", "Org.x/repo.rs", "a/b"] {
+        assert!(is_owner_name(good), "{good}");
+    }
+    for bad in [
+        "",
+        "/",
+        "a",
+        "a/",
+        "/a",
+        "a/b/c",
+        "../x",
+        "a/..",
+        "./x",
+        "a/.",
+        "/etc/passwd",
+        "a\\b/c",
+        "a/b\0",
+        "a b/c",
+        "-x/y/z",
+    ] {
+        assert!(!is_owner_name(bad), "{bad:?}");
+    }
+}
