@@ -268,6 +268,27 @@ fn context_kind_label(kind: &str) -> &'static str {
 const FINDING_CTX_CAP: usize = 80;
 const FINDING_CTX_HALF: usize = 40;
 
+/// The commit each repo was inspected at, from the scan's and the audit's `audited_refs`, and the
+/// repos where the two differ (see `camerata_ui_core::viewer::merge_audited_shas`). Repos with no
+/// recorded commit are left out: the server then reads the commit the project's latest inspection
+/// recorded.
+pub(super) fn audited_shas(
+    report: &ScanReportView,
+    audited: Option<&ScanReportView>,
+) -> camerata_ui_core::viewer::ShaChoice {
+    let pairs = |r: &ScanReportView| -> Vec<(String, Option<String>)> {
+        r.provenance
+            .audited_refs
+            .iter()
+            .map(|a| (a.repo.clone(), a.sha.clone()))
+            .collect()
+    };
+    camerata_ui_core::viewer::merge_audited_shas(
+        &pairs(report),
+        &audited.map(pairs).unwrap_or_default(),
+    )
+}
+
 /// The "Code context" section of the finding-detail modal. Fetches ON-DEMAND every time it
 /// mounts; the caller keys this component by `repo`/`path`/`line` (see the finding-detail
 /// modal) so opening a DIFFERENT finding remounts it fresh rather than showing stale content
@@ -279,7 +300,13 @@ const FINDING_CTX_HALF: usize = 40;
 /// renders a single reason line and nothing else. This section can only ADD context on top of
 /// the snippet the modal already shows; it never replaces or hides it, and never panics.
 #[component]
-fn FindingCodeContext(finding: FindingView) -> Element {
+fn FindingCodeContext(
+    finding: FindingView,
+    /// Open the whole file in the code viewer. `None` when the viewer is not reachable from here
+    /// (the Queue is not the surface on screen).
+    #[props(default)]
+    on_open_viewer: Option<Callback<()>>,
+) -> Element {
     let expect_line = finding
         .snippet
         .lines()
@@ -295,7 +322,17 @@ fn FindingCodeContext(finding: FindingView) -> Element {
     });
 
     let ctx = ctx_res.read().clone();
-    match ctx {
+    let door = on_open_viewer.map(|cb| {
+        rsx! {
+            button {
+                class: "btn-edit-sm finding-ctx-viewer",
+                title: "Read the whole file in the code viewer, where you can also decide this finding.",
+                onclick: move |_| cb.call(()),
+                "Open in viewer"
+            }
+        }
+    });
+    let body = match ctx {
         None => rsx! {
             div { class: "finding-ctx finding-ctx-loading",
                 p { class: "rule-modal-label", "Code context" }
@@ -307,6 +344,12 @@ fn FindingCodeContext(finding: FindingView) -> Element {
         // rather than showing a confusing empty error box.
         Some(None) => rsx! {},
         Some(Some(v)) => rsx! { FindingContextBlock { view: v } },
+    };
+    rsx! {
+        if let Some(door) = door {
+            div { class: "finding-ctx-door", {door} }
+        }
+        {body}
     }
 }
 
@@ -606,8 +649,8 @@ pub(super) use camerata_ui_core::triage::{deviation_groups, rule_group_label, De
 // five-second undo. This layer owns the focus signal, the keydown wiring and the rsx; it owns
 // none of the rules.
 pub(super) use camerata_ui_core::triage::{
-    deviation_headline, pane_command, pane_keys_armed, site_count, state_hotkey, KeyMods,
-    MergedSiteView, PaneCommand, PaneFocus, RowCursor, UndoEntry, UndoOutcome,
+    deviation_headline, next_pane_focus, pane_command, pane_keys_armed, site_count, state_hotkey,
+    KeyMods, MergedSiteView, PaneCommand, PaneFocus, RowCursor, UndoEntry, UndoOutcome,
 };
 
 // Pass 2, THE GATED CONVENTION COMMIT (design §3, Q3 + Q4 in §12/§13). Every rule about what
@@ -2895,6 +2938,9 @@ pub(super) struct PaneSiteRow {
 /// and those are the two things a keystroke test would otherwise have to take on trust.
 #[derive(Clone, PartialEq)]
 pub(super) struct DetailPaneRow {
+    /// The finding's `finding_key`: the same key the Queue's `RowCursor` and the code viewer
+    /// use, written to the DOM so a test can read which finding each surface is on.
+    pub finding_key: String,
     pub rule_id: String,
     /// From [`kind_chip_parts`] — the same chip the Queue's Kind column renders.
     pub kind_class: String,
@@ -2952,6 +2998,7 @@ impl DetailPaneRow {
         let (kind_class, kind_label, kind_tip) = kind_chip_parts(kind_tag(f));
         let (body, needs_review) = split_needs_review(&f.detail);
         Self {
+            finding_key: finding_key(f),
             rule_id: f.rule_id.clone(),
             kind_class: kind_class.to_string(),
             kind_label: kind_label.to_string(),
@@ -2994,6 +3041,20 @@ fn pane_site(primary: &FindingView, s: &MergedSiteView) -> PaneSiteRow {
         snippet: s.snippet.clone(),
         consequence: s.consequence,
     }
+}
+
+/// The undo banner for an armed undo at time `now` (ms on the table's monotonic clock), or `None`
+/// when there is none or its window has shut. Shared by the pane and the code viewer.
+pub(super) fn undo_banner_of(entry: &Option<UndoEntry>, now: u64) -> Option<UndoBanner> {
+    entry.as_ref().and_then(|e| {
+        e.is_live(now).then(|| UndoBanner {
+            message: e.message().to_string(),
+            // Ceiling, so a window with 1ms left still reads "1s" rather than "0s" — a
+            // countdown that shows zero while the button still works is a small lie, and
+            // this one is about how long the curator has to act.
+            seconds_left: e.remaining_ms(now).div_ceil(1_000),
+        })
+    })
 }
 
 /// The live five-second undo, as the pane renders it.
@@ -3078,12 +3139,21 @@ pub(super) fn FindingDetailPane(
     /// Defaulted so the pane's existing render tests keep compiling and asserting unchanged.
     #[props(default)]
     on_open_hub: Callback<()>,
+    /// Open the CODE VIEWER on the focused finding: the `path:line` tag and the "Code" button
+    /// are two of its doors (the `O` key and the modal's button are the others).
+    #[props(default)]
+    on_open_code: Callback<()>,
 ) -> Element {
     let armed = pane_keys_armed(focus);
+    let pane_key = row
+        .as_ref()
+        .map(|r| super::viewer::dom_key(&r.finding_key))
+        .unwrap_or_default();
     rsx! {
         aside {
             class: "finding-pane",
             id: "{DETAIL_PANE_ID}",
+            "data-finding-key": "{pane_key}",
             // The pane is a focusable REGION: tabbing into it arms the keys, tabbing out
             // disarms them. That is the Q5 scoping made operable rather than merely checked —
             // there is a visible, reachable thing that "the detail pane holds focus" means.
@@ -3122,6 +3192,12 @@ pub(super) fn FindingDetailPane(
                     span { class: "{r.kind_class}", title: "{r.kind_tip}", "{r.kind_label}" }
                     span { class: "pane-pos", "{r.position} of {r.total}" }
                     button {
+                        class: "btn-edit-sm pane-code",
+                        title: "Open the file in the code viewer (O).",
+                        onclick: move |_| on_open_code.call(()),
+                        "Code"
+                    }
+                    button {
                         class: "btn-edit-sm pane-full-detail",
                         title: "Open the full finding modal: the enclosing code block around this line, fetched on demand.",
                         onclick: move |_| on_open_detail.call(()),
@@ -3134,7 +3210,12 @@ pub(super) fn FindingDetailPane(
                     // column sort orders the ladder; the badge, the row highlight, the CSV
                     // and the report all read the clean word, and so does this.
                     span { class: "rule-modal-tag", "severity \u{b7} {r.severity}" }
-                    span { class: "rule-modal-tag", "{r.location}" }
+                    button {
+                        class: "rule-modal-tag pane-code-link",
+                        title: "Open this file in the code viewer (O).",
+                        onclick: move |_| on_open_code.call(()),
+                        "{r.location}"
+                    }
                     if !r.repo.is_empty() {
                         span { class: "rule-modal-tag", "{r.repo}" }
                     }
@@ -3309,7 +3390,7 @@ pub(super) fn FindingDetailPane(
                         // produce a command". A pane that said "armed" while the handler
                         // refused would be the ships-inert shape in miniature.
                         if armed {
-                            "Keys: C confirm \u{b7} I ignore \u{b7} T tech debt \u{b7} F false positive \u{b7} \u{2191}\u{2193} move"
+                            "Keys: C confirm \u{b7} I ignore \u{b7} T tech debt \u{b7} F false positive \u{b7} \u{2191}\u{2193} move \u{b7} O code"
                         } else if prompt.is_some() {
                             "Keys are off while you type a reason. Enter commits, Esc cancels."
                         } else {
@@ -3357,8 +3438,22 @@ pub(super) fn FindingsTable(
     /// normal, visibly-filtered table he can clear with the controls already on screen.
     #[props(default)]
     queue_rule_filter: Signal<Option<String>>,
+    /// The commit each repo was inspected at (`audited_refs[repo].sha`), for the code viewer.
+    /// A repo with no entry is read at whatever commit the server recorded for the project's
+    /// latest inspection.
+    #[props(default)]
+    audited_shas: std::collections::HashMap<String, String>,
+    /// Repos whose scan and audit recorded different commits: the viewer says so.
+    #[props(default)]
+    sha_conflicts: std::collections::HashSet<String>,
+    /// The project the findings belong to, passed to the code viewer's requests.
+    #[props(default)]
+    project_id: String,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    // Every queue row, before this table's triage-state filter: the viewer's gutter marks the
+    // decided findings of a file too, so it needs the whole set.
+    let all_findings = findings.clone();
     // Filter to THIS table's triage state + apply the default triage order (enforced/new before
     // suppressed/debt, then critical → high → medium → low). Both the filter and the sort are the
     // pure `TriageModel::visible` derivation now (RUST-HEADLESS-CORE-1): a flat 200-row dump is
@@ -3392,6 +3487,9 @@ pub(super) fn FindingsTable(
     // subtree — same reason as the rule modal). Shows the violated rule's full directive +
     // the complete, untruncated explanation that the row cell clips.
     let mut detail_finding = use_context::<Signal<Option<FindingView>>>();
+    // ── THE CODE VIEWER's open flag (viewer.rs). The rest of its state lives in `ViewerRoot`.
+    let mut viewer_open = use_signal(|| false);
+    let viewer_request = try_use_context::<super::viewer::ViewerRequest>();
     let in_techdebt = triage_view == TriageState::TechDebt;
     // The column set is rebuilt for the order indicator below, so the repo list is cloned
     // before `use_table` takes ownership of its copy.
@@ -3652,6 +3750,9 @@ pub(super) fn FindingsTable(
     // And a third, for the rule-hub door in the pane's header. Each `move` closure owns its
     // own copy; there is no shared borrow to hand round.
     let focused_for_hub = focused_finding.clone();
+    // And a fourth and fifth, for the code viewer: the finding it is handed, and the finding
+    // its "enclosing block" fallback opens in the modal.
+    let focused_for_viewer_modal = focused_finding.clone();
     // THE FOCUSED RULE, as a MEMO. It has to be one: `use_resource` re-runs when a signal
     // read inside its closure changes, and a plain captured `Option<String>` is not one — a
     // resource built over the captured value would fetch the first focused rule's fix once
@@ -3693,16 +3794,7 @@ pub(super) fn FindingsTable(
             visible_keys().len(),
         )
     });
-    let undo_banner = undo_entry.read().as_ref().and_then(|e| {
-        let t = now_ms();
-        e.is_live(t).then(|| UndoBanner {
-            message: e.message().to_string(),
-            // Ceiling, so a window with 1ms left still reads "1s" rather than "0s" — a
-            // countdown that shows zero while the button still works is a small lie, and
-            // this one is about how long the curator has to act.
-            seconds_left: e.remaining_ms(t).div_ceil(1_000),
-        })
-    });
+    let undo_banner = undo_banner_of(&undo_entry.read(), now_ms());
 
     // APPLY one disposition to the focused row, arm the undo, and advance the cursor.
     //
@@ -3712,12 +3804,18 @@ pub(super) fn FindingsTable(
     // the require-reason refusal and routes the write through the same per-row functions the
     // toolbar buttons call.
     // A `Callback` rather than a plain closure because three call sites share it (the keys,
-    // the pane buttons, and the reason prompt's Commit) and `Callback` is `Copy`.
+    // the pane buttons, and the reason prompt's Commit) and `Callback` is `Copy`. It is a
+    // `use_callback`: the handle is stable and it always runs the closure of the LATEST render,
+    // which is what lets the code viewer (hosted outside this table) hold it and still decide
+    // the finding the cursor is on now, not the one it was on when the viewer opened.
     let key_to_row_id_pane = key_to_row_id.clone();
     let focused_for_apply = focused_finding.clone();
-    let apply_disposition = Callback::new(move |(state, reason): (TriageState, String)| {
+    // Answers `true` only when a disposition was written. A caller must branch on this and not
+    // infer it from the disposition map: a blank reason for a row already in that state leaves
+    // the map unchanged and is still a refusal.
+    let apply_disposition = use_callback(move |(state, reason): (TriageState, String)| -> bool {
         let Some(f) = focused_for_apply.clone() else {
-            return;
+            return false;
         };
         let now = epoch.elapsed().as_millis() as u64;
         now_ms.set(now);
@@ -3736,7 +3834,7 @@ pub(super) fn FindingsTable(
                     state.label()
                 ),
             );
-            return;
+            return false;
         };
         dispositions.set(model.dispositions);
         prompt.set(None);
@@ -3777,7 +3875,128 @@ pub(super) fn FindingsTable(
                 }
             }
         });
+        true
     });
+
+    // THE UNDO, shared by the pane's button and the code viewer's: one action, two surfaces.
+    let undo_action = use_callback(move |()| {
+        let Some(mut entry) = undo_entry.peek().clone() else {
+            return;
+        };
+        let now = epoch.elapsed().as_millis() as u64;
+        let mut model = TriageModel {
+            dispositions: dispositions.peek().clone(),
+            triage_view,
+        };
+        match model.undo(&mut entry, now) {
+            UndoOutcome::Reverted(n) => {
+                dispositions.set(model.dispositions);
+                // Put the row back ON SCREEN too. Reverting only the map would
+                // leave the toast truthfully claiming a revert while the row stayed
+                // gone from the table, which is the half-done undo this is for.
+                if let Some((at, rid, f)) = undo_restore.peek().clone() {
+                    handle.insert_row(at, rid, f);
+                    cursor.set(RowCursor::focused_on(finding_key(
+                        &undo_restore.peek().as_ref().expect("just read").2,
+                    )));
+                }
+                crate::toast::push_toast(
+                    toasts,
+                    crate::toast::ToastKind::Info,
+                    format!("Undone \u{2014} {n} finding(s) put back."),
+                );
+            }
+            // Both refusals are REPORTED. A visible Undo that silently does nothing
+            // is the exact failure the window exists to prevent.
+            UndoOutcome::WindowClosed => crate::toast::push_toast(
+                toasts,
+                crate::toast::ToastKind::Warning,
+                "That undo expired (the window is five seconds). Move the finding back from its triage table.",
+            ),
+            UndoOutcome::AlreadyUndone => crate::toast::push_toast(
+                toasts,
+                crate::toast::ToastKind::Warning,
+                "That action was already undone.",
+            ),
+        }
+        undo_entry.set(None);
+        undo_restore.set(None);
+    });
+
+    // A request from another surface (the finding modal's "Open in viewer"): aim the cursor at
+    // that finding and open the viewer. The request is consumed as it is read, so it fires once.
+    {
+        let key_to_row_id = key_to_row_id.clone();
+        use_effect(move || {
+            let Some(req) = viewer_request else { return };
+            let Some(want) = req.0.read().clone() else {
+                return;
+            };
+            let mut req_sig = req.0;
+            req_sig.set(None);
+            if !key_to_row_id.contains_key(&want) {
+                crate::toast::push_toast(
+                    toasts,
+                    crate::toast::ToastKind::Info,
+                    "That finding is not in this table. Switch to the table it is in, then open the viewer.",
+                );
+                return;
+            }
+            match super::viewer::reach_finding(handle, &want) {
+                Ok(()) => {
+                    cursor.set(RowCursor::focused_on(want));
+                    viewer_open.set(true);
+                }
+                Err(why) => crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, why),
+            }
+        });
+    }
+
+    // THE CODE VIEWER is hosted at the results root (`viewer::ViewerRoot`), OUTSIDE this table's
+    // subtree, like every other overlay here (see `RuleDetailModal`: an overlay mounted as a
+    // sibling of the chorale table has left a ghost node swallowing the next click in the
+    // desktop webview). This table hands it the handles it needs. They are all Copy signals and
+    // stable callbacks, so the link is registered once and never goes stale.
+    let viewer_slot = try_use_context::<super::viewer::ViewerSlot>();
+    let viewer_close = use_callback(move |()| {
+        viewer_open.set(false);
+        focus_detail_pane();
+    });
+    let viewer_open_modal = use_callback(move |()| {
+        if let Some(f) = focused_for_viewer_modal.clone() {
+            detail_finding.set(Some(f));
+        }
+    });
+    {
+        // Built once: the data is frozen for this table's lifetime, like its rows.
+        let link = use_hook(|| super::viewer::ViewerLink {
+            handle,
+            cursor,
+            visible_keys,
+            dispositions,
+            all_findings: std::sync::Arc::new(all_findings.clone()),
+            shas: std::sync::Arc::new(audited_shas.clone()),
+            sha_conflicts: std::sync::Arc::new(sha_conflicts.clone()),
+            project_id: project_id.clone(),
+            open: viewer_open,
+            undo_entry,
+            now_ms,
+            on_undo: undo_action,
+            apply_disposition,
+            on_close: viewer_close,
+            on_open_modal: viewer_open_modal,
+        });
+        use_effect(move || {
+            if let Some(mut slot) = viewer_slot {
+                slot.0.set(Some(link.clone()));
+            }
+        });
+        use_drop(move || {
+            if let Some(mut slot) = viewer_slot {
+                slot.0.set(None);
+            }
+        });
+    }
 
     // SECURITY findings (the deterministic floor — the only tier ranked "critical") get a
     // red full-row highlight so they're unmistakable beyond the badge text. This now uses
@@ -4243,6 +4462,7 @@ pub(super) fn FindingsTable(
                         let next = cursor.peek().moved(&visible_keys(), dir);
                         cursor.set(next);
                     }
+                    Some(PaneCommand::OpenCode) => viewer_open.set(true),
                     Some(PaneCommand::Dispose(state)) => {
                         apply_disposition.call((state, String::new()));
                     }
@@ -4262,10 +4482,12 @@ pub(super) fn FindingsTable(
                 // A blur out of the pane while the reason prompt is open must not disarm
                 // the prompt's own focus state — the textarea is INSIDE the pane, so
                 // focusing it fires the region's `focusout` first.
-                if f == PaneFocus::Elsewhere && prompt.peek().is_some() {
-                    return;
+                //
+                // The same holds the other way: closing the code viewer refocuses the pane,
+                // and with the reason prompt still open that must not re-arm the keys.
+                if let Some(next) = next_pane_focus(f, prompt.peek().is_some()) {
+                    pane_focus.set(next);
                 }
-                pane_focus.set(f);
             }),
             on_prompt_reason: Callback::new(move |r: String| prompt_reason.set(r)),
             on_prompt_commit: Callback::new(move |()| {
@@ -4288,47 +4510,7 @@ pub(super) fn FindingsTable(
                 // Move REAL focus back, and let `focusin` set the state — never assert it.
                 focus_detail_pane();
             }),
-            on_undo: Callback::new(move |()| {
-                let Some(mut entry) = undo_entry.peek().clone() else { return };
-                let now = epoch.elapsed().as_millis() as u64;
-                let mut model = TriageModel {
-                    dispositions: dispositions.peek().clone(),
-                    triage_view,
-                };
-                match model.undo(&mut entry, now) {
-                    UndoOutcome::Reverted(n) => {
-                        dispositions.set(model.dispositions);
-                        // Put the row back ON SCREEN too. Reverting only the map would
-                        // leave the toast truthfully claiming a revert while the row stayed
-                        // gone from the table, which is the half-done undo this is for.
-                        if let Some((at, rid, f)) = undo_restore.peek().clone() {
-                            handle.insert_row(at, rid, f);
-                            cursor.set(RowCursor::focused_on(finding_key(
-                                &undo_restore.peek().as_ref().expect("just read").2,
-                            )));
-                        }
-                        crate::toast::push_toast(
-                            toasts,
-                            crate::toast::ToastKind::Info,
-                            format!("Undone \u{2014} {n} finding(s) put back."),
-                        );
-                    }
-                    // Both refusals are REPORTED. A visible Undo that silently does nothing
-                    // is the exact failure the window exists to prevent.
-                    UndoOutcome::WindowClosed => crate::toast::push_toast(
-                        toasts,
-                        crate::toast::ToastKind::Warning,
-                        "That undo expired (the window is five seconds). Move the finding back from its triage table.",
-                    ),
-                    UndoOutcome::AlreadyUndone => crate::toast::push_toast(
-                        toasts,
-                        crate::toast::ToastKind::Warning,
-                        "That action was already undone.",
-                    ),
-                }
-                undo_entry.set(None);
-                undo_restore.set(None);
-            }),
+            on_undo: undo_action,
             on_dispose: Callback::new(move |state: TriageState| {
                 // The pane's own buttons. A reason-carrying state opens the prompt first,
                 // exactly as its key does — one path, two triggers.
@@ -4353,6 +4535,7 @@ pub(super) fn FindingsTable(
                     });
                 }
             }),
+            on_open_code: Callback::new(move |()| viewer_open.set(true)),
         }
         }
     }
@@ -6673,6 +6856,13 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // FindingsTable. The modal shows the violated rule's directive + the full detail.
     let mut detail_finding = use_signal(|| Option::<FindingView>::None);
     use_context_provider(|| detail_finding);
+    // The code viewer's two shared pieces: the file cache (last 8 files, so it outlives a switch
+    // between triage tables) and the request the finding modal's "Open in viewer" button writes.
+    use_context_provider(|| Signal::new(camerata_ui_core::viewer::ViewerCache::new()));
+    let viewer_request = super::viewer::ViewerRequest(use_signal(|| Option::<String>::None));
+    use_context_provider(|| viewer_request);
+    // Where the Queue registers what the viewer needs (see `FindingsTable`).
+    use_context_provider(|| super::viewer::ViewerSlot(Signal::new(None)));
 
     // rule id -> what it enforces (the chosen/default alternative's directive, else
     // the rule title), for the findings-table rule-id hover.
@@ -6894,6 +7084,8 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
         // Row-detail modal: hosted here, at the results-subtree root, so it is NOT a
         // sibling of the chorale table (see RuleDetailModal for why).
         RuleDetailModal {}
+        // THE CODE VIEWER, hosted here for the same reason: it is a full-window overlay.
+        super::viewer::ViewerRoot {}
         // THE RULE HUB (design §8). Hosted at the same root and for the same reason: it is an
         // overlay, and an overlay that is a sibling of a chorale table left a ghost
         // click-eater in the desktop webview.
@@ -7046,6 +7238,17 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             FindingCodeContext {
                                 key: "{f.repo}\u{1f}{f.path}\u{1f}{f.line}",
                                 finding: f.clone(),
+                                // The viewer lives in the Queue, so the door only exists while
+                                // the Queue is the surface on screen. The modal closes; the
+                                // Queue aims its cursor at this finding and opens the viewer.
+                                on_open_viewer: (kind_view() == KindSurface::Queue).then(|| {
+                                    let key = finding_key(&f);
+                                    let mut req = viewer_request.0;
+                                    Callback::new(move |()| {
+                                        req.set(Some(key.clone()));
+                                        detail_finding.set(None);
+                                    })
+                                }),
                             }
                             // Recommended fix (docs/design/2026-07-26_audit-report-refinements.md):
                             // keyed by rule_id so switching findings remounts this section and
@@ -7903,6 +8106,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                     // keying on the view remounts the table so its frozen rows reflect the switch.
                     // Fed the QUEUE rows only: the informational kinds have their own panels.
                     {
+                        let sha_choice = audited_shas(&report, audited.as_ref());
                         rsx! {
                             FindingsTable {
                                 key: "{triage_view().label()}",
@@ -7913,6 +8117,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 dispositions,
                                 on_open_hub: Callback::new(move |r: RuleHubRequest| hub_open.set(Some(r))),
                                 queue_rule_filter,
+                                audited_shas: sha_choice.shas.clone(),
+                                sha_conflicts: sha_choice.conflicts.clone(),
+                                project_id: project_id.clone(),
                             }
                         }
                     }

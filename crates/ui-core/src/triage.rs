@@ -1463,6 +1463,9 @@ pub enum PaneCommand {
     PromptFor(TriageState),
     /// Move the row cursor.
     MoveFocus(FocusMove),
+    /// Open the in-app code viewer on the focused finding. Moves no row and writes nothing,
+    /// so it needs no undo and no reason.
+    OpenCode,
 }
 
 /// The single-key hotkey for a disposition, or `None` for a state that has none.
@@ -1530,6 +1533,11 @@ pub fn pane_command(focus: PaneFocus, key: &str, mods: KeyMods) -> Option<PaneCo
         return None;
     }
     let pressed = key.to_ascii_lowercase();
+    // `O` opens the code viewer. It is not a disposition, so it is matched before the
+    // hotkey loop and can never collide with one (`state_hotkey` has no `o`).
+    if pressed == "o" {
+        return Some(PaneCommand::OpenCode);
+    }
     let state = TriageState::all()
         .into_iter()
         .find(|s| state_hotkey(*s) == Some(pressed.as_str()))?;
@@ -1538,6 +1546,23 @@ pub fn pane_command(focus: PaneFocus, key: &str, mods: KeyMods) -> Option<PaneCo
     } else {
         PaneCommand::Dispose(state)
     })
+}
+
+/// What the pane's focus state becomes when the DOM reports `incoming`, given whether the pane's
+/// own reason prompt is open. `None` means leave it as it is.
+///
+/// While the prompt is open the state is `ReasonPrompt` and nothing else: a blur out of the pane
+/// must not disarm the prompt's own state, and a focus back INTO the pane (what closing the code
+/// viewer does, by calling `focus_detail_pane`) must not re-arm the disposition keys over a
+/// half-written reason. Disarming early is the safe direction.
+pub fn next_pane_focus(incoming: PaneFocus, prompt_open: bool) -> Option<PaneFocus> {
+    if prompt_open {
+        return match incoming {
+            PaneFocus::Elsewhere => None,
+            PaneFocus::Cursor | PaneFocus::ReasonPrompt => Some(PaneFocus::ReasonPrompt),
+        };
+    }
+    Some(incoming)
 }
 
 /// Whether the disposition keys will fire under this focus — what the pane's armed/off
@@ -3440,6 +3465,98 @@ mod tests {
             Some(PaneCommand::Dispose(TriageState::Confirmed)),
             "shift is how a capital C is typed, not a modifier that cancels it"
         );
+    }
+
+    /// Closing the code viewer refocuses the pane; with the pane's reason prompt still open that
+    /// must not re-arm the keys.
+    #[test]
+    fn an_open_reason_prompt_keeps_the_pane_focus_state_whatever_the_dom_reports() {
+        assert_eq!(
+            next_pane_focus(PaneFocus::Cursor, true),
+            Some(PaneFocus::ReasonPrompt)
+        );
+        assert_eq!(
+            next_pane_focus(PaneFocus::ReasonPrompt, true),
+            Some(PaneFocus::ReasonPrompt)
+        );
+        assert_eq!(next_pane_focus(PaneFocus::Elsewhere, true), None);
+        for f in [
+            PaneFocus::Cursor,
+            PaneFocus::ReasonPrompt,
+            PaneFocus::Elsewhere,
+        ] {
+            assert_eq!(
+                next_pane_focus(f, false),
+                Some(f),
+                "no prompt: the DOM is believed"
+            );
+        }
+        // And the keys stay off in the state it keeps.
+        let kept = next_pane_focus(PaneFocus::Cursor, true).unwrap();
+        assert!(!pane_keys_armed(kept));
+    }
+
+    /// A blank reason is refused even when the row is already in that state, so a caller
+    /// cannot infer "it landed" from the disposition map alone.
+    #[test]
+    fn a_blank_reason_is_refused_even_for_a_row_already_in_that_state() {
+        let f: FindingView = serde_json::from_value(serde_json::json!({
+            "repo": "o/r", "path": "a.rs", "line": 1, "rule_id": "R", "severity": "high",
+            "snippet": "s", "detail": "d"
+        }))
+        .unwrap();
+        let mut model = TriageModel::new();
+        assert!(model
+            .dispose_with_undo(
+                std::slice::from_ref(&f),
+                TriageState::Ignored,
+                "test fixture",
+                0
+            )
+            .is_some());
+        assert_eq!(finding_state(&model.dispositions, &f), TriageState::Ignored);
+        // Already Ignored; a blank reason is still a refusal.
+        assert!(model
+            .dispose_with_undo(std::slice::from_ref(&f), TriageState::Ignored, "  ", 1)
+            .is_none());
+        assert_eq!(finding_state(&model.dispositions, &f), TriageState::Ignored);
+    }
+
+    /// Code viewer A.1: `O` opens the viewer, scoped exactly like the disposition keys. Held
+    /// with a modifier, or typed while a reason prompt or anything outside the pane has focus,
+    /// it is nothing (a stray `o` in a reason is text).
+    #[test]
+    fn o_opens_the_code_viewer_under_the_same_scope_as_the_disposition_keys() {
+        let m = KeyMods::none();
+        for key in ["o", "O"] {
+            assert_eq!(
+                pane_command(PaneFocus::Cursor, key, m),
+                Some(PaneCommand::OpenCode)
+            );
+        }
+        for focus in [PaneFocus::ReasonPrompt, PaneFocus::Elsewhere] {
+            assert_eq!(pane_command(focus, "o", m), None, "{focus:?}");
+        }
+        for mods in [
+            KeyMods {
+                ctrl: true,
+                ..KeyMods::none()
+            },
+            KeyMods {
+                alt: true,
+                ..KeyMods::none()
+            },
+            KeyMods {
+                meta: true,
+                ..KeyMods::none()
+            },
+        ] {
+            assert_eq!(pane_command(PaneFocus::Cursor, "o", mods), None);
+        }
+        // It is not a disposition: no state has `o` for a hotkey.
+        assert!(TriageState::all()
+            .into_iter()
+            .all(|s| state_hotkey(s) != Some("o")));
     }
 
     /// req_pass2_11: the keys the pane does not claim stay unclaimed, so Tab, Escape, Enter
