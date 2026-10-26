@@ -399,6 +399,19 @@ mod abort_tests {
         assert_eq!(kind, Some(BlockKind::SqlStatement));
     }
 
+    /// The SQL classifier is hand-rolled and iterative; pinned here so a recursive rewrite shows.
+    #[test]
+    fn deeply_nested_sql_does_not_abort_the_classifier() {
+        let src = format!(
+            "create policy p on t using {}true{};",
+            "(".repeat(50_000),
+            ")".repeat(50_000)
+        );
+        on_small_stack(move || {
+            let _ = crate::supabase::sql_parse::classify_statement(&src);
+        });
+    }
+
     #[test]
     fn ordinary_nesting_is_still_extracted() {
         let src = "fn outer() { let v = vec![(1, [2, 3])]; if v.len() > 0 { inner(v); } }\nfn inner(_v: Vec<(i32, [i32; 2])>) {}\n";

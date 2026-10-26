@@ -3039,16 +3039,27 @@ tree, so a finding shows the code the inspection saw. Statuses added to the cont
 Responses are `Cache-Control: no-store`.
 
 **Reading a whole file for the code viewer** (`GET /api/onboard/source-file?repo&path[&sha][&around]`,
-`onboard/source_file.rs`): the same resolver (`source_for_read`), path jail (400 `path_traversal`) and
-redactor as finding-context, but returns the file, not one block. Up to 400 KB whole; up to 4 MB an
-800-line window centred on `around` (`window {from, to, total_lines}`); above that `too_large`, or
-`not_utf8`. Statuses: `ok` (from the commit, `source: "git"`), `commit_unavailable` (no commit
-recorded or object missing: the working tree, `source: "working_tree"`, lines still returned),
-`source_deleted` (date in `deleted_at`, nothing read), `file_missing`. Body: `language`, `block`
-(enclosing block of `around`), `classes` (the ten token classes) and `lines`, each line a list of
-`[class index or null, text]` segments highlighted server-side by `camerata_checks::extract::highlight`
-(tree-sitter for rs/ts/tsx/js/py, a keyword tokenizer for SQL); `highlight` is `ok`, `plain` or
-`skipped` (over 250 ms). Read-only; `no-store`.
+`onboard/source_file.rs`): the same resolver (`source_for_read`), path jail (400 `path_traversal`),
+redactor and status vocabulary (`FindingContextOutcome`) as finding-context, and the same semantics:
+`ok` from the commit (`source: "git"`), `ok` with `source: "working_tree"` when the inspection
+recorded no commit, `commit_unavailable` (object missing: the working tree rides along when the
+file is there), `source_deleted` (date in `deleted_at`, nothing read), `file_missing`
+(including a symlink or submodule at the commit), `too_large`, `not_utf8`. The UI keys its amber
+banner on `source == "working_tree"`. `source_for_read` also refuses a repo name that is not a
+plain `owner/name` a project owns (both endpoints). Up to 400 KB the file is returned whole; up to
+4 MB as an 800-line `window {from, to, total_lines}` (only the window plus 200 lines is
+highlighted); above that `too_large`. Body: `language`, `block` (enclosing block of `around`),
+`classes` (the ten token classes) and `lines`, each a list of `[class index or null, text]`
+segments highlighted by `camerata_checks::extract::highlight` (tree-sitter for rs/ts/tsx/js/py, a
+keyword tokenizer for SQL); `highlight` is `ok`, `plain` or `skipped`. The CPU work runs on the
+blocking pool under timeouts; if the block and highlight stage is slow the lines come back plain
+(`skipped`, no `block`). Read-only; `no-store`.
+
+Every parser that recurses over a client file (syn, the tree-sitter walkers, the clone tokenizer,
+the enclosing-block resolver) sits behind one bracket-depth guard, `camerata_checks::extract::nesting`:
+nesting deeper than 64 (Rust) or 400 (TS, JS, Python) is treated as unparseable instead of
+overflowing the stack, which would abort the process. The highlighter additionally skips a source
+nested over 1,000 deep or with a line over 20 KB, and cancels tree-sitter at its 250 ms budget.
 
 **UI** (`crates/ui/src/source_ui.rs`, `workspace.rs`, pure logic in `camerata_ui_core::source`): the
 Workspace repo card has four states, a Danger zone with the typed confirmation, the re-fetch dialog and

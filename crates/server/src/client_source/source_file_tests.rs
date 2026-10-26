@@ -148,22 +148,41 @@ async fn a_missing_object_falls_back_to_the_labelled_working_tree() {
         .starts_with("Inspected commit not available in this clone"));
     assert_eq!(file_lines(&json)[1], "    println!(\"hi\");");
 
-    // The working tree file gone too: nothing to show.
+    // The working tree file gone too: nothing to show, and the status is the same one
+    // finding-context reports.
     std::fs::remove_file(fx.checkout.join("src/main.rs")).unwrap();
     let (_, _, json) = get(&fx, &uri("src/main.rs", "&around=2")).await;
-    assert_eq!(json["status"], "file_missing");
+    assert_eq!(json["status"], "commit_unavailable");
     assert_eq!(json["source"], "working_tree");
     assert!(json.get("lines").is_none());
+    let (_, _, ctx) = get(
+        &fx,
+        "/api/onboard/finding-context?repo=acme%2Fapp&path=src%2Fmain.rs&line=2",
+    )
+    .await;
+    assert_eq!(ctx["status"], json["status"]);
+    assert_eq!(ctx["source"], json["source"]);
+    assert_eq!(ctx["reason"], json["reason"]);
 }
 
 #[tokio::test]
 async fn no_recorded_commit_shows_the_working_tree_and_says_so() {
     let fx = fixture();
+    // Same semantics as finding-context: status ok, labelled `working_tree`.
     let (_, _, json) = get(&fx, &uri("src/main.rs", "")).await;
-    assert_eq!(json["status"], "commit_unavailable");
+    assert_eq!(json["status"], "ok");
     assert_eq!(json["source"], "working_tree");
-    assert!(json["reason"].as_str().unwrap().contains("No commit"));
+    assert!(json.get("commit").is_none());
     assert_eq!(file_lines(&json).len(), 3);
+    let (_, _, ctx) = get(
+        &fx,
+        "/api/onboard/finding-context?repo=acme%2Fapp&path=src%2Fmain.rs&line=2",
+    )
+    .await;
+    assert_eq!(
+        (&ctx["status"], &ctx["source"]),
+        (&json["status"], &json["source"])
+    );
 }
 
 #[tokio::test]
@@ -267,6 +286,7 @@ async fn redaction_also_covers_the_working_tree_fallback() {
 async fn path_traversal_is_a_400_for_all_three_shapes() {
     let fx = fixture();
     fx.inspect_at(&fx.head);
+    WORKING_TREE_READS.with(|c| c.set(0));
     // A symlink inside the checkout pointing outside it (working-tree jail).
     let outside = fx.root.join("outside.txt");
     std::fs::write(&outside, "outside\n").unwrap();
@@ -293,6 +313,11 @@ async fn path_traversal_is_a_400_for_all_three_shapes() {
     std::os::unix::fs::symlink(&outside, fresh.checkout.join("escape.txt")).unwrap();
     let (status, _, json) = get(&fresh, &uri("escape.txt", "")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(
+        WORKING_TREE_READS.with(std::cell::Cell::get),
+        0,
+        "a refused path must not read a file"
+    );
 }
 
 #[tokio::test]
@@ -390,6 +415,7 @@ async fn the_working_tree_fallback_applies_the_same_size_policy() {
     let (_, _, json) = get(&fx, &uri("huge.txt", "")).await;
     assert_eq!(json["status"], "too_large");
     assert_eq!(json["source"], "working_tree");
+    assert!(json["reason"].as_str().unwrap().contains("4 MB"));
 }
 
 #[tokio::test]
@@ -523,5 +549,179 @@ fn owner_name_is_exactly_one_plain_pair() {
         "-x/y/z",
     ] {
         assert!(!is_owner_name(bad), "{bad:?}");
+    }
+}
+
+/// A symlink or a submodule at the inspected commit is not a file to show.
+#[tokio::test]
+async fn a_symlink_or_submodule_at_the_commit_is_file_missing_on_both_endpoints() {
+    let fx = fixture();
+    std::os::unix::fs::symlink("main.rs", fx.checkout.join("src/link.rs")).unwrap();
+    crate::test_git::git(&fx.checkout, &["add", "-A"]);
+    crate::test_git::git(
+        &fx.checkout,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{},vendor/sub", fx.head),
+        ],
+    );
+    let committed = commit_all(&fx.checkout, "symlink and submodule entries");
+    fx.inspect_at(&committed);
+    assert_eq!(
+        crate::test_git::git(&fx.checkout, &["ls-tree", &committed, "src/link.rs"])
+            .split(' ')
+            .next(),
+        Some("120000"),
+        "the fixture really committed a symlink"
+    );
+
+    for path in ["src/link.rs", "vendor/sub", "src", "src/"] {
+        for endpoint in [
+            uri(path, ""),
+            format!(
+                "/api/onboard/finding-context?repo=acme%2Fapp&path={}&line=1",
+                path.replace('/', "%2F")
+            ),
+        ] {
+            let (status, _, json) = get(&fx, &endpoint).await;
+            assert_eq!(status, StatusCode::OK, "{endpoint}");
+            assert_eq!(json["status"], "file_missing", "{endpoint}: {json}");
+            assert!(json.get("lines").is_none(), "{endpoint}");
+        }
+    }
+    // A regular file beside them still reads.
+    let (_, _, ok) = get(&fx, &uri("src/main.rs", "")).await;
+    assert_eq!(ok["status"], "ok");
+}
+
+/// A key block that straddles the first line of the returned window: redaction happens before
+/// windowing, so neither the body lines inside the window nor the ones cut off above it leak.
+#[tokio::test]
+async fn a_pem_block_straddling_the_window_edge_is_redacted_on_both_sides() {
+    use camerata_secrets::fixtures::pem_block;
+
+    let fx = fixture();
+    let pem = pem_block("RSA ", 6);
+    let pem_lines: Vec<String> = pem.lines().map(str::to_string).collect();
+    // around=15000 windows lines 14600..15399. Start the block 3 lines above the window.
+    let start = 14_598;
+    let mut lines: Vec<String> = (1..=30_000).map(|n| format!("let v{n} = {n};")).collect();
+    for (i, l) in pem_lines.iter().enumerate() {
+        lines[start - 1 + i] = l.clone();
+    }
+    let body = lines.join("\n") + "\n";
+    assert!(body.len() > 400_000);
+    write_file(&fx.checkout, "src/straddle.rs", &body);
+    let committed = commit_all(&fx.checkout, "straddle");
+    fx.inspect_at(&committed);
+
+    let (_, _, json) = get(&fx, &uri("src/straddle.rs", "&around=15000")).await;
+
+    assert_eq!(json["status"], "ok", "{json}");
+    assert_eq!(json["window"]["from"], 14_600);
+    let shown = file_lines(&json);
+    assert_eq!(shown.len(), 800);
+    // The block's first line is above the window; its tail is inside it. No base64 body line
+    // may appear anywhere in the response.
+    let response = shown.join("\n");
+    for body_line in &pem_lines[1..pem_lines.len() - 1] {
+        assert!(!response.contains(body_line.as_str()), "key body leaked");
+    }
+    // The lines after the block are untouched.
+    assert!(response.contains("let v15000 = 15000;"));
+}
+
+async fn get_with_limits(
+    fx: &Fx,
+    path: &str,
+    extra: &str,
+    limits: crate::onboard::source_file::RenderLimits,
+) -> serde_json::Value {
+    let params: crate::onboard::source_file::SourceFileParams = serde_json::from_value(
+        serde_json::json!({ "repo": REPO, "path": path, "around": extra.parse::<usize>().ok() }),
+    )
+    .unwrap();
+    let response = crate::onboard::source_file::source_file_with(&fx.state, params, limits).await;
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// The CPU stages run on the blocking pool under a timeout; a slow second stage degrades to
+/// plain lines and no block, a slow first stage to `too_large`. Never a hang.
+#[tokio::test]
+async fn a_slow_render_degrades_instead_of_hanging() {
+    use crate::onboard::source_file::RenderLimits;
+    use std::time::Duration;
+
+    let fx = fixture();
+    fx.inspect_at(&fx.head);
+
+    use crate::onboard::source_file::TEST_STAGE_DELAY_MS;
+    use std::sync::atomic::Ordering;
+    TEST_STAGE_DELAY_MS.store(400, Ordering::SeqCst);
+
+    let degraded = get_with_limits(
+        &fx,
+        "src/main.rs",
+        "2",
+        RenderLimits {
+            prepare: Duration::from_secs(30),
+            decorate: Duration::from_millis(100),
+        },
+    )
+    .await;
+    assert_eq!(degraded["status"], "ok", "{degraded}");
+    assert_eq!(degraded["highlight"], "skipped");
+    assert!(degraded["block"].is_null());
+    assert_eq!(
+        file_lines(&degraded),
+        vec!["fn main() {", "    println!(\"hi\");", "}"]
+    );
+
+    let refused = get_with_limits(
+        &fx,
+        "src/main.rs",
+        "2",
+        RenderLimits {
+            prepare: Duration::from_millis(100),
+            decorate: Duration::from_secs(30),
+        },
+    )
+    .await;
+    TEST_STAGE_DELAY_MS.store(0, Ordering::SeqCst);
+    assert_eq!(refused["status"], "too_large", "{refused}");
+    assert!(refused.get("lines").is_none());
+}
+
+/// Adversarially nested files (a generated or minified bundle) are shown as plain lines and a
+/// line window, never an abort of the server.
+#[tokio::test]
+async fn deeply_nested_files_degrade_without_aborting() {
+    let fx = fixture();
+    write_file(
+        &fx.checkout,
+        "src/deep.rs",
+        &format!(
+            "fn f() {{ {}1{}; }}\n",
+            "(".repeat(1_000),
+            ")".repeat(1_000)
+        ),
+    );
+    write_file(
+        &fx.checkout,
+        "src/deep.js",
+        &format!("var x = {}{};\n", "[".repeat(20_000), "]".repeat(20_000)),
+    );
+    let committed = commit_all(&fx.checkout, "deep");
+    fx.inspect_at(&committed);
+
+    for path in ["src/deep.rs", "src/deep.js"] {
+        let (status, _, json) = get(&fx, &uri(path, "&around=1")).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_eq!(json["status"], "ok", "{path}: {json}");
+        assert_eq!(json["block"]["kind"], "window", "{path}");
+        assert_eq!(file_lines(&json).len(), 1, "{path}");
     }
 }

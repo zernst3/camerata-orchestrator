@@ -55,7 +55,7 @@ pub struct FindingContextParams {
 
 /// Add `"source": "git" | "working_tree"` (and, for git, the commit and whether the checkout has
 /// moved on) to an outcome's JSON body.
-fn labelled(
+pub(crate) fn labelled(
     outcome: &FindingContextOutcome,
     source: &str,
     git: Option<(&str, bool)>,

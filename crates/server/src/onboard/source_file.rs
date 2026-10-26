@@ -3,12 +3,18 @@
 //!
 //! The finding modal shows the enclosing block of one finding; the viewer shows the FILE, so a
 //! reviewer reads the code around a finding without leaving the app. Everything that decides
-//! where code may be read from is shared with `finding-context`, not copied:
+//! where code may be read from, and every status word, is shared with `finding-context`, not
+//! copied:
 //!
 //! - **where** (inspected commit, working tree, or nothing because the source was deleted):
-//!   [`crate::client_source::read::source_for_read`], the one resolver;
+//!   [`crate::client_source::read::source_for_read`], the one resolver (it also refuses a repo
+//!   name that is not a plain `owner/name` a project owns);
 //! - **path jail** and the git object read: [`super::finding_context`]'s
-//!   `resolve_contained_path`, `is_plain_relative_path` and `read_git_blob`;
+//!   `resolve_contained_path`, `is_plain_relative_path` and `read_git_blob` (which shows regular
+//!   files only: a symlink or submodule at the commit is `file_missing`);
+//! - **statuses and their reasons**: [`FindingContextOutcome`], the one vocabulary, with the
+//!   same source labels (`read::labelled`) and the same semantics. Only the content body is
+//!   local to this module;
 //! - **redaction**: [`super::finding_context::redact_block`], which calls
 //!   `camerata_secrets::redact_str`. Every line leaves this module redacted, and the text that is
 //!   highlighted and parsed for the enclosing block is the redacted text, so no raw line is ever
@@ -18,20 +24,32 @@
 //!
 //! | `status` | Meaning | Carries lines |
 //! |---|---|---|
-//! | `ok` | Read from the inspected commit (`source: "git"`) | yes |
-//! | `commit_unavailable` | No commit was recorded, or this clone lacks it; the working tree is shown (`source: "working_tree"`) | yes |
+//! | `ok` | Read from the inspected commit (`source: "git"`), or from the working tree when the inspection recorded no commit (`source: "working_tree"`) | yes |
+//! | `commit_unavailable` | The recorded commit is not in this clone; the working tree is shown (`source: "working_tree"`) when the file is there | when the file is there |
 //! | `source_deleted` | The client source was deleted on purpose; nothing is read, `deleted_at` carries the date | no |
-//! | `file_missing` | No such file (at the commit, or in the working tree after a fallback) | no |
-//! | `not_utf8` / `too_large` | Refused (binary, or above [`MAX_VIEWER_BYTES`]) | no |
+//! | `file_missing` | No such regular file | no |
+//! | `not_utf8` / `too_large` | Refused (binary, or above [`MAX_VIEWER_BYTES`], or too slow to prepare) | no |
 //! | `path_traversal` | The path escapes the repo; the only non-200 | no |
 //!
-//! A file up to `MAX_FILE_BYTES` (400 KB) is returned whole. A larger one, up to 4 MB, is
-//! returned as an 800-line window centred on `around`, with `window` saying which lines.
+//! The viewer keys its amber banner on `source == "working_tree"`.
 //!
-//! Read-only by construction: a GET, no filesystem write, and the only subprocess is the
-//! read-only `git cat-file` in `read_git_blob`.
+//! A file up to `MAX_FILE_BYTES` (400 KB) is returned whole. A larger one, up to 4 MB, is
+//! returned as an 800-line window centred on `around`, with `window` saying which lines; only
+//! the window (plus [`HIGHLIGHT_CONTEXT_LINES`] lines before it) is highlighted.
+//!
+//! # Never blocks the runtime, never hangs
+//!
+//! The CPU work (redaction, enclosing block, highlighting) runs on the blocking pool under a
+//! timeout ([`RenderLimits`]). The redacted lines are prepared first; if the second stage (block
+//! and highlight) is slow, the response degrades to plain lines with `highlight: "skipped"` and
+//! no `block`. If even the first stage is slow the file is reported `too_large`.
+//!
+//! Read-only by construction: a GET, no filesystem write, and the only subprocesses are the
+//! read-only `git cat-file` and `git ls-tree` in `finding_context`.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -46,7 +64,7 @@ use super::finding_context::{
     is_plain_relative_path, language_label, read_git_blob, read_working_tree_file, redact_block,
     resolve_contained_path, FindingContextOutcome, GitReadError,
 };
-use crate::client_source::read::{no_store, source_for_read, SourceRead};
+use crate::client_source::read::{labelled, no_store, source_for_read, SourceRead};
 use crate::AppState;
 
 /// Above this a file is refused outright (`too_large`).
@@ -54,6 +72,28 @@ pub const MAX_VIEWER_BYTES: usize = 4 * 1024 * 1024;
 
 /// Lines in the window returned for a file above [`MAX_FILE_BYTES`].
 pub const WINDOW_LINES: usize = 800;
+
+/// Lines before a window that are highlighted with it, so a string or comment that began just
+/// above the window is usually still lexed correctly.
+pub const HIGHLIGHT_CONTEXT_LINES: usize = 200;
+
+/// How long each CPU stage may take before the response degrades.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderLimits {
+    /// Reading, UTF-8, redaction and windowing. Over this the file is `too_large`.
+    pub prepare: Duration,
+    /// Enclosing block and highlighting. Over this the lines are returned plain.
+    pub decorate: Duration,
+}
+
+impl Default for RenderLimits {
+    fn default() -> Self {
+        Self {
+            prepare: Duration::from_secs(5),
+            decorate: Duration::from_secs(2),
+        }
+    }
+}
 
 /// Query of `GET /api/onboard/source-file`.
 #[derive(Debug, serde::Deserialize)]
@@ -86,18 +126,32 @@ pub(crate) enum Refused {
     CommitUnavailable,
 }
 
+impl From<Refused> for FindingContextOutcome {
+    fn from(refused: Refused) -> Self {
+        match refused {
+            Refused::FileMissing => FindingContextOutcome::FileMissing,
+            Refused::NotUtf8 => FindingContextOutcome::NotUtf8,
+            Refused::TooLarge => FindingContextOutcome::TooLargeToView,
+            Refused::PathTraversal => FindingContextOutcome::PathTraversal,
+            Refused::CommitUnavailable => FindingContextOutcome::CommitUnavailable,
+        }
+    }
+}
+
+/// One run of a line: `(class index or None for plain, text)`.
+pub(crate) type Segment = (Option<usize>, String);
+
 /// A file read, redacted, windowed and highlighted: everything the response body carries.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Rendered {
     pub language: String,
     pub total_lines: usize,
-    /// 1-based inclusive line range actually returned.
+    /// 1-based inclusive line range actually returned (`to < from` for an empty file).
     pub from: usize,
     pub to: usize,
     pub highlight: HighlightStatus,
     pub block: Option<EnclosingBlock>,
-    /// Per returned line, `(class index or None for plain, text)` segments.
-    pub lines: Vec<Vec<(Option<usize>, String)>>,
+    pub lines: Vec<Vec<Segment>>,
 }
 
 /// Where one read comes from.
@@ -116,11 +170,12 @@ impl Origin<'_> {
 }
 
 /// Read, redact, window and highlight `rel_path` from `origin`. The path jail runs before any
-/// read. Never panics.
+/// read. Never panics, never blocks the runtime, never hangs (see the module docs).
 pub(crate) async fn read_rendered(
     origin: Origin<'_>,
     rel_path: &str,
     around: Option<usize>,
+    limits: RenderLimits,
 ) -> Result<Rendered, Refused> {
     let Some(abs_path) = resolve_contained_path(origin.dir(), rel_path) else {
         return Err(Refused::PathTraversal);
@@ -129,9 +184,11 @@ pub(crate) async fn read_rendered(
         Origin::WorkingTree(_) => {
             // The size is checked first so an oversized file is never read into memory.
             match tokio::fs::metadata(&abs_path).await {
-                Ok(meta) if meta.len() > MAX_VIEWER_BYTES as u64 => return Err(Refused::TooLarge),
-                Ok(_) => {}
-                Err(_) => return Err(Refused::FileMissing),
+                Ok(meta) if meta.is_file() && meta.len() > MAX_VIEWER_BYTES as u64 => {
+                    return Err(Refused::TooLarge)
+                }
+                Ok(meta) if meta.is_file() => {}
+                _ => return Err(Refused::FileMissing),
             }
             read_working_tree_file(&abs_path)
                 .await
@@ -150,15 +207,83 @@ pub(crate) async fn read_rendered(
                 })?
         }
     };
-    render(bytes, rel_path, around)
+
+    let path = rel_path.to_string();
+    let prepared = {
+        let path = path.clone();
+        tokio::time::timeout(
+            limits.prepare,
+            tokio::task::spawn_blocking(move || prepare(bytes, &path, around)),
+        )
+        .await
+    };
+    let prepared = match prepared {
+        Ok(Ok(result)) => result?,
+        // Too slow, or the worker panicked: nothing to show.
+        Ok(Err(_)) | Err(_) => return Err(Refused::TooLarge),
+    };
+
+    let shared = Arc::new(prepared);
+    let job = {
+        let (shared, path) = (Arc::clone(&shared), path);
+        tokio::task::spawn_blocking(move || decorate(&shared, &path, around))
+    };
+    let decorated = match tokio::time::timeout(limits.decorate, job).await {
+        Ok(Ok(decorated)) => decorated,
+        // Block and highlight are an extra: plain lines, no block.
+        Ok(Err(_)) | Err(_) => plain_decoration(&shared),
+    };
+    Ok(Rendered {
+        language: shared.language.clone(),
+        total_lines: shared.lines.len(),
+        from: shared.from,
+        to: shared.to,
+        highlight: decorated.highlight,
+        block: decorated.block,
+        lines: decorated.lines,
+    })
 }
 
-/// The pure tail of a read: size, UTF-8, redaction, window, enclosing block, highlight.
-pub(crate) fn render(
+/// The redacted lines and the window, before any parsing.
+#[derive(Debug)]
+pub(crate) struct Prepared {
+    language: String,
+    /// Every line of the file, redacted.
+    lines: Vec<String>,
+    from: usize,
+    to: usize,
+}
+
+/// What parsing adds to a [`Prepared`].
+#[derive(Debug)]
+pub(crate) struct Decorated {
+    block: Option<EnclosingBlock>,
+    highlight: HighlightStatus,
+    lines: Vec<Vec<Segment>>,
+}
+
+/// Test seam: milliseconds each CPU stage sleeps before working, so a test can prove the
+/// timeouts degrade the response without needing a genuinely slow input.
+#[cfg(test)]
+pub(crate) static TEST_STAGE_DELAY_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+fn test_stage_delay() {
+    let ms = TEST_STAGE_DELAY_MS.load(std::sync::atomic::Ordering::SeqCst);
+    if ms > 0 {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
+/// Size, UTF-8, redaction and windowing. Pure CPU; run on the blocking pool.
+pub(crate) fn prepare(
     bytes: Vec<u8>,
     rel_path: &str,
     around: Option<usize>,
-) -> Result<Rendered, Refused> {
+) -> Result<Prepared, Refused> {
+    #[cfg(test)]
+    test_stage_delay();
     if bytes.len() > MAX_VIEWER_BYTES {
         return Err(Refused::TooLarge);
     }
@@ -172,37 +297,72 @@ pub(crate) fn render(
     drop(source);
     let lines = redact_block(&raw_lines);
     drop(raw_lines);
-    let total_lines = lines.len();
-    let text = lines.join("\n");
 
+    let total_lines = lines.len();
     let (from, to) = if whole || total_lines == 0 {
         (1, total_lines)
     } else {
         window_around(around.unwrap_or(1), total_lines)
     };
+    Ok(Prepared {
+        language: language_label(rel_path),
+        lines,
+        from,
+        to,
+    })
+}
 
-    let block = around.and_then(|line| enclosing_block(rel_path, &text, line));
-    let highlighted = highlight(highlight_lang_for_path(rel_path), &text);
+/// The enclosing block of `around` and the highlighted segments of the window. Pure CPU; run on
+/// the blocking pool.
+pub(crate) fn decorate(prepared: &Prepared, rel_path: &str, around: Option<usize>) -> Decorated {
+    #[cfg(test)]
+    test_stage_delay();
+    let Prepared {
+        lines, from, to, ..
+    } = prepared;
+    let (from, to) = (*from, *to);
+    let block = around.and_then(|line| enclosing_block(rel_path, &lines.join("\n"), line));
+
+    // Highlight the window with some leading context, not the whole file.
+    let whole = from == 1 && to == lines.len();
+    let hl_from = if whole {
+        1
+    } else {
+        from.saturating_sub(HIGHLIGHT_CONTEXT_LINES).max(1)
+    };
+    let hl_text = lines
+        .get(hl_from.saturating_sub(1)..to.min(lines.len()))
+        .map(|slice| slice.join("\n"))
+        .unwrap_or_default();
+    let highlighted = highlight(highlight_lang_for_path(rel_path), &hl_text);
 
     let mut out = Vec::with_capacity(to.saturating_sub(from) + 1);
     for n in from..=to {
         let Some(line) = lines.get(n - 1) else { break };
-        let spans = highlighted.lines.get(n - 1).map_or(&[][..], Vec::as_slice);
+        let spans = n
+            .checked_sub(hl_from)
+            .and_then(|i| highlighted.lines.get(i))
+            .map_or(&[][..], Vec::as_slice);
         out.push(segments(line, spans));
     }
-    Ok(Rendered {
-        language: language_label(rel_path),
-        total_lines,
-        from,
-        to: if out.is_empty() {
-            to
-        } else {
-            from + out.len() - 1
-        },
-        highlight: highlighted.status,
+    Decorated {
         block,
+        highlight: highlighted.status,
         lines: out,
-    })
+    }
+}
+
+/// The degraded decoration: plain lines, no block.
+fn plain_decoration(prepared: &Prepared) -> Decorated {
+    let lines = (prepared.from..=prepared.to)
+        .filter_map(|n| prepared.lines.get(n - 1))
+        .map(|line| vec![(None, line.clone())])
+        .collect();
+    Decorated {
+        block: None,
+        highlight: HighlightStatus::Skipped,
+        lines,
+    }
 }
 
 /// The [`WINDOW_LINES`]-line window centred on `around`, clamped to the file.
@@ -215,10 +375,7 @@ fn window_around(around: usize, total_lines: usize) -> (usize, usize) {
 }
 
 /// Cut `line` into `(class, text)` segments from its spans; gaps are plain (`None`).
-fn segments(
-    line: &str,
-    spans: &[(TokenClass, std::ops::Range<usize>)],
-) -> Vec<(Option<usize>, String)> {
+fn segments(line: &str, spans: &[(TokenClass, std::ops::Range<usize>)]) -> Vec<Segment> {
     let mut out = Vec::new();
     let mut at = 0;
     for (class, range) in spans {
@@ -239,33 +396,6 @@ fn segments(
     out
 }
 
-fn refusal_reason(refused: Refused) -> &'static str {
-    match refused {
-        Refused::FileMissing => "file not found at the inspected commit",
-        Refused::NotUtf8 => "file is not valid UTF-8 (binary?)",
-        Refused::TooLarge => "file exceeds the 4 MB viewer cap",
-        Refused::PathTraversal => "requested path escapes the repo directory",
-        Refused::CommitUnavailable => {
-            "Inspected commit not available in this clone; showing the working tree"
-        }
-    }
-}
-
-fn refusal_body(refused: Refused, source: Option<&str>) -> serde_json::Value {
-    let status = match refused {
-        Refused::FileMissing => "file_missing",
-        Refused::NotUtf8 => "not_utf8",
-        Refused::TooLarge => "too_large",
-        Refused::PathTraversal => "path_traversal",
-        Refused::CommitUnavailable => "commit_unavailable",
-    };
-    let mut body = serde_json::json!({ "status": status, "reason": refusal_reason(refused) });
-    if let (Some(map), Some(source)) = (body.as_object_mut(), source) {
-        map.insert("source".to_string(), serde_json::json!(source));
-    }
-    body
-}
-
 fn highlight_label(status: HighlightStatus) -> &'static str {
     match status {
         HighlightStatus::Highlighted => "ok",
@@ -274,27 +404,84 @@ fn highlight_label(status: HighlightStatus) -> &'static str {
     }
 }
 
-/// The response body for a rendered file.
-fn content_body(rendered: &Rendered, status: &str, source: &str) -> serde_json::Value {
-    serde_json::json!({
-        "status": status,
-        "source": source,
-        "language": rendered.language,
-        "total_lines": rendered.total_lines,
-        "window": {
-            "from": rendered.from,
-            "to": rendered.to,
-            "total_lines": rendered.total_lines,
-        },
-        "highlight": highlight_label(rendered.highlight),
-        "classes": TokenClass::CLASS_NAMES,
-        "block": rendered.block.map(|b| serde_json::json!({
-            "start_line": b.start_line,
-            "end_line": b.end_line,
-            "kind": b.kind.label(),
-        })),
-        "lines": rendered.lines,
-    })
+#[derive(serde::Serialize)]
+struct WindowBody {
+    from: usize,
+    to: usize,
+    total_lines: usize,
+}
+
+#[derive(serde::Serialize)]
+struct BlockBody {
+    start_line: usize,
+    end_line: usize,
+    kind: &'static str,
+}
+
+/// The response body of a file that has lines to show.
+#[derive(serde::Serialize)]
+struct ContentBody<'a> {
+    status: &'static str,
+    source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_differs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    language: &'a str,
+    total_lines: usize,
+    window: WindowBody,
+    highlight: &'static str,
+    classes: [&'static str; 10],
+    block: Option<BlockBody>,
+    lines: &'a [Vec<Segment>],
+}
+
+impl<'a> ContentBody<'a> {
+    fn new(rendered: &'a Rendered, status: &'static str, source: &'static str) -> Self {
+        Self {
+            status,
+            source,
+            commit: None,
+            head_differs: None,
+            reason: None,
+            language: &rendered.language,
+            total_lines: rendered.total_lines,
+            window: WindowBody {
+                from: rendered.from,
+                to: rendered.to,
+                total_lines: rendered.total_lines,
+            },
+            highlight: highlight_label(rendered.highlight),
+            classes: TokenClass::CLASS_NAMES,
+            block: rendered.block.map(|b| BlockBody {
+                start_line: b.start_line,
+                end_line: b.end_line,
+                kind: b.kind.label(),
+            }),
+            lines: &rendered.lines,
+        }
+    }
+}
+
+/// Path traversal is the only outcome that is not a 200.
+fn status_of(outcome: &FindingContextOutcome) -> StatusCode {
+    if *outcome == FindingContextOutcome::PathTraversal {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::OK
+    }
+}
+
+fn respond(status: StatusCode, body: impl serde::Serialize) -> Response {
+    no_store((status, Json(body)).into_response())
+}
+
+/// A refusal in the shared vocabulary, labelled with where it was read from.
+fn refusal(refused: Refused, source: &str, git: Option<(&str, bool)>) -> Response {
+    let outcome = FindingContextOutcome::from(refused);
+    respond(status_of(&outcome), labelled(&outcome, source, git))
 }
 
 /// `GET /api/onboard/source-file`: the whole file (or an 800-line window) at the inspected
@@ -304,6 +491,15 @@ fn content_body(rendered: &Rendered, status: &str, source: &str) -> serde_json::
 /// Invariant: a deleted source reads nothing (the resolver answers before any path is built) and
 /// is never shown from the working tree.
 pub async fn source_file(state: &AppState, params: SourceFileParams) -> Response {
+    source_file_with(state, params, RenderLimits::default()).await
+}
+
+/// [`source_file`] with explicit render limits (tests shrink them).
+pub async fn source_file_with(
+    state: &AppState,
+    params: SourceFileParams,
+    limits: RenderLimits,
+) -> Response {
     let read = match source_for_read(
         state,
         params.project.as_deref(),
@@ -315,13 +511,12 @@ pub async fn source_file(state: &AppState, params: SourceFileParams) -> Response
         Ok(read) => read,
         Err(refusal) => return no_store(refusal.into_response()),
     };
-    let around = params.around;
-    let path = params.path.as_str();
-    let (status, body) = match read {
+    let (around, path) = (params.around, params.path.as_str());
+    match read {
         SourceRead::Deleted {
             deleted_at,
             record_id,
-        } => (
+        } => respond(
             StatusCode::OK,
             FindingContextOutcome::SourceDeleted {
                 deleted_at,
@@ -329,22 +524,18 @@ pub async fn source_file(state: &AppState, params: SourceFileParams) -> Response
             }
             .to_json(),
         ),
-        SourceRead::Unresolved { .. } => (StatusCode::OK, refusal_body(Refused::FileMissing, None)),
+        // Not linked / not on disk: indistinguishable from "file missing" to the UI.
+        SourceRead::Unresolved { .. } => {
+            respond(StatusCode::OK, FindingContextOutcome::FileMissing.to_json())
+        }
+        // No commit is known for this inspection: the working tree, labelled.
         SourceRead::WorkingTree { dir } => {
-            // No commit is known for this inspection: the working tree, labelled.
-            match read_rendered(Origin::WorkingTree(&dir), path, around).await {
-                Ok(rendered) => {
-                    let mut body = content_body(&rendered, "commit_unavailable", "working_tree");
-                    set_reason(
-                        &mut body,
-                        "No commit was recorded for this inspection; showing the working tree",
-                    );
-                    (StatusCode::OK, body)
-                }
-                Err(refused) => (
-                    status_of(refused),
-                    refusal_body(refused, Some("working_tree")),
+            match read_rendered(Origin::WorkingTree(&dir), path, around, limits).await {
+                Ok(rendered) => respond(
+                    StatusCode::OK,
+                    ContentBody::new(&rendered, "ok", "working_tree"),
                 ),
+                Err(refused) => refusal(refused, "working_tree", None),
             }
         }
         SourceRead::Git {
@@ -358,51 +549,32 @@ pub async fn source_file(state: &AppState, params: SourceFileParams) -> Response
             },
             path,
             around,
+            limits,
         )
         .await
         {
             Ok(rendered) => {
-                let mut body = content_body(&rendered, "ok", "git");
-                if let Some(map) = body.as_object_mut() {
-                    map.insert("commit".to_string(), serde_json::json!(sha));
-                    map.insert("head_differs".to_string(), serde_json::json!(head_differs));
-                }
-                (StatusCode::OK, body)
+                let mut body = ContentBody::new(&rendered, "ok", "git");
+                body.commit = Some(&sha);
+                body.head_differs = Some(head_differs);
+                respond(StatusCode::OK, body)
             }
             Err(Refused::CommitUnavailable) => {
                 // The one labelled fallback, and only while the folder exists (the resolver
-                // checked): the working tree, loudly.
-                match read_rendered(Origin::WorkingTree(&dir), path, around).await {
+                // checked): the working tree, loudly. The status stays `commit_unavailable`.
+                let outcome = FindingContextOutcome::CommitUnavailable;
+                match read_rendered(Origin::WorkingTree(&dir), path, around, limits).await {
                     Ok(rendered) => {
                         let mut body =
-                            content_body(&rendered, "commit_unavailable", "working_tree");
-                        set_reason(&mut body, refusal_reason(Refused::CommitUnavailable));
-                        (StatusCode::OK, body)
+                            ContentBody::new(&rendered, "commit_unavailable", "working_tree");
+                        body.reason = outcome.to_json()["reason"].as_str().map(str::to_string);
+                        respond(StatusCode::OK, body)
                     }
-                    Err(refused) => (
-                        status_of(refused),
-                        refusal_body(refused, Some("working_tree")),
-                    ),
+                    Err(_) => respond(StatusCode::OK, labelled(&outcome, "working_tree", None)),
                 }
             }
-            Err(refused) => (status_of(refused), refusal_body(refused, Some("git"))),
+            Err(refused) => refusal(refused, "git", Some((&sha, head_differs))),
         },
-    };
-    no_store((status, Json(body)).into_response())
-}
-
-fn set_reason(body: &mut serde_json::Value, reason: &str) {
-    if let Some(map) = body.as_object_mut() {
-        map.insert("reason".to_string(), serde_json::json!(reason));
-    }
-}
-
-/// Path traversal is the only outcome that is not a 200.
-fn status_of(refused: Refused) -> StatusCode {
-    if refused == Refused::PathTraversal {
-        StatusCode::BAD_REQUEST
-    } else {
-        StatusCode::OK
     }
 }
 
@@ -410,8 +582,19 @@ fn status_of(refused: Refused) -> StatusCode {
 mod tests {
     use super::*;
 
-    fn text(rendered: &Rendered, n: usize) -> String {
-        rendered.lines[n].iter().map(|(_, t)| t.as_str()).collect()
+    /// `prepare` + `decorate` without the runtime, as one value.
+    fn render(
+        bytes: Vec<u8>,
+        path: &str,
+        around: Option<usize>,
+    ) -> Result<(Prepared, Decorated), Refused> {
+        let prepared = prepare(bytes, path, around)?;
+        let decorated = decorate(&prepared, path, around);
+        Ok((prepared, decorated))
+    }
+
+    fn text(decorated: &Decorated, n: usize) -> String {
+        decorated.lines[n].iter().map(|(_, t)| t.as_str()).collect()
     }
 
     #[test]
@@ -427,19 +610,18 @@ mod tests {
     #[test]
     fn a_small_file_is_whole_with_a_block_and_highlight() {
         let src = "// c\nfn f() {\n    let s = \"x\";\n}\n";
-        let r = render(src.as_bytes().to_vec(), "src/lib.rs", Some(3)).unwrap();
-        assert_eq!((r.from, r.to, r.total_lines), (1, 4, 4));
-        assert_eq!(r.language, "rust");
-        assert_eq!(r.highlight, HighlightStatus::Highlighted);
-        let block = r.block.unwrap();
+        let (p, d) = render(src.as_bytes().to_vec(), "src/lib.rs", Some(3)).unwrap();
+        assert_eq!((p.from, p.to, p.lines.len()), (1, 4, 4));
+        assert_eq!(p.language, "rust");
+        assert_eq!(d.highlight, HighlightStatus::Highlighted);
+        let block = d.block.unwrap();
         assert_eq!((block.start_line, block.end_line), (2, 4));
         assert_eq!(block.kind.label(), "function");
-        assert_eq!(text(&r, 2), "    let s = \"x\";");
         // Segment texts always re-join to the line.
         for n in 0..4 {
-            assert_eq!(text(&r, n), src.lines().nth(n).unwrap());
+            assert_eq!(text(&d, n), src.lines().nth(n).unwrap());
         }
-        assert!(r.lines[2]
+        assert!(d.lines[2]
             .iter()
             .any(|(c, t)| *c == Some(TokenClass::String.index()) && t == "\"x\""));
     }
@@ -448,31 +630,34 @@ mod tests {
     fn a_file_between_the_two_caps_is_windowed_around_the_line() {
         let body: String = (1..=40_000).map(|n| format!("let v{n} = {n};\n")).collect();
         assert!(body.len() > MAX_FILE_BYTES && body.len() < MAX_VIEWER_BYTES);
-        let r = render(body.into_bytes(), "src/big.rs", Some(10_000)).unwrap();
-        assert_eq!(r.total_lines, 40_000);
-        assert_eq!((r.from, r.to), (9_600, 10_399));
-        assert_eq!(r.lines.len(), 800);
-        assert_eq!(text(&r, 0), "let v9600 = 9600;");
+        let (p, d) = render(body.into_bytes(), "src/big.rs", Some(10_000)).unwrap();
+        assert_eq!(p.lines.len(), 40_000);
+        assert_eq!((p.from, p.to), (9_600, 10_399));
+        assert_eq!(d.lines.len(), 800);
+        assert_eq!(text(&d, 0), "let v9600 = 9600;");
+        // Only the window and its leading context were highlighted, and it still lines up.
+        assert_eq!(d.highlight, HighlightStatus::Highlighted);
+        assert!(d.lines[0].iter().any(|(c, _)| c.is_some()));
     }
 
     #[test]
     fn refusals_above_the_cap_and_for_binary() {
         let big = vec![b'x'; MAX_VIEWER_BYTES + 1];
-        assert_eq!(render(big, "a.rs", None), Err(Refused::TooLarge));
+        assert_eq!(prepare(big, "a.rs", None).unwrap_err(), Refused::TooLarge);
         assert_eq!(
-            render(vec![0xFF, 0xFE, 0x00], "a.rs", None),
-            Err(Refused::NotUtf8)
+            prepare(vec![0xFF, 0xFE, 0x00], "a.rs", None).unwrap_err(),
+            Refused::NotUtf8
         );
     }
 
     #[test]
     fn an_empty_file_and_an_out_of_range_line_do_not_panic() {
-        let r = render(Vec::new(), "a.rs", Some(7)).unwrap();
-        assert_eq!((r.total_lines, r.lines.len()), (0, 0));
-        assert!(r.block.is_none());
-        let r = render(b"fn f() {}\n".to_vec(), "a.rs", Some(99)).unwrap();
-        assert!(r.block.is_none());
-        assert_eq!(r.lines.len(), 1);
+        let (p, d) = render(Vec::new(), "a.rs", Some(7)).unwrap();
+        assert_eq!((p.lines.len(), d.lines.len()), (0, 0));
+        assert!(d.block.is_none());
+        let (_, d) = render(b"fn f() {}\n".to_vec(), "a.rs", Some(99)).unwrap();
+        assert!(d.block.is_none());
+        assert_eq!(d.lines.len(), 1);
     }
 
     #[test]
@@ -489,6 +674,36 @@ mod tests {
         assert!(segments("", &[])
             .iter()
             .all(|(c, t)| c.is_none() && t.is_empty()));
+    }
+
+    #[test]
+    fn the_degraded_decoration_is_plain_and_has_no_block() {
+        let prepared = prepare(b"fn f() {}\nlet x = 1;\n".to_vec(), "a.rs", Some(1)).unwrap();
+        let d = plain_decoration(&prepared);
+        assert_eq!(d.highlight, HighlightStatus::Skipped);
+        assert!(d.block.is_none());
+        assert_eq!(
+            d.lines,
+            vec![
+                vec![(None, "fn f() {}".to_string())],
+                vec![(None, "let x = 1;".to_string())]
+            ]
+        );
+    }
+
+    #[test]
+    fn every_refusal_maps_into_the_shared_status_vocabulary() {
+        for (refused, status) in [
+            (Refused::FileMissing, "file_missing"),
+            (Refused::NotUtf8, "not_utf8"),
+            (Refused::TooLarge, "too_large"),
+            (Refused::PathTraversal, "path_traversal"),
+            (Refused::CommitUnavailable, "commit_unavailable"),
+        ] {
+            let json = FindingContextOutcome::from(refused).to_json();
+            assert_eq!(json["status"], status);
+            assert!(json["reason"].as_str().is_some_and(|r| !r.is_empty()));
+        }
     }
 
     /// A.15: the viewer's modules have no write path and start no process of their own. (The
@@ -513,6 +728,10 @@ mod tests {
             (
                 "highlight.rs",
                 include_str!("../../../checks/src/extract/highlight.rs"),
+            ),
+            (
+                "nesting.rs",
+                include_str!("../../../checks/src/extract/nesting.rs"),
             ),
         ] {
             let production = text.split("#[cfg(test)]").next().unwrap();

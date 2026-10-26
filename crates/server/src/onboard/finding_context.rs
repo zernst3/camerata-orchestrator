@@ -50,6 +50,10 @@ pub enum FindingContextOutcome {
     NotUtf8,
     /// The file exceeds [`MAX_FILE_BYTES`] — the same cap the onboarding scan itself enforces.
     TooLarge,
+    /// The code viewer refuses the file: over its cap, or too slow to prepare. Same `too_large`
+    /// status as [`TooLarge`](FindingContextOutcome::TooLarge), with a reason that does not name
+    /// the 400 KB modal cap.
+    TooLargeToView,
     /// The file is readable, but `line` is past its current end (the file shrank).
     LineGone,
     /// The requested `path` resolves outside the repo directory — refused before any read.
@@ -116,6 +120,13 @@ impl FindingContextOutcome {
             FindingContextOutcome::TooLarge => serde_json::json!({
                 "status": "too_large",
                 "reason": format!("file exceeds the {} KB cap", MAX_FILE_BYTES / 1000),
+            }),
+            FindingContextOutcome::TooLargeToView => serde_json::json!({
+                "status": "too_large",
+                "reason": format!(
+                    "file is too large to view here (over {} MB, or too slow to prepare)",
+                    super::source_file::MAX_VIEWER_BYTES / (1024 * 1024)
+                ),
             }),
             FindingContextOutcome::LineGone => serde_json::json!({
                 "status": "line_gone",
@@ -231,6 +242,42 @@ pub(crate) enum GitReadError {
     TooLarge,
 }
 
+/// Whether `rel_path` at commit `sha` is a regular file (tree entry mode 100644 or 100755), by
+/// the read-only `git ls-tree`. The path follows `--`, so it can never be read as an option.
+async fn is_regular_file_at(dir: &Path, sha: &str, rel_path: &str) -> bool {
+    let Ok(output) = tokio::process::Command::new("git")
+        .current_dir(dir)
+        .args([
+            "-c",
+            "core.quotepath=off",
+            "ls-tree",
+            "-z",
+            sha,
+            "--",
+            rel_path,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    // `<mode> SP <type> SP <object> TAB <path> NUL`; the entry for exactly this path.
+    let wanted = rel_path.trim_end_matches('/').as_bytes();
+    output.stdout.split(|b| *b == 0).any(|entry| {
+        let Some(tab) = entry.iter().position(|b| *b == b'\t') else {
+            return false;
+        };
+        let (meta, path) = (&entry[..tab], &entry[tab + 1..]);
+        path == wanted && (meta.starts_with(b"100644 ") || meta.starts_with(b"100755 "))
+    })
+}
+
 /// `git cat-file blob <sha>:<path>`: the file as it was at `sha`, never the working tree. The
 /// output is read only up to `cap_bytes + 1` bytes, so an oversized blob is detected (and
 /// the process killed) without buffering it.
@@ -244,6 +291,11 @@ pub(crate) async fn read_git_blob(
 
     if !crate::client_source::git::commit_exists(dir, sha).await {
         return Err(GitReadError::CommitUnavailable);
+    }
+    // Only a regular file is shown. A symlink's blob is its target path and a submodule is a
+    // commit, neither of which is the code a reader expects; a directory is not a file either.
+    if !is_regular_file_at(dir, sha, rel_path).await {
+        return Err(GitReadError::NotFound);
     }
     // `sha:` makes the argument an object name; nothing in `rel_path` can be read as an option.
     let spec = format!("{sha}:{rel_path}");
