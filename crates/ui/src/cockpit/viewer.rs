@@ -29,23 +29,30 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use camerata_ui_core::triage::{
-    finding_key, Disposition, FindingView, KeyMods, RowCursor, TriageState, UndoEntry,
+    finding_key, finding_state, Disposition, FindingView, KeyMods, RowCursor, TriageState,
+    UndoEntry,
 };
 use camerata_ui_core::viewer::{
-    advance_after_disposition, back_step, block_for, block_from_context, close_target, cut_line,
-    file_findings, finding_position, finish_disposition, gutter_marks, line_at_scroll, line_label,
-    more_chars_label, page_request, parse_goto_line, prefetch_target, push_history,
-    scroll_top_for_line, scrolled, severity_class, spacers, step_file_in_group, step_in_file,
-    viewer_command, viewer_focus, viewer_keys_armed, virtual_range, BackStep, BannerKind,
-    BlockView, CloseTarget, FileKey, FileStep, GutterMark, HistoryEntry, SessionCopy,
-    SourceFileView, SourceOutcome, ViewerCache, ViewerCommand, CODE_LINE_H_PX, KEY_ROWS,
-    MAX_LINE_CHARS, OVERSCAN_LINES, SCROLL_QUANTUM_LINES, SHA_CONFLICT_NOTE,
+    advance_after_disposition, allowed_in_reference_view, back_step, block_for, block_from_context,
+    clears_search, close_target, cut_line, file_findings, finding_position, finish_disposition,
+    gutter_marks, line_at_scroll, line_label, more_chars_label, page_request, parse_goto_line,
+    prefetch_target, push_history, scroll_top_for_line, scrolled, severity_class, spacers,
+    step_file_in_group, step_in_file, viewer_code_keys_armed, viewer_command, viewer_focus,
+    viewer_keys_armed, virtual_range, BackStep, BannerKind, BlockView, CloseTarget, FileKey,
+    FileStep, GutterMark, HistoryEntry, OpenSurfaces, SessionCopy, SourceFileView, SourceOutcome,
+    ViewerCache, ViewerCommand, ViewerFocus, CODE_LINE_H_PX, KEY_ROWS, MAX_LINE_CHARS,
+    OVERSCAN_LINES, SCROLL_QUANTUM_LINES, SHA_CONFLICT_NOTE,
+};
+use camerata_ui_core::viewer_find::{
+    cycle_match, first_match_from, location_plan, mark_matches, move_selection, permalink,
+    popover_view, search_key, search_status, search_view, segments_text, symbol_prefill, Authority,
+    LocationPlan, Mark, PopoverView, RefHit, RefsOutcome, SearchKey, SymbolRefsView,
 };
 use chorale_core::GroupKey;
 use chorale_dioxus::UseTableHandle;
 use dioxus::prelude::*;
 
-use super::scan::undo_banner_of;
+use super::scan::{kind_chip_parts, undo_banner_of, RuleHubRequest};
 
 /// The DOM id of the viewer's focusable root. The keydown handler lives here.
 pub(super) const VIEWER_ID: &str = "camerata-code-viewer";
@@ -138,7 +145,111 @@ pub(super) async fn fetch_block(
     )
 }
 
+/// `GET /api/onboard/symbol-refs`. `None` when the server cannot be reached or does not answer
+/// with JSON. A refusal (a deleted source, an unknown repo, an invalid symbol) is an ANSWER with
+/// a status and a reason where the server sends one, so the list can say why it is empty.
+pub(super) async fn fetch_symbol_refs(
+    repo: &str,
+    symbol: &str,
+    sha: Option<&str>,
+    project: Option<&str>,
+) -> Option<SymbolRefsView> {
+    let mut params = vec![("repo", repo.to_string()), ("symbol", symbol.to_string())];
+    if let Some(sha) = sha.filter(|s| !s.is_empty()) {
+        params.push(("sha", sha.to_string()));
+    }
+    if let Some(project) = project.filter(|p| !p.is_empty()) {
+        params.push(("project", project.to_string()));
+    }
+    let resp = reqwest::Client::new()
+        .get(format!("{}/api/onboard/symbol-refs", crate::bff_base()))
+        .query(&params)
+        .send()
+        .await
+        .ok()?;
+    let status = resp.status();
+    let value: serde_json::Value = resp.json().await.ok()?;
+    let mut view: SymbolRefsView = serde_json::from_value(value.clone()).ok()?;
+    if view.status.is_empty() {
+        // A 400 refusal carries `{ok:false, code, message}`, not a status.
+        view.status = "invalid".to_string();
+        view.reason = value
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("The search was refused ({status})"));
+    }
+    if view.symbol.is_empty() {
+        view.symbol = symbol.to_string();
+    }
+    Some(view)
+}
+
+/// The text a permalink is copied with, through the clipboard bridge's own channel when it is
+/// installed (the desktop webview cannot reliably copy from page script), else the page-script
+/// fallback every other "Copy" in the app uses. Returns the script for the bridge. Pure.
+pub(super) fn bridge_copy_script(text: &str) -> Option<String> {
+    let literal = serde_json::to_string(text).ok()?;
+    Some(format!(
+        "if (window.__camerataClipboardBridgeSend) {{ \
+           window.__camerataClipboardBridgeSend({{ op: 'copy', text: {literal} }}); return true; \
+         }} return false;"
+    ))
+}
+
+/// Copy `text`; `true` when something took it.
+async fn copy_text(text: &str) -> bool {
+    if let Some(script) = bridge_copy_script(text) {
+        if matches!(
+            dioxus::document::eval(&script).await,
+            Ok(serde_json::Value::Bool(true))
+        ) {
+            return true;
+        }
+    }
+    crate::source_ui::copy_to_clipboard(text).await
+}
+
 // ── What the props-only component is given ───────────────────────────────────────────────
+
+/// The in-file search, as the component draws it.
+#[derive(Clone, PartialEq, Default)]
+pub(super) struct SearchProps {
+    pub needle: String,
+    /// The field is open and owns the keyboard. Closed with a needle left: highlights only.
+    pub field_open: bool,
+    /// `3 of 12`, `3 of 12 (wrapped)`, `No matches`.
+    pub status: String,
+    /// `(file line, char column)` of every match, in file order.
+    pub matches: Arc<Vec<(usize, usize)>>,
+    pub needle_chars: usize,
+    /// The match Enter will step from.
+    pub current: Option<usize>,
+}
+
+/// The symbol prompt, as the component draws it.
+#[derive(Clone, PartialEq)]
+pub(super) struct SymbolPromptProps {
+    pub text: String,
+    pub error: Option<String>,
+}
+
+/// Where the references request stands.
+#[derive(Clone, PartialEq)]
+pub(super) enum RefsLoad {
+    Loading,
+    /// The server did not answer.
+    Failed,
+    Loaded(Arc<SymbolRefsView>),
+}
+
+/// The references list, as the component draws it.
+#[derive(Clone, PartialEq)]
+pub(super) struct RefsProps {
+    pub symbol: String,
+    pub load: RefsLoad,
+    pub selected: usize,
+}
 
 /// Where the file stands.
 #[derive(Clone, PartialEq)]
@@ -209,19 +320,40 @@ fn tok_class(view: &SourceFileView, index: usize) -> Option<&'static str> {
     KNOWN.iter().find(|k| **k == name).copied()
 }
 
-/// The highlighted text of one line, cut at [`MAX_LINE_CHARS`].
-fn line_spans(view: &SourceFileView, segments: &[camerata_ui_core::viewer::Segment]) -> Element {
+/// The highlighted text of one line, cut at [`MAX_LINE_CHARS`], with the search matches on it
+/// (`ranges` are `(char column, chars)`; `current` is the column of the current match).
+fn line_spans(
+    view: &SourceFileView,
+    segments: &[camerata_ui_core::viewer::Segment],
+    ranges: &[(usize, usize)],
+    current: Option<usize>,
+) -> Element {
     let cut = cut_line(segments, MAX_LINE_CHARS);
     let (shown, more): (&[_], Option<usize>) = match &cut {
         Some((segs, more)) => (segs.as_slice(), Some(*more)),
         None => (segments, None),
     };
+    if ranges.is_empty() {
+        return rsx! {
+            for (i, (class, text)) in shown.iter().enumerate() {
+                if let Some(c) = class.and_then(|c| tok_class(view, c)) {
+                    span { key: "{i}", class: "tok-{c}", "{text}" }
+                } else {
+                    span { key: "{i}", "{text}" }
+                }
+            }
+            if let Some(n) = more {
+                span { class: "cv-more", "{more_chars_label(n)}" }
+            }
+        };
+    }
+    let pieces = mark_matches(shown, ranges, current);
     rsx! {
-        for (i, (class, text)) in shown.iter().enumerate() {
-            if let Some(c) = class.and_then(|c| tok_class(view, c)) {
-                span { key: "{i}", class: "tok-{c}", "{text}" }
-            } else {
-                span { key: "{i}", "{text}" }
+        for (i, piece) in pieces.iter().enumerate() {
+            span {
+                key: "{i}",
+                class: "{piece_class(view, piece.class, piece.mark)}",
+                "{piece.text}"
             }
         }
         if let Some(n) = more {
@@ -230,21 +362,56 @@ fn line_spans(view: &SourceFileView, segments: &[camerata_ui_core::viewer::Segme
     }
 }
 
+/// The CSS classes of a run of a line: its syntax class and its search mark.
+fn piece_class(view: &SourceFileView, class: Option<usize>, mark: Mark) -> String {
+    let mut out = String::new();
+    if let Some(c) = class.and_then(|c| tok_class(view, c)) {
+        out.push_str("tok-");
+        out.push_str(c);
+    }
+    match mark {
+        Mark::None => {}
+        Mark::Match => out.push_str(" cv-match"),
+        Mark::Current => out.push_str(" cv-match cv-match-cur"),
+    }
+    out.trim().to_string()
+}
+
+/// The matches on line `n`: `(char column, chars)`, from the file-ordered match list.
+fn ranges_on_line(search: Option<&SearchProps>, n: usize) -> Vec<(usize, usize)> {
+    let Some(s) = search else {
+        return Vec::new();
+    };
+    if s.needle_chars == 0 {
+        return Vec::new();
+    }
+    let first = s.matches.partition_point(|(line, _)| *line < n);
+    s.matches[first..]
+        .iter()
+        .take_while(|(line, _)| *line == n)
+        .map(|(_, col)| (*col, s.needle_chars))
+        .collect()
+}
+
 /// The code area: gutter, lines, band, highlight, minimap. Only the lines in
 /// [`virtual_range`] are in the DOM.
 #[allow(clippy::too_many_arguments)]
 fn code_body(
     view: &SourceFileView,
-    finding: &ViewerFinding,
+    path_key: &str,
+    severity: &str,
+    hit: Option<usize>,
     block: Option<&BlockView>,
     marks: &[GutterMark],
     scroll_top: f64,
     viewport_px: f64,
     line_cursor: Option<usize>,
+    search: Option<&SearchProps>,
     on_scroll: Callback<(f64, f64)>,
     on_scroll_ready: Callback<()>,
     on_mark: Callback<String>,
     on_line: Callback<usize>,
+    on_hover: Callback<Option<usize>>,
 ) -> Element {
     let total = view.total();
     if total == 0 {
@@ -261,10 +428,10 @@ fn code_body(
     .within(w.from, w.to);
     let (pad_top, pad_bottom) = spacers(total, range, CODE_LINE_H_PX);
     let mark_at: HashMap<usize, &GutterMark> = marks.iter().map(|m| (m.line, m)).collect();
-    let sev = severity_class(&finding.severity);
-    let hit = finding.line;
+    let sev = severity_class(severity);
+    let current_at = search.and_then(|s| s.current.and_then(|i| s.matches.get(i).copied()));
     rsx! {
-        div { class: "cv-body",
+        div { class: "cv-body", key: "{path_key}",
             div {
                 class: "cv-scroll",
                 id: SCROLL_ID,
@@ -277,14 +444,44 @@ fn code_body(
                     style: "padding-top:{pad_top}px;padding-bottom:{pad_bottom}px;",
                     for n in range.first..=range.last {
                         {
+                            let is_hit = hit == Some(n);
                             let in_band = block
                                 .is_some_and(|b| n >= b.start_line && n <= b.end_line);
-                            let class = line_class(n == hit, in_band, line_cursor == Some(n), sev);
+                            let class = line_class(is_hit, in_band, line_cursor == Some(n), sev);
                             let mark = mark_at.get(&n).copied();
+                            let has_mark = mark.is_some();
                             let segments = view.line(n);
+                            let ranges = ranges_on_line(search, n);
+                            let current_col = current_at.filter(|(l, _)| *l == n).map(|(_, c)| c);
                             rsx! {
-                                div { key: "{n}", class: "{class}",
-                                    span { class: "cv-gutter",
+                                div {
+                                    key: "{n}",
+                                    class: "{class}",
+                                    onmouseenter: move |_| {
+                                        if is_hit {
+                                            on_hover.call(Some(n));
+                                        }
+                                    },
+                                    onmouseleave: move |_| {
+                                        if is_hit {
+                                            on_hover.call(None);
+                                        }
+                                    },
+                                    // The whole gutter cell is the hover target, not the 10px dot: a
+                                    // decided dot is a disabled button, which some webviews do not
+                                    // send mouse events for.
+                                    span {
+                                        class: "cv-gutter",
+                                        onmouseenter: move |_| {
+                                            if has_mark {
+                                                on_hover.call(Some(n));
+                                            }
+                                        },
+                                        onmouseleave: move |_| {
+                                            if has_mark {
+                                                on_hover.call(None);
+                                            }
+                                        },
                                         if let Some(m) = mark {
                                             {
                                                 let target = m.target.clone();
@@ -315,7 +512,7 @@ fn code_body(
                                     }
                                     span { class: "cv-code",
                                         if let Some(segs) = segments {
-                                            {line_spans(view, segs)}
+                                            {line_spans(view, segs, &ranges, current_col)}
                                         }
                                     }
                                 }
@@ -334,9 +531,11 @@ fn code_body(
                         title: "{m.title}",
                     }
                 }
-                span {
-                    class: "cv-mini-cur",
-                    style: "top:{minimap_top(hit, total)}%;",
+                if let Some(hit) = hit {
+                    span {
+                        class: "cv-mini-cur",
+                        style: "top:{minimap_top(hit, total)}%;",
+                    }
                 }
             }
         }
@@ -411,6 +610,144 @@ fn note_body(
     }
 }
 
+/// The finding popover (A.5): at most eight lines, no fix text.
+fn popover_card(
+    p: &PopoverView,
+    pinned: bool,
+    line: Option<usize>,
+    on_hover: Callback<Option<usize>>,
+    on_hub: Callback<String>,
+    on_goto: Callback<String>,
+) -> Element {
+    let (kind_class, kind_label, kind_tip) = kind_chip_parts(p.kind_tag);
+    let rule = p.rule_id.clone();
+    let class = if pinned {
+        "cv-popover cv-popover-pinned"
+    } else {
+        "cv-popover"
+    };
+    rsx! {
+        div {
+            class: "{class}",
+            title: if pinned { "Pinned. Space unpins it." } else { "Space pins it." },
+            // The pointer may move from the line onto the card to click in it.
+            onmouseenter: move |_| {
+                if line.is_some() {
+                    on_hover.call(line);
+                }
+            },
+            onmouseleave: move |_| on_hover.call(None),
+            div { class: "cv-pop-line cv-pop-head",
+                button {
+                    class: "cv-pop-rule",
+                    title: "Open the Rule Hub (H)",
+                    onclick: move |_| on_hub.call(rule.clone()),
+                    "{p.rule_id}"
+                }
+                span { class: "{kind_class}", title: "{kind_tip}", "{kind_label}" }
+                span { class: "cv-pop-auth", "{p.authority.label()}" }
+            }
+            if let Some(h) = p.headline.clone() {
+                div { class: "cv-pop-line cv-pop-headline", "{h}" }
+            }
+            if let Some(d) = p.directive.clone() {
+                div { class: "cv-pop-line cv-pop-directive", "{d}" }
+            }
+            div { class: "cv-pop-line",
+                span { class: "cv-pop-sev {severity_class(&p.severity)}", "{p.severity}" }
+                span { class: "cv-sep", "\u{b7}" }
+                span { "{p.confidence}" }
+                if let Some(e) = p.effort.clone() {
+                    span { class: "cv-sep", "\u{b7}" }
+                    span { "effort {e}" }
+                }
+            }
+            if let Some(r) = p.needs_review.clone() {
+                div { class: "cv-pop-line cv-pop-review", strong { "Needs review: {r}" } }
+            }
+            div { class: "cv-pop-line",
+                span { "{p.disposition}" }
+                if let Some(prev) = p.previously.clone() {
+                    span { class: "cv-sep", "\u{b7}" }
+                    span { class: "cv-pop-prev", "{prev}" }
+                }
+            }
+            if !p.related.is_empty() {
+                div { class: "cv-pop-line cv-pop-related",
+                    span { "{p.related.len() + p.related_more} more in this file: " }
+                    for r in p.related.iter() {
+                        {
+                            let key = r.key.clone();
+                            let navigable = r.navigable;
+                            rsx! {
+                                if navigable {
+                                    button {
+                                        key: "{r.key}",
+                                        class: "cv-pop-link",
+                                        onclick: move |_| on_goto.call(key.clone()),
+                                        "L{r.line} {r.rule_id}"
+                                    }
+                                } else {
+                                    span { key: "{r.key}", class: "cv-pop-dim", "L{r.line} {r.rule_id}" }
+                                }
+                            }
+                        }
+                    }
+                    if p.related_more > 0 {
+                        span { class: "cv-pop-dim", "and {p.related_more} more" }
+                    }
+                }
+            }
+            if !p.also_matches.is_empty() {
+                div { class: "cv-pop-line",
+                    "Also violates here: {p.also_matches.join(\", \")}"
+                }
+            }
+        }
+    }
+}
+
+/// The symbol references list (A.6), at the right of the code.
+fn refs_panel(r: &RefsProps, on_pick: Callback<usize>) -> Element {
+    rsx! {
+        aside { class: "cv-refs", "data-selected": "{r.selected}",
+            match &r.load {
+                RefsLoad::Loading => rsx! {
+                    div { class: "cv-refs-head", "Searching for {r.symbol}\u{2026}" }
+                },
+                RefsLoad::Failed => rsx! {
+                    div { class: "cv-refs-head", "The server did not answer. Esc goes back." }
+                },
+                RefsLoad::Loaded(v) => rsx! {
+                    div { class: "cv-refs-head", "{v.summary()}" }
+                    if let Some(b) = v.banner() {
+                        div { class: "cv-banner cv-banner-amber", "{b}" }
+                    }
+                    match v.outcome() {
+                        RefsOutcome::Note(text) => rsx! {
+                            div { class: "cv-refs-note", "{text}" }
+                        },
+                        RefsOutcome::List => rsx! {
+                            div { class: "cv-refs-list",
+                                for (i, hit) in v.hits.iter().enumerate() {
+                                    div {
+                                        key: "{i}",
+                                        class: if i == r.selected { "cv-ref cv-ref-sel" } else { "cv-ref" },
+                                        onclick: move |_| on_pick.call(i),
+                                        div { class: "cv-ref-loc", "{hit.path}:{hit.line}" }
+                                        div { class: "cv-ref-text", "{hit.text}" }
+                                    }
+                                }
+                            }
+                        },
+                    }
+                },
+            }
+            div { class: "cv-refs-keys", "Up Down move \u{b7} Enter open \u{b7} Esc back" }
+        }
+    }
+}
+
 /// THE CODE VIEWER, props-only. See the module docs.
 #[component]
 #[allow(clippy::too_many_arguments)]
@@ -433,10 +770,33 @@ pub(super) fn CodeViewer(
     #[props(default)] scroll_top: f64,
     #[props(default = DEFAULT_VIEWPORT_PX)] viewport_px: f64,
     #[props(default)] line_cursor: Option<usize>,
+    /// The path of a reference being shown, when it is not the finding's own file. The finding's
+    /// line and band are then not drawn: they belong to another file.
+    #[props(default)]
+    viewing: Option<String>,
     /// The go-to-line field, when open.
     #[props(default)]
     goto: Option<String>,
     #[props(default)] goto_error: Option<String>,
+    /// The in-file search: the field while it is open, the highlights after it closes.
+    #[props(default)]
+    search: Option<SearchProps>,
+    /// The symbol prompt, when open.
+    #[props(default)]
+    symbol_prompt: Option<SymbolPromptProps>,
+    /// The references list, when open.
+    #[props(default)]
+    refs: Option<RefsProps>,
+    /// The popover, when it is showing (hovered or pinned).
+    #[props(default)]
+    popover: Option<PopoverView>,
+    /// The line the hovered popover is about, so the card can hold itself open.
+    #[props(default)]
+    popover_line: Option<usize>,
+    #[props(default)] pinned: bool,
+    /// The Rule Hub is open above the viewer: the viewer's keys are off.
+    #[props(default)]
+    hub_open: bool,
     /// The disposition whose reason is being collected.
     #[props(default)]
     prompt: Option<TriageState>,
@@ -454,6 +814,21 @@ pub(super) fn CodeViewer(
     #[props(default)] on_goto_input: Callback<String>,
     #[props(default)] on_goto_commit: Callback<()>,
     #[props(default)] on_goto_cancel: Callback<()>,
+    #[props(default)] on_search_input: Callback<String>,
+    #[props(default)] on_search_key: Callback<SearchKey>,
+    #[props(default)] on_symbol_input: Callback<String>,
+    #[props(default)] on_symbol_commit: Callback<()>,
+    #[props(default)] on_symbol_cancel: Callback<()>,
+    #[props(default)] on_ref_pick: Callback<usize>,
+    /// The mouse is over the finding's line or a gutter dot (`Some(line)`), or left it.
+    #[props(default)]
+    on_hover: Callback<Option<usize>>,
+    /// A rule id in the popover was clicked: open the Rule Hub on it.
+    #[props(default)]
+    on_popover_hub: Callback<String>,
+    /// A related finding in the popover was clicked.
+    #[props(default)]
+    on_popover_goto: Callback<String>,
     #[props(default)] on_prompt_reason: Callback<String>,
     #[props(default)] on_prompt_commit: Callback<()>,
     #[props(default)] on_prompt_cancel: Callback<()>,
@@ -464,9 +839,19 @@ pub(super) fn CodeViewer(
     /// re-renders that bar and not the viewer.
     children: Element,
 ) -> Element {
-    let focus = viewer_focus(prompt.is_some(), goto.is_some());
+    let focus = viewer_focus(OpenSurfaces {
+        reason_prompt: prompt.is_some(),
+        goto: goto.is_some(),
+        search: search.as_ref().is_some_and(|s| s.field_open),
+        symbol_prompt: symbol_prompt.is_some(),
+        refs_list: refs.is_some(),
+        rule_hub: hub_open,
+    });
     let armed = viewer_keys_armed(focus);
+    let code_keys = viewer_code_keys_armed(focus);
     let dom_finding_key = dom_key(&finding_key);
+    let shown_path = viewing.clone().unwrap_or_else(|| finding.path.clone());
+    let own_file = viewing.is_none();
 
     let loaded = match &file {
         FileStateView::Loaded(v) => Some(Arc::clone(v)),
@@ -484,6 +869,9 @@ pub(super) fn CodeViewer(
     };
     let shows_code = matches!(outcome, Some(SourceOutcome::Code));
     let here = line_cursor.unwrap_or(finding.line);
+    let hit = own_file.then_some(finding.line);
+    let search_open = search.as_ref().filter(|s| s.field_open).cloned();
+    let highlights = search.clone().filter(|s| !s.needle.is_empty());
 
     rsx! {
         div {
@@ -517,12 +905,19 @@ pub(super) fn CodeViewer(
                     if !revision.is_empty() {
                         span { class: "cv-rev", "@ {revision}" }
                     }
-                    span { class: "cv-path", "{finding.path}" }
+                    span { class: "cv-path", "{shown_path}" }
+                    if !own_file {
+                        span {
+                            class: "cv-refchip",
+                            title: "This is a reference, not a finding. Backspace goes back.",
+                            "reference"
+                        }
+                    }
                     if shows_code {
                         span { class: "cv-sep", "\u{b7}" }
                         span { class: "cv-pos", "{line_label(here, total)}" }
                     }
-                    if position.1 > 0 && position.0 > 0 {
+                    if own_file && position.1 > 0 && position.0 > 0 {
                         span { class: "cv-sep", "\u{b7}" }
                         span { class: "cv-pos", "finding {position.0} of {position.1} in this file" }
                     }
@@ -546,29 +941,65 @@ pub(super) fn CodeViewer(
                 if let Some(s) = status.clone() {
                     div { class: "cv-status", "{s}" }
                 }
-                match (&file, &outcome) {
-                    (FileStateView::Loading, _) => rsx! {
-                        div { class: "cv-note", "Loading {finding.path}\u{2026}" }
-                    },
-                    (FileStateView::Failed, _) => rsx! {
-                        {note_body("The server did not answer. The file could not be loaded.", Some(&finding.snippet), false, on_open_modal)}
-                    },
-                    (FileStateView::Loaded(v), Some(SourceOutcome::Code)) => rsx! {
-                        {code_body(v, &finding, block.as_ref(), &marks, scroll_top, viewport_px, line_cursor, on_scroll, on_scroll_ready, on_mark, on_line)}
-                    },
-                    // Deleted source: the message and NO code, not even the stored line.
-                    (_, Some(SourceOutcome::SourceDeleted(text))) => rsx! {
-                        {note_body(text, None, false, on_open_modal)}
-                    },
-                    (_, Some(SourceOutcome::TooLarge(text))) => rsx! {
-                        {note_body(text, Some(&finding.snippet), true, on_open_modal)}
-                    },
-                    (_, Some(SourceOutcome::NotUtf8(text)))
-                    | (_, Some(SourceOutcome::FileMissing(text)))
-                    | (_, Some(SourceOutcome::Unavailable(text))) => rsx! {
-                        {note_body(text, Some(&finding.snippet), false, on_open_modal)}
-                    },
-                    _ => rsx! {},
+                if let Some(s) = search_open {
+                    div { class: "cv-search",
+                        label { class: "rule-modal-label", "Find" }
+                        input {
+                            class: "input cv-search-input",
+                            r#type: "text",
+                            placeholder: "search this file",
+                            value: "{s.needle}",
+                            onmounted: move |e| {
+                                spawn(async move {
+                                    let _ = e.set_focus(true).await;
+                                });
+                            },
+                            oninput: move |e| on_search_input.call(e.value()),
+                            onkeydown: move |e: KeyboardEvent| {
+                                // The field owns its keys; only Enter, Shift+Enter and Esc mean
+                                // anything, and nothing typed here reaches the viewer.
+                                e.stop_propagation();
+                                let shift = e.modifiers().contains(Modifiers::SHIFT);
+                                if let Some(k) = search_key(&e.key().to_string(), shift) {
+                                    e.prevent_default();
+                                    on_search_key.call(k);
+                                }
+                            },
+                        }
+                        span { class: "cv-search-status", "{s.status}" }
+                    }
+                }
+                div { class: "cv-main",
+                    match (&file, &outcome) {
+                        (FileStateView::Loading, _) => rsx! {
+                            div { class: "cv-note", "Loading {shown_path}\u{2026}" }
+                        },
+                        (FileStateView::Failed, _) => rsx! {
+                            {note_body("The server did not answer. The file could not be loaded.", Some(&finding.snippet), false, on_open_modal)}
+                        },
+                        (FileStateView::Loaded(v), Some(SourceOutcome::Code)) => rsx! {
+                            {code_body(v, &shown_path, &finding.severity, hit, block.as_ref(), &marks, scroll_top, viewport_px, line_cursor, highlights.as_ref(), on_scroll, on_scroll_ready, on_mark, on_line, on_hover)}
+                        },
+                        // Deleted source: the message and NO code, not even the stored line.
+                        (_, Some(SourceOutcome::SourceDeleted(text))) => rsx! {
+                            {note_body(text, None, false, on_open_modal)}
+                        },
+                        (_, Some(SourceOutcome::TooLarge(text))) => rsx! {
+                            {note_body(text, Some(&finding.snippet), true, on_open_modal)}
+                        },
+                        (_, Some(SourceOutcome::NotUtf8(text)))
+                        | (_, Some(SourceOutcome::FileMissing(text)))
+                        | (_, Some(SourceOutcome::Unavailable(text))) => rsx! {
+                            {note_body(text, Some(&finding.snippet), false, on_open_modal)}
+                        },
+                        _ => rsx! {},
+                    }
+                    if let Some(r) = refs.clone() {
+                        {refs_panel(&r, on_ref_pick)}
+                    }
+                    if let Some(p) = popover.clone() {
+                        {popover_card(&p, pinned, popover_line, on_hover, on_popover_hub, on_popover_goto)}
+                    }
                 }
                 if help {
                     div { class: "cv-help",
@@ -628,6 +1059,37 @@ pub(super) fn CodeViewer(
                         }
                     }
                 }
+                if let Some(p) = symbol_prompt {
+                    div { class: "cv-goto cv-symbol",
+                        label { class: "rule-modal-label", "Where is this symbol used?" }
+                        input {
+                            class: "input cv-goto-input cv-symbol-input",
+                            r#type: "text",
+                            placeholder: "symbol",
+                            value: "{p.text}",
+                            onmounted: move |e| {
+                                spawn(async move {
+                                    let _ = e.set_focus(true).await;
+                                });
+                            },
+                            oninput: move |e| on_symbol_input.call(e.value()),
+                            onkeydown: move |e: KeyboardEvent| {
+                                e.stop_propagation();
+                                match e.key() {
+                                    Key::Escape => on_symbol_cancel.call(()),
+                                    Key::Enter => {
+                                        e.prevent_default();
+                                        on_symbol_commit.call(());
+                                    }
+                                    _ => {}
+                                }
+                            },
+                        }
+                        if let Some(err) = p.error.clone() {
+                            span { class: "cv-goto-error", "{err}" }
+                        }
+                    }
+                }
                 if let Some(text) = goto.clone() {
                     div { class: "cv-goto",
                         label { class: "rule-modal-label", "Go to line" }
@@ -660,8 +1122,12 @@ pub(super) fn CodeViewer(
                     }
                 }
                 div { class: if armed { "cv-keys armed" } else { "cv-keys off" },
-                    if armed {
-                        "C confirm \u{b7} T tech debt \u{b7} I ignore \u{b7} F false positive \u{b7} ] [ finding \u{b7} }} {{ file \u{b7} G line \u{b7} . this finding \u{b7} ? all keys \u{b7} Esc close"
+                    if code_keys {
+                        "C confirm \u{b7} T tech debt \u{b7} I ignore \u{b7} F false positive \u{b7} ] [ finding \u{b7} }} {{ file \u{b7} / find \u{b7} S symbol \u{b7} Y link \u{b7} H rule \u{b7} G line \u{b7} . this finding \u{b7} ? all keys \u{b7} Esc close"
+                    } else if armed {
+                        "Up Down choose a reference \u{b7} Enter open it \u{b7} Esc back to the code"
+                    } else if focus == ViewerFocus::RuleHub {
+                        "The Rule Hub is open. Esc closes it and returns here."
                     } else {
                         "Keys are off while you type. Enter commits, Esc cancels."
                     }
@@ -809,6 +1275,13 @@ pub(super) struct ViewerLink {
     pub on_close: Callback<()>,
     /// Open the finding modal on the focused finding (the "too large" fallback surface).
     pub on_open_modal: Callback<()>,
+    /// The origin remote the scan recorded per repo (tokenless), so `Y` can add a GitHub URL.
+    pub origins: Arc<HashMap<String, String>>,
+    /// The rule directive per rule id, for the popover. The same map the finding modal reads.
+    pub descriptions: Arc<HashMap<String, String>>,
+    /// Open the Rule Hub (`H`, and the rule id in the popover). The hub is hosted at the
+    /// results root above the viewer; closing it leaves the viewer as it was.
+    pub on_open_hub: Callback<RuleHubRequest>,
 }
 
 impl PartialEq for ViewerLink {
@@ -828,8 +1301,17 @@ impl PartialEq for ViewerLink {
             && self.apply_disposition == other.apply_disposition
             && self.on_close == other.on_close
             && self.on_open_modal == other.on_open_modal
+            && Arc::ptr_eq(&self.origins, &other.origins)
+            && Arc::ptr_eq(&self.descriptions, &other.descriptions)
+            && self.on_open_hub == other.on_open_hub
     }
 }
+
+/// Whether the Rule Hub is open, shared by the results root (which owns the hub) with the viewer
+/// (which opens it with `H`, disarms its keys while it is up, and takes focus back when it
+/// closes). Provided as context; a viewer mounted without it simply never sees the hub open.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct ViewerHubOpen(pub Signal<Option<RuleHubRequest>>);
 
 /// Where the Queue registers its [`ViewerLink`]. Provided by the results view.
 #[derive(Clone, Copy, PartialEq)]
@@ -865,6 +1347,7 @@ fn ViewerUndoBar(
 #[component]
 pub(super) fn ViewerRoot() -> Element {
     let slot = try_use_context::<ViewerSlot>();
+    let hub = try_use_context::<ViewerHubOpen>();
     let cache = try_use_context::<Signal<ViewerCache>>();
     let local_cache = use_signal(ViewerCache::new);
     let cache = cache.unwrap_or(local_cache);
@@ -919,6 +1402,7 @@ pub(super) fn ViewerRoot() -> Element {
             history,
             status,
             help,
+            hub,
             on_close,
         }
     }
@@ -927,8 +1411,41 @@ pub(super) fn ViewerRoot() -> Element {
 /// How long a scroll must rest before the viewer asks for a new page of a windowed file.
 const PAGE_DEBOUNCE_MS: u64 = 150;
 
+/// How long the pointer must rest on the finding's line or a gutter dot before the popover shows.
+const HOVER_DELAY_MS: u64 = 250;
+
+/// How long after the pointer leaves before the popover goes, so it can be reached to click.
+const HOVER_GRACE_MS: u64 = 200;
+
+/// The in-file search while the host holds it.
+#[derive(Clone, PartialEq, Default)]
+struct SearchState {
+    needle: String,
+    /// The field is open. Closed with a needle left, the matches stay highlighted until the
+    /// next navigation.
+    field_open: bool,
+    /// The match Enter steps from.
+    current: Option<usize>,
+    /// The last step wrapped past an end.
+    wrapped: bool,
+}
+
+/// The references request while the host holds it.
+#[derive(Clone, PartialEq)]
+struct RefsState {
+    symbol: String,
+    load: RefsLoad,
+    selected: usize,
+}
+
+/// The file whose view is a reference (not the finding's own), else `None`.
+fn reference_path(finding_path: &str, viewing: Option<&String>) -> Option<String> {
+    viewing.filter(|p| p.as_str() != finding_path).cloned()
+}
+
 /// THE STATEFUL VIEWER. Mounted while the viewer is open, keyed by the focused finding's key.
 #[component]
+#[allow(clippy::too_many_lines)]
 pub(super) fn CodeViewerHost(
     /// The finding the queue's cursor is on.
     finding: FindingView,
@@ -938,6 +1455,7 @@ pub(super) fn CodeViewerHost(
     history: Signal<Vec<HistoryEntry>>,
     status: Signal<Option<String>>,
     help: Signal<bool>,
+    #[props(default)] hub: Option<ViewerHubOpen>,
     on_close: Callback<()>,
 ) -> Element {
     let ViewerLink {
@@ -954,6 +1472,9 @@ pub(super) fn CodeViewerHost(
         on_undo,
         apply_disposition,
         on_open_modal,
+        origins,
+        descriptions,
+        on_open_hub,
         ..
     } = link;
     let key = finding_key(&finding);
@@ -963,6 +1484,7 @@ pub(super) fn CodeViewerHost(
     let mut cursor = cursor;
     let mut status = status;
     let mut help = help;
+    let toasts = try_use_context::<Signal<Vec<crate::toast::Toast>>>();
 
     // Per-finding state. The host is keyed by the finding, so all of this starts clean when
     // the cursor moves.
@@ -991,57 +1513,84 @@ pub(super) fn CodeViewerHost(
     // (see `block_for`) and never replaced by a page or a cached answer for another line.
     // `None` is "not decided yet"; `Some(None)` is "this file has no block".
     let mut block = use_signal(|| Option::<Option<BlockView>>::None);
+    // A file other than the finding's own that a symbol reference opened. A reference is a code
+    // location, not a finding: it never moves the cursor.
+    let mut viewing = use_signal(|| Option::<String>::None);
+    let mut search = use_signal(|| Option::<SearchState>::None);
+    let mut symbol_prompt = use_signal(|| Option::<(String, Option<String>)>::None);
+    let mut refs = use_signal(|| Option::<RefsState>::None);
+    let mut pinned = use_signal(|| false);
+    let mut hover_line = use_signal(|| Option::<usize>::None);
+    let mut hover_gen = use_signal(|| 0_u64);
+
+    let view_path = reference_path(&finding.path, (*viewing.read()).as_ref())
+        .unwrap_or_else(|| finding.path.clone());
+    let in_reference = view_path != finding.path;
+    let hub_open = hub.is_some_and(|h| h.0.read().is_some());
 
     let file_key = FileKey {
         repo: finding.repo.clone(),
         sha: sha.clone(),
-        path: finding.path.clone(),
+        path: view_path.clone(),
     };
 
     // The fetch. A cached file answers without a request; an answer the LRU will not keep is
-    // held for this open only. Either way the finding's own block is settled once.
+    // held for this open only. Either way the finding's own block is settled once. The answer
+    // carries the key it was fetched for, so a file that is still loading is never drawn under
+    // the path of the one before it.
     let file_res = use_resource({
         let finding = finding.clone();
         let sha = sha.clone();
         let project_id = project_id.clone();
-        let file_key = file_key.clone();
         move || {
+            let shown = reference_path(&finding.path, (*viewing.read()).as_ref());
+            let is_reference = shown.is_some();
+            let path = shown.unwrap_or_else(|| finding.path.clone());
             let wanted = around().unwrap_or(finding.line);
-            let (repo, path, line) = (finding.repo.clone(), finding.path.clone(), finding.line);
-            let (sha, project_id, file_key) = (sha.clone(), project_id.clone(), file_key.clone());
+            let (repo, line) = (finding.repo.clone(), finding.line);
+            let (sha, project_id) = (sha.clone(), project_id.clone());
+            let file_key = FileKey {
+                repo: repo.clone(),
+                sha: sha.clone(),
+                path: path.clone(),
+            };
             let mut cache = cache;
             let mut session = session;
             async move {
-                let hit = cache.write().get(&file_key, wanted);
-                let held = session.peek().lookup(&file_key, wanted);
-                let view = if let Some(hit) = hit.or(held) {
-                    hit
-                } else {
-                    let got = fetch_source_file(
-                        &repo,
-                        &path,
-                        Some(&sha),
-                        Some(wanted),
-                        Some(&project_id),
-                    )
-                    .await?;
-                    let view = Arc::new(got);
-                    let kept = cache.write().put(file_key.clone(), Arc::clone(&view));
-                    if !kept {
-                        session.write().put(file_key, Arc::clone(&view));
-                    }
-                    view
-                };
-                if block.peek().is_none() {
-                    let decided = match block_for(&view, line) {
-                        Some(b) => b,
-                        None => {
-                            fetch_block(&repo, &path, line, Some(&sha), Some(&project_id)).await
+                let result = async {
+                    let hit = cache.write().get(&file_key, wanted);
+                    let held = session.peek().lookup(&file_key, wanted);
+                    let view = if let Some(hit) = hit.or(held) {
+                        hit
+                    } else {
+                        let got = fetch_source_file(
+                            &repo,
+                            &path,
+                            Some(&sha),
+                            Some(wanted),
+                            Some(&project_id),
+                        )
+                        .await?;
+                        let view = Arc::new(got);
+                        let kept = cache.write().put(file_key.clone(), Arc::clone(&view));
+                        if !kept {
+                            session.write().put(file_key.clone(), Arc::clone(&view));
                         }
+                        view
                     };
-                    block.set(Some(decided));
+                    if !is_reference && block.peek().is_none() {
+                        let decided = match block_for(&view, line) {
+                            Some(b) => b,
+                            None => {
+                                fetch_block(&repo, &path, line, Some(&sha), Some(&project_id)).await
+                            }
+                        };
+                        block.set(Some(decided));
+                    }
+                    Some(view)
                 }
-                Some(view)
+                .await;
+                (file_key, result)
             }
         }
     });
@@ -1082,16 +1631,29 @@ pub(super) fn CodeViewerHost(
         }
     });
 
+    // The Rule Hub sits above the viewer; when it closes, the keyboard comes back here.
+    let mut hub_was_open = use_signal(|| false);
+    use_effect(move || {
+        let now = hub.is_some_and(|h| h.0.read().is_some());
+        if *hub_was_open.peek() && !now {
+            focus_viewer();
+        }
+        hub_was_open.set(now);
+    });
+
     // What the render shows.
     let wanted = around().unwrap_or(violation_line);
     let kept = cache
         .peek()
         .lookup(&file_key, wanted)
         .or_else(|| session.peek().lookup(&file_key, wanted));
-    let file_state = match kept.or_else(|| file_res.read().clone().flatten()) {
+    let file_state = match kept {
         Some(v) => FileStateView::Loaded(v),
-        None if file_res.read().is_none() => FileStateView::Loading,
-        None => FileStateView::Failed,
+        None => match file_res.read().clone() {
+            Some((k, Some(v))) if k == file_key => FileStateView::Loaded(v),
+            Some((k, None)) if k == file_key => FileStateView::Failed,
+            _ => FileStateView::Loading,
+        },
     };
     let total_lines = match &file_state {
         FileStateView::Loaded(v) => v.total(),
@@ -1109,13 +1671,15 @@ pub(super) fn CodeViewerHost(
     });
     let items = use_memo({
         let all_findings = all_findings.clone();
-        let (repo, path) = (finding.repo.clone(), finding.path.clone());
+        let (repo, own_path) = (finding.repo.clone(), finding.path.clone());
         move || {
+            let shown = reference_path(&own_path, (*viewing.read()).as_ref())
+                .unwrap_or_else(|| own_path.clone());
             file_findings(
                 &all_findings,
                 &dispositions.read(),
                 &repo,
-                &path,
+                &shown,
                 &navigable_keys(&ordered.read()),
             )
         }
@@ -1146,6 +1710,57 @@ pub(super) fn CodeViewerHost(
         scroll_top.set(top);
         last_scroll.set(top);
         set_dom_scroll(top);
+    });
+
+    // Show `line` of `path`: a scroll in the file on screen, else a switch of file. Never a
+    // cursor move: `path` is a place in the code, not a finding.
+    let show_location = Callback::new({
+        let own_path = finding.path.clone();
+        move |(path, line): (String, usize)| {
+            let current = reference_path(&own_path, (*viewing.peek()).as_ref())
+                .unwrap_or_else(|| own_path.clone());
+            line_cursor.set(Some(line));
+            match location_plan(&own_path, &current, &path) {
+                LocationPlan::Scroll => {
+                    let top =
+                        scroll_top_for_line(line, CODE_LINE_H_PX, *viewport.peek(), total_lines);
+                    scroll_top.set(top);
+                    last_scroll.set(top);
+                    set_dom_scroll(top);
+                }
+                // Another file: the scroll container is rebuilt for it (it is keyed by path)
+                // and takes its position from the signal when it mounts.
+                plan => {
+                    let top = scroll_top_for_line(
+                        line,
+                        CODE_LINE_H_PX,
+                        *viewport.peek(),
+                        usize::MAX / 64,
+                    );
+                    scroll_top.set(top);
+                    last_scroll.set(top);
+                    match plan {
+                        LocationPlan::ShowReference(other) => {
+                            viewing.set(Some(other));
+                            around.set(Some(line));
+                        }
+                        _ => {
+                            viewing.set(None);
+                            around.set(None);
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // The line the viewer stands on, for the back stack and the permalink.
+    let here_line = Callback::new(move |()| -> usize {
+        (*line_cursor.peek()).unwrap_or(if viewing.peek().is_some() {
+            1
+        } else {
+            violation_line
+        })
     });
 
     // One path: decide, and if it landed, move on within the file.
@@ -1179,15 +1794,245 @@ pub(super) fn CodeViewerHost(
         }
     });
 
+    // The loaded file, for the search and the symbol pre-fill.
+    let loaded_view = match &file_state {
+        FileStateView::Loaded(v) => Some(Arc::clone(v)),
+        _ => None,
+    };
+
+    // The search: matches over the lines the viewer has, and the step to the next one.
+    let go_to_match = Callback::new({
+        let loaded_view = loaded_view.clone();
+        move |state: SearchState| {
+            let Some(v) = loaded_view.as_ref() else {
+                return;
+            };
+            let found = search_view(v, &state.needle);
+            if let Some((line, _)) = state.current.and_then(|i| found.matches.get(i).copied()) {
+                line_cursor.set(Some(line));
+                let top = scroll_top_for_line(line, CODE_LINE_H_PX, *viewport.peek(), total_lines);
+                scroll_top.set(top);
+                last_scroll.set(top);
+                set_dom_scroll(top);
+            }
+        }
+    });
+    let on_search_input = Callback::new({
+        let loaded_view = loaded_view.clone();
+        move |text: String| {
+            let from = (*line_cursor.peek()).unwrap_or(if viewing.peek().is_some() {
+                1
+            } else {
+                violation_line
+            });
+            let matches = loaded_view
+                .as_ref()
+                .map(|v| search_view(v, &text).matches)
+                .unwrap_or_default();
+            let next = SearchState {
+                current: first_match_from(&matches, from),
+                needle: text,
+                field_open: true,
+                wrapped: false,
+            };
+            search.set(Some(next.clone()));
+            go_to_match.call(next);
+        }
+    });
+    let on_search_key = Callback::new({
+        let loaded_view = loaded_view.clone();
+        move |k: SearchKey| {
+            let Some(mut state) = search.peek().clone() else {
+                return;
+            };
+            match k {
+                SearchKey::Close => {
+                    state.field_open = false;
+                    // An empty needle has nothing to leave highlighted.
+                    search.set((!state.needle.is_empty()).then_some(state));
+                    focus_viewer();
+                }
+                SearchKey::Next | SearchKey::Previous => {
+                    let total = loaded_view
+                        .as_ref()
+                        .map_or(0, |v| search_view(v, &state.needle).matches.len());
+                    if let Some((i, wrapped)) =
+                        cycle_match(state.current, total, k == SearchKey::Next)
+                    {
+                        state.current = Some(i);
+                        state.wrapped = wrapped;
+                        search.set(Some(state.clone()));
+                        go_to_match.call(state);
+                    }
+                }
+            }
+        }
+    });
+
+    // Open the symbol prompt, pre-filled from what the detector captured or the violation line.
+    let open_symbols = Callback::new({
+        let finding = finding.clone();
+        let loaded_view = loaded_view.clone();
+        move |()| {
+            let line_text = if viewing.peek().is_none() {
+                loaded_view
+                    .as_ref()
+                    .and_then(|v| v.line(violation_line).map(|s| segments_text(s)))
+            } else {
+                None
+            }
+            .unwrap_or_else(|| finding.snippet.clone());
+            let text = symbol_prefill(&finding.captures, &line_text).unwrap_or_default();
+            symbol_prompt.set(Some((text, None)));
+        }
+    });
+    let run_symbols = Callback::new({
+        let (repo, project_id, sha) = (finding.repo.clone(), project_id.clone(), sha.clone());
+        move |()| {
+            let text = symbol_prompt
+                .peek()
+                .as_ref()
+                .map(|(t, _)| t.trim().to_string())
+                .unwrap_or_default();
+            if !camerata_api_types::symbol::is_valid_symbol(&text) {
+                symbol_prompt.set(Some((
+                    text,
+                    Some("Letters, digits and _ $ - . : only, up to 128".to_string()),
+                )));
+                return;
+            }
+            symbol_prompt.set(None);
+            refs.set(Some(RefsState {
+                symbol: text.clone(),
+                load: RefsLoad::Loading,
+                selected: 0,
+            }));
+            let (repo, project_id, sha) = (repo.clone(), project_id.clone(), sha.clone());
+            spawn(async move {
+                let got = fetch_symbol_refs(&repo, &text, Some(&sha), Some(&project_id)).await;
+                let mut state = refs.peek().clone();
+                // A newer search replaced this one, or the list was closed: drop the answer.
+                if let Some(s) = state.as_mut().filter(|s| s.symbol == text) {
+                    s.load = match got {
+                        Some(v) => RefsLoad::Loaded(Arc::new(v)),
+                        None => RefsLoad::Failed,
+                    };
+                    refs.set(state);
+                }
+            });
+        }
+    });
+    // Open a hit: push where the curator is onto the back stack, then show the hit's place. The
+    // list closes and the keys return to the code, so Backspace comes back.
+    let open_hit = Callback::new({
+        let (key, own_path) = (key.clone(), finding.path.clone());
+        move |hit: RefHit| {
+            let from_path = reference_path(&own_path, (*viewing.peek()).as_ref())
+                .unwrap_or_else(|| own_path.clone());
+            push_history(
+                &mut history.write(),
+                HistoryEntry {
+                    key: key.clone(),
+                    path: from_path,
+                    line: here_line.call(()),
+                },
+            );
+            refs.set(None);
+            search.set(None);
+            show_location.call((hit.path, hit.line));
+            focus_viewer();
+        }
+    });
+
+    // The permalink of the place on screen.
+    let copy_permalink = Callback::new({
+        let (repo, own_path, sha) = (finding.repo.clone(), finding.path.clone(), sha.clone());
+        let origins = origins.clone();
+        let loaded_view = loaded_view.clone();
+        move |()| {
+            let path = reference_path(&own_path, (*viewing.peek()).as_ref())
+                .unwrap_or_else(|| own_path.clone());
+            // The commit the viewer actually read when it was not given one.
+            let sha = if sha.is_empty() {
+                loaded_view
+                    .as_ref()
+                    .filter(|v| v.source == "git")
+                    .map(|v| v.commit.clone())
+                    .unwrap_or_default()
+            } else {
+                sha.clone()
+            };
+            let line = here_line.call(());
+            let Some(link) = permalink(
+                &repo,
+                &sha,
+                &path,
+                line,
+                origins.get(&repo).map(String::as_str),
+            ) else {
+                status.set(Some(
+                    "No inspected commit was recorded, so there is no permalink.".to_string(),
+                ));
+                return;
+            };
+            let text = link.clipboard_text();
+            spawn(async move {
+                if copy_text(&text).await {
+                    status.set(Some("Copied the permalink.".to_string()));
+                    if let Some(t) = toasts {
+                        crate::toast::push_toast(
+                            t,
+                            crate::toast::ToastKind::Info,
+                            "Copied the permalink.",
+                        );
+                    }
+                } else {
+                    status.set(Some("Could not copy the permalink.".to_string()));
+                    if let Some(t) = toasts {
+                        crate::toast::push_toast(
+                            t,
+                            crate::toast::ToastKind::Error,
+                            "Could not copy the permalink.",
+                        );
+                    }
+                }
+            });
+        }
+    });
+
     let on_key = Callback::new({
         let key = key.clone();
         let finding = finding.clone();
         let all_for_keys = all_findings.clone();
+        let loaded_view = loaded_view.clone();
         move |(k, m): (String, KeyMods)| {
-            let focus = viewer_focus(prompt.peek().is_some(), goto.peek().is_some());
+            let focus = viewer_focus(OpenSurfaces {
+                reason_prompt: prompt.peek().is_some(),
+                goto: goto.peek().is_some(),
+                search: search.peek().as_ref().is_some_and(|s| s.field_open),
+                symbol_prompt: symbol_prompt.peek().is_some(),
+                refs_list: refs.peek().is_some(),
+                rule_hub: hub.is_some_and(|h| h.0.peek().is_some()),
+            });
+            if camerata_ui_core::viewer::closes_hub(focus, &k, m) {
+                if let Some(mut h) = hub {
+                    h.0.set(None);
+                }
+                return;
+            }
             let Some(cmd) = viewer_command(focus, &k, m) else {
                 return;
             };
+            if viewing.peek().is_some() && !allowed_in_reference_view(cmd) {
+                status.set(Some(
+                    "A reference is on screen, not the finding. Backspace returns to it."
+                        .to_string(),
+                ));
+                return;
+            }
+            if clears_search(cmd) {
+                search.set(None);
+            }
             match cmd {
                 ViewerCommand::Close => {
                     let help_open = *help.peek();
@@ -1233,18 +2078,33 @@ pub(super) fn CodeViewerHost(
                 }
                 ViewerCommand::BackToFinding => {
                     line_cursor.set(None);
-                    scroll_to_line.call(violation_line);
+                    if viewing.peek().is_some() {
+                        viewing.set(None);
+                        around.set(None);
+                        let top = scroll_top_for_line(
+                            violation_line,
+                            CODE_LINE_H_PX,
+                            *viewport.peek(),
+                            usize::MAX / 64,
+                        );
+                        scroll_top.set(top);
+                        last_scroll.set(top);
+                    } else {
+                        scroll_to_line.call(violation_line);
+                    }
                 }
                 ViewerCommand::OpenGoToLine => {
                     goto.set(Some(String::new()));
                     goto_error.set(None);
                 }
                 ViewerCommand::Back => {
-                    let step = back_step(&mut history.write(), &key);
+                    let step = back_step(&mut history.write(), &key, &finding.path);
                     match step {
                         BackStep::Line(line) => {
-                            line_cursor.set(Some(line));
-                            scroll_to_line.call(line);
+                            show_location.call((finding.path.clone(), line));
+                        }
+                        BackStep::Location { path, line } => {
+                            show_location.call((path, line));
                         }
                         BackStep::Finding(target) => {
                             goto_finding.call(target);
@@ -1269,6 +2129,52 @@ pub(super) fn CodeViewerHost(
                 ViewerCommand::ToggleHelp => {
                     let now = *help.peek();
                     help.set(!now);
+                }
+                ViewerCommand::OpenSearch => {
+                    if loaded_view.is_none() {
+                        status.set(Some("There is no code to search.".to_string()));
+                    } else {
+                        let mut state = search.peek().clone().unwrap_or_default();
+                        state.field_open = true;
+                        search.set(Some(state));
+                    }
+                }
+                ViewerCommand::OpenSymbols => open_symbols.call(()),
+                ViewerCommand::CopyPermalink => copy_permalink.call(()),
+                ViewerCommand::TogglePopover => {
+                    let now = *pinned.peek();
+                    pinned.set(!now);
+                }
+                ViewerCommand::OpenHub => {
+                    on_open_hub.call(RuleHubRequest {
+                        repo: finding.repo.clone(),
+                        rule_id: finding.rule_id.clone(),
+                    });
+                }
+                ViewerCommand::RefsMove(dir) => {
+                    let mut state = refs.peek().clone();
+                    if let Some(s) = state.as_mut() {
+                        if let RefsLoad::Loaded(v) = &s.load {
+                            s.selected = move_selection(s.selected, v.hits.len(), dir);
+                        }
+                    }
+                    refs.set(state);
+                }
+                ViewerCommand::RefsOpen => {
+                    let hit = refs.peek().as_ref().and_then(|s| match &s.load {
+                        RefsLoad::Loaded(v) if v.outcome() == RefsOutcome::List => {
+                            v.hits.get(s.selected).cloned()
+                        }
+                        _ => None,
+                    });
+                    match hit {
+                        Some(hit) => open_hit.call(hit),
+                        None => status.set(Some("There is no reference to open.".to_string())),
+                    }
+                }
+                ViewerCommand::RefsClose => {
+                    refs.set(None);
+                    focus_viewer();
                 }
             }
         }
@@ -1331,7 +2237,7 @@ pub(super) fn CodeViewerHost(
             };
             viewport.set(h);
             // Only re-aim at the finding if the curator has not moved within the file yet.
-            if line_cursor.peek().is_none() {
+            if line_cursor.peek().is_none() && viewing.peek().is_none() {
                 let top = scroll_top_for_line(violation_line, CODE_LINE_H_PX, h, total_lines);
                 scroll_top.set(top);
                 last_scroll.set(top);
@@ -1341,21 +2247,22 @@ pub(super) fn CodeViewerHost(
     });
 
     let commit_goto = Callback::new({
-        let key = key.clone();
+        let (key, own_path) = (key.clone(), finding.path.clone());
         move |()| {
             let text = goto.peek().clone().unwrap_or_default();
             match parse_goto_line(&text, total_lines) {
                 Ok(line) => {
-                    let from = line_cursor.peek().unwrap_or(violation_line);
+                    let from_path = reference_path(&own_path, (*viewing.peek()).as_ref())
+                        .unwrap_or_else(|| own_path.clone());
                     push_history(
                         &mut history.write(),
                         HistoryEntry {
                             key: key.clone(),
-                            line: from,
+                            path: from_path.clone(),
+                            line: here_line.call(()),
                         },
                     );
-                    line_cursor.set(Some(line));
-                    scroll_to_line.call(line);
+                    show_location.call((from_path, line));
                     goto.set(None);
                     goto_error.set(None);
                     focus_viewer();
@@ -1365,19 +2272,110 @@ pub(super) fn CodeViewerHost(
         }
     });
 
+    // The popover: for the finding on the hovered line, else (pinned) for this finding.
+    let on_hover = Callback::new(move |line: Option<usize>| {
+        let generation = *hover_gen.peek() + 1;
+        hover_gen.set(generation);
+        match line {
+            Some(l) => {
+                spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(HOVER_DELAY_MS)).await;
+                    if *hover_gen.peek() == generation {
+                        hover_line.set(Some(l));
+                    }
+                });
+            }
+            None => {
+                spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(HOVER_GRACE_MS)).await;
+                    if *hover_gen.peek() == generation {
+                        hover_line.set(None);
+                    }
+                });
+            }
+        }
+    });
+    let popover_line = hover_line();
+    let popover = (pinned() || popover_line.is_some())
+        .then(|| {
+            let items_now = items.read();
+            let target_key = match popover_line {
+                Some(l) if in_reference || l != violation_line => items_now
+                    .iter()
+                    .find(|i| i.line == l)
+                    .map(|i| i.key.clone()),
+                _ => Some(key.clone()),
+            }?;
+            let f = all_findings.iter().find(|f| finding_key(f) == target_key)?;
+            // The "related in this file" list is the finding's own file's.
+            let own_items;
+            let related_from: &[camerata_ui_core::viewer::FileFinding] = if in_reference {
+                own_items = file_findings(
+                    &all_findings,
+                    &dispositions.peek(),
+                    &finding.repo,
+                    &finding.path,
+                    &navigable_keys(&ordered.peek()),
+                );
+                &own_items
+            } else {
+                &items_now
+            };
+            Some(popover_view(
+                f,
+                finding_state(&dispositions.peek(), f),
+                descriptions.get(&f.rule_id).map(String::as_str),
+                Authority::of(f, super::rules::is_enforced_floor(&f.rule_id)),
+                related_from,
+                // Decision memory (B.5) is not built: the popover has the seam and no data yet.
+                None,
+            ))
+        })
+        .flatten();
+
+    // The search as the component draws it.
+    let search_props = search().map(|s| {
+        let result = loaded_view
+            .as_ref()
+            .filter(|_| !s.needle.is_empty())
+            .map(|v| search_view(v, &s.needle))
+            .unwrap_or_default();
+        SearchProps {
+            status: search_status(&s.needle, &result, s.current, s.wrapped),
+            needle_chars: result.needle_chars,
+            matches: Arc::new(result.matches),
+            current: s.current,
+            field_open: s.field_open,
+            needle: s.needle,
+        }
+    });
+
     rsx! {
         CodeViewer {
             finding: ViewerFinding::from_finding(&finding, &sha, sha_conflict),
             finding_key: key.clone(),
             file: file_state,
-            block: block().flatten(),
+            block: if in_reference { None } else { block().flatten() },
             marks: marks(),
             position: position(),
             scroll_top: scroll_top(),
             viewport_px: viewport(),
             line_cursor: line_cursor(),
+            viewing: in_reference.then(|| view_path.clone()),
             goto: goto(),
             goto_error: goto_error(),
+            search: search_props,
+            symbol_prompt: symbol_prompt()
+                .map(|(text, error)| SymbolPromptProps { text, error }),
+            refs: refs()
+                .map(|r| RefsProps {
+                    symbol: r.symbol,
+                    load: r.load,
+                    selected: r.selected,
+                }),
+            popover,
+            pinned: pinned(),
+            hub_open,
             prompt: prompt(),
             prompt_reason: prompt_reason(),
             status: status(),
@@ -1392,6 +2390,37 @@ pub(super) fn CodeViewerHost(
                 goto.set(None);
                 goto_error.set(None);
                 focus_viewer();
+            }),
+            on_search_input,
+            on_search_key,
+            on_symbol_input: Callback::new(move |v: String| symbol_prompt.set(Some((v, None)))),
+            on_symbol_commit: run_symbols,
+            on_symbol_cancel: Callback::new(move |()| {
+                symbol_prompt.set(None);
+                focus_viewer();
+            }),
+            on_ref_pick: Callback::new(move |i: usize| {
+                let hit = refs.peek().as_ref().and_then(|s| match &s.load {
+                    RefsLoad::Loaded(v) => v.hits.get(i).cloned(),
+                    _ => None,
+                });
+                if let Some(hit) = hit {
+                    open_hit.call(hit);
+                }
+            }),
+            on_hover,
+            on_popover_hub: Callback::new({
+                let repo = finding.repo.clone();
+                move |rule_id: String| {
+                    on_open_hub.call(RuleHubRequest {
+                        repo: repo.clone(),
+                        rule_id,
+                    });
+                }
+            }),
+            popover_line,
+            on_popover_goto: Callback::new(move |target: String| {
+                goto_finding.call(target);
             }),
             on_prompt_reason: Callback::new(move |v: String| prompt_reason.set(v)),
             on_prompt_commit: Callback::new(move |()| {
@@ -1439,6 +2468,13 @@ mod render_tests {
         /// The finding's own block. `None` falls back to the loaded view's block.
         block: Option<BlockView>,
         sha_conflict: bool,
+        viewing: Option<String>,
+        search: Option<SearchProps>,
+        symbol_prompt: Option<SymbolPromptProps>,
+        refs: Option<RefsProps>,
+        popover: Option<PopoverView>,
+        pinned: bool,
+        hub_open: bool,
     }
 
     impl Default for Case {
@@ -1455,6 +2491,13 @@ mod render_tests {
                 line_cursor: None,
                 block: None,
                 sha_conflict: false,
+                viewing: None,
+                search: None,
+                symbol_prompt: None,
+                refs: None,
+                popover: None,
+                pinned: false,
+                hub_open: false,
             }
         }
     }
@@ -1493,6 +2536,13 @@ mod render_tests {
                 help: case.help,
                 status: case.status,
                 line_cursor: case.line_cursor,
+                viewing: case.viewing,
+                search: case.search,
+                symbol_prompt: case.symbol_prompt,
+                refs: case.refs,
+                popover: case.popover,
+                pinned: case.pinned,
+                hub_open: case.hub_open,
             }
         }
     }
@@ -1960,6 +3010,9 @@ mod render_tests {
                 apply_disposition: Callback::default(),
                 on_close: Callback::default(),
                 on_open_modal: Callback::default(),
+                origins: Arc::new(HashMap::new()),
+                descriptions: Arc::new(HashMap::new()),
+                on_open_hub: Callback::default(),
             };
             use_context_provider(|| ViewerSlot(Signal::new(Some(link))));
             let resolved = cursor.read().resolve(&visible_keys());
@@ -2094,6 +3147,379 @@ mod render_tests {
         });
         assert!(html.contains("could not be loaded"));
         let _ = (WindowView::default(), BlockView::default());
+    }
+
+    // ── step 3: search, symbols, popover, reference view, hub ──
+
+    fn search_props(
+        needle: &str,
+        matches: &[(usize, usize)],
+        current: Option<usize>,
+    ) -> SearchProps {
+        SearchProps {
+            needle: needle.to_string(),
+            field_open: true,
+            status: search_status(
+                needle,
+                &camerata_ui_core::viewer_find::SearchResult {
+                    matches: matches.to_vec(),
+                    needle_chars: needle.chars().count(),
+                    ..Default::default()
+                },
+                current,
+                false,
+            ),
+            matches: Arc::new(matches.to_vec()),
+            needle_chars: needle.chars().count(),
+            current,
+        }
+    }
+
+    #[test]
+    fn search_highlights_every_match_on_screen_marks_the_current_one_and_counts() {
+        // `    line N` holds "line" at col 4 of each of lines 3..6.
+        let matches = [(3, 4), (4, 4), (5, 4), (6, 4)];
+        let html = render(Case {
+            file: FileStateView::Loaded(view(6, |_| {})),
+            search: Some(search_props("line", &matches, Some(1))),
+            ..Case::default()
+        });
+        assert_eq!(count(&html, "cv-match-cur"), 1, "{html}");
+        // Every match is marked (the current one carries both classes).
+        assert_eq!(count(&html, "cv-match"), 4 + 1, "{html}");
+        assert!(html.contains("cv-search"), "the field is open");
+        assert!(html.contains("2 of 4"), "{html}");
+        assert!(html.contains("cv-keys off"), "the field owns the keys");
+        assert!(html.contains(">line</span>"), "{html}");
+    }
+
+    #[test]
+    fn a_closed_search_field_leaves_the_highlights_and_returns_the_keys() {
+        let mut props = search_props("line", &[(3, 4)], Some(0));
+        props.field_open = false;
+        let html = render(Case {
+            file: FileStateView::Loaded(view(6, |_| {})),
+            search: Some(props),
+            ..Case::default()
+        });
+        assert_eq!(count(&html, "cv-match-cur"), 1);
+        assert!(!html.contains("class=\"cv-search\""), "{html}");
+        assert!(html.contains("cv-keys armed"));
+    }
+
+    #[test]
+    fn no_matches_says_so_and_marks_nothing() {
+        let html = render(Case {
+            file: FileStateView::Loaded(view(6, |_| {})),
+            search: Some(search_props("zzz", &[], None)),
+            ..Case::default()
+        });
+        assert!(html.contains("No matches"));
+        assert_eq!(count(&html, "cv-match"), 0);
+    }
+
+    #[test]
+    fn a_match_split_across_highlight_runs_is_marked_in_each_run() {
+        // Line 1 is `fn` (a keyword run) then ` main() {`; a match for "n m" spans both runs.
+        let html = render(Case {
+            file: FileStateView::Loaded(view(2, |_| {})),
+            search: Some(search_props("n m", &[(1, 1)], Some(0))),
+            ..Case::default()
+        });
+        assert!(html.contains("tok-keyword cv-match cv-match-cur"), "{html}");
+        assert!(html.contains("class=\"cv-match cv-match-cur\""), "{html}");
+    }
+
+    #[test]
+    fn the_symbol_prompt_is_prefilled_and_owns_the_keys() {
+        let html = render(Case {
+            file: FileStateView::Loaded(view(4, |_| {})),
+            symbol_prompt: Some(SymbolPromptProps {
+                text: "build_sql".into(),
+                error: Some("Letters, digits and _ $ - . : only, up to 128".into()),
+            }),
+            ..Case::default()
+        });
+        assert!(html.contains("cv-symbol-input"));
+        assert!(html.contains("value=\"build_sql\""), "{html}");
+        assert!(html.contains("Letters, digits"));
+        assert!(html.contains("cv-keys off"));
+    }
+
+    fn refs_view(json: serde_json::Value) -> Arc<SymbolRefsView> {
+        Arc::new(serde_json::from_value(json).expect("response"))
+    }
+
+    #[test]
+    fn the_references_list_shows_hits_selection_and_its_own_keys() {
+        let v = refs_view(serde_json::json!({
+            "status": "ok", "source": "git", "symbol": "build_sql", "more": true,
+            "hits": [
+                {"path": "src/a.rs", "line": 3, "text": "build_sql(x)"},
+                {"path": "src/b.rs", "line": 40, "text": "let q = build_sql(y);"},
+            ]
+        }));
+        let html = render(Case {
+            file: FileStateView::Loaded(view(4, |_| {})),
+            refs: Some(RefsProps {
+                symbol: "build_sql".into(),
+                load: RefsLoad::Loaded(v),
+                selected: 1,
+            }),
+            ..Case::default()
+        });
+        assert!(
+            html.contains("2 references to build_sql (more not shown)"),
+            "{html}"
+        );
+        assert!(html.contains("src/a.rs:3") && html.contains("src/b.rs:40"));
+        assert_eq!(count(&html, "cv-ref-sel"), 1);
+        // The selected row is the second one.
+        let sel = html.find("cv-ref-sel").expect("selected row");
+        assert!(html[sel..].contains("src/b.rs:40"));
+        // The list owns the keys: the code's strip is off, the list's own is shown.
+        assert!(html.contains("cv-keys armed"));
+        assert!(html.contains("Up Down choose a reference"), "{html}");
+        assert!(!html.contains("C confirm"));
+    }
+
+    #[test]
+    fn the_references_list_says_why_it_is_empty() {
+        for (json, want) in [
+            (
+                serde_json::json!({"status": "ok", "source": "git", "symbol": "zzz", "hits": []}),
+                "No references to zzz",
+            ),
+            (
+                serde_json::json!({
+                    "status": "source_deleted",
+                    "reason": "Source deleted on 24 Oct 2026, re-fetch to view"
+                }),
+                "Source deleted on 24 Oct 2026",
+            ),
+            (
+                serde_json::json!({
+                    "status": "commit_unavailable", "source": "working_tree", "symbol": "s",
+                    "reason": "Inspected commit not available in this clone; showing the working tree",
+                    "hits": [{"path": "a.rs", "line": 1, "text": "s"}]
+                }),
+                "Inspected commit not available",
+            ),
+        ] {
+            let html = render(Case {
+                file: FileStateView::Loaded(view(4, |_| {})),
+                refs: Some(RefsProps {
+                    symbol: "zzz".into(),
+                    load: RefsLoad::Loaded(refs_view(json)),
+                    selected: 0,
+                }),
+                ..Case::default()
+            });
+            assert!(html.contains(want), "{want}: {html}");
+        }
+        let html = render(Case {
+            file: FileStateView::Loaded(view(4, |_| {})),
+            refs: Some(RefsProps {
+                symbol: "foo".into(),
+                load: RefsLoad::Loading,
+                selected: 0,
+            }),
+            ..Case::default()
+        });
+        assert!(html.contains("Searching for foo"));
+        let html = render(Case {
+            file: FileStateView::Loaded(view(4, |_| {})),
+            refs: Some(RefsProps {
+                symbol: "foo".into(),
+                load: RefsLoad::Failed,
+                selected: 0,
+            }),
+            ..Case::default()
+        });
+        assert!(html.contains("The server did not answer"));
+    }
+
+    fn popover(extra: impl FnOnce(&mut serde_json::Value)) -> PopoverView {
+        let mut f = serde_json::json!({
+            "repo": "acme/app", "path": "src/db.rs", "line": 3, "rule_id": "SQL-INJECTION-1",
+            "severity": "high", "snippet": "let q = format!(\"select {}\", id);",
+            "detail": "User input reaches the query. It is concatenated. [needs review: dynamic table]",
+            "kind": "defect", "confidence": "needs-review", "effort": "low",
+            "also_matches": ["ARCH-NO-RAW-SQL-1"]
+        });
+        extra(&mut f);
+        let f: FindingView = serde_json::from_value(f).expect("fixture");
+        let own_key = finding_key(&f);
+        let mk = |rule: &str, line: usize, navigable: bool| camerata_ui_core::viewer::FileFinding {
+            key: if line == 3 {
+                own_key.clone()
+            } else {
+                format!("k{line}")
+            },
+            line,
+            rule_id: rule.to_string(),
+            severity: "low".into(),
+            state: TriageState::Unresolved,
+            navigable,
+        };
+        popover_view(
+            &f,
+            TriageState::Unresolved,
+            Some("Never build SQL by concatenating input."),
+            Authority::Advisory,
+            &[
+                mk("SQL-INJECTION-1", 3, true),
+                mk("XSS-1", 88, true),
+                mk("CSRF-1", 214, false),
+            ],
+            None,
+        )
+    }
+
+    #[test]
+    fn the_popover_shows_up_to_eight_lines_and_no_fix() {
+        let p = popover(|_| {});
+        let html = render(Case {
+            file: FileStateView::Loaded(view(6, |_| {})),
+            popover: Some(p.clone()),
+            ..Case::default()
+        });
+        assert_eq!(count(&html, "cv-pop-line"), p.line_count(), "{html}");
+        assert!(p.line_count() <= 8);
+        assert!(html.contains("cv-pop-rule"), "the rule id is the hub link");
+        assert!(html.contains("kind-defect"), "{html}");
+        assert!(html.contains("AI \u{b7} advisory"));
+        assert!(html.contains("User input reaches the query."));
+        assert!(!html.contains("It is concatenated."), "first sentence only");
+        assert!(html.contains("Never build SQL by concatenating input."));
+        assert!(html.contains("Needs review: dynamic table"));
+        assert!(html.contains("effort low"));
+        assert!(html.contains("Unresolved"));
+        assert!(html.contains("2 more in this file"));
+        assert!(html.contains("L88 XSS-1"));
+        assert!(html.contains("Also violates here: ARCH-NO-RAW-SQL-1"));
+        assert!(!html.contains("Previously"), "the memory seam is empty");
+        assert!(!html.contains("Fix"), "no fix text in the popover");
+        assert!(!html.contains("cv-popover-pinned"));
+    }
+
+    #[test]
+    fn only_a_finding_the_cursor_can_reach_is_a_link_in_the_popover() {
+        let html = render(Case {
+            file: FileStateView::Loaded(view(6, |_| {})),
+            popover: Some(popover(|_| {})),
+            ..Case::default()
+        });
+        // L88 is reachable (a button); L214 was decided and left the table (plain text).
+        assert_eq!(count(&html, "class=\"cv-pop-link\""), 1, "{html}");
+        assert!(html.contains("cv-pop-dim"));
+    }
+
+    #[test]
+    fn a_pinned_popover_says_so_and_a_deviation_reads_its_claim() {
+        let p = popover(|f| {
+            f["rule_id"] = "API-VERSIONING-1".into();
+            f["kind"] = "deviation".into();
+            f["deviating_sites"] = 2.into();
+            f["assessed_sites"] = 47.into();
+            f["convention_option_id"] = "versioned".into();
+            f["convention_label"] = "URI-versioned endpoints".into();
+        });
+        let html = render(Case {
+            file: FileStateView::Loaded(view(6, |_| {})),
+            popover: Some(p),
+            pinned: true,
+            ..Case::default()
+        });
+        assert!(html.contains("cv-popover-pinned"));
+        assert!(html.contains("kind-deviation"));
+        assert!(html.contains("URI-versioned endpoints"), "{html}");
+        assert!(!html.contains("User input reaches the query"));
+    }
+
+    #[test]
+    fn a_reference_is_a_location_not_the_finding() {
+        let html = render(Case {
+            file: FileStateView::Loaded(view(6, |v| v["block"] = serde_json::Value::Null)),
+            viewing: Some("src/other.rs".into()),
+            line_cursor: Some(4),
+            position: (0, 2),
+            marks: vec![mark(5, "high", false, 1)],
+            ..Case::default()
+        });
+        // The header names the file on screen and says it is a reference.
+        assert!(html.contains("src/other.rs"), "{html}");
+        assert!(!html.contains("src/db.rs"));
+        assert!(html.contains("cv-refchip"));
+        assert!(html.contains("line 4 of 6"));
+        // The finding's line, band and minimap tick belong to its own file.
+        assert_eq!(count(&html, "cv-line-hit"), 0, "{html}");
+        assert_eq!(count(&html, "cv-line-band"), 0);
+        assert_eq!(count(&html, "cv-mini-cur"), 0);
+        assert!(!html.contains("in this file"));
+        // The line the curator jumped to is marked.
+        assert_eq!(count(&html, "cv-line-cursor"), 1);
+        // The file's own findings are still marked.
+        assert_eq!(count(&html, "class=\"cv-mark cv-sev-"), 1);
+    }
+
+    #[test]
+    fn the_finding_in_its_own_file_has_no_reference_chip() {
+        let html = render(Case {
+            file: FileStateView::Loaded(view(6, |_| {})),
+            ..Case::default()
+        });
+        assert!(!html.contains("cv-refchip"));
+        assert_eq!(count(&html, "cv-mini-cur"), 1);
+    }
+
+    #[test]
+    fn the_rule_hub_above_the_viewer_turns_the_keys_off_and_says_how_to_return() {
+        let html = render(Case {
+            file: FileStateView::Loaded(view(6, |_| {})),
+            hub_open: true,
+            ..Case::default()
+        });
+        assert!(html.contains("cv-keys off"));
+        assert!(html.contains("The Rule Hub is open. Esc closes it and returns here."));
+    }
+
+    #[test]
+    fn the_key_strip_names_the_new_keys() {
+        let html = render(Case {
+            file: FileStateView::Loaded(view(6, |_| {})),
+            ..Case::default()
+        });
+        for needle in ["/ find", "S symbol", "Y link", "H rule"] {
+            assert!(html.contains(needle), "{needle}");
+        }
+    }
+
+    #[test]
+    fn ranges_on_a_line_come_from_the_file_ordered_match_list() {
+        let s = SearchProps {
+            needle_chars: 3,
+            matches: Arc::new(vec![(2, 5), (4, 0), (4, 9), (7, 1)]),
+            ..SearchProps::default()
+        };
+        assert_eq!(ranges_on_line(Some(&s), 4), vec![(0, 3), (9, 3)]);
+        assert_eq!(ranges_on_line(Some(&s), 3), Vec::<(usize, usize)>::new());
+        assert_eq!(ranges_on_line(Some(&s), 7), vec![(1, 3)]);
+        assert!(ranges_on_line(None, 4).is_empty());
+        let empty = SearchProps::default();
+        assert!(ranges_on_line(Some(&empty), 1).is_empty());
+    }
+
+    #[test]
+    fn a_reference_path_is_only_a_path_that_is_not_the_findings_own() {
+        let own = "src/db.rs".to_string();
+        let other = "src/x.rs".to_string();
+        assert_eq!(
+            reference_path("src/db.rs", Some(&other)),
+            Some(other.clone())
+        );
+        assert_eq!(reference_path("src/db.rs", Some(&own)), None);
+        assert_eq!(reference_path("src/db.rs", None), None);
     }
 }
 
@@ -2274,6 +3700,135 @@ mod network_tests {
 
     #[tokio::test]
     #[serial_test::serial(process_env)]
+    async fn the_symbol_request_carries_repo_symbol_sha_and_project() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/symbol-refs"))
+            .and(query_param("repo", "acme/app"))
+            .and(query_param("symbol", "build_sql"))
+            .and(query_param("sha", "a".repeat(40)))
+            .and(query_param("project", "proj-7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok", "source": "git", "commit": "a".repeat(40),
+                "head_differs": false, "symbol": "build_sql", "more": true,
+                "hits": [{"path": "src/a.rs", "line": 3, "text": "build_sql(x)"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let got = fetch_symbol_refs(
+            "acme/app",
+            "build_sql",
+            Some(&"a".repeat(40)),
+            Some("proj-7"),
+        )
+        .await
+        .expect("an answer");
+        assert_eq!(got.outcome(), RefsOutcome::List);
+        assert_eq!(got.hits.len(), 1);
+        assert_eq!(
+            (got.hits[0].path.as_str(), got.hits[0].line),
+            ("src/a.rs", 3)
+        );
+        assert!(got.more);
+        assert_eq!(got.summary(), "1 reference to build_sql (more not shown)");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn an_unknown_commit_and_project_are_left_off_the_symbol_query() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/symbol-refs"))
+            .and(query_param_is_missing("sha"))
+            .and(query_param_is_missing("project"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "commit_unavailable", "source": "working_tree",
+                "reason": "Inspected commit not available in this clone; showing the working tree",
+                "symbol": "foo", "hits": [], "more": false
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let got = fetch_symbol_refs("acme/app", "foo", Some(""), Some(""))
+            .await
+            .expect("an answer");
+        assert!(got
+            .banner()
+            .unwrap()
+            .starts_with("Inspected commit not available"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_deleted_source_and_a_refused_symbol_are_answers_with_their_reasons() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/symbol-refs"))
+            .and(query_param("symbol", "gone"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "source_deleted", "source": "git",
+                "reason": "Source deleted on 24 Oct 2026, re-fetch to view",
+                "deleted_at": "2026-10-24T17:40:19Z", "record_id": "r1"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/symbol-refs"))
+            .and(query_param("symbol", "a b"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "ok": false, "code": "invalid_symbol",
+                "message": "A symbol is 1 to 128 letters, digits or _ $ - . : characters."
+            })))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let deleted = fetch_symbol_refs("acme/app", "gone", None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            deleted.outcome(),
+            RefsOutcome::Note("Source deleted on 24 Oct 2026, re-fetch to view".into())
+        );
+        let refused = fetch_symbol_refs("acme/app", "a b", None, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            refused.outcome(),
+            RefsOutcome::Note(t) if t.starts_with("A symbol is 1 to 128")
+        ));
+        assert!(refused.hits.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_symbol_search_the_server_does_not_answer_is_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/symbol-refs"))
+            .respond_with(ResponseTemplate::new(502).set_body_string("bad gateway"))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        assert!(fetch_symbol_refs("a/b", "foo", None, None).await.is_none());
+    }
+
+    #[test]
+    fn the_permalink_goes_through_the_clipboard_bridge_as_one_escaped_literal() {
+        let script =
+            bridge_copy_script("acme/app@abc1234:src/a \"b\".rs:3\nhttps://x/y#L3").unwrap();
+        assert!(script.contains("window.__camerataClipboardBridgeSend"));
+        assert!(script.contains("op: 'copy'"));
+        assert!(script.contains("\\n"), "the newline is escaped: {script}");
+        assert!(script.contains("\\\"b\\\""), "quotes are escaped: {script}");
+        assert!(script.trim_end().ends_with("return false;"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn a_server_that_does_not_answer_with_json_is_none() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -2449,6 +4004,7 @@ mod navigation_tests {
             &mut history,
             HistoryEntry {
                 key: a.clone(),
+                path: "a.rs".into(),
                 line: 10,
             },
         );
@@ -2473,7 +4029,7 @@ mod navigation_tests {
         assert_eq!(outcome.goto.as_deref(), Some(b.as_str()));
         assert_eq!(plan_reach(&state, &b), Reach::Visible);
         // Backspace: the entry is for A, not the finding on screen (B).
-        let BackStep::Finding(back_to) = back_step(&mut history, &b) else {
+        let BackStep::Finding(back_to) = back_step(&mut history, &b, "a.rs") else {
             panic!()
         };
         assert_eq!(back_to, a);
@@ -2595,5 +4151,590 @@ mod wiring_tests {
         settle(&mut vdom).await;
         assert!(slot.peek().is_none(), "the link must not outlive its table");
         assert!(!dioxus_ssr::render(&vdom).contains("cv-panel"));
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    //! The mounted viewer, driven by real key events (no browser): a symbol-reference excursion
+    //! into another file and back, the Rule Hub round trip, and the search field. SSR cannot
+    //! press a key; this dispatches `keydown` and `input` to the element ids the VirtualDom
+    //! reports, then reads what the viewer renders and what the queue's cursor says.
+
+    use super::*;
+    use dioxus::dioxus_core::{Mutation, Mutations};
+    use dioxus::html::{
+        Code, Key, Location, Modifiers, SerializedFormData, SerializedKeyboardData,
+    };
+    use std::any::Any;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// What the harness lets the test look at.
+    #[derive(Clone, Copy)]
+    struct Probe {
+        cursor: Signal<RowCursor>,
+        hub: Signal<Option<RuleHubRequest>>,
+        decisions: Signal<usize>,
+    }
+
+    thread_local! {
+        static PROBE: RefCell<Option<Probe>> = const { RefCell::new(None) };
+    }
+
+    fn finding(line: usize) -> FindingView {
+        serde_json::from_value(serde_json::json!({
+            "repo": "me/api", "path": "src/x.rs", "line": line, "rule_id": "SQL-INJECTION-1",
+            "severity": "high", "snippet": format!("s{line}"), "detail": "d",
+            "status": "active", "kind": "defect"
+        }))
+        .expect("fixture")
+    }
+
+    fn app() -> Element {
+        let all = vec![finding(4), finding(9)];
+        let table_rows: Vec<_> = all
+            .iter()
+            .map(|f| (chorale_core::RowId::new(), f.clone()))
+            .collect();
+        let handle = chorale_dioxus::use_table({
+            let table_rows = table_rows.clone();
+            move || {
+                super::super::scan::finding_table_state(
+                    table_rows.clone(),
+                    vec!["me/api".to_string()],
+                    false,
+                )
+            }
+        });
+        let dispositions = use_signal(HashMap::<String, Disposition>::new);
+        let cursor = use_signal({
+            let first = finding_key(&all[0]);
+            move || RowCursor::focused_on(first.clone())
+        });
+        let table = handle.signal();
+        let visible_keys = use_memo(move || {
+            chorale_core::visible_grouped_view(&table.read())
+                .into_iter()
+                .filter_map(|r| match r {
+                    chorale_core::GroupedRow::Data(_, f) => Some(finding_key(&f)),
+                    _ => None,
+                })
+                .collect::<Vec<String>>()
+        });
+        let open = use_signal(|| true);
+        let hub = use_signal(|| Option::<RuleHubRequest>::None);
+        let decisions = use_signal(|| 0_usize);
+        use_context_provider(|| ViewerHubOpen(hub));
+        let link = ViewerLink {
+            handle,
+            cursor,
+            visible_keys,
+            dispositions,
+            all_findings: Arc::new(all.clone()),
+            shas: Arc::new(HashMap::new()),
+            sha_conflicts: Arc::new(HashSet::new()),
+            project_id: String::new(),
+            open,
+            undo_entry: use_signal(|| None),
+            now_ms: use_signal(|| 0),
+            on_undo: Callback::default(),
+            apply_disposition: Callback::new({
+                let mut decisions = decisions;
+                move |_: (TriageState, String)| {
+                    decisions += 1;
+                    true
+                }
+            }),
+            on_close: Callback::default(),
+            on_open_modal: Callback::default(),
+            origins: Arc::new(HashMap::new()),
+            descriptions: Arc::new(HashMap::new()),
+            on_open_hub: Callback::new({
+                let mut hub = hub;
+                move |r: RuleHubRequest| hub.set(Some(r))
+            }),
+        };
+        use_context_provider(|| ViewerSlot(Signal::new(Some(link))));
+        PROBE.with(|p| {
+            *p.borrow_mut() = Some(Probe {
+                cursor,
+                hub,
+                decisions,
+            })
+        });
+        rsx! { ViewerRoot {} }
+    }
+
+    /// A source-file answer for `lines` lines of `{prefix} N`, with `extra` replacing some.
+    fn file_body(prefix: &str, lines: usize, extra: &[(usize, &str)]) -> serde_json::Value {
+        let body: Vec<serde_json::Value> = (1..=lines)
+            .map(|n| {
+                let text = extra
+                    .iter()
+                    .find(|(l, _)| *l == n)
+                    .map_or_else(|| format!("{prefix} {n}"), |(_, t)| (*t).to_string());
+                serde_json::json!([[null, text]])
+            })
+            .collect();
+        serde_json::json!({
+            "status": "ok", "source": "git", "commit": "a".repeat(40), "head_differs": false,
+            "language": "rust", "total_lines": lines,
+            "window": {"from": 1, "to": lines, "total_lines": lines},
+            "highlight": "ok", "classes": [], "block": null, "lines": body,
+        })
+    }
+
+    async fn serve() -> MockServer {
+        let server = MockServer::start().await;
+        let ok = |body: serde_json::Value| ResponseTemplate::new(200).set_body_json(body);
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .and(query_param("path", "src/x.rs"))
+            .respond_with(ok(file_body(
+                "here",
+                14,
+                &[(4, "    let q = build_sql(x);")],
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .and(query_param("path", "src/other.rs"))
+            .respond_with(ok(file_body("there", 6, &[])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/finding-context"))
+            .respond_with(ok(serde_json::json!({"status": "file_missing"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/symbol-refs"))
+            .and(query_param("symbol", "build_sql"))
+            .respond_with(ok(serde_json::json!({
+                "status": "ok", "source": "git", "symbol": "build_sql", "more": false,
+                "hits": [
+                    {"path": "src/other.rs", "line": 3, "text": "build_sql(y)"},
+                    {"path": "src/x.rs", "line": 11, "text": "build_sql(z)"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn named_key(key: &str) -> Key {
+        match key {
+            "Enter" => Key::Enter,
+            "Escape" => Key::Escape,
+            "Backspace" => Key::Backspace,
+            "ArrowDown" => Key::ArrowDown,
+            "ArrowUp" => Key::ArrowUp,
+            other => Key::Character(other.to_string()),
+        }
+    }
+
+    /// Dispatch to `id`.
+    fn send(vdom: &VirtualDom, name: &str, id: dioxus::dioxus_core::ElementId, data: Box<dyn Any>) {
+        let platform: Rc<dyn Any> = Rc::new(dioxus::html::PlatformEventData::new(data));
+        vdom.runtime()
+            .handle_event(name, dioxus::dioxus_core::Event::new(platform, true), id);
+    }
+
+    fn keydown(vdom: &VirtualDom, id: dioxus::dioxus_core::ElementId, key: &str, mods: Modifiers) {
+        let data = SerializedKeyboardData::new(
+            named_key(key),
+            Code::Unidentified,
+            Location::Standard,
+            false,
+            mods,
+            false,
+        );
+        send(vdom, "keydown", id, Box::new(data));
+    }
+
+    fn input(vdom: &VirtualDom, id: dioxus::dioxus_core::ElementId, value: &str) {
+        let data = SerializedFormData::new(value.to_string(), Vec::new());
+        send(vdom, "input", id, Box::new(data));
+    }
+
+    /// Everything the VirtualDom has told us about listeners so far.
+    #[derive(Default)]
+    struct Listeners(Vec<(String, dioxus::dioxus_core::ElementId)>);
+
+    impl Listeners {
+        fn take(&mut self, m: &Mutations) {
+            for e in &m.edits {
+                if let Mutation::NewEventListener { name, id } = e {
+                    self.0.push((name.clone(), *id));
+                }
+            }
+        }
+        fn last(&self, name: &str) -> dioxus::dioxus_core::ElementId {
+            self.0
+                .iter()
+                .rev()
+                .find(|(n, _)| n == name)
+                .map(|(_, id)| *id)
+                .unwrap_or_else(|| panic!("no {name} listener among {:?}", self.0))
+        }
+    }
+
+    /// Let pending work run (fetches, effects), collecting the listeners it creates.
+    async fn settle(vdom: &mut VirtualDom, seen: &mut Listeners) {
+        for _ in 0..4 {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(50), vdom.wait_for_work())
+                    .await;
+            seen.take(&vdom.render_immediate_to_vec());
+        }
+    }
+
+    fn html(vdom: &VirtualDom) -> String {
+        dioxus_ssr::render(vdom)
+    }
+
+    fn data_key(html: &str) -> String {
+        let attr = "data-finding-key=\"";
+        let i = html.find(attr).expect("the viewer is mounted") + attr.len();
+        html[i..i + html[i..].find('"').expect("closing quote")].to_string()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_reference_excursion_never_moves_the_cursor_and_backspace_returns() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let server = serve().await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let probe = PROBE.with(|p| p.borrow().expect("probe"));
+        let panel = seen.last("keydown");
+        let key_before = data_key(&html(&vdom));
+        let cursor_before = probe.cursor.peek().clone();
+
+        let page = html(&vdom);
+        assert!(
+            page.contains("here 1") && page.contains("finding 1 of 2 in this file"),
+            "{page}"
+        );
+        assert!(!page.contains("cv-refchip"));
+
+        // S: the prompt is pre-filled with the longest identifier on the violation line.
+        keydown(&vdom, panel, "s", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("value=\"build_sql\""), "{page}");
+        assert!(page.contains("cv-keys off"));
+        // Enter in the field runs the search; the list shows both hits.
+        let field = seen.last("keydown");
+        keydown(&vdom, field, "Enter", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("2 references to build_sql"), "{page}");
+        assert!(page.contains("src/other.rs:3") && page.contains("src/x.rs:11"));
+        assert!(page.contains("Up Down choose a reference"));
+
+        // A decision key does nothing while the list owns the keys.
+        keydown(&vdom, panel, "c", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(
+            *probe.decisions.peek(),
+            0,
+            "C is text-free but inert in the list"
+        );
+
+        // Enter opens the first hit: another file, shown as a reference, cursor untouched.
+        keydown(&vdom, panel, "Enter", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("cv-refchip"), "{page}");
+        assert!(
+            page.contains("src/other.rs") && page.contains("there 1"),
+            "{page}"
+        );
+        assert!(page.contains("line 3 of 6"), "{page}");
+        assert!(
+            !page.contains("cv-line-hit"),
+            "the finding's line is in the other file"
+        );
+        assert!(!page.contains("class=\"cv-refs\""), "the list closed");
+        assert_eq!(
+            data_key(&page),
+            key_before,
+            "the viewer is still on the same finding"
+        );
+        assert!(
+            *probe.cursor.peek() == cursor_before,
+            "the queue cursor did not move"
+        );
+
+        // A decision key is refused: the finding is not on screen.
+        keydown(&vdom, panel, "c", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(*probe.decisions.peek(), 0);
+        assert!(html(&vdom).contains("A reference is on screen, not the finding"));
+        keydown(&vdom, panel, "i", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        assert!(
+            !html(&vdom).contains("Reason for"),
+            "no reason prompt opens either"
+        );
+
+        // Backspace goes back to the finding's own line.
+        keydown(&vdom, panel, "Backspace", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(!page.contains("cv-refchip"), "{page}");
+        assert!(
+            page.contains("src/x.rs") && page.contains("here 1"),
+            "{page}"
+        );
+        assert!(page.contains("cv-line-hit"));
+        assert_eq!(data_key(&page), key_before);
+        assert!(*probe.cursor.peek() == cursor_before);
+        assert_eq!(*probe.decisions.peek(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_hit_in_the_same_file_is_a_scroll_and_backspace_returns_to_the_line() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let server = serve().await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let panel = seen.last("keydown");
+
+        keydown(&vdom, panel, "s", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        keydown(&vdom, seen.last("keydown"), "Enter", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        // Down to the second hit (src/x.rs:11), then open it.
+        keydown(&vdom, panel, "ArrowDown", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        assert!(html(&vdom).contains("data-selected=\"1\""));
+        keydown(&vdom, panel, "Enter", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(
+            !page.contains("cv-refchip"),
+            "same file: not a reference, {page}"
+        );
+        assert!(page.contains("line 11 of 14"), "{page}");
+        // Back to the violation line (4).
+        keydown(&vdom, panel, "Backspace", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        assert!(html(&vdom).contains("line 4 of 14"), "{}", html(&vdom));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn escape_in_the_list_returns_to_the_code_and_a_bad_symbol_stays_in_the_prompt() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let server = serve().await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let panel = seen.last("keydown");
+
+        // An invalid symbol is refused in the prompt; nothing is sent.
+        keydown(&vdom, panel, "s", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        input(&vdom, seen.last("input"), "a b");
+        settle(&mut vdom, &mut seen).await;
+        keydown(&vdom, seen.last("keydown"), "Enter", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(
+            page.contains("Letters, digits and _ $ - . : only"),
+            "{page}"
+        );
+        assert!(page.contains("cv-symbol-input"), "the prompt stays open");
+        // Esc cancels the prompt and re-arms the keys.
+        keydown(&vdom, seen.last("keydown"), "Escape", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        assert!(!html(&vdom).contains("cv-symbol-input"));
+        assert!(html(&vdom).contains("C confirm"));
+
+        // A good one runs; Esc in the list closes it without leaving the viewer.
+        keydown(&vdom, panel, "s", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        keydown(&vdom, seen.last("keydown"), "Enter", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        assert!(html(&vdom).contains("class=\"cv-refs\""));
+        keydown(&vdom, panel, "Escape", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(!page.contains("class=\"cv-refs\""), "{page}");
+        assert!(page.contains("cv-panel"), "the viewer is still open");
+        assert!(page.contains("C confirm"), "the code's keys are back");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn h_opens_the_hub_the_viewer_stands_aside_and_esc_returns() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let server = serve().await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let probe = PROBE.with(|p| p.borrow().expect("probe"));
+        let panel = seen.last("keydown");
+        let key_before = data_key(&html(&vdom));
+
+        keydown(&vdom, panel, "h", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(
+            probe.hub.peek().clone(),
+            Some(RuleHubRequest {
+                repo: "me/api".into(),
+                rule_id: "SQL-INJECTION-1".into()
+            })
+        );
+        let page = html(&vdom);
+        assert!(page.contains("The Rule Hub is open"), "{page}");
+        // Every other key is inert while the hub is up.
+        keydown(&vdom, panel, "c", Modifiers::empty());
+        keydown(&vdom, panel, "s", Modifiers::empty());
+        keydown(&vdom, panel, "Backspace", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(*probe.decisions.peek(), 0);
+        assert!(!html(&vdom).contains("cv-symbol-input"));
+
+        // Esc closes the hub and the viewer is as it was.
+        keydown(&vdom, panel, "Escape", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        assert!(probe.hub.peek().is_none());
+        let page = html(&vdom);
+        assert!(
+            page.contains("cv-panel") && page.contains("C confirm"),
+            "{page}"
+        );
+        assert_eq!(data_key(&page), key_before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_search_field_highlights_counts_cycles_with_a_wrap_and_keeps_highlights_after_esc()
+    {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let server = serve().await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let panel = seen.last("keydown");
+
+        keydown(&vdom, panel, "/", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        assert!(html(&vdom).contains("cv-search-input"));
+        // "here 1" is on lines 1 and 10..14: 6 matches, case-insensitively. Typing starts on the
+        // first at or after the finding's line (4), which is line 10: the second match.
+        input(&vdom, seen.last("input"), "HERE 1");
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("2 of 6"), "{page}");
+        assert_eq!(page.matches("cv-match-cur").count(), 1);
+        // Enter steps forward; at the last match it wraps and says so.
+        let field = seen.last("keydown");
+        for _ in 0..4 {
+            keydown(&vdom, field, "Enter", Modifiers::empty());
+        }
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(
+            page.contains("6 of 6") && !page.contains("wrapped"),
+            "{page}"
+        );
+        keydown(&vdom, field, "Enter", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        assert!(html(&vdom).contains("1 of 6 (wrapped)"), "{}", html(&vdom));
+        // Shift+Enter goes back, wrapping the other way.
+        keydown(&vdom, field, "Enter", Modifiers::SHIFT);
+        settle(&mut vdom, &mut seen).await;
+        assert!(html(&vdom).contains("6 of 6 (wrapped)"), "{}", html(&vdom));
+        // Esc closes the field and leaves the highlights; the keys are back.
+        keydown(&vdom, field, "Escape", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(!page.contains("cv-search-input"), "{page}");
+        assert!(page.contains("cv-match"), "the highlights stay");
+        assert!(page.contains("C confirm"));
+        // The next navigation (go to line) retires them.
+        keydown(&vdom, panel, "g", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        assert!(!html(&vdom).contains("cv-match"), "{}", html(&vdom));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn space_pins_the_popover_for_the_finding_and_space_unpins_it() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let server = serve().await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let panel = seen.last("keydown");
+        assert!(!html(&vdom).contains("cv-popover"));
+
+        keydown(&vdom, panel, " ", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("cv-popover-pinned"), "{page}");
+        assert!(
+            page.contains("SQL-INJECTION-1") && page.contains("1 more in this file"),
+            "{page}"
+        );
+        // The other finding in this file is a link to it.
+        assert!(page.contains("L9 SQL-INJECTION-1"));
+
+        keydown(&vdom, panel, " ", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        assert!(!html(&vdom).contains("cv-popover"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn y_reports_whether_the_permalink_was_copied() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let server = serve().await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        keydown(&vdom, seen.last("keydown"), "y", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        // There is no webview here, so the copy cannot succeed; the point is that the viewer
+        // answers either way, in words, and stays open. (The text copied is pinned in core.)
+        let page = html(&vdom);
+        assert!(
+            page.contains("Copied the permalink.")
+                || page.contains("Could not copy the permalink."),
+            "{page}"
+        );
+        assert!(page.contains("cv-panel"));
     }
 }

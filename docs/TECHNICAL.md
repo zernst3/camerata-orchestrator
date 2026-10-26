@@ -3055,6 +3055,27 @@ keyword tokenizer for SQL); `highlight` is `ok`, `plain` or `skipped`. The CPU w
 blocking pool under timeouts; if the block and highlight stage is slow the lines come back plain
 (`skipped`, no `block`). Read-only; `no-store`.
 
+**Symbol references for the code viewer** (`GET /api/onboard/symbol-refs?repo&symbol[&sha][&project]`,
+`onboard/symbol_refs.rs`): one read-only `git grep -z -n -w -I -F --no-color --no-recurse-submodules
+-e <symbol> <sha> --` in the repo dir (no shell; the symbol follows `-e`, so a leading `-` is a
+pattern character, and `-F` makes a `.` a dot). It goes through the same `source_for_read` as
+source-file (exact `owner/name` a project owns, 40-hex sha, a deleted source answers
+`source_deleted` before any process is started) and the same status words and source labels. The
+symbol rule (`camerata_api_types::symbol::is_valid_symbol`, shared with the UI) is 1 to 128 bytes of
+letters, digits and `_ $ - . :` with at least one letter, digit or `_`; anything else is a 400
+`invalid_symbol` before anything is read. Response: `{status, source, commit?, head_differs?,
+reason?, symbol, hits: [{path, line, text}], more}`. `ok` is a search at the inspected commit
+(`source: "git"`) or, when the inspection recorded no commit, of the working tree
+(`source: "working_tree"`); `commit_unavailable` (object missing) searches the working tree and
+says so, and for a folder that is not a git checkout returns no hits; `source_deleted`;
+`file_missing` (no project owns the repo or no folder); `too_large` (the search ran over 15 s).
+Noise paths (`is_noise_path`: vendored, build and generated directories, lockfiles, minified
+bundles) are dropped, every hit line is redacted (`redact_block`, then cut at 240 characters; a
+line that is only base64 characters is shown as `[redacted]` because the per-line redactor cannot
+see the `-----BEGIN` line above a key body), and at most 200 hits are returned with `more: true`
+when there were others. The output is read up to 8 MB and the process is killed beyond that;
+`kill_on_drop`, `GIT_OPTIONAL_LOCKS=0`, `grep.fallbackToNoIndex=false`. Read-only; `no-store`.
+
 **The code viewer UI** (`crates/ui/src/cockpit/viewer.rs`; every judgment in
 `camerata_ui_core::viewer`). `CodeViewer` is props-only and SSR-tested; `CodeViewerHost` owns the
 signals and I/O and is mounted by `FindingsTable` while the viewer is open, keyed by the focused
@@ -3082,8 +3103,21 @@ LRU will not keep (working tree, no recorded commit, a refusal) is held by `Sess
 long as the viewer stays open. The viewer is hosted at the results root (`ViewerRoot`, fed by the
 `ViewerLink` the Queue registers) and the undo ticker re-renders only `ViewerUndoBar`. The pane's
 `apply_disposition` answers `true` only when it wrote a disposition, and the viewer branches on
-that (`finish_disposition`). Not built yet: the hover popover, in-file search, symbol references and
-the permalink (work order steps A.5 and A.6).
+that (`finish_disposition`).
+
+The reading aids (work order A.5 and A.6; pure logic in `camerata_ui_core::viewer_find`): the
+popover (`popover_view`, at most eight lines, with an empty `previously` seam for decision memory),
+in-file search (`search_lines`, `cycle_match`, `mark_matches`; case-insensitive, char columns, wrap
+announced), symbol references (`symbol_prefill`, `SymbolRefsView`) and the permalink (`permalink`,
+GitHub URL only when the scan's `audited_refs[].origin_url` is on github.com; copied through the
+desktop clipboard bridge's own channel). The focus is `viewer_focus(OpenSurfaces)`: only `Code`
+and `RefsList` arm commands, and `RuleHub` (the hub is open above the viewer, shared through the
+`ViewerHubOpen` context) arms none and relays only `Esc`. A symbol-reference hit is a place, not a
+finding: the host keeps a `viewing` path beside the finding, fetches and draws that file with its
+own gutter, and never writes the Queue's cursor (`location_plan`); decision keys are refused while a
+file other than the finding's is on screen (`allowed_in_reference_view`). The back stack
+(`HistoryEntry {key, path, line}`) holds both go-to-line and reference hops. The host is tested by
+dispatching real `keydown` and `input` events to the mounted `VirtualDom` (`host_tests`).
 
 Every parser that recurses over a client file (syn, the tree-sitter walkers, the clone tokenizer,
 the enclosing-block resolver) sits behind one bracket-depth guard, `camerata_checks::extract::nesting`:

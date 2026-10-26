@@ -7294,7 +7294,7 @@ async fn onboard_source_file(
     crate::onboard::source_file::source_file(&state, q).await
 }
 
-/// `GET /api/onboard/symbol-refs` — where a symbol is used: one read-only whole-word search at
+/// `GET /api/onboard/symbol-refs`: where a symbol is used: one read-only whole-word search at
 /// the inspected commit, noise paths dropped, every hit line redacted, at most 200 hits with a
 /// `more` flag (`WORK_ORDER_REVIEW_SPEED.md` A.6). Shares the source-file resolver
 /// (`client_source::read::source_for_read`), so a deleted source answers `status:

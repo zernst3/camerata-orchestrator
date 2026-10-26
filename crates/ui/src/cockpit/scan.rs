@@ -289,6 +289,23 @@ pub(super) fn audited_shas(
     )
 }
 
+/// The origin remote each repo was scanned from, from the scan's and the audit's `audited_refs`
+/// (the audit's wins where both recorded one). Repos with no recorded origin are left out.
+pub(super) fn audited_origins(
+    report: &ScanReportView,
+    audited: Option<&ScanReportView>,
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for r in [Some(report), audited].into_iter().flatten() {
+        for a in &r.provenance.audited_refs {
+            if let Some(url) = a.origin_url.as_ref().filter(|u| !u.is_empty()) {
+                out.insert(a.repo.clone(), url.clone());
+            }
+        }
+    }
+    out
+}
+
 /// The "Code context" section of the finding-detail modal. Fetches ON-DEMAND every time it
 /// mounts; the caller keys this component by `repo`/`path`/`line` (see the finding-detail
 /// modal) so opening a DIFFERENT finding remounts it fresh rather than showing stale content
@@ -3446,6 +3463,10 @@ pub(super) fn FindingsTable(
     /// Repos whose scan and audit recorded different commits: the viewer says so.
     #[props(default)]
     sha_conflicts: std::collections::HashSet<String>,
+    /// The origin remote each repo was scanned from (`audited_refs[repo].origin_url`), so the
+    /// viewer's permalink can add a GitHub URL when the origin is GitHub.
+    #[props(default)]
+    audited_origins: std::collections::HashMap<String, String>,
     /// The project the findings belong to, passed to the code viewer's requests.
     #[props(default)]
     project_id: String,
@@ -3985,6 +4006,9 @@ pub(super) fn FindingsTable(
             apply_disposition,
             on_close: viewer_close,
             on_open_modal: viewer_open_modal,
+            origins: std::sync::Arc::new(audited_origins.clone()),
+            descriptions: std::sync::Arc::new(descriptions.clone()),
+            on_open_hub,
         });
         use_effect(move || {
             if let Some(mut slot) = viewer_slot {
@@ -6915,6 +6939,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // can perform. Both session-local lenses like `kind_view`, and deliberately not persisted
     // for the same reason: an open modal is not a decision.
     let mut hub_open = use_signal(|| Option::<RuleHubRequest>::None);
+    // The code viewer opens the hub with `H`, disarms its keys while it is up and takes the
+    // keyboard back when it closes, so it needs to see this signal.
+    use_context_provider(|| super::viewer::ViewerHubOpen(hub_open));
     let mut queue_rule_filter = use_signal(|| Option::<String>::None);
     let mut processing = use_signal(|| false);
     // ── THE GATED CONVENTION COMMIT (design §3; Q3 + Q4) ──────────────────────
@@ -8119,6 +8146,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 queue_rule_filter,
                                 audited_shas: sha_choice.shas.clone(),
                                 sha_conflicts: sha_choice.conflicts.clone(),
+                                audited_origins: audited_origins(&report, audited.as_ref()),
                                 project_id: project_id.clone(),
                             }
                         }

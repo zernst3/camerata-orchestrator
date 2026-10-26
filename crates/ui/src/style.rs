@@ -6686,6 +6686,66 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .cv-goto-error { color: var(--warning-color); font-size: 12px; }
 .cv-keys { padding: 5px 12px; font-size: 11px; border-top: 1px solid var(--line); color: var(--ink-faint); }
 .cv-keys.armed { color: var(--ink-soft); }
+
+/* The main row: the code (or a note) and, when `S` was pressed, the references list. The popover
+   floats over its lower left. */
+.cv-main { position: relative; display: flex; flex: 1 1 auto; min-height: 0; min-width: 0; }
+.cv-main > .cv-body, .cv-main > .cv-note { flex: 1 1 0; min-width: 0; }
+.cv-refchip {
+  font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--accent);
+  color: var(--accent);
+}
+
+/* In-file search: the field, and the matches (the current one stronger). */
+.cv-search {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.cv-search-input { width: 280px; }
+.cv-search-status { font-size: 12px; color: var(--ink-soft); }
+.cv-match { background: rgba(120, 170, 255, 0.28); border-radius: 2px; }
+.cv-match-cur { background: rgba(120, 170, 255, 0.62); outline: 1px solid var(--accent); }
+
+/* Symbol references: a list at the right of the code. */
+.cv-symbol-input { width: 260px; }
+.cv-refs {
+  flex: 0 0 380px; display: flex; flex-direction: column; min-height: 0;
+  border-left: 1px solid var(--line); background: #120f0c; font-size: 12px;
+}
+.cv-refs-head { padding: 8px 10px; color: var(--ink); font-weight: 700; border-bottom: 1px solid var(--line); }
+.cv-refs-note { padding: 10px; color: var(--ink-soft); }
+.cv-refs-list { flex: 1 1 auto; overflow: auto; }
+.cv-ref { padding: 4px 10px; cursor: pointer; border-bottom: 1px solid var(--line); }
+.cv-ref:hover { background: var(--accent-wash); }
+.cv-ref-sel { background: var(--accent-wash); box-shadow: inset 3px 0 0 var(--accent); }
+.cv-ref-loc { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+.cv-ref-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink-soft);
+  white-space: pre; overflow: hidden; text-overflow: ellipsis;
+}
+.cv-refs-keys { padding: 5px 10px; color: var(--ink-faint); border-top: 1px solid var(--line); }
+
+/* The finding popover: at most eight short lines. */
+.cv-popover {
+  position: absolute; left: 96px; bottom: 10px; z-index: 3; max-width: 520px;
+  padding: 8px 12px; background: #1d1913; color: var(--ink); font-size: 12px;
+  border: 1px solid var(--line); border-radius: var(--r-md); box-shadow: var(--shadow-pop);
+}
+.cv-popover-pinned { border-color: var(--accent); }
+.cv-pop-line { margin: 2px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.cv-pop-rule, .cv-pop-link {
+  background: transparent; border: 0; padding: 0; cursor: pointer; color: var(--accent);
+  font: inherit; font-weight: 700; text-decoration: underline;
+}
+.cv-pop-link { font-weight: 400; margin-right: 6px; }
+.cv-pop-auth { color: var(--ink-soft); }
+.cv-pop-headline { font-weight: 700; }
+.cv-pop-directive { color: var(--ink-soft); }
+.cv-pop-review { color: var(--warning-color); }
+.cv-pop-dim, .cv-pop-prev { color: var(--ink-faint); }
+.cv-pop-sev.critical { color: var(--danger-color); }
+.cv-pop-sev.high { color: var(--warning-color); }
+.cv-pop-sev.medium { color: var(--accent); }
 .finding-ctx-door { margin: 6px 0; }
 .pane-code-link { cursor: pointer; background: transparent; }
 .pane-code-link:hover { border-color: var(--accent); color: var(--ink); }

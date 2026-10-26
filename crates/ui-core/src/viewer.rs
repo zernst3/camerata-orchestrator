@@ -520,28 +520,52 @@ pub fn scrolled(
 
 // ── The key map (A.8) ────────────────────────────────────────────────────────────────────
 
-/// Where keyboard focus is inside the viewer. Only [`ViewerFocus::Code`] arms commands: an
-/// open prompt owns every key as text. The search, symbol and references surfaces belong to a
-/// later step; their variants exist so the map does not change shape when they land, and
-/// until then they arm nothing.
+/// Where keyboard focus is inside the viewer. Only [`ViewerFocus::Code`] and
+/// [`ViewerFocus::RefsList`] arm commands: the list answers its own four keys (move, open,
+/// close), and every other focus is a text field or another surface that owns every key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewerFocus {
     Code,
+    /// The in-file search field (`/`).
     SearchField,
     GoToLine,
+    /// The symbol prompt (`S`).
     SymbolPrompt,
     /// The reason prompt for `I` and `F`.
     ReasonPrompt,
+    /// The list of symbol references.
     RefsList,
+    /// The Rule Hub is open above the viewer (`H`). It owns the keyboard until it closes.
+    RuleHub,
+}
+
+/// Which prompts and surfaces are open over the code.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OpenSurfaces {
+    pub reason_prompt: bool,
+    pub goto: bool,
+    pub search: bool,
+    pub symbol_prompt: bool,
+    pub refs_list: bool,
+    pub rule_hub: bool,
 }
 
 /// The focus implied by which prompts are open. Pure, so the viewer needs no DOM focus
-/// tracking: a prompt is open or it is not.
-pub fn viewer_focus(reason_prompt_open: bool, goto_open: bool) -> ViewerFocus {
-    if reason_prompt_open {
+/// tracking: a prompt is open or it is not. An overlay above the viewer wins, then the prompt
+/// that was opened last in the order a reviewer reaches them.
+pub fn viewer_focus(open: OpenSurfaces) -> ViewerFocus {
+    if open.rule_hub {
+        ViewerFocus::RuleHub
+    } else if open.reason_prompt {
         ViewerFocus::ReasonPrompt
-    } else if goto_open {
+    } else if open.symbol_prompt {
+        ViewerFocus::SymbolPrompt
+    } else if open.search {
+        ViewerFocus::SearchField
+    } else if open.goto {
         ViewerFocus::GoToLine
+    } else if open.refs_list {
+        ViewerFocus::RefsList
     } else {
         ViewerFocus::Code
     }
@@ -570,6 +594,22 @@ pub enum ViewerCommand {
     Scroll(ScrollKey),
     /// Show or hide the key list.
     ToggleHelp,
+    /// Open the in-file search field (`/`).
+    OpenSearch,
+    /// Open the symbol prompt (`S`).
+    OpenSymbols,
+    /// Copy the permalink of the line on screen (`Y`).
+    CopyPermalink,
+    /// Pin or unpin the finding popover (`Space`).
+    TogglePopover,
+    /// Open the Rule Hub for the current rule (`H`).
+    OpenHub,
+    /// In the references list: next or previous hit.
+    RefsMove(FocusMove),
+    /// In the references list: open the selected hit.
+    RefsOpen,
+    /// In the references list: back to the code.
+    RefsClose,
 }
 
 /// THE VIEWER'S SCOPED KEY HANDLER, as a pure function.
@@ -584,6 +624,9 @@ pub enum ViewerCommand {
 /// the pane, `I` and `F` prompt for a reason, and a new disposition hotkey reaches the viewer
 /// by being added once.
 pub fn viewer_command(focus: ViewerFocus, key: &str, mods: KeyMods) -> Option<ViewerCommand> {
+    if focus == ViewerFocus::RefsList {
+        return refs_command(key, mods);
+    }
     if focus != ViewerFocus::Code {
         return None;
     }
@@ -624,15 +667,70 @@ pub fn viewer_command(focus: ViewerFocus, key: &str, mods: KeyMods) -> Option<Vi
         "." => Some(ViewerCommand::BackToFinding),
         "g" => Some(ViewerCommand::OpenGoToLine),
         "?" => Some(ViewerCommand::ToggleHelp),
+        "/" => Some(ViewerCommand::OpenSearch),
+        "s" => Some(ViewerCommand::OpenSymbols),
+        "y" => Some(ViewerCommand::CopyPermalink),
+        " " => Some(ViewerCommand::TogglePopover),
+        "h" => Some(ViewerCommand::OpenHub),
         _ => None,
     }
 }
 
-/// Whether the viewer's keys fire under this focus. Defined as "would `C` produce a command",
-/// the same trick as `pane_keys_armed`, so what the strip says and what the handler does
-/// cannot drift apart.
+/// The references list's own four keys. Nothing else is answered there, so `C` cannot decide a
+/// finding while the curator is choosing a hit; a modifier refuses everything.
+fn refs_command(key: &str, mods: KeyMods) -> Option<ViewerCommand> {
+    if mods.ctrl || mods.alt || mods.meta {
+        return None;
+    }
+    match key {
+        "ArrowDown" | "j" | "J" => Some(ViewerCommand::RefsMove(FocusMove::Down)),
+        "ArrowUp" | "k" | "K" => Some(ViewerCommand::RefsMove(FocusMove::Up)),
+        "Enter" => Some(ViewerCommand::RefsOpen),
+        "Escape" => Some(ViewerCommand::RefsClose),
+        _ => None,
+    }
+}
+
+/// Whether the viewer answers keys under this focus. `Esc` is answered by exactly the two
+/// focuses that arm commands ([`ViewerFocus::Code`] closes the viewer, [`ViewerFocus::RefsList`]
+/// closes the list), so the strip and the handler cannot drift apart.
 pub fn viewer_keys_armed(focus: ViewerFocus) -> bool {
+    viewer_command(focus, "Escape", KeyMods::none()).is_some()
+}
+
+/// Whether this press closes the Rule Hub that `H` opened above the viewer. The hub has no key
+/// handling of its own and DOM focus stays on the viewer, so the viewer relays `Esc` to it; no
+/// other key does anything while the hub is up.
+pub fn closes_hub(focus: ViewerFocus, key: &str, mods: KeyMods) -> bool {
+    focus == ViewerFocus::RuleHub && key == "Escape" && !(mods.ctrl || mods.alt || mods.meta)
+}
+
+/// Whether the key strip should show the code's keys (as opposed to the list's).
+pub fn viewer_code_keys_armed(focus: ViewerFocus) -> bool {
     viewer_command(focus, "c", KeyMods::none()).is_some()
+}
+
+/// Whether `cmd` may run while a reference in ANOTHER file is on screen. The queue's current
+/// finding is not on screen then, so a decision key must not act on code the curator cannot see.
+/// Everything that moves the cursor, reads or leaves is allowed (a cursor move ends the
+/// excursion, since the viewer re-opens on the new finding).
+pub fn allowed_in_reference_view(cmd: ViewerCommand) -> bool {
+    !matches!(cmd, ViewerCommand::Dispose(_) | ViewerCommand::PromptFor(_))
+}
+
+/// Whether `cmd` is a navigation that retires the search highlights ("until the next
+/// navigation"). Scrolling, the key list, the popover and the search itself keep them.
+pub fn clears_search(cmd: ViewerCommand) -> bool {
+    matches!(
+        cmd,
+        ViewerCommand::MoveRow(_)
+            | ViewerCommand::FindingInFile(_)
+            | ViewerCommand::FileInGroup(_)
+            | ViewerCommand::BackToFinding
+            | ViewerCommand::OpenGoToLine
+            | ViewerCommand::Back
+            | ViewerCommand::RefsOpen
+    )
 }
 
 /// The keys the pane and the viewer deliberately share (lower case; the letters are matched
@@ -648,7 +746,7 @@ pub struct KeyRow {
 }
 
 /// The viewer's keys, for the `?` list and the user guide.
-pub const KEY_ROWS: [KeyRow; 11] = [
+pub const KEY_ROWS: [KeyRow; 16] = [
     KeyRow {
         label: "Esc",
         action: "Close the key list, else the viewer",
@@ -693,6 +791,31 @@ pub const KEY_ROWS: [KeyRow; 11] = [
         label: "G",
         action: "Go to a line",
         probes: &[("g", false)],
+    },
+    KeyRow {
+        label: "/",
+        action: "Search this file (Enter next, Shift+Enter previous, Esc closes)",
+        probes: &[("/", false)],
+    },
+    KeyRow {
+        label: "S",
+        action: "Where else is this symbol used (Enter runs, then Up Down, Enter opens, Esc back)",
+        probes: &[("s", false)],
+    },
+    KeyRow {
+        label: "Y",
+        action: "Copy a permalink to this line",
+        probes: &[("y", false)],
+    },
+    KeyRow {
+        label: "Space",
+        action: "Pin or unpin the finding popover",
+        probes: &[(" ", false)],
+    },
+    KeyRow {
+        label: "H",
+        action: "Open the Rule Hub for this rule (closing it returns here)",
+        probes: &[("h", false)],
     },
     KeyRow {
         label: "Backspace  Alt+Left",
@@ -977,6 +1100,9 @@ pub fn parse_goto_line(input: &str, total_lines: usize) -> Result<usize, String>
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HistoryEntry {
     pub key: String,
+    /// The file the position was in. The finding's own file for a position in the finding's
+    /// code; another file after a symbol-reference jump.
+    pub path: String,
     pub line: usize,
 }
 
@@ -1063,19 +1189,31 @@ impl SessionCopy {
 /// Where `Backspace` goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BackStep {
-    /// Scroll to this line of the finding already on screen.
+    /// Scroll to this line of the finding's own file.
     Line(usize),
+    /// Show this line of this file, which is not the finding's own (a reference excursion
+    /// that went through more than one file).
+    Location { path: String, line: usize },
     /// Move the cursor to this finding (the viewer then opens on it).
     Finding(String),
     /// The history is empty.
     Nothing,
 }
 
-/// Pop the history. An entry for the finding on screen is a scroll; an entry for another finding
-/// is a cursor move, which the caller must check can still be reached.
-pub fn back_step(history: &mut Vec<HistoryEntry>, current_key: &str) -> BackStep {
+/// Pop the history. An entry for the finding on screen is a scroll (in its own file, or in the
+/// other file a reference jump went to); an entry for another finding is a cursor move, which the
+/// caller must check can still be reached. `finding_path` is the file of the finding on screen.
+pub fn back_step(
+    history: &mut Vec<HistoryEntry>,
+    current_key: &str,
+    finding_path: &str,
+) -> BackStep {
     match history.pop() {
-        Some(e) if e.key == current_key => BackStep::Line(e.line),
+        Some(e) if e.key == current_key && e.path == finding_path => BackStep::Line(e.line),
+        Some(e) if e.key == current_key => BackStep::Location {
+            path: e.path,
+            line: e.line,
+        },
         Some(e) => BackStep::Finding(e.key),
         None => BackStep::Nothing,
     }
@@ -1559,6 +1697,14 @@ mod tests {
             ("Home", Scroll(ScrollKey::Home)),
             ("End", Scroll(ScrollKey::End)),
             ("?", ToggleHelp),
+            ("/", OpenSearch),
+            ("s", OpenSymbols),
+            ("S", OpenSymbols),
+            ("y", CopyPermalink),
+            ("Y", CopyPermalink),
+            (" ", TogglePopover),
+            ("h", OpenHub),
+            ("H", OpenHub),
         ];
         for (key, want) in cases {
             assert_eq!(
@@ -1638,7 +1784,7 @@ mod tests {
             ViewerFocus::GoToLine,
             ViewerFocus::SymbolPrompt,
             ViewerFocus::ReasonPrompt,
-            ViewerFocus::RefsList,
+            ViewerFocus::RuleHub,
         ] {
             assert!(!viewer_keys_armed(focus));
             for key in &universe {
@@ -1659,9 +1805,199 @@ mod tests {
             );
         }
         assert!(viewer_keys_armed(ViewerFocus::Code));
-        assert_eq!(viewer_focus(true, true), ViewerFocus::ReasonPrompt);
-        assert_eq!(viewer_focus(false, true), ViewerFocus::GoToLine);
-        assert_eq!(viewer_focus(false, false), ViewerFocus::Code);
+        // Typing a search needle or a symbol fires nothing either.
+        for focus in [ViewerFocus::SearchField, ViewerFocus::SymbolPrompt] {
+            for ch in "/syh .]}[{gG?cCtTiIfF-_".chars() {
+                assert_eq!(viewer_command(focus, &ch.to_string(), none()), None);
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_code_and_the_references_list_arm_commands() {
+        let all = [
+            ViewerFocus::Code,
+            ViewerFocus::SearchField,
+            ViewerFocus::GoToLine,
+            ViewerFocus::SymbolPrompt,
+            ViewerFocus::ReasonPrompt,
+            ViewerFocus::RefsList,
+            ViewerFocus::RuleHub,
+        ];
+        let universe = key_universe();
+        for focus in all {
+            let answers = universe
+                .iter()
+                .any(|k| viewer_command(focus, k, none()).is_some());
+            let arms = matches!(focus, ViewerFocus::Code | ViewerFocus::RefsList);
+            assert_eq!(answers, arms, "{focus:?}");
+            assert_eq!(viewer_keys_armed(focus), arms, "{focus:?}");
+        }
+        assert!(viewer_code_keys_armed(ViewerFocus::Code));
+        assert!(!viewer_code_keys_armed(ViewerFocus::RefsList));
+    }
+
+    #[test]
+    fn the_references_list_answers_exactly_its_own_keys() {
+        use ViewerCommand::*;
+        let list = ViewerFocus::RefsList;
+        let cases: &[(&str, ViewerCommand)] = &[
+            ("ArrowDown", RefsMove(FocusMove::Down)),
+            ("ArrowUp", RefsMove(FocusMove::Up)),
+            ("j", RefsMove(FocusMove::Down)),
+            ("K", RefsMove(FocusMove::Up)),
+            ("Enter", RefsOpen),
+            ("Escape", RefsClose),
+        ];
+        for (key, want) in cases {
+            assert_eq!(viewer_command(list, key, none()), Some(*want), "{key}");
+        }
+        // Nothing else: a decision key cannot act while a hit is being chosen.
+        let mut answered: Vec<String> = key_universe()
+            .into_iter()
+            .filter(|k| viewer_command(list, k, none()).is_some())
+            .collect();
+        answered.sort();
+        let mut want: Vec<String> = [
+            "ArrowDown",
+            "ArrowUp",
+            "j",
+            "J",
+            "k",
+            "K",
+            "Enter",
+            "Escape",
+        ]
+        .iter()
+        .map(|k| (*k).to_string())
+        .collect();
+        want.sort();
+        assert_eq!(answered, want);
+        // Held modifiers pass through.
+        for key in ["ArrowDown", "Enter", "Escape", "j"] {
+            for m in [
+                mods(true, false, false, false),
+                mods(false, true, false, false),
+                mods(false, false, true, false),
+            ] {
+                assert_eq!(viewer_command(list, key, m), None, "{key} {m:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_focus_follows_the_surfaces_that_are_open() {
+        let open = |f: fn(&mut OpenSurfaces)| {
+            let mut s = OpenSurfaces::default();
+            f(&mut s);
+            viewer_focus(s)
+        };
+        assert_eq!(viewer_focus(OpenSurfaces::default()), ViewerFocus::Code);
+        assert_eq!(open(|s| s.reason_prompt = true), ViewerFocus::ReasonPrompt);
+        assert_eq!(open(|s| s.goto = true), ViewerFocus::GoToLine);
+        assert_eq!(open(|s| s.search = true), ViewerFocus::SearchField);
+        assert_eq!(open(|s| s.symbol_prompt = true), ViewerFocus::SymbolPrompt);
+        assert_eq!(open(|s| s.refs_list = true), ViewerFocus::RefsList);
+        assert_eq!(open(|s| s.rule_hub = true), ViewerFocus::RuleHub);
+        // The hub sits above everything; a prompt beats the list beneath it.
+        let all = OpenSurfaces {
+            reason_prompt: true,
+            goto: true,
+            search: true,
+            symbol_prompt: true,
+            refs_list: true,
+            rule_hub: true,
+        };
+        assert_eq!(viewer_focus(all), ViewerFocus::RuleHub);
+        assert_eq!(
+            viewer_focus(OpenSurfaces {
+                rule_hub: false,
+                ..all
+            }),
+            ViewerFocus::ReasonPrompt
+        );
+        assert_eq!(
+            viewer_focus(OpenSurfaces {
+                refs_list: true,
+                search: true,
+                ..OpenSurfaces::default()
+            }),
+            ViewerFocus::SearchField
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_hub_and_nothing_else_does() {
+        let esc = |m| closes_hub(ViewerFocus::RuleHub, "Escape", m);
+        assert!(esc(none()));
+        assert!(esc(mods(false, false, false, true)));
+        assert!(!esc(mods(true, false, false, false)));
+        assert!(!esc(mods(false, true, false, false)));
+        // Only while the hub is the focus, and only Escape.
+        for focus in [
+            ViewerFocus::Code,
+            ViewerFocus::RefsList,
+            ViewerFocus::SearchField,
+            ViewerFocus::ReasonPrompt,
+        ] {
+            assert!(!closes_hub(focus, "Escape", none()), "{focus:?}");
+        }
+        for key in key_universe().into_iter().filter(|k| k != "Escape") {
+            assert!(!closes_hub(ViewerFocus::RuleHub, &key, none()), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_decision_key_does_not_act_on_code_that_is_not_on_screen() {
+        use ViewerCommand::*;
+        assert!(!allowed_in_reference_view(Dispose(Confirmed)));
+        assert!(!allowed_in_reference_view(PromptFor(Ignored)));
+        for cmd in [
+            Close,
+            MoveRow(FocusMove::Down),
+            FindingInFile(FocusMove::Up),
+            FileInGroup(FocusMove::Down),
+            BackToFinding,
+            OpenGoToLine,
+            Back,
+            Scroll(ScrollKey::End),
+            ToggleHelp,
+            OpenSearch,
+            OpenSymbols,
+            CopyPermalink,
+            TogglePopover,
+            OpenHub,
+        ] {
+            assert!(allowed_in_reference_view(cmd), "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn search_highlights_survive_scrolling_and_end_at_the_next_navigation() {
+        use ViewerCommand::*;
+        for cmd in [
+            MoveRow(FocusMove::Down),
+            FindingInFile(FocusMove::Down),
+            FileInGroup(FocusMove::Up),
+            BackToFinding,
+            OpenGoToLine,
+            Back,
+            RefsOpen,
+        ] {
+            assert!(clears_search(cmd), "{cmd:?}");
+        }
+        for cmd in [
+            Scroll(ScrollKey::PageDown),
+            ToggleHelp,
+            TogglePopover,
+            OpenSearch,
+            OpenSymbols,
+            CopyPermalink,
+            Dispose(Confirmed),
+            Close,
+        ] {
+            assert!(!clears_search(cmd), "{cmd:?}");
+        }
     }
 
     /// Every key a keyboard can send that this test knows about: all printable ASCII plus the
@@ -1760,15 +2096,38 @@ mod tests {
     }
 
     #[test]
-    fn keys_reserved_for_later_steps_are_not_bound_yet() {
-        for key in [
-            "/", "s", "S", "y", "Y", " ", "h", "H", "n", "N", "p", "P", "u", "U", "Enter",
-        ] {
+    fn keys_the_order_deliberately_leaves_unbound_stay_unbound() {
+        // A.8: no N/P (ambiguous between finding and file), no U (an undo must not be a stray
+        // key), no Enter on the code (native text selection is never fought).
+        for key in ["n", "N", "p", "P", "u", "U", "Enter"] {
             assert_eq!(
                 viewer_command(ViewerFocus::Code, key, none()),
                 None,
-                "{key} must stay unbound in this step"
+                "{key} must stay unbound"
             );
+        }
+    }
+
+    #[test]
+    fn the_new_keys_are_the_viewers_alone() {
+        for key in ["/", "s", "S", "y", "Y", " ", "h", "H"] {
+            assert_eq!(pane_command(PaneFocus::Cursor, key, none()), None, "{key}");
+            assert!(
+                viewer_command(ViewerFocus::Code, key, none()).is_some(),
+                "{key}"
+            );
+            // A held modifier leaves them to the webview (Cmd-F, Cmd-S, Ctrl-Y...).
+            for m in [
+                mods(true, false, false, false),
+                mods(false, false, true, false),
+                mods(false, true, false, false),
+            ] {
+                assert_eq!(
+                    viewer_command(ViewerFocus::Code, key, m),
+                    None,
+                    "{key} {m:?}"
+                );
+            }
         }
     }
 
@@ -2037,6 +2396,7 @@ mod tests {
         let mut h = Vec::new();
         let e = |n: usize| HistoryEntry {
             key: "k".into(),
+            path: "a.rs".into(),
             line: n,
         };
         push_history(&mut h, e(1));
@@ -2142,12 +2502,40 @@ mod tests {
     fn back_pops_a_scroll_for_this_finding_and_a_move_for_another() {
         let e = |k: &str, line| HistoryEntry {
             key: k.into(),
+            path: "a.rs".into(),
             line,
         };
         let mut h = vec![e("a", 5), e("b", 9)];
-        assert_eq!(back_step(&mut h, "a"), BackStep::Finding("b".into()));
-        assert_eq!(back_step(&mut h, "a"), BackStep::Line(5));
-        assert_eq!(back_step(&mut h, "a"), BackStep::Nothing);
+        assert_eq!(
+            back_step(&mut h, "a", "a.rs"),
+            BackStep::Finding("b".into())
+        );
+        assert_eq!(back_step(&mut h, "a", "a.rs"), BackStep::Line(5));
+        assert_eq!(back_step(&mut h, "a", "a.rs"), BackStep::Nothing);
+    }
+
+    #[test]
+    fn back_returns_through_a_reference_excursion_one_hop_at_a_time() {
+        // On finding `a` (in a.rs) at line 10: S, jump to b.rs:40, S again, jump to c.rs:7.
+        let mut h = Vec::new();
+        let at = |path: &str, line| HistoryEntry {
+            key: "a".into(),
+            path: path.into(),
+            line,
+        };
+        push_history(&mut h, at("a.rs", 10));
+        push_history(&mut h, at("b.rs", 40));
+        // Backspace: from c.rs to b.rs:40 (still not the finding's file).
+        assert_eq!(
+            back_step(&mut h, "a", "a.rs"),
+            BackStep::Location {
+                path: "b.rs".into(),
+                line: 40
+            }
+        );
+        // Backspace: from b.rs to the finding's own line.
+        assert_eq!(back_step(&mut h, "a", "a.rs"), BackStep::Line(10));
+        assert_eq!(back_step(&mut h, "a", "a.rs"), BackStep::Nothing);
     }
 
     #[test]
@@ -2228,6 +2616,7 @@ mod tests {
             &mut history,
             HistoryEntry {
                 key: a.clone(),
+                path: "a.rs".into(),
                 line: 10,
             },
         );
@@ -2257,7 +2646,7 @@ mod tests {
         let cursor = RowCursor::focused_on(b.clone()).resolve(&table);
         assert_eq!(cursor.key(), Some(b.as_str()));
         // Backspace: the entry is for A, another finding than the one on screen (B).
-        let BackStep::Finding(target) = back_step(&mut history, &b) else {
+        let BackStep::Finding(target) = back_step(&mut history, &b, "a.rs") else {
             panic!()
         };
         assert_eq!(target, a);

@@ -233,6 +233,12 @@ pub struct FindingView {
     /// location, while this is the set of other LOCATIONS this one defect touches.
     #[serde(default)]
     pub also_locations: Vec<MergedSiteView>,
+    /// The detector's placeholder bindings for this finding (`table` -> `profiles`,
+    /// `function-name` -> `send-invite`), mirrored from `camerata_server::onboard::Finding::captures`.
+    /// The code viewer's `S` key pre-fills its symbol search from here. Empty for most
+    /// AI-judged findings.
+    #[serde(default)]
+    pub captures: std::collections::BTreeMap<String, String>,
     #[serde(default, flatten)]
     pub kind: Option<camerata_api_types::audit::FindingKind>,
 }
