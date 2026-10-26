@@ -28,6 +28,7 @@ mod ancestry;
 pub mod clone;
 pub mod ecma;
 pub mod enclosing;
+pub mod highlight;
 pub mod paths;
 pub mod python;
 pub mod resolver;

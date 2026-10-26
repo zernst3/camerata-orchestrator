@@ -47,6 +47,11 @@ tree-sitter = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-javascript = "0.25"
 tree-sitter-python = "0.25"
+# Server-side syntax highlighting for the in-app code viewer (`extract::highlight`): the same
+# 0.25 tree-sitter family, plus the Rust grammar (Rust parsing elsewhere is `syn`, which has no
+# highlight queries). Decision: docs/OVERNIGHT_DECISIONS.md 2026-10-23.
+tree-sitter-highlight = "0.25"
+tree-sitter-rust = "0.24"
 
 [dev-dependencies]
 # subprocess streaming tests (spawn sh to emit lines and verify heartbeat fires).
