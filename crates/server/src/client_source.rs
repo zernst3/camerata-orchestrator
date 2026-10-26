@@ -64,6 +64,8 @@ mod source_file_tests;
 #[cfg(test)]
 mod status_tests;
 #[cfg(test)]
+mod symbol_refs_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
 
 pub use records::{DeletionRecord, PurgeOutcome, PurgedItem, PurgedKind, RefetchRecord};

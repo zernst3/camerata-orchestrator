@@ -1300,6 +1300,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
         .route("/api/onboard/finding-context", get(onboard_finding_context))
         .route("/api/onboard/source-file", get(onboard_source_file))
+        .route("/api/onboard/symbol-refs", get(onboard_symbol_refs))
         .route("/api/onboard/finding-fix", get(onboard_finding_fix))
         .route("/api/git/detect-repo", post(detect_repo))
         .route("/api/gate-probe", post(gate_probe))
@@ -7291,6 +7292,19 @@ async fn onboard_source_file(
     axum::extract::Query(q): axum::extract::Query<crate::onboard::source_file::SourceFileParams>,
 ) -> Response {
     crate::onboard::source_file::source_file(&state, q).await
+}
+
+/// `GET /api/onboard/symbol-refs` — where a symbol is used: one read-only whole-word search at
+/// the inspected commit, noise paths dropped, every hit line redacted, at most 200 hits with a
+/// `more` flag (`WORK_ORDER_REVIEW_SPEED.md` A.6). Shares the source-file resolver
+/// (`client_source::read::source_for_read`), so a deleted source answers `status:
+/// "source_deleted"` and runs nothing. Read-only; never cached by the webview. Shape and
+/// statuses: `onboard::symbol_refs` module docs.
+async fn onboard_symbol_refs(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<crate::onboard::symbol_refs::SymbolRefsParams>,
+) -> Response {
+    crate::onboard::symbol_refs::symbol_refs(&state, q).await
 }
 
 /// Query parameters for `GET /api/onboard/finding-fix`.
