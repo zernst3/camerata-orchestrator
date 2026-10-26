@@ -94,6 +94,10 @@ pub struct SourceFileView {
     /// The lines of `window`, in order.
     #[serde(default)]
     pub lines: Vec<Vec<Segment>>,
+    /// The `around` line the request that produced this answer named. Set by the client, not
+    /// the server: the server's `block` is for that line (see [`block_for`]).
+    #[serde(skip)]
+    pub requested_around: Option<usize>,
 }
 
 /// What a response means for the viewer's body.
@@ -647,7 +651,7 @@ pub struct KeyRow {
 pub const KEY_ROWS: [KeyRow; 11] = [
     KeyRow {
         label: "Esc",
-        action: "Close the viewer",
+        action: "Close the key list, else the viewer",
         probes: &[("Escape", false)],
     },
     KeyRow {
@@ -994,6 +998,176 @@ pub fn push_history(stack: &mut Vec<HistoryEntry>, entry: HistoryEntry) {
 /// The header strip's line label: `line 12 of 340`.
 pub fn line_label(line: usize, total: usize) -> String {
     format!("line {line} of {total}")
+}
+
+// ── The finding's block, kept apart from the file's ──────────────────────────────────────
+
+/// The enclosing block of the finding's own line, if `view` was requested for that line.
+///
+/// The server computes `block` for the `around` the request named, so a response only carries
+/// THIS finding's block when it was fetched for this finding's line. A cached whole file was
+/// fetched for another finding's line, and a page of a windowed file for the centre of the
+/// viewport; their `block` marks other code. `Some(block)` (which may itself be `None`: a plain
+/// file has no block) is a block that can be trusted; `None` means ask again.
+pub fn block_for(view: &SourceFileView, violation_line: usize) -> Option<Option<BlockView>> {
+    (view.requested_around == Some(violation_line)).then(|| view.block.clone())
+}
+
+/// The block for a small `finding-context` answer: `start_line` and the number of lines.
+pub fn block_from_context(start_line: usize, line_count: usize, kind: &str) -> Option<BlockView> {
+    (start_line > 0 && line_count > 0).then(|| BlockView {
+        start_line,
+        end_line: start_line + line_count - 1,
+        kind: kind.to_string(),
+    })
+}
+
+// ── What stays for the life of one open viewer ───────────────────────────────────────────
+
+/// The last answer the LRU would not keep (a working-tree read, a refusal, or a repo with no
+/// recorded commit), kept only while the viewer stays open so moving between findings in one file
+/// does not refetch it. Cleared when the viewer closes; never shared across opens.
+#[derive(Clone, Debug, Default)]
+pub struct SessionCopy {
+    entry: Option<(FileKey, Arc<SourceFileView>)>,
+}
+
+impl SessionCopy {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The kept answer for `key`, if it carries `line`.
+    pub fn lookup(&self, key: &FileKey, line: usize) -> Option<Arc<SourceFileView>> {
+        self.entry
+            .as_ref()
+            .filter(|(k, v)| k == key && v.covers(line))
+            .map(|(_, v)| Arc::clone(v))
+    }
+
+    pub fn put(&mut self, key: FileKey, view: Arc<SourceFileView>) {
+        self.entry = Some((key, view));
+    }
+
+    pub fn clear(&mut self) {
+        self.entry = None;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entry.is_none()
+    }
+}
+
+// ── Back, closing, and what follows a decision ───────────────────────────────────────────
+
+/// Where `Backspace` goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BackStep {
+    /// Scroll to this line of the finding already on screen.
+    Line(usize),
+    /// Move the cursor to this finding (the viewer then opens on it).
+    Finding(String),
+    /// The history is empty.
+    Nothing,
+}
+
+/// Pop the history. An entry for the finding on screen is a scroll; an entry for another finding
+/// is a cursor move, which the caller must check can still be reached.
+pub fn back_step(history: &mut Vec<HistoryEntry>, current_key: &str) -> BackStep {
+    match history.pop() {
+        Some(e) if e.key == current_key => BackStep::Line(e.line),
+        Some(e) => BackStep::Finding(e.key),
+        None => BackStep::Nothing,
+    }
+}
+
+/// What `Esc` closes: the key list if it is open, else the viewer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseTarget {
+    Help,
+    Viewer,
+}
+
+pub fn close_target(help_open: bool) -> CloseTarget {
+    if help_open {
+        CloseTarget::Help
+    } else {
+        CloseTarget::Viewer
+    }
+}
+
+/// What the viewer does once the pane's disposition path has answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisposeOutcome {
+    /// Close the viewer's reason prompt. False when the write was refused: the prompt stays open
+    /// with what was typed.
+    pub close_prompt: bool,
+    /// The finding to move the cursor to, when the decision landed and the file has another
+    /// undecided finding. `None` leaves the cursor where the queue put it.
+    pub goto: Option<String>,
+}
+
+/// `landed` is the pane path's own answer (true only when it wrote a disposition), NOT an
+/// inference from the disposition map: a blank reason for a row already in that state leaves the
+/// map unchanged and must still read as refused. `target` was chosen BEFORE the write.
+pub fn finish_disposition(landed: bool, target: Option<String>) -> DisposeOutcome {
+    if landed {
+        DisposeOutcome {
+            close_prompt: true,
+            goto: target,
+        }
+    } else {
+        DisposeOutcome {
+            close_prompt: false,
+            goto: None,
+        }
+    }
+}
+
+// ── Which commit a repo is read at ───────────────────────────────────────────────────────
+
+/// The commit per repo, and the repos whose scan and audit recorded different commits.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShaChoice {
+    pub shas: HashMap<String, String>,
+    /// Repos where the two runs disagree. They are read at the scan's commit and the viewer says
+    /// so.
+    pub conflicts: HashSet<String>,
+}
+
+/// The note shown when a repo's two runs recorded different commits.
+pub const SHA_CONFLICT_NOTE: &str =
+    "The scan and the audit ran at different commits; line numbers may differ";
+
+/// Merge the `(repo, sha)` pairs the deterministic scan recorded with those the audit recorded.
+/// A finding carries no origin, so which run produced it cannot be told. Where only one run
+/// recorded a commit that one is used. Where both did and they agree, that is the commit. Where
+/// they differ the scan's wins and the repo is listed in `conflicts`: never a silent pick.
+pub fn merge_audited_shas(
+    scan: &[(String, Option<String>)],
+    audit: &[(String, Option<String>)],
+) -> ShaChoice {
+    let known = |list: &[(String, Option<String>)]| -> HashMap<String, String> {
+        list.iter()
+            .filter_map(|(repo, sha)| {
+                sha.as_ref()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| (repo.clone(), s.clone()))
+            })
+            .collect()
+    };
+    let (scan, audit) = (known(scan), known(audit));
+    let mut out = ShaChoice::default();
+    for (repo, sha) in &audit {
+        out.shas.insert(repo.clone(), sha.clone());
+    }
+    for (repo, sha) in &scan {
+        if audit.get(repo).is_some_and(|a| a != sha) {
+            out.conflicts.insert(repo.clone());
+        }
+        out.shas.insert(repo.clone(), sha.clone());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1923,5 +2097,175 @@ mod tests {
             RowCursor::focused_on(target).resolve(&visible).key(),
             Some(finding_key(&fs[1]).as_str())
         );
+    }
+
+    // ── block, session copy, back, close, dispose outcome, shas ──
+
+    #[test]
+    fn a_block_is_trusted_only_for_the_line_the_request_named() {
+        let mut v = parse(ok_json());
+        v.requested_around = Some(3);
+        assert_eq!(block_for(&v, 3).unwrap().unwrap().kind, "function");
+        // A cached file fetched for another finding's line, or a page centred elsewhere.
+        assert_eq!(block_for(&v, 9), None);
+        v.requested_around = None;
+        assert_eq!(block_for(&v, 3), None);
+        // A plain file has no block, and that is an answer.
+        let mut plain = parse(ok_json());
+        plain.block = None;
+        plain.requested_around = Some(3);
+        assert_eq!(block_for(&plain, 3), Some(None));
+        assert_eq!(block_from_context(10, 5, "function").unwrap().end_line, 14);
+        assert!(block_from_context(0, 5, "function").is_none());
+        assert!(block_from_context(10, 0, "function").is_none());
+    }
+
+    #[test]
+    fn the_session_copy_holds_one_answer_per_open_and_clears() {
+        let mut s = SessionCopy::new();
+        let mut j = ok_json();
+        j["source"] = "working_tree".into();
+        let view = Arc::new(parse(j));
+        s.put(key("a.rs"), Arc::clone(&view));
+        assert!(s.lookup(&key("a.rs"), 2).is_some());
+        assert!(
+            s.lookup(&key("b.rs"), 2).is_none(),
+            "another file is a miss"
+        );
+        s.put(key("b.rs"), view);
+        assert!(s.lookup(&key("a.rs"), 2).is_none(), "one answer is kept");
+        s.clear();
+        assert!(s.is_empty() && s.lookup(&key("b.rs"), 2).is_none());
+    }
+
+    #[test]
+    fn back_pops_a_scroll_for_this_finding_and_a_move_for_another() {
+        let e = |k: &str, line| HistoryEntry {
+            key: k.into(),
+            line,
+        };
+        let mut h = vec![e("a", 5), e("b", 9)];
+        assert_eq!(back_step(&mut h, "a"), BackStep::Finding("b".into()));
+        assert_eq!(back_step(&mut h, "a"), BackStep::Line(5));
+        assert_eq!(back_step(&mut h, "a"), BackStep::Nothing);
+    }
+
+    #[test]
+    fn escape_closes_the_key_list_before_the_viewer() {
+        assert_eq!(close_target(true), CloseTarget::Help);
+        assert_eq!(close_target(false), CloseTarget::Viewer);
+    }
+
+    #[test]
+    fn a_refused_decision_keeps_the_prompt_and_a_landed_one_advances() {
+        assert_eq!(
+            finish_disposition(false, Some("next".into())),
+            DisposeOutcome {
+                close_prompt: false,
+                goto: None
+            }
+        );
+        assert_eq!(
+            finish_disposition(true, Some("next".into())),
+            DisposeOutcome {
+                close_prompt: true,
+                goto: Some("next".into())
+            }
+        );
+        assert_eq!(
+            finish_disposition(true, None),
+            DisposeOutcome {
+                close_prompt: true,
+                goto: None
+            }
+        );
+    }
+
+    #[test]
+    fn the_scan_wins_where_the_runs_differ_and_the_difference_is_named() {
+        let s = |r: &str, sha: Option<&str>| (r.to_string(), sha.map(str::to_string));
+        let scan = vec![
+            s("o/a", Some("1111")),
+            s("o/b", Some("2222")),
+            s("o/c", None),
+            s("o/d", Some("")),
+        ];
+        let audit = vec![
+            s("o/a", Some("1111")),
+            s("o/b", Some("9999")),
+            s("o/c", Some("3333")),
+            s("o/e", Some("5555")),
+        ];
+        let c = merge_audited_shas(&scan, &audit);
+        assert_eq!(c.shas["o/a"], "1111");
+        assert_eq!(c.shas["o/b"], "2222", "the scan's commit");
+        assert_eq!(c.shas["o/c"], "3333", "only the audit recorded one");
+        assert_eq!(c.shas["o/e"], "5555");
+        assert!(!c.shas.contains_key("o/d"), "an empty sha is no sha");
+        assert_eq!(c.conflicts, HashSet::from(["o/b".to_string()]));
+        assert!(SHA_CONFLICT_NOTE.contains("different commits"));
+        assert_eq!(merge_audited_shas(&[], &[]), ShaChoice::default());
+    }
+
+    /// The whole sequence the review asked for, on the pure pieces: open on A, go to a line
+    /// (history), `]` to B, `[` back to A, `c` on A, then Backspace. The history entry names A,
+    /// which has left the table, so the cursor must not move.
+    #[test]
+    fn backspace_after_deciding_the_finding_in_history_does_not_move_the_cursor() {
+        use crate::triage::RowCursor;
+        let fs = vec![
+            finding("R-A", "a.rs", 10, "high"),
+            finding("R-B", "a.rs", 40, "high"),
+        ];
+        let mut d = HashMap::new();
+        let mut table: Vec<String> = fs.iter().map(finding_key).collect();
+        let (a, b) = (table[0].clone(), table[1].clone());
+        let nav = |table: &[String]| table.iter().cloned().collect::<HashSet<_>>();
+
+        // Open on A; G12 pushes (A, 10).
+        let mut history = Vec::new();
+        push_history(
+            &mut history,
+            HistoryEntry {
+                key: a.clone(),
+                line: 10,
+            },
+        );
+        // `]` to B, `[` back to A.
+        let items = file_findings(&fs, &d, "o/r", "a.rs", &nav(&table));
+        let FileStep::Move(k) = step_in_file(&items, &a, FocusMove::Down) else {
+            panic!()
+        };
+        assert_eq!(k, b);
+        assert_eq!(
+            RowCursor::focused_on(k).resolve(&table).key(),
+            Some(b.as_str())
+        );
+        let FileStep::Move(k) = step_in_file(&items, &b, FocusMove::Up) else {
+            panic!()
+        };
+        assert_eq!(
+            RowCursor::focused_on(k).resolve(&table).key(),
+            Some(a.as_str())
+        );
+        // `c` on A: it lands, the target is B, A leaves the table.
+        let target = advance_after_disposition(&items, &a);
+        decide(&mut d, &fs[0], Confirmed);
+        table.retain(|k| *k != a);
+        let outcome = finish_disposition(true, target);
+        assert_eq!(outcome.goto.as_deref(), Some(b.as_str()));
+        let cursor = RowCursor::focused_on(b.clone()).resolve(&table);
+        assert_eq!(cursor.key(), Some(b.as_str()));
+        // Backspace: the entry is for A, another finding than the one on screen (B).
+        let BackStep::Finding(target) = back_step(&mut history, &b) else {
+            panic!()
+        };
+        assert_eq!(target, a);
+        // The caller's reach check: A is no longer a row, so the cursor stays on B.
+        assert!(!table.contains(&target), "A has left the table");
+        assert_eq!(cursor.resolve(&table).key(), Some(b.as_str()));
+        // Had the cursor been aimed at A anyway, resolve would have clamped to row 0: the check
+        // is what prevents it.
+        assert_eq!(RowCursor::focused_on(a).resolve(&table).index(), 0);
     }
 }

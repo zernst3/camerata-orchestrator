@@ -268,22 +268,25 @@ fn context_kind_label(kind: &str) -> &'static str {
 const FINDING_CTX_CAP: usize = 80;
 const FINDING_CTX_HALF: usize = 40;
 
-/// The commit each repo was inspected at, from the report's `audited_refs` (the audited report's
-/// provenance wins over the scan's). Repos with no recorded commit are left out: the server then
-/// reads the commit the project's latest inspection recorded.
+/// The commit each repo was inspected at, from the scan's and the audit's `audited_refs`, and the
+/// repos where the two differ (see `camerata_ui_core::viewer::merge_audited_shas`). Repos with no
+/// recorded commit are left out: the server then reads the commit the project's latest inspection
+/// recorded.
 pub(super) fn audited_shas(
     report: &ScanReportView,
     audited: Option<&ScanReportView>,
-) -> std::collections::HashMap<String, String> {
-    let mut out = std::collections::HashMap::new();
-    for r in std::iter::once(report).chain(audited) {
-        for a in &r.provenance.audited_refs {
-            if let Some(sha) = a.sha.as_ref().filter(|s| !s.is_empty()) {
-                out.insert(a.repo.clone(), sha.clone());
-            }
-        }
-    }
-    out
+) -> camerata_ui_core::viewer::ShaChoice {
+    let pairs = |r: &ScanReportView| -> Vec<(String, Option<String>)> {
+        r.provenance
+            .audited_refs
+            .iter()
+            .map(|a| (a.repo.clone(), a.sha.clone()))
+            .collect()
+    };
+    camerata_ui_core::viewer::merge_audited_shas(
+        &pairs(report),
+        &audited.map(pairs).unwrap_or_default(),
+    )
 }
 
 /// The "Code context" section of the finding-detail modal. Fetches ON-DEMAND every time it
@@ -646,8 +649,8 @@ pub(super) use camerata_ui_core::triage::{deviation_groups, rule_group_label, De
 // five-second undo. This layer owns the focus signal, the keydown wiring and the rsx; it owns
 // none of the rules.
 pub(super) use camerata_ui_core::triage::{
-    deviation_headline, pane_command, pane_keys_armed, site_count, state_hotkey, KeyMods,
-    MergedSiteView, PaneCommand, PaneFocus, RowCursor, UndoEntry, UndoOutcome,
+    deviation_headline, next_pane_focus, pane_command, pane_keys_armed, site_count, state_hotkey,
+    KeyMods, MergedSiteView, PaneCommand, PaneFocus, RowCursor, UndoEntry, UndoOutcome,
 };
 
 // Pass 2, THE GATED CONVENTION COMMIT (design §3, Q3 + Q4 in §12/§13). Every rule about what
@@ -3440,6 +3443,9 @@ pub(super) fn FindingsTable(
     /// latest inspection.
     #[props(default)]
     audited_shas: std::collections::HashMap<String, String>,
+    /// Repos whose scan and audit recorded different commits: the viewer says so.
+    #[props(default)]
+    sha_conflicts: std::collections::HashSet<String>,
     /// The project the findings belong to, passed to the code viewer's requests.
     #[props(default)]
     project_id: String,
@@ -3804,9 +3810,12 @@ pub(super) fn FindingsTable(
     // the finding the cursor is on now, not the one it was on when the viewer opened.
     let key_to_row_id_pane = key_to_row_id.clone();
     let focused_for_apply = focused_finding.clone();
-    let apply_disposition = use_callback(move |(state, reason): (TriageState, String)| {
+    // Answers `true` only when a disposition was written. A caller must branch on this and not
+    // infer it from the disposition map: a blank reason for a row already in that state leaves
+    // the map unchanged and is still a refusal.
+    let apply_disposition = use_callback(move |(state, reason): (TriageState, String)| -> bool {
         let Some(f) = focused_for_apply.clone() else {
-            return;
+            return false;
         };
         let now = epoch.elapsed().as_millis() as u64;
         now_ms.set(now);
@@ -3825,7 +3834,7 @@ pub(super) fn FindingsTable(
                     state.label()
                 ),
             );
-            return;
+            return false;
         };
         dispositions.set(model.dispositions);
         prompt.set(None);
@@ -3866,6 +3875,7 @@ pub(super) fn FindingsTable(
                 }
             }
         });
+        true
     });
 
     // THE UNDO, shared by the pane's button and the code viewer's: one action, two surfaces.
@@ -3924,16 +3934,20 @@ pub(super) fn FindingsTable(
             };
             let mut req_sig = req.0;
             req_sig.set(None);
-            if key_to_row_id.contains_key(&want) {
-                super::viewer::expand_groups_for(handle, &want);
-                cursor.set(RowCursor::focused_on(want));
-                viewer_open.set(true);
-            } else {
+            if !key_to_row_id.contains_key(&want) {
                 crate::toast::push_toast(
                     toasts,
                     crate::toast::ToastKind::Info,
                     "That finding is not in this table. Switch to the table it is in, then open the viewer.",
                 );
+                return;
+            }
+            match super::viewer::reach_finding(handle, &want) {
+                Ok(()) => {
+                    cursor.set(RowCursor::focused_on(want));
+                    viewer_open.set(true);
+                }
+                Err(why) => crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, why),
             }
         });
     }
@@ -3962,6 +3976,7 @@ pub(super) fn FindingsTable(
             dispositions,
             all_findings: std::sync::Arc::new(all_findings.clone()),
             shas: std::sync::Arc::new(audited_shas.clone()),
+            sha_conflicts: std::sync::Arc::new(sha_conflicts.clone()),
             project_id: project_id.clone(),
             open: viewer_open,
             undo_entry,
@@ -4467,10 +4482,12 @@ pub(super) fn FindingsTable(
                 // A blur out of the pane while the reason prompt is open must not disarm
                 // the prompt's own focus state — the textarea is INSIDE the pane, so
                 // focusing it fires the region's `focusout` first.
-                if f == PaneFocus::Elsewhere && prompt.peek().is_some() {
-                    return;
+                //
+                // The same holds the other way: closing the code viewer refocuses the pane,
+                // and with the reason prompt still open that must not re-arm the keys.
+                if let Some(next) = next_pane_focus(f, prompt.peek().is_some()) {
+                    pane_focus.set(next);
                 }
-                pane_focus.set(f);
             }),
             on_prompt_reason: Callback::new(move |r: String| prompt_reason.set(r)),
             on_prompt_commit: Callback::new(move |()| {
@@ -8089,6 +8106,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                     // keying on the view remounts the table so its frozen rows reflect the switch.
                     // Fed the QUEUE rows only: the informational kinds have their own panels.
                     {
+                        let sha_choice = audited_shas(&report, audited.as_ref());
                         rsx! {
                             FindingsTable {
                                 key: "{triage_view().label()}",
@@ -8099,7 +8117,8 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 dispositions,
                                 on_open_hub: Callback::new(move |r: RuleHubRequest| hub_open.set(Some(r))),
                                 queue_rule_filter,
-                                audited_shas: audited_shas(&report, audited.as_ref()),
+                                audited_shas: sha_choice.shas.clone(),
+                                sha_conflicts: sha_choice.conflicts.clone(),
                                 project_id: project_id.clone(),
                             }
                         }

@@ -32,18 +32,20 @@ use camerata_ui_core::triage::{
     finding_key, Disposition, FindingView, KeyMods, RowCursor, TriageState, UndoEntry,
 };
 use camerata_ui_core::viewer::{
-    advance_after_disposition, cut_line, file_findings, finding_position, gutter_marks,
-    line_at_scroll, line_label, more_chars_label, page_request, parse_goto_line, prefetch_target,
-    push_history, scroll_top_for_line, scrolled, severity_class, spacers, step_file_in_group,
-    step_in_file, viewer_command, viewer_focus, viewer_keys_armed, virtual_range, BannerKind,
-    FileKey, FileStep, GutterMark, HistoryEntry, SourceFileView, SourceOutcome, ViewerCache,
-    ViewerCommand, CODE_LINE_H_PX, KEY_ROWS, MAX_LINE_CHARS, OVERSCAN_LINES, SCROLL_QUANTUM_LINES,
+    advance_after_disposition, back_step, block_for, block_from_context, close_target, cut_line,
+    file_findings, finding_position, finish_disposition, gutter_marks, line_at_scroll, line_label,
+    more_chars_label, page_request, parse_goto_line, prefetch_target, push_history,
+    scroll_top_for_line, scrolled, severity_class, spacers, step_file_in_group, step_in_file,
+    viewer_command, viewer_focus, viewer_keys_armed, virtual_range, BackStep, BannerKind,
+    BlockView, CloseTarget, FileKey, FileStep, GutterMark, HistoryEntry, SessionCopy,
+    SourceFileView, SourceOutcome, ViewerCache, ViewerCommand, CODE_LINE_H_PX, KEY_ROWS,
+    MAX_LINE_CHARS, OVERSCAN_LINES, SCROLL_QUANTUM_LINES, SHA_CONFLICT_NOTE,
 };
 use chorale_core::GroupKey;
 use chorale_dioxus::UseTableHandle;
 use dioxus::prelude::*;
 
-use super::scan::{undo_banner_of, UndoBanner, RULE_GROUP_COLUMN};
+use super::scan::undo_banner_of;
 
 /// The DOM id of the viewer's focusable root. The keydown handler lives here.
 pub(super) const VIEWER_ID: &str = "camerata-code-viewer";
@@ -92,7 +94,48 @@ pub(super) async fn fetch_source_file(
         .await
         .ok()?;
     let value: serde_json::Value = resp.json().await.ok()?;
-    serde_json::from_value(value).ok()
+    let mut view: SourceFileView = serde_json::from_value(value).ok()?;
+    // The server's `block` is for the line it was asked about; remember which that was.
+    view.requested_around = around;
+    Some(view)
+}
+
+/// The enclosing block of one line, from the small `finding-context` endpoint. Used when the file
+/// came from the cache (fetched for another finding's line), so the band marks THIS finding's code
+/// without refetching the whole file.
+pub(super) async fn fetch_block(
+    repo: &str,
+    path: &str,
+    line: usize,
+    sha: Option<&str>,
+    project: Option<&str>,
+) -> Option<BlockView> {
+    let mut params = vec![
+        ("repo", repo.to_string()),
+        ("path", path.to_string()),
+        ("line", line.to_string()),
+    ];
+    if let Some(sha) = sha.filter(|s| !s.is_empty()) {
+        params.push(("sha", sha.to_string()));
+    }
+    if let Some(project) = project.filter(|p| !p.is_empty()) {
+        params.push(("project", project.to_string()));
+    }
+    let resp = reqwest::Client::new()
+        .get(format!("{}/api/onboard/finding-context", crate::bff_base()))
+        .query(&params)
+        .send()
+        .await
+        .ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    if v.get("status").and_then(|s| s.as_str()) != Some("ok") {
+        return None;
+    }
+    block_from_context(
+        usize::try_from(v.get("start_line")?.as_u64()?).ok()?,
+        v.get("lines")?.as_array()?.len(),
+        v.get("kind").and_then(|k| k.as_str()).unwrap_or(""),
+    )
 }
 
 // ── What the props-only component is given ───────────────────────────────────────────────
@@ -118,10 +161,12 @@ pub(super) struct ViewerFinding {
     pub snippet: String,
     /// The first 7 characters of the commit the report recorded, when it recorded one.
     pub sha7: String,
+    /// The scan and the audit recorded different commits for this repo.
+    pub sha_conflict: bool,
 }
 
 impl ViewerFinding {
-    pub(super) fn from_finding(f: &FindingView, sha: &str) -> Self {
+    pub(super) fn from_finding(f: &FindingView, sha: &str, sha_conflict: bool) -> Self {
         Self {
             repo: f.repo.clone(),
             path: f.path.clone(),
@@ -130,6 +175,7 @@ impl ViewerFinding {
             line: f.line,
             snippet: f.snippet.clone(),
             sha7: camerata_ui_core::source::short_sha(sha).to_string(),
+            sha_conflict,
         }
     }
 }
@@ -190,6 +236,7 @@ fn line_spans(view: &SourceFileView, segments: &[camerata_ui_core::viewer::Segme
 fn code_body(
     view: &SourceFileView,
     finding: &ViewerFinding,
+    block: Option<&BlockView>,
     marks: &[GutterMark],
     scroll_top: f64,
     viewport_px: f64,
@@ -214,7 +261,6 @@ fn code_body(
     .within(w.from, w.to);
     let (pad_top, pad_bottom) = spacers(total, range, CODE_LINE_H_PX);
     let mark_at: HashMap<usize, &GutterMark> = marks.iter().map(|m| (m.line, m)).collect();
-    let block = view.block.clone();
     let sev = severity_class(&finding.severity);
     let hit = finding.line;
     rsx! {
@@ -232,7 +278,6 @@ fn code_body(
                     for n in range.first..=range.last {
                         {
                             let in_band = block
-                                .as_ref()
                                 .is_some_and(|b| n >= b.start_line && n <= b.end_line);
                             let class = line_class(n == hit, in_band, line_cursor == Some(n), sev);
                             let mark = mark_at.get(&n).copied();
@@ -375,6 +420,10 @@ pub(super) fn CodeViewer(
     /// Its key, for the `data-finding-key` attribute the one-cursor test reads.
     finding_key: String,
     file: FileStateView,
+    /// The finding's own enclosing block, which the band marks. It is NOT read from `file`: a
+    /// cached or paged answer carries the block of some other line.
+    #[props(default)]
+    block: Option<BlockView>,
     /// One marker per cited line in this file.
     #[props(default)]
     marks: Vec<GutterMark>,
@@ -392,7 +441,6 @@ pub(super) fn CodeViewer(
     #[props(default)]
     prompt: Option<TriageState>,
     #[props(default)] prompt_reason: String,
-    #[props(default)] undo: Option<UndoBanner>,
     /// The one-line message in the status strip.
     #[props(default)]
     status: Option<String>,
@@ -409,10 +457,12 @@ pub(super) fn CodeViewer(
     #[props(default)] on_prompt_reason: Callback<String>,
     #[props(default)] on_prompt_commit: Callback<()>,
     #[props(default)] on_prompt_cancel: Callback<()>,
-    #[props(default)] on_undo: Callback<()>,
     #[props(default)] on_mark: Callback<String>,
     #[props(default)] on_line: Callback<usize>,
     #[props(default)] on_open_modal: Callback<()>,
+    /// The live undo bar, supplied by a component that owns the 250 ms ticker, so the ticker
+    /// re-renders that bar and not the viewer.
+    children: Element,
 ) -> Element {
     let focus = viewer_focus(prompt.is_some(), goto.is_some());
     let armed = viewer_keys_armed(focus);
@@ -490,6 +540,9 @@ pub(super) fn CodeViewer(
                         "{b.text}"
                     }
                 }
+                if finding.sha_conflict && shows_code {
+                    div { class: "cv-banner cv-banner-amber", "{SHA_CONFLICT_NOTE}" }
+                }
                 if let Some(s) = status.clone() {
                     div { class: "cv-status", "{s}" }
                 }
@@ -501,7 +554,7 @@ pub(super) fn CodeViewer(
                         {note_body("The server did not answer. The file could not be loaded.", Some(&finding.snippet), false, on_open_modal)}
                     },
                     (FileStateView::Loaded(v), Some(SourceOutcome::Code)) => rsx! {
-                        {code_body(v, &finding, &marks, scroll_top, viewport_px, line_cursor, on_scroll, on_scroll_ready, on_mark, on_line)}
+                        {code_body(v, &finding, block.as_ref(), &marks, scroll_top, viewport_px, line_cursor, on_scroll, on_scroll_ready, on_mark, on_line)}
                     },
                     // Deleted source: the message and NO code, not even the stored line.
                     (_, Some(SourceOutcome::SourceDeleted(text))) => rsx! {
@@ -530,17 +583,7 @@ pub(super) fn CodeViewer(
                         }
                     }
                 }
-                if let Some(u) = undo.clone() {
-                    div { class: "pane-undo cv-undo",
-                        span { class: "pane-undo-msg", "{u.message}" }
-                        button {
-                            class: "btn-edit-sm pane-undo-btn",
-                            onclick: move |_| on_undo.call(()),
-                            "Undo"
-                        }
-                        span { class: "pane-undo-left", "{u.seconds_left}s" }
-                    }
-                }
+                {children}
                 if let Some(state) = prompt {
                     div { class: "pane-reason-prompt cv-prompt",
                         label { class: "rule-modal-label",
@@ -644,44 +687,83 @@ fn set_dom_scroll(px: f64) {
     ));
 }
 
-/// The collapsed groups that hide `key`'s row. The queue is grouped rule group then file, and
-/// every group starts collapsed; a collapsed row is not in chorale's visible view, and a cursor
-/// aimed at it would clamp to a neighbour. At most two groups (the rule group, then the file).
-pub(super) fn collapsed_groups_hiding(
-    state: &chorale_core::TableState<FindingView>,
-    key: &str,
-) -> Vec<GroupKey> {
-    let Some((_, row)) = state.rows.iter().find(|(_, f)| finding_key(f) == key) else {
-        return Vec::new();
-    };
-    let value = |id| {
-        state
-            .columns
-            .iter()
-            .find(|c| c.id == id)
-            .map(|c| (c.accessor)(row).to_csv_string())
-    };
-    let (Some(rule), Some(file)) = (
-        value(RULE_GROUP_COLUMN),
-        value(chorale_core::ColumnId("file")),
-    ) else {
-        return Vec::new();
-    };
-    [
-        GroupKey::from_values(std::slice::from_ref(&rule)),
-        GroupKey::from_values(&[rule, file]),
-    ]
-    .into_iter()
-    .filter(|g| state.collapsed_groups.contains(g))
-    .collect()
+/// How a finding's row relates to what the table shows.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Reach {
+    /// On screen: the cursor can land on it.
+    Visible,
+    /// A row of the table, hidden only by these collapsed groups. Toggling them makes it visible.
+    NeedsExpand(Vec<GroupKey>),
+    /// Not a row of the table any more (it was decided and left, or the table was rebuilt).
+    Gone,
+    /// A row, but a column filter hides it.
+    Filtered,
+    /// The table is grouped by a column this code cannot read a value from.
+    Unresolvable,
 }
 
-/// Expand whatever groups hide `key`'s row, so the cursor can land on it. Only the groups that
-/// hold the row are opened; the rest of the table stays as the curator left it.
-pub(super) fn expand_groups_for(handle: UseTableHandle<FindingView>, key: &str) {
-    let hiding = collapsed_groups_hiding(&handle.signal().peek(), key);
-    for group in hiding {
-        handle.toggle_group(group);
+impl Reach {
+    /// The status line for a finding the cursor cannot be aimed at. `None` when it can.
+    pub(super) fn problem(&self) -> Option<&'static str> {
+        match self {
+            Reach::Visible | Reach::NeedsExpand(_) => None,
+            Reach::Gone => Some("That finding has left the table"),
+            Reach::Filtered => Some("That finding is hidden by a filter"),
+            Reach::Unresolvable => Some("Could not open the group that holds that finding"),
+        }
+    }
+}
+
+/// Where `key`'s row stands, and which collapsed groups hide it.
+///
+/// The group keys come from the table's own `grouping`, one prefix per depth, so a different
+/// grouping (an order preset) needs no change here. A cursor aimed at a row that is not visible
+/// would clamp to row 0 without a word, so callers must check this first.
+pub(super) fn plan_reach(state: &chorale_core::TableState<FindingView>, key: &str) -> Reach {
+    let Some((_, row)) = state.rows.iter().find(|(_, f)| finding_key(f) == key) else {
+        return Reach::Gone;
+    };
+    if !chorale_core::filtered_sorted_rows(state)
+        .iter()
+        .any(|f| finding_key(f) == key)
+    {
+        return Reach::Filtered;
+    }
+    let mut values: Vec<String> = Vec::new();
+    let mut hiding = Vec::new();
+    for column in &state.grouping {
+        let Some(def) = state.columns.iter().find(|c| c.id == *column) else {
+            return Reach::Unresolvable;
+        };
+        values.push((def.accessor)(row).to_csv_string());
+        let group = GroupKey::from_values(&values);
+        if state.collapsed_groups.contains(&group) {
+            hiding.push(group);
+        }
+    }
+    if hiding.is_empty() {
+        Reach::Visible
+    } else {
+        Reach::NeedsExpand(hiding)
+    }
+}
+
+/// Make `key`'s row visible by opening the groups that hide it (and only those). `Err` carries
+/// the status line when it cannot be reached; nothing is changed then.
+pub(super) fn reach_finding(
+    handle: UseTableHandle<FindingView>,
+    key: &str,
+) -> Result<(), &'static str> {
+    let plan = plan_reach(&handle.signal().peek(), key);
+    match plan {
+        Reach::Visible => Ok(()),
+        Reach::NeedsExpand(groups) => {
+            for group in groups {
+                handle.toggle_group(group);
+            }
+            Ok(())
+        }
+        other => Err(other.problem().unwrap_or("That finding cannot be reached")),
     }
 }
 
@@ -713,13 +795,16 @@ pub(super) struct ViewerLink {
     pub all_findings: Arc<Vec<FindingView>>,
     /// The inspected commit per repo, from the report's `audited_refs`.
     pub shas: Arc<HashMap<String, String>>,
+    /// Repos whose scan and audit recorded different commits (the viewer says so).
+    pub sha_conflicts: Arc<HashSet<String>>,
     pub project_id: String,
     pub open: Signal<bool>,
     pub undo_entry: Signal<Option<UndoEntry>>,
     pub now_ms: Signal<u64>,
     pub on_undo: Callback<()>,
-    /// The pane's own disposition path. The viewer calls it; it has none of its own.
-    pub apply_disposition: Callback<(TriageState, String)>,
+    /// The pane's own disposition path. The viewer calls it; it has none of its own. Answers
+    /// `true` only when a disposition was actually written.
+    pub apply_disposition: Callback<(TriageState, String), bool>,
     /// Close the viewer and put DOM focus back on the pane.
     pub on_close: Callback<()>,
     /// Open the finding modal on the focused finding (the "too large" fallback surface).
@@ -734,6 +819,7 @@ impl PartialEq for ViewerLink {
             && self.dispositions == other.dispositions
             && Arc::ptr_eq(&self.all_findings, &other.all_findings)
             && Arc::ptr_eq(&self.shas, &other.shas)
+            && Arc::ptr_eq(&self.sha_conflicts, &other.sha_conflicts)
             && self.project_id == other.project_id
             && self.open == other.open
             && self.undo_entry == other.undo_entry
@@ -749,6 +835,30 @@ impl PartialEq for ViewerLink {
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct ViewerSlot(pub Signal<Option<ViewerLink>>);
 
+/// The live undo bar. It owns the ticker's subscription: `now_ms` changes four times a second
+/// for five seconds after each decision, and only this small component re-renders for it.
+#[component]
+fn ViewerUndoBar(
+    undo_entry: Signal<Option<UndoEntry>>,
+    now_ms: Signal<u64>,
+    on_undo: Callback<()>,
+) -> Element {
+    let Some(u) = undo_banner_of(&undo_entry.read(), *now_ms.read()) else {
+        return rsx! {};
+    };
+    rsx! {
+        div { class: "pane-undo cv-undo",
+            span { class: "pane-undo-msg", "{u.message}" }
+            button {
+                class: "btn-edit-sm pane-undo-btn",
+                onclick: move |_| on_undo.call(()),
+                "Undo"
+            }
+            span { class: "pane-undo-left", "{u.seconds_left}s" }
+        }
+    }
+}
+
 /// The viewer's host at the results root. Renders nothing until the Queue has registered a link
 /// and opened the viewer; then it resolves the finding the cursor is on and mounts
 /// [`CodeViewerHost`] on it, keyed by that finding.
@@ -761,6 +871,8 @@ pub(super) fn ViewerRoot() -> Element {
     let mut history = use_signal(Vec::<HistoryEntry>::new);
     let mut status = use_signal(|| Option::<String>::None);
     let mut help = use_signal(|| false);
+    // The last answer the LRU would not keep, for as long as this viewer stays open.
+    let mut session = use_signal(SessionCopy::new);
 
     let Some(link) = slot.and_then(|s| s.0.read().clone()) else {
         return rsx! {};
@@ -768,7 +880,8 @@ pub(super) fn ViewerRoot() -> Element {
     if !*link.open.read() {
         return rsx! {};
     }
-    // The ONE cursor, resolved the way the pane resolves it.
+    // The ONE cursor, resolved the way the pane resolves it. Nothing here reads the undo clock:
+    // that is the undo bar's subscription, not the viewer's.
     let resolved = link.cursor.read().resolve(&link.visible_keys.read());
     let finding = resolved.key().and_then(|k| {
         link.all_findings
@@ -776,13 +889,14 @@ pub(super) fn ViewerRoot() -> Element {
             .find(|f| finding_key(f) == k)
             .cloned()
     });
-    let undo = undo_banner_of(&link.undo_entry.read(), *link.now_ms.read());
     let close = link.on_close;
     let on_close = Callback::new(move |()| {
-        // A new viewing starts with a clean history and no stale status line.
+        // A new viewing starts with a clean history, no stale status line, and nothing kept
+        // from this one.
         history.write().clear();
         status.set(None);
         help.set(false);
+        session.write().clear();
         close.call(());
     });
     let Some(finding) = finding else {
@@ -801,14 +915,17 @@ pub(super) fn ViewerRoot() -> Element {
             finding,
             link,
             cache,
+            session,
             history,
             status,
             help,
-            undo,
             on_close,
         }
     }
 }
+
+/// How long a scroll must rest before the viewer asks for a new page of a windowed file.
+const PAGE_DEBOUNCE_MS: u64 = 150;
 
 /// THE STATEFUL VIEWER. Mounted while the viewer is open, keyed by the focused finding's key.
 #[component]
@@ -817,10 +934,10 @@ pub(super) fn CodeViewerHost(
     finding: FindingView,
     link: ViewerLink,
     cache: Signal<ViewerCache>,
+    session: Signal<SessionCopy>,
     history: Signal<Vec<HistoryEntry>>,
     status: Signal<Option<String>>,
     help: Signal<bool>,
-    undo: Option<UndoBanner>,
     on_close: Callback<()>,
 ) -> Element {
     let ViewerLink {
@@ -830,7 +947,10 @@ pub(super) fn CodeViewerHost(
         dispositions,
         all_findings,
         shas,
+        sha_conflicts,
         project_id,
+        undo_entry,
+        now_ms,
         on_undo,
         apply_disposition,
         on_open_modal,
@@ -838,6 +958,7 @@ pub(super) fn CodeViewerHost(
     } = link;
     let key = finding_key(&finding);
     let sha = shas.get(&finding.repo).cloned().unwrap_or_default();
+    let sha_conflict = sha_conflicts.contains(&finding.repo);
     let violation_line = finding.line;
     let mut cursor = cursor;
     let mut status = status;
@@ -845,14 +966,17 @@ pub(super) fn CodeViewerHost(
 
     // Per-finding state. The host is keyed by the finding, so all of this starts clean when
     // the cursor moves.
-    let mut scroll_top = use_signal(|| {
-        scroll_top_for_line(
-            violation_line,
-            CODE_LINE_H_PX,
-            DEFAULT_VIEWPORT_PX,
-            usize::MAX / 64,
-        )
-    });
+    let initial_top = scroll_top_for_line(
+        violation_line,
+        CODE_LINE_H_PX,
+        DEFAULT_VIEWPORT_PX,
+        usize::MAX / 64,
+    );
+    let mut scroll_top = use_signal(|| initial_top);
+    // The exact scroll position, written by the scroll handler and read only by the scroll
+    // keys. Nothing reads it in render, so writing it re-renders nothing. (`scroll_top` is
+    // quantised to 25 lines so a slow scroll does not re-render on every pixel.)
+    let mut last_scroll = use_signal(|| initial_top);
     let mut viewport = use_signal(|| DEFAULT_VIEWPORT_PX);
     let mut line_cursor = use_signal(|| Option::<usize>::None);
     let mut goto = use_signal(|| Option::<String>::None);
@@ -860,6 +984,13 @@ pub(super) fn CodeViewerHost(
     let mut prompt = use_signal(|| Option::<TriageState>::None);
     let mut prompt_reason = use_signal(String::new);
     let mut around = use_signal(|| Option::<usize>::None);
+    // The debounce for paging a windowed file; neither is read in render.
+    let mut page_target = use_signal(|| Option::<usize>::None);
+    let mut page_timer = use_signal(|| false);
+    // THIS finding's enclosing block, decided once from the first answer that can be trusted
+    // (see `block_for`) and never replaced by a page or a cached answer for another line.
+    // `None` is "not decided yet"; `Some(None)` is "this file has no block".
+    let mut block = use_signal(|| Option::<Option<BlockView>>::None);
 
     let file_key = FileKey {
         repo: finding.repo.clone(),
@@ -867,8 +998,8 @@ pub(super) fn CodeViewerHost(
         path: finding.path.clone(),
     };
 
-    // The fetch. A cached file answers without a request; the answer is also written to the
-    // cache (read-only git reads only), which is what makes the next visit instant.
+    // The fetch. A cached file answers without a request; an answer the LRU will not keep is
+    // held for this open only. Either way the finding's own block is settled once.
     let file_res = use_resource({
         let finding = finding.clone();
         let sha = sha.clone();
@@ -876,18 +1007,40 @@ pub(super) fn CodeViewerHost(
         let file_key = file_key.clone();
         move || {
             let wanted = around().unwrap_or(finding.line);
-            let (repo, path) = (finding.repo.clone(), finding.path.clone());
+            let (repo, path, line) = (finding.repo.clone(), finding.path.clone(), finding.line);
             let (sha, project_id, file_key) = (sha.clone(), project_id.clone(), file_key.clone());
             let mut cache = cache;
+            let mut session = session;
             async move {
-                if let Some(hit) = cache.write().get(&file_key, wanted) {
-                    return Some(hit);
+                let hit = cache.write().get(&file_key, wanted);
+                let held = session.peek().lookup(&file_key, wanted);
+                let view = if let Some(hit) = hit.or(held) {
+                    hit
+                } else {
+                    let got = fetch_source_file(
+                        &repo,
+                        &path,
+                        Some(&sha),
+                        Some(wanted),
+                        Some(&project_id),
+                    )
+                    .await?;
+                    let view = Arc::new(got);
+                    let kept = cache.write().put(file_key.clone(), Arc::clone(&view));
+                    if !kept {
+                        session.write().put(file_key, Arc::clone(&view));
+                    }
+                    view
+                };
+                if block.peek().is_none() {
+                    let decided = match block_for(&view, line) {
+                        Some(b) => b,
+                        None => {
+                            fetch_block(&repo, &path, line, Some(&sha), Some(&project_id)).await
+                        }
+                    };
+                    block.set(Some(decided));
                 }
-                let got =
-                    fetch_source_file(&repo, &path, Some(&sha), Some(wanted), Some(&project_id))
-                        .await?;
-                let view = Arc::new(got);
-                cache.write().put(file_key, Arc::clone(&view));
                 Some(view)
             }
         }
@@ -931,8 +1084,11 @@ pub(super) fn CodeViewerHost(
 
     // What the render shows.
     let wanted = around().unwrap_or(violation_line);
-    let cached = cache.peek().lookup(&file_key, wanted);
-    let file_state = match cached.or_else(|| file_res.read().clone().flatten()) {
+    let kept = cache
+        .peek()
+        .lookup(&file_key, wanted)
+        .or_else(|| session.peek().lookup(&file_key, wanted));
+    let file_state = match kept.or_else(|| file_res.read().clone().flatten()) {
         Some(v) => FileStateView::Loaded(v),
         None if file_res.read().is_none() => FileStateView::Loading,
         None => FileStateView::Failed,
@@ -942,35 +1098,53 @@ pub(super) fn CodeViewerHost(
         _ => 0,
     };
 
-    let ordered = {
-        let state = handle.signal();
-        let guard = state.read();
+    // The rows, this file's findings and the gutter are memos: they recompute when the table or
+    // the dispositions change, and not for anything else (the undo clock, a scroll).
+    let table = handle.signal();
+    let ordered = use_memo(move || {
+        let guard = table.read();
         let rows = chorale_core::filtered_sorted_rows(&guard);
         drop(guard);
         rows
-    };
-    let items = file_findings(
-        &all_findings,
-        &dispositions.read(),
-        &finding.repo,
-        &finding.path,
-        &navigable_keys(&ordered),
-    );
-    let marks = gutter_marks(&items);
-    let position = finding_position(&items, &key);
+    });
+    let items = use_memo({
+        let all_findings = all_findings.clone();
+        let (repo, path) = (finding.repo.clone(), finding.path.clone());
+        move || {
+            file_findings(
+                &all_findings,
+                &dispositions.read(),
+                &repo,
+                &path,
+                &navigable_keys(&ordered.read()),
+            )
+        }
+    });
+    let marks = use_memo(move || gutter_marks(&items.read()));
+    let position = use_memo({
+        let key = key.clone();
+        move || finding_position(&items.read(), &key)
+    });
 
     // ── Actions ──
 
-    // Aim the queue's cursor at a finding. The cursor is the only notion of "current".
-    let goto_finding = Callback::new(move |target: String| {
-        expand_groups_for(handle, &target);
+    // Aim the queue's cursor at a finding. The cursor is the only notion of "current". A
+    // finding the table cannot show any more is refused with a status line: aiming the cursor
+    // at it would clamp to row 0 and the viewer would silently open on something else.
+    let goto_finding = Callback::new(move |target: String| -> bool {
+        if let Err(why) = reach_finding(handle, &target) {
+            status.set(Some(why.to_string()));
+            return false;
+        }
         cursor.set(RowCursor::focused_on(target));
         status.set(None);
+        true
     });
 
     let scroll_to_line = Callback::new(move |line: usize| {
         let top = scroll_top_for_line(line, CODE_LINE_H_PX, *viewport.peek(), total_lines);
         scroll_top.set(top);
+        last_scroll.set(top);
         set_dom_scroll(top);
     });
 
@@ -988,15 +1162,17 @@ pub(super) fn CodeViewerHost(
                 &finding.path,
                 &nav,
             );
+            // The target is chosen BEFORE the write: the decided row leaves the table.
             let target = advance_after_disposition(&before, &key);
-            apply_disposition.call((state, reason));
-            let landed = dispositions.peek().get(&key).map(|d| d.state) == Some(state);
-            if !landed {
+            // The pane path's own answer, not an inference from the disposition map.
+            let landed = apply_disposition.call((state, reason));
+            let outcome = finish_disposition(landed, target);
+            if !outcome.close_prompt {
                 return;
             }
             prompt.set(None);
             prompt_reason.set(String::new());
-            if let Some(t) = target {
+            if let Some(t) = outcome.goto {
                 goto_finding.call(t);
             }
             focus_viewer();
@@ -1013,7 +1189,13 @@ pub(super) fn CodeViewerHost(
                 return;
             };
             match cmd {
-                ViewerCommand::Close => on_close.call(()),
+                ViewerCommand::Close => {
+                    let help_open = *help.peek();
+                    match close_target(help_open) {
+                        CloseTarget::Help => help.set(false),
+                        CloseTarget::Viewer => on_close.call(()),
+                    }
+                }
                 ViewerCommand::Dispose(state) => dispose.call((state, String::new())),
                 ViewerCommand::PromptFor(state) => {
                     prompt.set(Some(state));
@@ -1034,14 +1216,18 @@ pub(super) fn CodeViewerHost(
                         &nav,
                     );
                     match step_in_file(&items, &key, dir) {
-                        FileStep::Move(t) => goto_finding.call(t),
+                        FileStep::Move(t) => {
+                            goto_finding.call(t);
+                        }
                         FileStep::Stay(msg) => status.set(Some(msg)),
                     }
                 }
                 ViewerCommand::FileInGroup(dir) => {
                     let ordered = ordered_rows(handle);
                     match step_file_in_group(&ordered, &dispositions.peek(), &finding, dir) {
-                        FileStep::Move(t) => goto_finding.call(t),
+                        FileStep::Move(t) => {
+                            goto_finding.call(t);
+                        }
                         FileStep::Stay(msg) => status.set(Some(msg)),
                     }
                 }
@@ -1054,25 +1240,30 @@ pub(super) fn CodeViewerHost(
                     goto_error.set(None);
                 }
                 ViewerCommand::Back => {
-                    let entry = history.write().pop();
-                    match entry {
-                        Some(e) if e.key == key => {
-                            line_cursor.set(Some(e.line));
-                            scroll_to_line.call(e.line);
+                    let step = back_step(&mut history.write(), &key);
+                    match step {
+                        BackStep::Line(line) => {
+                            line_cursor.set(Some(line));
+                            scroll_to_line.call(line);
                         }
-                        Some(e) => goto_finding.call(e.key),
-                        None => status.set(Some("Nothing to go back to.".to_string())),
+                        BackStep::Finding(target) => {
+                            goto_finding.call(target);
+                        }
+                        BackStep::Nothing => {
+                            status.set(Some("Nothing to go back to.".to_string()));
+                        }
                     }
                 }
                 ViewerCommand::Scroll(sk) => {
                     let top = scrolled(
-                        *scroll_top.peek(),
+                        *last_scroll.peek(),
                         sk,
                         *viewport.peek(),
                         total_lines,
                         CODE_LINE_H_PX,
                     );
                     scroll_top.set(top);
+                    last_scroll.set(top);
                     set_dom_scroll(top);
                 }
                 ViewerCommand::ToggleHelp => {
@@ -1086,6 +1277,7 @@ pub(super) fn CodeViewerHost(
     let on_scroll = Callback::new({
         let file_state = file_state.clone();
         move |(top, client_h): (f64, f64)| {
+            last_scroll.set(top);
             // Re-render only when the first rendered line would change.
             let step = |t: f64| line_at_scroll(t, CODE_LINE_H_PX) / SCROLL_QUANTUM_LINES;
             if step(top) != step(*scroll_top.peek()) {
@@ -1094,15 +1286,32 @@ pub(super) fn CodeViewerHost(
             if client_h > 50.0 && (client_h - *viewport.peek()).abs() > 1.0 {
                 viewport.set(client_h);
             }
-            // A file delivered as a window: ask for a new one when the viewport nears an edge.
-            if let FileStateView::Loaded(v) = &file_state {
-                if let Some(w) = v.window.as_ref() {
-                    if let Some(centre) = page_request(w, top, *viewport.peek(), CODE_LINE_H_PX) {
-                        if *around.peek() != Some(centre) {
-                            around.set(Some(centre));
-                        }
+            // A file delivered as a window: ask for a new one when the viewport nears an edge,
+            // once the scroll has rested. Asking on every event would cancel the fetch in
+            // flight each time.
+            let FileStateView::Loaded(v) = &file_state else {
+                return;
+            };
+            let Some(w) = v.window.as_ref() else {
+                return;
+            };
+            match page_request(w, top, *viewport.peek(), CODE_LINE_H_PX) {
+                Some(centre) => {
+                    page_target.set(Some(centre));
+                    if !*page_timer.peek() {
+                        page_timer.set(true);
+                        spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(PAGE_DEBOUNCE_MS))
+                                .await;
+                            page_timer.set(false);
+                            let want = *page_target.peek();
+                            if want.is_some() && *around.peek() != want {
+                                around.set(want);
+                            }
+                        });
                     }
                 }
+                None => page_target.set(None),
             }
         }
     });
@@ -1125,6 +1334,7 @@ pub(super) fn CodeViewerHost(
             if line_cursor.peek().is_none() {
                 let top = scroll_top_for_line(violation_line, CODE_LINE_H_PX, h, total_lines);
                 scroll_top.set(top);
+                last_scroll.set(top);
                 set_dom_scroll(top);
             }
         });
@@ -1157,11 +1367,12 @@ pub(super) fn CodeViewerHost(
 
     rsx! {
         CodeViewer {
-            finding: ViewerFinding::from_finding(&finding, &sha),
+            finding: ViewerFinding::from_finding(&finding, &sha, sha_conflict),
             finding_key: key.clone(),
             file: file_state,
-            marks,
-            position,
+            block: block().flatten(),
+            marks: marks(),
+            position: position(),
             scroll_top: scroll_top(),
             viewport_px: viewport(),
             line_cursor: line_cursor(),
@@ -1169,7 +1380,6 @@ pub(super) fn CodeViewerHost(
             goto_error: goto_error(),
             prompt: prompt(),
             prompt_reason: prompt_reason(),
-            undo,
             status: status(),
             help: help(),
             on_key,
@@ -1194,10 +1404,12 @@ pub(super) fn CodeViewerHost(
                 prompt_reason.set(String::new());
                 focus_viewer();
             }),
-            on_undo,
-            on_mark: goto_finding,
+            on_mark: Callback::new(move |t: String| {
+                goto_finding.call(t);
+            }),
             on_line: Callback::new(move |n: usize| line_cursor.set(Some(n))),
             on_open_modal,
+            ViewerUndoBar { undo_entry, now_ms, on_undo }
         }
     }
 }
@@ -1210,7 +1422,7 @@ mod render_tests {
     //! the viewer and the pane each say they are on.
 
     use super::*;
-    use camerata_ui_core::viewer::{BlockView, WindowView};
+    use camerata_ui_core::viewer::WindowView;
 
     /// Everything the viewer takes, with sensible defaults.
     #[derive(Clone, PartialEq)]
@@ -1224,6 +1436,9 @@ mod render_tests {
         help: bool,
         status: Option<String>,
         line_cursor: Option<usize>,
+        /// The finding's own block. `None` falls back to the loaded view's block.
+        block: Option<BlockView>,
+        sha_conflict: bool,
     }
 
     impl Default for Case {
@@ -1238,6 +1453,8 @@ mod render_tests {
                 help: false,
                 status: None,
                 line_cursor: None,
+                block: None,
+                sha_conflict: false,
             }
         }
     }
@@ -1251,14 +1468,22 @@ mod render_tests {
             line: 3,
             snippet: "let q = format!(\"select {}\", id);".into(),
             sha7: "abc1234".into(),
+            sha_conflict: false,
         }
     }
 
     fn harness(case: Case) -> Element {
+        let block = case.block.clone().or_else(|| match &case.file {
+            FileStateView::Loaded(v) => v.block.clone(),
+            _ => None,
+        });
+        let mut f = finding();
+        f.sha_conflict = case.sha_conflict;
         rsx! {
             CodeViewer {
-                finding: finding(),
+                finding: f,
                 finding_key: "the-key".to_string(),
+                block,
                 file: case.file,
                 marks: case.marks,
                 position: case.position,
@@ -1482,6 +1707,14 @@ mod render_tests {
         assert!(html.contains("file not found"));
     }
 
+    /// The opening tags of the gutter dots (`<button class="cv-mark ...>`), nothing else.
+    fn gutter_dots(html: &str) -> Vec<&str> {
+        html.split("<button class=\"cv-mark ")
+            .skip(1)
+            .map(|rest| &rest[..rest.find('>').unwrap_or(rest.len())])
+            .collect()
+    }
+
     fn mark(line: usize, severity: &str, decided: bool, count: usize) -> GutterMark {
         GutterMark {
             line,
@@ -1514,7 +1747,19 @@ mod render_tests {
         assert_eq!(count(&html, "cv-mark cv-sev-critical\""), 1);
         // A line with two findings carries a count badge; the decided dots are not clickable.
         assert_eq!(count(&html, "class=\"cv-count\""), 1);
-        assert_eq!(count(&html, "disabled"), 2);
+        // Exactly the two decided dots are disabled, and they are the hollow ones.
+        let dots = gutter_dots(&html);
+        assert_eq!(dots.len(), 4);
+        let disabled: Vec<&&str> = dots.iter().filter(|d| d.contains("disabled")).collect();
+        assert_eq!(disabled.len(), 2, "{dots:?}");
+        assert!(
+            disabled.iter().all(|d| d.contains("cv-mark-hollow")),
+            "{dots:?}"
+        );
+        assert!(dots
+            .iter()
+            .filter(|d| !d.contains("cv-mark-hollow"))
+            .all(|d| !d.contains("disabled")));
         // The minimap has the same four markers plus the current finding's tick.
         assert_eq!(count(&html, "class=\"cv-mini cv-sev-"), 4);
         assert_eq!(count(&html, "cv-mini-cur"), 1);
@@ -1706,6 +1951,7 @@ mod render_tests {
                 dispositions,
                 all_findings: Arc::new(all.clone()),
                 shas: Arc::new(HashMap::new()),
+                sha_conflicts: Arc::new(HashSet::new()),
                 project_id: String::new(),
                 open,
                 undo_entry: use_signal(|| None),
@@ -1765,6 +2011,79 @@ mod render_tests {
             "{html}"
         );
         assert!(html.contains("finding 2 of 3 in this file"), "{html}");
+    }
+
+    #[test]
+    fn the_band_marks_the_findings_own_block_not_the_one_the_answer_carries() {
+        // The answer's block is lines 2..=4 (it was fetched for another line). The finding's own
+        // block is lines 5..=6.
+        let own = BlockView {
+            start_line: 5,
+            end_line: 6,
+            kind: "function".into(),
+        };
+        let html = render(Case {
+            file: FileStateView::Loaded(view(8, |_| {})),
+            block: Some(own),
+            ..Case::default()
+        });
+        assert_eq!(count(&html, "cv-line-band"), 2, "{html}");
+        // And with no block decided yet nothing is banded, whatever the answer carries.
+        let html = render(Case {
+            file: FileStateView::Loaded(view(8, |v| v["block"] = serde_json::Value::Null)),
+            ..Case::default()
+        });
+        assert_eq!(count(&html, "cv-line-band"), 0);
+    }
+
+    #[test]
+    fn a_repo_whose_runs_differ_in_commit_says_so_in_amber() {
+        let html = render(Case {
+            file: FileStateView::Loaded(view(4, |_| {})),
+            sha_conflict: true,
+            ..Case::default()
+        });
+        assert!(
+            html.contains(
+                "The scan and the audit ran at different commits; line numbers may differ"
+            ),
+            "{html}"
+        );
+        assert!(html.contains("cv-banner-amber"));
+        let html = render(Case {
+            file: FileStateView::Loaded(view(4, |_| {})),
+            ..Case::default()
+        });
+        assert!(!html.contains("different commits"));
+    }
+
+    #[test]
+    fn the_undo_bar_shows_a_live_undo_and_nothing_otherwise() {
+        use camerata_ui_core::triage::TriageModel;
+        fn bar_live() -> Element {
+            let f: FindingView = serde_json::from_value(serde_json::json!({
+                "repo": "o/r", "path": "a.rs", "line": 1, "rule_id": "R", "severity": "high",
+                "snippet": "s", "detail": "d"
+            }))
+            .expect("fixture");
+            let entry = TriageModel::new().dispose_with_undo(&[f], TriageState::Confirmed, "", 0);
+            let undo_entry = use_signal(move || entry.clone());
+            let now_ms = use_signal(|| 1_000);
+            rsx! { ViewerUndoBar { undo_entry, now_ms, on_undo: Callback::default() } }
+        }
+        fn bar_idle() -> Element {
+            let undo_entry = use_signal(|| None);
+            let now_ms = use_signal(|| 0);
+            rsx! { ViewerUndoBar { undo_entry, now_ms, on_undo: Callback::default() } }
+        }
+        let mut vdom = VirtualDom::new(bar_live);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("cv-undo") && html.contains("Undo"), "{html}");
+        assert!(html.contains("4s"), "{html}");
+        let mut vdom = VirtualDom::new(bar_idle);
+        vdom.rebuild_in_place();
+        assert!(!dioxus_ssr::render(&vdom).contains("cv-undo"));
     }
 
     #[test]
@@ -1894,6 +2213,67 @@ mod network_tests {
 
     #[tokio::test]
     #[serial_test::serial(process_env)]
+    async fn the_answer_remembers_which_line_it_was_asked_about() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok", "source": "git", "total_lines": 1,
+                "window": {"from": 1, "to": 1, "total_lines": 1}, "lines": [[[null, "x"]]],
+                "block": {"start_line": 1, "end_line": 1, "kind": "function"}
+            })))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let asked = fetch_source_file("a/b", "x.rs", None, Some(1), None)
+            .await
+            .unwrap();
+        assert!(block_for(&asked, 1).is_some(), "its block is for line 1");
+        assert!(block_for(&asked, 7).is_none(), "and not for line 7");
+        let unasked = fetch_source_file("a/b", "x.rs", None, None, None)
+            .await
+            .unwrap();
+        assert!(block_for(&unasked, 1).is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_cached_file_gets_its_blocks_from_the_small_context_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/finding-context"))
+            .and(query_param("repo", "acme/app"))
+            .and(query_param("path", "src/db.rs"))
+            .and(query_param("line", "88"))
+            .and(query_param("sha", "abc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok", "start_line": 80, "end_line": 92, "violation_line": 88,
+                "kind": "function", "lines": vec!["l"; 13], "language": "rust",
+                "matches_snippet": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/finding-context"))
+            .and(query_param("line", "5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "line_gone", "reason": "file changed since scan"
+            })))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let b = fetch_block("acme/app", "src/db.rs", 88, Some("abc"), None)
+            .await
+            .unwrap();
+        assert_eq!((b.start_line, b.end_line), (80, 92));
+        assert!(fetch_block("acme/app", "src/db.rs", 5, None, None)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn a_server_that_does_not_answer_with_json_is_none() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1910,12 +2290,13 @@ mod network_tests {
 
 #[cfg(test)]
 mod navigation_tests {
-    //! The one piece of table plumbing the viewer needs: reaching a row whose group is collapsed.
+    //! The table plumbing the viewer needs: reaching a row whose group is collapsed, and refusing
+    //! one the table no longer holds.
 
     use super::*;
     use chorale_core::{
-        collapse_all_groups, set_grouping, toggle_group, visible_grouped_view, ColumnId,
-        GroupedRow, RowId, TableState,
+        collapse_all_groups, remove_rows, set_filter, set_grouping, toggle_group,
+        visible_grouped_view, ColumnId, FilterValue, GroupedRow, RowId, TableState,
     };
 
     fn finding(rule: &str, path: &str, line: usize) -> FindingView {
@@ -1926,10 +2307,16 @@ mod navigation_tests {
         .expect("fixture")
     }
 
-    fn collapsed_queue(rows: &[FindingView]) -> TableState<FindingView> {
+    fn queue(rows: &[FindingView]) -> TableState<FindingView> {
         let pairs = rows.iter().map(|f| (RowId::new(), f.clone())).collect();
-        let state = super::super::scan::finding_table_state(pairs, vec!["me/api".into()], false);
-        let state = set_grouping(&state, vec![RULE_GROUP_COLUMN, ColumnId("file")]);
+        super::super::scan::finding_table_state(pairs, vec!["me/api".into()], false)
+    }
+
+    fn collapsed_queue(rows: &[FindingView]) -> TableState<FindingView> {
+        let state = set_grouping(
+            &queue(rows),
+            vec![super::super::scan::RULE_GROUP_COLUMN, ColumnId("file")],
+        );
         collapse_all_groups(&state)
     }
 
@@ -1943,38 +2330,270 @@ mod navigation_tests {
             .collect()
     }
 
+    fn open(mut state: TableState<FindingView>, plan: &Reach) -> TableState<FindingView> {
+        let Reach::NeedsExpand(groups) = plan else {
+            panic!("expected NeedsExpand, got {plan:?}");
+        };
+        for g in groups {
+            state = toggle_group(&state, g);
+        }
+        state
+    }
+
     #[test]
-    fn opening_the_two_groups_that_hold_a_row_makes_it_reachable_and_nothing_else() {
+    fn opening_the_groups_that_hold_a_row_makes_it_reachable_and_nothing_else() {
         let rows = vec![
             finding("R-A", "a.rs", 10),
             finding("R-A", "b.rs", 20),
             finding("R-B", "c.rs", 30),
         ];
-        let mut state = collapsed_queue(&rows);
+        let state = collapsed_queue(&rows);
         assert!(visible(&state).is_empty(), "everything starts collapsed");
         let target = finding_key(&rows[1]);
 
-        let hiding = collapsed_groups_hiding(&state, &target);
-        assert_eq!(hiding.len(), 2, "the rule group and the file");
-        for g in &hiding {
-            state = toggle_group(&state, g);
-        }
+        let plan = plan_reach(&state, &target);
+        assert!(
+            matches!(&plan, Reach::NeedsExpand(g) if g.len() == 2),
+            "{plan:?}"
+        );
+        let state = open(state, &plan);
         // Only that file's row appeared: its sibling file and the other rule stay collapsed.
         assert_eq!(visible(&state), vec![target.clone()]);
-        // Nothing left hiding it, so a second call is a no-op.
-        assert!(collapsed_groups_hiding(&state, &target).is_empty());
-        // A key that is not in the table hides nothing.
-        assert!(collapsed_groups_hiding(&state, "nope").is_empty());
+        assert_eq!(plan_reach(&state, &target), Reach::Visible);
     }
 
     #[test]
     fn a_row_in_an_already_open_group_needs_only_the_closed_one() {
         let rows = vec![finding("R-A", "a.rs", 10), finding("R-A", "b.rs", 20)];
-        let mut state = collapsed_queue(&rows);
-        let first = collapsed_groups_hiding(&state, &finding_key(&rows[0]));
+        let state = collapsed_queue(&rows);
+        let Reach::NeedsExpand(first) = plan_reach(&state, &finding_key(&rows[0])) else {
+            panic!()
+        };
         // Open the rule group only (the first of the two keys).
-        state = toggle_group(&state, &first[0]);
-        let hiding = collapsed_groups_hiding(&state, &finding_key(&rows[1]));
+        let state = toggle_group(&state, &first[0]);
+        let Reach::NeedsExpand(hiding) = plan_reach(&state, &finding_key(&rows[1])) else {
+            panic!()
+        };
         assert_eq!(hiding.len(), 1, "just the file group");
+    }
+
+    #[test]
+    fn the_group_keys_come_from_the_tables_own_grouping() {
+        let rows = vec![finding("R-A", "a.rs", 10), finding("R-A", "b.rs", 20)];
+        let target = finding_key(&rows[0]);
+        // Grouped by file only (an order preset would do this): one group to open.
+        let by_file = collapse_all_groups(&set_grouping(&queue(&rows), vec![ColumnId("file")]));
+        let plan = plan_reach(&by_file, &target);
+        assert!(
+            matches!(&plan, Reach::NeedsExpand(g) if g.len() == 1),
+            "{plan:?}"
+        );
+        assert_eq!(visible(&open(by_file, &plan)), vec![target.clone()]);
+        // Ungrouped: nothing hides it.
+        assert_eq!(plan_reach(&queue(&rows), &target), Reach::Visible);
+        // A grouping column this code cannot read a value from fails loud, not silent.
+        let odd = set_grouping(&queue(&rows), vec![ColumnId("no-such-column")]);
+        let plan = plan_reach(&odd, &target);
+        assert_eq!(plan, Reach::Unresolvable);
+        assert!(plan.problem().unwrap().contains("Could not open the group"));
+    }
+
+    #[test]
+    fn a_finding_that_left_the_table_or_is_filtered_out_is_refused_with_a_message() {
+        let rows = vec![finding("R-A", "a.rs", 10), finding("R-B", "b.rs", 20)];
+        let state = queue(&rows);
+        let gone_id = state.rows[0].0;
+        let key_a = finding_key(&rows[0]);
+        let gone = remove_rows(&state, &[gone_id]);
+        let plan = plan_reach(&gone, &key_a);
+        assert_eq!(plan, Reach::Gone);
+        assert_eq!(plan.problem(), Some("That finding has left the table"));
+        // Filtered by a column filter: still a row, not on screen.
+        let filtered = set_filter(
+            &state,
+            ColumnId("type"),
+            Some(FilterValue::Text("R-B".into())),
+        );
+        let plan = plan_reach(&filtered, &key_a);
+        assert_eq!(plan, Reach::Filtered);
+        assert_eq!(plan.problem(), Some("That finding is hidden by a filter"));
+        assert_eq!(
+            plan_reach(&filtered, &finding_key(&rows[1])),
+            Reach::Visible
+        );
+        assert!(Reach::Visible.problem().is_none());
+    }
+
+    /// The review's sequence on the real table state: open on A, go-to-line (history), `]` to B,
+    /// `[` to A, `c` on A (A leaves the table), Backspace. The history names A, which is gone, so
+    /// the viewer must not move the cursor (a cursor aimed at it clamps to row 0, silently).
+    #[test]
+    fn backspace_to_a_finding_that_left_the_table_is_refused_and_the_cursor_stays() {
+        use camerata_ui_core::viewer::{
+            advance_after_disposition, file_findings, finish_disposition, step_in_file,
+        };
+        let rows = vec![
+            finding("R-A", "a.rs", 10),
+            finding("R-A", "a.rs", 40),
+            finding("R-Z", "z.rs", 1),
+        ];
+        let (a, b) = (finding_key(&rows[0]), finding_key(&rows[1]));
+        let mut state = queue(&rows);
+        let nav = |s: &TableState<FindingView>| -> HashSet<String> {
+            navigable_keys(&chorale_core::filtered_sorted_rows(s))
+        };
+        let none = HashMap::<String, Disposition>::new();
+
+        let mut history = Vec::new();
+        push_history(
+            &mut history,
+            HistoryEntry {
+                key: a.clone(),
+                line: 10,
+            },
+        );
+        let items = file_findings(&rows, &none, "me/api", "a.rs", &nav(&state));
+        let FileStep::Move(to_b) =
+            step_in_file(&items, &a, camerata_ui_core::triage::FocusMove::Down)
+        else {
+            panic!()
+        };
+        assert_eq!(to_b, b);
+        assert_eq!(plan_reach(&state, &to_b), Reach::Visible);
+        let FileStep::Move(to_a) =
+            step_in_file(&items, &b, camerata_ui_core::triage::FocusMove::Up)
+        else {
+            panic!()
+        };
+        assert_eq!(to_a, a);
+        // `c` on A: it landed, the viewer advances to B, and A is gone from the table.
+        let target = advance_after_disposition(&items, &a);
+        state = remove_rows(&state, &[state.rows[0].0]);
+        let outcome = finish_disposition(true, target);
+        assert_eq!(outcome.goto.as_deref(), Some(b.as_str()));
+        assert_eq!(plan_reach(&state, &b), Reach::Visible);
+        // Backspace: the entry is for A, not the finding on screen (B).
+        let BackStep::Finding(back_to) = back_step(&mut history, &b) else {
+            panic!()
+        };
+        assert_eq!(back_to, a);
+        assert_eq!(
+            plan_reach(&state, &back_to).problem(),
+            Some("That finding has left the table")
+        );
+    }
+}
+
+#[cfg(test)]
+mod wiring_tests {
+    //! The real `FindingsTable` hands the viewer its link and takes it back. SSR cannot press a
+    //! key, but `render_immediate` runs the effects and the re-render they cause, and a signal
+    //! written from the test drives the rest.
+
+    use super::super::scan::FindingsTable;
+    use super::*;
+    use std::cell::RefCell;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    type Handles = (Signal<Option<ViewerLink>>, Signal<bool>);
+
+    thread_local! {
+        static HANDLES: RefCell<Option<Handles>> =
+            const { RefCell::new(None) };
+    }
+
+    fn finding(line: usize) -> FindingView {
+        serde_json::from_value(serde_json::json!({
+            "repo": "me/api", "path": "src/x.rs", "line": line, "rule_id": "SQL-INJECTION-1",
+            "severity": "high", "snippet": format!("s{line}"), "detail": "d",
+            "status": "active", "kind": "defect"
+        }))
+        .expect("fixture")
+    }
+
+    /// Let the pending effects run and apply the re-renders they cause.
+    async fn settle(vdom: &mut VirtualDom) {
+        for _ in 0..3 {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(100), vdom.wait_for_work())
+                    .await;
+            vdom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+        }
+    }
+
+    fn app() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        use_context_provider(|| Signal::new(None::<FindingView>));
+        let slot = use_context_provider(|| ViewerSlot(Signal::new(None)));
+        let show = use_signal(|| true);
+        HANDLES.with(|h| *h.borrow_mut() = Some((slot.0, show)));
+        let dispositions = use_signal(HashMap::<String, Disposition>::new);
+        rsx! {
+            if show() {
+                FindingsTable {
+                    findings: vec![finding(4), finding(9)],
+                    repos: vec!["me/api".to_string()],
+                    descriptions: HashMap::new(),
+                    dispositions,
+                }
+            }
+            ViewerRoot {}
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn the_table_registers_its_link_the_viewer_opens_on_it_and_unmounting_clears_it() {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(app);
+        vdom.rebuild_in_place();
+        let (slot, show) = HANDLES.with(|h| h.borrow().expect("the harness stored its handles"));
+        // Before the effects run the table has registered nothing.
+        assert!(slot.peek().is_none());
+        // The effects run, and the table's link is in the slot.
+        settle(&mut vdom).await;
+        let link = slot.peek().clone().expect("the table registered its link");
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            !html.contains("cv-panel"),
+            "closed: the root renders nothing"
+        );
+
+        // Opening it (what `O` and the doors do) mounts the viewer at the root. Every group is
+        // collapsed on mount, so the cursor is on no row and the root says so.
+        vdom.in_runtime(|| {
+            let mut open = link.open;
+            open.set(true);
+        });
+        settle(&mut vdom).await;
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("cv-empty") && html.contains("No finding focused"),
+            "{html}"
+        );
+
+        // The pane's own `use_callback` handle, reached through the link: nothing is focused,
+        // so nothing is written, and the answer is `false`, not an inference from the map.
+        let landed = vdom.in_runtime(|| {
+            link.apply_disposition
+                .call((TriageState::Confirmed, String::new()))
+        });
+        assert!(!landed);
+        assert!(link.dispositions.peek().is_empty());
+
+        // Unmounting the table clears the slot (`use_drop`), so a stale link cannot outlive it.
+        vdom.in_runtime(|| {
+            let mut show = show;
+            show.set(false);
+        });
+        settle(&mut vdom).await;
+        assert!(slot.peek().is_none(), "the link must not outlive its table");
+        assert!(!dioxus_ssr::render(&vdom).contains("cv-panel"));
     }
 }

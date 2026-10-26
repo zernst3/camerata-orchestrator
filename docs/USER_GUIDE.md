@@ -409,7 +409,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
 
    | Key | What it does |
    |---|---|
-   | `Esc` | Close the viewer (an open prompt closes first) |
+   | `Esc` | Close the key list, else the viewer (an open prompt closes first) |
    | `C` `T` | Confirm, tech debt (applied at once, 5 second undo) |
    | `I` `F` | Ignore, false positive (asks for a reason) |
    | `Down` `Up` `J` `K` | Next or previous row in the Queue |
