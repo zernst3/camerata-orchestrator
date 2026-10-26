@@ -48,6 +48,10 @@ fn language_for(dialect: EcmaDialect) -> tree_sitter::Language {
 /// could not be loaded (never happens for our statically-linked, version-pinned grammars) —
 /// kept as an `Option` so callers degrade gracefully instead of unwrapping.
 pub(crate) fn parse(dialect: EcmaDialect, source: &str) -> Option<Tree> {
+    // The walkers recurse once per nesting level; see `nesting`.
+    if !super::nesting::parseable(super::SourceLang::JavaScript, source) {
+        return None;
+    }
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&language_for(dialect)).ok()?;
     parser.parse(source, None)

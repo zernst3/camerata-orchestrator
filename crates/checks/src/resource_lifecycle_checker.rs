@@ -100,7 +100,7 @@ impl ArchChecker for ResourceLifecycleChecker {
 }
 
 fn spawn_chain_violations(path: &str, source: &str) -> Vec<ArchViolation> {
-    let Ok(file) = syn::parse_file(source) else {
+    let Some(file) = crate::extract::rust_syn::parse_file(source) else {
         return Vec::new();
     };
 

@@ -50,6 +50,10 @@ pub enum FindingContextOutcome {
     NotUtf8,
     /// The file exceeds [`MAX_FILE_BYTES`] — the same cap the onboarding scan itself enforces.
     TooLarge,
+    /// The code viewer refuses the file: over its cap, or too slow to prepare. Same `too_large`
+    /// status as [`TooLarge`](FindingContextOutcome::TooLarge), with a reason that does not name
+    /// the 400 KB modal cap.
+    TooLargeToView,
     /// The file is readable, but `line` is past its current end (the file shrank).
     LineGone,
     /// The requested `path` resolves outside the repo directory — refused before any read.
@@ -116,6 +120,13 @@ impl FindingContextOutcome {
             FindingContextOutcome::TooLarge => serde_json::json!({
                 "status": "too_large",
                 "reason": format!("file exceeds the {} KB cap", MAX_FILE_BYTES / 1000),
+            }),
+            FindingContextOutcome::TooLargeToView => serde_json::json!({
+                "status": "too_large",
+                "reason": format!(
+                    "file is too large to view here (over {} MB, or too slow to prepare)",
+                    super::source_file::MAX_VIEWER_BYTES / (1024 * 1024)
+                ),
             }),
             FindingContextOutcome::LineGone => serde_json::json!({
                 "status": "line_gone",
@@ -185,7 +196,7 @@ pub async fn lookup_at(
             if !is_plain_relative_path(rel_path) {
                 return FindingContextOutcome::PathTraversal;
             }
-            match read_git_blob(dir, sha, rel_path).await {
+            match read_git_blob(dir, sha, rel_path, MAX_FILE_BYTES).await {
                 Ok(b) => b,
                 Err(GitReadError::CommitUnavailable) => {
                     return FindingContextOutcome::CommitUnavailable
@@ -206,7 +217,7 @@ thread_local! {
 }
 
 /// Read one file from the working tree. The single place the working tree is read.
-async fn read_working_tree_file(abs_path: &Path) -> std::io::Result<Vec<u8>> {
+pub(crate) async fn read_working_tree_file(abs_path: &Path) -> std::io::Result<Vec<u8>> {
     #[cfg(test)]
     WORKING_TREE_READS.with(|c| c.set(c.get() + 1));
     tokio::fs::read(abs_path).await
@@ -214,7 +225,7 @@ async fn read_working_tree_file(abs_path: &Path) -> std::io::Result<Vec<u8>> {
 
 /// A repo-relative path that is safe to put after `<sha>:` — no leading `/`, no `..` segment, no
 /// NUL.
-fn is_plain_relative_path(rel_path: &str) -> bool {
+pub(crate) fn is_plain_relative_path(rel_path: &str) -> bool {
     !rel_path.starts_with('/')
         && !rel_path.contains('\0')
         && !rel_path.split(['/', '\\']).any(|seg| seg == "..")
@@ -222,23 +233,69 @@ fn is_plain_relative_path(rel_path: &str) -> bool {
 
 /// Why a git object read did not return a file.
 #[derive(Debug, PartialEq, Eq)]
-enum GitReadError {
+pub(crate) enum GitReadError {
     /// The commit is not in this clone.
     CommitUnavailable,
     /// The commit exists but has no such file (or the path is a directory).
     NotFound,
-    /// The blob is larger than [`MAX_FILE_BYTES`].
+    /// The blob is larger than the caller's cap.
     TooLarge,
 }
 
+/// Whether `rel_path` at commit `sha` is a regular file (tree entry mode 100644 or 100755), by
+/// the read-only `git ls-tree`. The path follows `--`, so it can never be read as an option.
+async fn is_regular_file_at(dir: &Path, sha: &str, rel_path: &str) -> bool {
+    let Ok(output) = tokio::process::Command::new("git")
+        .current_dir(dir)
+        .args([
+            "-c",
+            "core.quotepath=off",
+            "ls-tree",
+            "-z",
+            sha,
+            "--",
+            rel_path,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    // `<mode> SP <type> SP <object> TAB <path> NUL`; the entry for exactly this path.
+    let wanted = rel_path.trim_end_matches('/').as_bytes();
+    output.stdout.split(|b| *b == 0).any(|entry| {
+        let Some(tab) = entry.iter().position(|b| *b == b'\t') else {
+            return false;
+        };
+        let (meta, path) = (&entry[..tab], &entry[tab + 1..]);
+        path == wanted && (meta.starts_with(b"100644 ") || meta.starts_with(b"100755 "))
+    })
+}
+
 /// `git cat-file blob <sha>:<path>`: the file as it was at `sha`, never the working tree. The
-/// output is read only up to `MAX_FILE_BYTES + 1` bytes, so an oversized blob is detected (and
+/// output is read only up to `cap_bytes + 1` bytes, so an oversized blob is detected (and
 /// the process killed) without buffering it.
-async fn read_git_blob(dir: &Path, sha: &str, rel_path: &str) -> Result<Vec<u8>, GitReadError> {
+pub(crate) async fn read_git_blob(
+    dir: &Path,
+    sha: &str,
+    rel_path: &str,
+    cap_bytes: usize,
+) -> Result<Vec<u8>, GitReadError> {
     use tokio::io::AsyncReadExt;
 
     if !crate::client_source::git::commit_exists(dir, sha).await {
         return Err(GitReadError::CommitUnavailable);
+    }
+    // Only a regular file is shown. A symlink's blob is its target path and a submodule is a
+    // commit, neither of which is the code a reader expects; a directory is not a file either.
+    if !is_regular_file_at(dir, sha, rel_path).await {
+        return Err(GitReadError::NotFound);
     }
     // `sha:` makes the argument an object name; nothing in `rel_path` can be read as an option.
     let spec = format!("{sha}:{rel_path}");
@@ -255,11 +312,11 @@ async fn read_git_blob(dir: &Path, sha: &str, rel_path: &str) -> Result<Vec<u8>,
         return Err(GitReadError::NotFound);
     };
     let mut bytes = Vec::new();
-    let cap = MAX_FILE_BYTES as u64 + 1;
+    let cap = cap_bytes as u64 + 1;
     if stdout.take(cap).read_to_end(&mut bytes).await.is_err() {
         return Err(GitReadError::NotFound);
     }
-    if bytes.len() > MAX_FILE_BYTES {
+    if bytes.len() > cap_bytes {
         // Dropping the child kills it; the rest of the blob is never read.
         return Err(GitReadError::TooLarge);
     }
@@ -320,7 +377,7 @@ fn describe(
 }
 
 /// Redact a block of lines as one text, returning the same number of lines.
-fn redact_block(lines: &[String]) -> Vec<String> {
+pub(crate) fn redact_block(lines: &[String]) -> Vec<String> {
     let joined = lines.join("\n");
     match camerata_secrets::redact_str(&joined) {
         std::borrow::Cow::Borrowed(_) => lines.to_vec(),
@@ -331,7 +388,7 @@ fn redact_block(lines: &[String]) -> Vec<String> {
 /// `"sql"` for a `.sql` path, else the [`camerata_checks::extract::SourceLang`] label, else
 /// `"text"` for anything the extractor layer doesn't cover — purely cosmetic (the UI's
 /// "language" tag), never affects which block is resolved.
-fn language_label(rel_path: &str) -> String {
+pub(crate) fn language_label(rel_path: &str) -> String {
     if rel_path
         .rsplit('.')
         .next()
@@ -352,7 +409,7 @@ fn language_label(rel_path: &str) -> String {
 /// ancestor of both the target and the root (resolving any symlinks in it), then compare with
 /// `starts_with`. Using the existing-ancestor form (rather than requiring the exact target to
 /// exist) means containment can still be checked for a file that's already been deleted.
-fn resolve_contained_path(repo_dir: &Path, rel_path: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_contained_path(repo_dir: &Path, rel_path: &str) -> Option<PathBuf> {
     if rel_path.trim().is_empty() {
         return None;
     }

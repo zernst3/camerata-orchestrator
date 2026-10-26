@@ -22,6 +22,16 @@ use super::{
     LiteralKind, MethodCall, ModuleConst,
 };
 
+/// `syn::parse_file`, but only for a file whose bracket nesting [`nesting`] says `syn` and its
+/// visitors can recurse through on a 2 MiB stack; deeper input is treated as unparseable (`None`),
+/// never allowed to overflow the stack, which would abort the process.
+pub(crate) fn parse_file(source: &str) -> Option<syn::File> {
+    if !super::nesting::parseable(super::SourceLang::Rust, source) {
+        return None;
+    }
+    syn::parse_file(source).ok()
+}
+
 /// Extract every `use` (and `extern crate`) declaration. See module docs for the
 /// specifier/names convention: `specifier` is the module-path PREFIX, `names` the LEAF
 /// binding(s) — `use crate::repositories::user::UserRepo;` yields
@@ -30,7 +40,7 @@ use super::{
 /// is what a config-driven "forbidden import" list names, and is stable regardless of local
 /// renaming (see `ImportKind` docs in `extract::mod`).
 pub fn imports(source: &str) -> Vec<Import> {
-    let Ok(file) = syn::parse_file(source) else {
+    let Some(file) = parse_file(source) else {
         return Vec::new();
     };
     let mut visitor = ImportVisitor { out: Vec::new() };
@@ -48,7 +58,7 @@ pub fn imports(source: &str) -> Vec<Import> {
 /// not the `fn` keyword's line. `attrs` carries each attribute's raw source text
 /// (`#[get("/x")]`), sliced from `source` by byte range — never a re-serialization.
 pub fn functions(source: &str) -> Vec<FunctionSpan> {
-    let Ok(file) = syn::parse_file(source) else {
+    let Some(file) = parse_file(source) else {
         return Vec::new();
     };
     let mut visitor = FnVisitor {
@@ -64,7 +74,7 @@ pub fn functions(source: &str) -> Vec<FunctionSpan> {
 /// renders verbatim; anything more complex (a call, an index, a cast, ...) renders as the
 /// placeholder `"<expr>"` — never a guess, never a panic.
 pub fn method_calls(source: &str) -> Vec<MethodCall> {
-    let Ok(file) = syn::parse_file(source) else {
+    let Some(file) = parse_file(source) else {
         return Vec::new();
     };
     let mut visitor = CallVisitor { out: Vec::new() };
@@ -232,7 +242,7 @@ impl<'s, 'ast> Visit<'ast> for FnVisitor<'s> {
 /// first string literal in the macro body is the directory (`prefix`, with a trailing `/`);
 /// `None` when the body has no literal. See [`ComputedLoad`].
 pub fn computed_loads(source: &str) -> Vec<ComputedLoad> {
-    let Ok(file) = syn::parse_file(source) else {
+    let Some(file) = parse_file(source) else {
         return Vec::new();
     };
     let mut visitor = LoadVisitor { out: Vec::new() };
@@ -305,7 +315,7 @@ pub struct ModDecl {
 /// declares the file, and "declared" is the whole criterion for the dead-code checker.
 /// Never panics: a parse failure yields an empty vec.
 pub fn mod_decls(source: &str) -> Vec<ModDecl> {
-    let Ok(file) = syn::parse_file(source) else {
+    let Some(file) = parse_file(source) else {
         return Vec::new();
     };
     let mut visitor = ModVisitor {
@@ -411,7 +421,7 @@ fn render_receiver(expr: &syn::Expr) -> String {
 /// no expression positions, so no context guard could apply to what is inside), but the token
 /// streams of attributes ARE walked for string literals, with `attribute` set.
 pub fn literals(source: &str) -> Vec<Literal> {
-    let Ok(file) = syn::parse_file(source) else {
+    let Some(file) = parse_file(source) else {
         return Vec::new();
     };
     let mut visitor = LiteralVisitor::default();

@@ -55,7 +55,7 @@ pub struct FindingContextParams {
 
 /// Add `"source": "git" | "working_tree"` (and, for git, the commit and whether the checkout has
 /// moved on) to an outcome's JSON body.
-fn labelled(
+pub(crate) fn labelled(
     outcome: &FindingContextOutcome,
     source: &str,
     git: Option<(&str, bool)>,
@@ -212,6 +212,24 @@ fn owning_project(state: &AppState, project_hint: Option<&str>, repo: &str) -> O
         .map(|p| p.id)
 }
 
+/// Whether `repo` is exactly `owner/name` made of the characters a GitHub login and repository
+/// name can contain: one `/`, no empty segment, no `.` or `..` segment, no separator or NUL.
+pub fn is_owner_name(repo: &str) -> bool {
+    let mut parts = repo.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let segment_ok = |seg: &str| {
+        !seg.is_empty()
+            && seg != "."
+            && seg != ".."
+            && seg
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    };
+    segment_ok(owner) && segment_ok(name)
+}
+
 /// Decide where `repo`'s code is read from. `sha` is the caller's explicit commit (validated as
 /// 40 hex characters, else a 400), defaulting to the commit the project's latest inspection that
 /// covered the repo recorded.
@@ -230,16 +248,25 @@ pub async fn source_for_read(
             });
         }
     }
-    let project_id = owning_project(state, project_hint, repo);
+    // The repo name becomes a path under the workspace root, so it must be a plain `owner/name`
+    // that a project owns. A traversal ("../../etc"), an absolute path or a repo no project has
+    // is refused here, before any directory is built or any file is read: the path jail of the
+    // readers is relative to the directory this resolves, so it cannot catch this itself.
+    let project_id = match owning_project(state, project_hint, repo) {
+        Some(id) if is_owner_name(repo) => id,
+        _ => {
+            return Ok(SourceRead::Unresolved {
+                reason: "no project owns a repo with that name".to_string(),
+            })
+        }
+    };
 
     // Deleted wins over everything: the directory is gone by construction.
-    if let Some(project_id) = &project_id {
-        if let Some(record) = deleted_record(state, project_id, repo) {
-            return Ok(SourceRead::Deleted {
-                deleted_at: record.completed_at,
-                record_id: record.id,
-            });
-        }
+    if let Some(record) = deleted_record(state, &project_id, repo) {
+        return Ok(SourceRead::Deleted {
+            deleted_at: record.completed_at,
+            record_id: record.id,
+        });
     }
 
     let Some(dir) = resolve_dir(state, repo) else {
@@ -255,9 +282,7 @@ pub async fn source_for_read(
 
     let sha = match sha {
         Some(s) => Some(s.to_string()),
-        None => project_id
-            .as_deref()
-            .and_then(|id| inspected_entry(state, id, repo))
+        None => inspected_entry(state, &project_id, repo)
             .and_then(|e| e.sha_for(repo).map(str::to_string))
             .filter(|s| is_full_sha(s)),
     };
