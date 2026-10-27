@@ -48,6 +48,8 @@ mod delete_tests;
 #[cfg(test)]
 mod e2e_tests;
 #[cfg(test)]
+mod finding_context_batch_tests;
+#[cfg(test)]
 mod guard_tests;
 #[cfg(test)]
 mod read_tests;

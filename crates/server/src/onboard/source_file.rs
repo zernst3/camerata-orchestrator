@@ -172,6 +172,48 @@ impl Origin<'_> {
     }
 }
 
+/// The raw bytes of `rel_path` from `origin`, at most `cap` of them: the path jail first, then
+/// the working-tree file or the committed blob. The ONE place a code-showing endpoint turns a
+/// `(origin, path)` into bytes ([`read_rendered`] and the batch context endpoint both call it).
+/// A working-tree file larger than `cap` is refused before it is read into memory.
+pub(crate) async fn read_bytes(
+    origin: Origin<'_>,
+    rel_path: &str,
+    cap: usize,
+) -> Result<Vec<u8>, Refused> {
+    let Some(abs_path) = resolve_contained_path(origin.dir(), rel_path) else {
+        return Err(Refused::PathTraversal);
+    };
+    match origin {
+        Origin::WorkingTree(_) => {
+            // The size is checked first so an oversized file is never read into memory.
+            match tokio::fs::metadata(&abs_path).await {
+                Ok(meta) if meta.is_file() && meta.len() > cap as u64 => {
+                    return Err(Refused::TooLarge)
+                }
+                Ok(meta) if meta.is_file() => {}
+                _ => return Err(Refused::FileMissing),
+            }
+            read_working_tree_file(&abs_path)
+                .await
+                .map_err(|_| Refused::FileMissing)
+        }
+        Origin::Git { dir, sha } => {
+            if !is_plain_relative_path(rel_path) {
+                return Err(Refused::PathTraversal);
+            }
+            read_git_blob(dir, sha, rel_path, cap)
+                .await
+                .map_err(|e| match e {
+                    GitReadError::CommitUnavailable => Refused::CommitUnavailable,
+                    GitReadError::NotFound => Refused::FileMissing,
+                    GitReadError::TooLarge => Refused::TooLarge,
+                    GitReadError::Busy => Refused::Busy,
+                })
+        }
+    }
+}
+
 /// Read, redact, window and highlight `rel_path` from `origin`. The path jail runs before any
 /// read. Never panics, never blocks the runtime, never hangs (see the module docs).
 pub(crate) async fn read_rendered(
@@ -180,37 +222,7 @@ pub(crate) async fn read_rendered(
     around: Option<usize>,
     limits: RenderLimits,
 ) -> Result<Rendered, Refused> {
-    let Some(abs_path) = resolve_contained_path(origin.dir(), rel_path) else {
-        return Err(Refused::PathTraversal);
-    };
-    let bytes = match origin {
-        Origin::WorkingTree(_) => {
-            // The size is checked first so an oversized file is never read into memory.
-            match tokio::fs::metadata(&abs_path).await {
-                Ok(meta) if meta.is_file() && meta.len() > MAX_VIEWER_BYTES as u64 => {
-                    return Err(Refused::TooLarge)
-                }
-                Ok(meta) if meta.is_file() => {}
-                _ => return Err(Refused::FileMissing),
-            }
-            read_working_tree_file(&abs_path)
-                .await
-                .map_err(|_| Refused::FileMissing)?
-        }
-        Origin::Git { dir, sha } => {
-            if !is_plain_relative_path(rel_path) {
-                return Err(Refused::PathTraversal);
-            }
-            read_git_blob(dir, sha, rel_path, MAX_VIEWER_BYTES)
-                .await
-                .map_err(|e| match e {
-                    GitReadError::CommitUnavailable => Refused::CommitUnavailable,
-                    GitReadError::NotFound => Refused::FileMissing,
-                    GitReadError::TooLarge => Refused::TooLarge,
-                    GitReadError::Busy => Refused::Busy,
-                })?
-        }
-    };
+    let bytes = read_bytes(origin, rel_path, MAX_VIEWER_BYTES).await?;
 
     let path = rel_path.to_string();
     let prepared = {
@@ -280,6 +292,23 @@ fn test_stage_delay() {
     }
 }
 
+/// Size cap, UTF-8, and redaction of a whole file: every line of it, redacted. Pure CPU; run on
+/// the blocking pool. The ONE place a file's text is redacted for display ([`prepare`] and the
+/// batch context endpoint both call it), so a multi-line key body is caught wherever a caller
+/// goes on to cut.
+///
+/// The file is redacted as one text (a multi-line key body is only recognisable as a block),
+/// then re-split. The `\n` count is preserved, so line numbers hold.
+pub(crate) fn redacted_lines(bytes: Vec<u8>, cap: usize) -> Result<Vec<String>, Refused> {
+    if bytes.len() > cap {
+        return Err(Refused::TooLarge);
+    }
+    let source = String::from_utf8(bytes).map_err(|_| Refused::NotUtf8)?;
+    let raw_lines: Vec<String> = source.lines().map(str::to_string).collect();
+    drop(source);
+    Ok(redact_block(&raw_lines))
+}
+
 /// Size, UTF-8, redaction and windowing. Pure CPU; run on the blocking pool.
 pub(crate) fn prepare(
     bytes: Vec<u8>,
@@ -288,19 +317,8 @@ pub(crate) fn prepare(
 ) -> Result<Prepared, Refused> {
     #[cfg(test)]
     test_stage_delay();
-    if bytes.len() > MAX_VIEWER_BYTES {
-        return Err(Refused::TooLarge);
-    }
     let whole = bytes.len() <= MAX_FILE_BYTES;
-    let source = String::from_utf8(bytes).map_err(|_| Refused::NotUtf8)?;
-
-    // Redact the whole file as one text (a multi-line key body is only recognisable as a
-    // block), then work only on the redacted lines. The `\n` count is preserved, so line numbers
-    // hold.
-    let raw_lines: Vec<String> = source.lines().map(str::to_string).collect();
-    drop(source);
-    let lines = redact_block(&raw_lines);
-    drop(raw_lines);
+    let lines = redacted_lines(bytes, MAX_VIEWER_BYTES)?;
 
     let total_lines = lines.len();
     let (from, to) = if whole || total_lines == 0 {

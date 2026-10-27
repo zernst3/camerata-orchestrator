@@ -373,20 +373,7 @@ fn describe(
     // only recognisable as a block), then re-split. The `\n` count is preserved, so line
     // numbers hold.
     let lines = redact_block(&slice_lines(&source, block.start_line, block.end_line));
-    let matches_snippet = match expect.map(str::trim).filter(|e| !e.is_empty()) {
-        None => true, // nothing to compare against — don't flag stale
-        Some(exp) => source
-            .lines()
-            .nth(line.saturating_sub(1))
-            .map(|actual| {
-                // `expect` is the STORED snippet, which was redacted at construction, so the
-                // current line is compared in its redacted form.
-                let actual = camerata_secrets::redact_str(actual.trim());
-                let actual = actual.as_ref();
-                actual.contains(exp) || exp.contains(actual)
-            })
-            .unwrap_or(false),
-    };
+    let matches_snippet = snippet_matches(source.lines().nth(line.saturating_sub(1)), expect);
 
     FindingContextOutcome::Ok {
         lines,
@@ -396,6 +383,25 @@ fn describe(
         kind: block.kind.label(),
         language: language_label(rel_path),
         matches_snippet,
+    }
+}
+
+/// Whether the violation line's CURRENT content still contains (or is contained by) the
+/// caller-supplied `expect` snippet text, as trimmed text. `true` when there is nothing to
+/// compare (no `expect`), so nothing is flagged stale; `false` when the line is gone. The ONE
+/// staleness comparison: finding-context and the batch endpoint both call it.
+pub(crate) fn snippet_matches(actual_line: Option<&str>, expect: Option<&str>) -> bool {
+    match expect.map(str::trim).filter(|e| !e.is_empty()) {
+        None => true, // nothing to compare against: don't flag stale
+        Some(exp) => actual_line
+            .map(|actual| {
+                // `expect` is the STORED snippet, which was redacted at construction, so the
+                // current line is compared in its redacted form.
+                let actual = camerata_secrets::redact_str(actual.trim());
+                let actual = actual.as_ref();
+                actual.contains(exp) || exp.contains(actual)
+            })
+            .unwrap_or(false),
     }
 }
 

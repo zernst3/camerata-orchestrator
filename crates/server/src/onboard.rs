@@ -22,6 +22,7 @@ pub mod clone_advisory;
 pub mod count;
 pub mod files;
 pub mod finding_context;
+pub mod finding_context_batch;
 pub mod greenfield;
 pub mod propose;
 pub(crate) mod redact;
