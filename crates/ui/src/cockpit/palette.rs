@@ -19,7 +19,7 @@
 //! activity for the internal timer, like the viewer and the stacked view.
 
 use camerata_ui_core::palette::{
-    filter, palette_key, PaletteAction, PaletteEntry, PaletteKey, PaletteState,
+    filter, palette_key, palette_open_key, PaletteEntry, PaletteKey, PaletteState,
 };
 use camerata_ui_core::triage::{FocusMove, KeyMods};
 use dioxus::prelude::*;
@@ -47,13 +47,15 @@ pub(super) fn option_id(index: usize) -> String {
 const REMEMBER_FOCUS_JS: &str = "window.__camerataPaletteReturn = document.activeElement;";
 
 /// Put the keyboard back on the element remembered when the palette opened, or on `fallback` when
-/// there was none worth returning to (nothing focused, the page body, or an element the table has
-/// since replaced). The remembered element is forgotten either way.
+/// there was none worth returning to: nothing focused, the page body, an element the table has
+/// since replaced, or the toolbar's own Commands button (focus there would leave the pane's
+/// decision keys dead, which is the opposite of what Esc promises). The remembered element is
+/// forgotten either way.
 fn restore_focus_js(fallback: &str) -> String {
     format!(
         "var el = window.__camerataPaletteReturn; window.__camerataPaletteReturn = null;\
-if (!(el && el !== document.body && el.isConnected && typeof el.focus === 'function')) \
-{{ el = document.getElementById('{fallback}'); }}\
+if (!(el && el !== document.body && el.id !== '{PALETTE_BUTTON_ID}' && el.isConnected \
+&& typeof el.focus === 'function')) {{ el = document.getElementById('{fallback}'); }}\
 if (el) el.focus();"
     )
 }
@@ -94,9 +96,27 @@ pub(super) struct PaletteOpen {
 pub(super) struct PaletteLink {
     /// The open palette, or `None`. The Queue writes it to open; the host writes `None` to close.
     pub open: Signal<Option<PaletteOpen>>,
-    /// Run this action. The Queue's one dispatcher: it calls the function the action's button or
-    /// key calls, and refuses (the same gate as opening) while a reason prompt is open.
-    pub on_run: Callback<PaletteAction>,
+    /// Run this entry. The Queue's one dispatcher: it calls the function the entry's button or
+    /// key calls. It refuses (the same gate as opening) while a reason prompt is open, and when
+    /// the entry no longer means what it said, and in both cases says so and puts the keyboard
+    /// where it belongs. Answers `true` only when the action ran.
+    pub on_run: Callback<PaletteEntry, bool>,
+    /// The open chord was pressed, with whether the page had a dialog up at that moment (read
+    /// from the DOM by the review bridge). Opens the palette, or closes it when it is open.
+    pub on_chord: Callback<bool>,
+}
+
+/// The review bridge heard a key with Ctrl or Cmd held. If it is the open chord, toggle the
+/// palette through the Queue's link. `modal_open` is the page's own answer to "is a dialog up".
+/// A no-op when no Queue has registered (another tab).
+pub(super) fn route_chord(slot: Option<PaletteSlot>, key: &str, mods: KeyMods, modal_open: bool) {
+    if !palette_open_key(key, mods) {
+        return;
+    }
+    let link = slot.and_then(|s| s.0.peek().clone());
+    if let Some(link) = link {
+        link.on_chord.call(modal_open);
+    }
 }
 
 /// Where the Queue registers its [`PaletteLink`]. Provided by the results view.
@@ -136,16 +156,18 @@ fn PaletteHost(link: PaletteLink, open: PaletteOpen) -> Element {
             restore_focus();
         }
     });
-    // Run the line at `index` of the narrowed list.
+    // Run the line at `index` of the narrowed list. The keyboard goes back only if the action ran
+    // and is one that does not take the keyboard itself: a refused run has already put the
+    // keyboard where it belongs (an open reason prompt keeps it).
     let run_at = use_callback(move |index: usize| {
-        let action = {
+        let entry = {
             let all = entries.peek();
             let shown = filter(&all, state.peek().query());
-            shown.get(index).map(|e| e.action)
+            shown.get(index).map(|e| (*e).clone())
         };
-        let Some(action) = action else { return };
-        on_run.call(action);
-        close.call(action.returns_focus());
+        let Some(entry) = entry else { return };
+        let ran = on_run.call(entry.clone());
+        close.call(ran && entry.action.returns_focus());
     });
 
     let query = state.read().query().to_string();
@@ -206,6 +228,8 @@ fn PaletteHost(link: PaletteLink, open: PaletteOpen) -> Element {
                                 e.prevent_default();
                                 close.call(true);
                             }
+                            // Tab stays in the palette: the pane under it must not get the keyboard.
+                            Some(PaletteKey::Trap) => e.prevent_default(),
                             Some(PaletteKey::Move(dir)) => {
                                 e.prevent_default();
                                 move_highlight(&mut state, &entries, dir);
@@ -281,6 +305,9 @@ mod tests {
         assert!(js.contains("window.__camerataPaletteReturn"));
         assert!(js.contains("el.isConnected"));
         assert!(js.contains("el !== document.body"));
+        // The toolbar's own Commands button is not worth returning to: focus there leaves the
+        // pane's decision keys dead, which is the opposite of what Esc promises.
+        assert!(js.contains(&format!("el.id !== '{PALETTE_BUTTON_ID}'")));
         // The fallback is the detail pane, so its keys work without a click.
         assert!(js.contains(&format!("getElementById('{DETAIL_PANE_ID}')")));
         // Forgotten either way, so a stale element is never returned to on a later opening.

@@ -43,15 +43,23 @@ pub enum PaletteGate {
     ReasonPrompt,
     /// The code viewer or the stacked view is open over the Queue.
     Overlay,
+    /// A dialog is open over the Queue (the full-detail view, the Rule Hub, the review-time
+    /// view, or any other `.rule-modal-overlay`). It is drawn above the palette, so the palette
+    /// would open where nobody can see it.
+    Modal,
 }
 
 /// THE PALETTE'S GATE, as a pure function of what is open. A reason prompt is named before an
 /// overlay, so the reviewer is told about the one that has something half-written in it.
-pub fn palette_gate(reason_prompt_open: bool, overlay_open: bool) -> PaletteGate {
+/// `modal_open` is the page's own answer to "is any dialog up", read from the DOM when the chord
+/// was pressed, so a dialog this code has never heard of is still refused.
+pub fn palette_gate(reason_prompt_open: bool, overlay_open: bool, modal_open: bool) -> PaletteGate {
     if reason_prompt_open {
         PaletteGate::ReasonPrompt
     } else if overlay_open {
         PaletteGate::Overlay
+    } else if modal_open {
+        PaletteGate::Modal
     } else {
         PaletteGate::Open
     }
@@ -73,6 +81,7 @@ impl PaletteGate {
             Self::Overlay => Some(
                 "Close the code viewer or the stacked view first, then open the command palette.",
             ),
+            Self::Modal => Some("Close the open dialog first, then open the command palette."),
         }
     }
 }
@@ -95,18 +104,21 @@ pub enum PaletteKey {
     Move(FocusMove),
     /// Run the highlighted entry.
     Run,
+    /// Tab and Shift+Tab: the keyboard stays in the palette (a focus trap). The palette is a
+    /// modal layer; letting Tab walk out would put the keyboard on the pane under it while the
+    /// palette is still drawn.
+    Trap,
 }
 
 /// THE PALETTE'S KEY MAP, a whitelist like the pane's, the viewer's and the stack's: any key not
-/// named here is `None` and is typed into the field (or ignored). The open chord closes it again.
+/// named here is `None` and is typed into the field (or ignored). The open chord is not here: it
+/// is heard at the document, by the review bridge, which toggles the palette (open or closed).
 pub fn palette_key(key: &str, mods: KeyMods) -> Option<PaletteKey> {
-    if palette_open_key(key, mods) {
-        return Some(PaletteKey::Close);
-    }
     if mods.ctrl || mods.alt || mods.meta {
         return None;
     }
     match key {
+        "Tab" => Some(PaletteKey::Trap),
         "Escape" => Some(PaletteKey::Close),
         "Enter" => Some(PaletteKey::Run),
         "ArrowDown" => Some(PaletteKey::Move(FocusMove::Down)),
@@ -352,6 +364,32 @@ pub fn entries(ctx: &PaletteContext) -> Vec<PaletteEntry> {
     out
 }
 
+// ── Staleness ────────────────────────────────────────────────────────────────────────────
+
+/// Whether `chosen`, picked from a list built when the palette opened, still means what it said
+/// now (`fresh` is the list for the state of the review at run time). `None` when it does, and
+/// then it may run. Otherwise what to tell the reviewer, and nothing runs:
+///
+/// - its action is gone (the focused row left the table in a refresh, the undo window shut): it
+///   is no longer available;
+/// - its action is there under another label (the timer was paused or resumed by itself since
+///   the palette opened): running it would do the opposite of what the line said.
+pub fn stale_note(chosen: &PaletteEntry, fresh: &[PaletteEntry]) -> Option<String> {
+    if fresh.contains(chosen) {
+        return None;
+    }
+    Some(match fresh.iter().find(|e| e.action == chosen.action) {
+        Some(now) => format!(
+            "\u{201c}{}\u{201d} changed while the palette was open and is now \u{201c}{}\u{201d}. Open the palette again to run it.",
+            chosen.label, now.label
+        ),
+        None => format!(
+            "\u{201c}{}\u{201d} is no longer available: the review changed while the palette was open.",
+            chosen.label
+        ),
+    })
+}
+
 // ── Filtering ────────────────────────────────────────────────────────────────────────────
 
 /// The entries that match `query`, in the order given (stable, so the list does not reshuffle
@@ -447,15 +485,18 @@ mod tests {
     // ── The gate ──
 
     #[test]
-    fn the_palette_is_refused_under_a_reason_prompt_and_over_an_overlay() {
-        assert_eq!(palette_gate(false, false), PaletteGate::Open);
-        assert_eq!(palette_gate(true, false), PaletteGate::ReasonPrompt);
-        assert_eq!(palette_gate(false, true), PaletteGate::Overlay);
-        // A prompt inside an overlay is still named as the prompt.
-        assert_eq!(palette_gate(true, true), PaletteGate::ReasonPrompt);
-        assert!(palette_gate(false, false).is_open());
-        assert!(!palette_gate(true, false).is_open());
-        assert!(!palette_gate(false, true).is_open());
+    fn the_palette_is_refused_under_a_prompt_over_an_overlay_and_under_a_dialog() {
+        assert_eq!(palette_gate(false, false, false), PaletteGate::Open);
+        assert_eq!(palette_gate(true, false, false), PaletteGate::ReasonPrompt);
+        assert_eq!(palette_gate(false, true, false), PaletteGate::Overlay);
+        assert_eq!(palette_gate(false, false, true), PaletteGate::Modal);
+        // A prompt is named before anything else, then an overlay before a dialog.
+        assert_eq!(palette_gate(true, true, true), PaletteGate::ReasonPrompt);
+        assert_eq!(palette_gate(false, true, true), PaletteGate::Overlay);
+        assert!(palette_gate(false, false, false).is_open());
+        assert!(!palette_gate(true, false, false).is_open());
+        assert!(!palette_gate(false, true, false).is_open());
+        assert!(!palette_gate(false, false, true).is_open());
     }
 
     #[test]
@@ -466,7 +507,12 @@ mod tests {
             .unwrap()
             .contains("reason"));
         assert!(PaletteGate::Overlay.refusal().unwrap().contains("viewer"));
-        for gate in [PaletteGate::ReasonPrompt, PaletteGate::Overlay] {
+        assert!(PaletteGate::Modal.refusal().unwrap().contains("dialog"));
+        for gate in [
+            PaletteGate::ReasonPrompt,
+            PaletteGate::Overlay,
+            PaletteGate::Modal,
+        ] {
             assert!(!gate.refusal().unwrap().contains('\u{2014}'), "no em-dash");
             assert!(!gate.refusal().unwrap().contains('\u{2013}'), "no en-dash");
         }
@@ -508,13 +554,17 @@ mod tests {
             palette_key("ArrowUp", none),
             Some(PaletteKey::Move(FocusMove::Up))
         );
-        assert_eq!(
-            palette_key("k", mods(true, false, false)),
-            Some(PaletteKey::Close),
-            "the open chord closes it"
-        );
+        // Tab and Shift+Tab are trapped, so the keyboard cannot walk out to the pane.
+        assert_eq!(palette_key("Tab", none), Some(PaletteKey::Trap));
+        let shift = KeyMods {
+            shift: true,
+            ..KeyMods::none()
+        };
+        assert_eq!(palette_key("Tab", shift), Some(PaletteKey::Trap));
+        // The open chord is the bridge's, not the field's.
+        assert_eq!(palette_key("k", mods(true, false, false)), None);
         // Everything else is typing.
-        for typed in ["c", "i", "t", "f", "o", "b", "a", " ", "Tab", "Backspace"] {
+        for typed in ["c", "i", "t", "f", "o", "b", "a", " ", "Backspace"] {
             assert_eq!(palette_key(typed, none), None, "{typed}");
         }
         // A chord is not Enter.
@@ -790,5 +840,67 @@ mod tests {
         assert_eq!(state.selected(&shown), Some(shown[0]));
         state.move_cursor(FocusMove::Down, shown.len());
         assert_eq!(state.selected(&shown), Some(shown[1]));
+    }
+
+    // ── Staleness ──
+
+    #[test]
+    fn a_line_that_still_means_what_it_said_runs() {
+        let list = entries(&full());
+        for e in &list {
+            assert_eq!(stale_note(e, &list), None);
+        }
+    }
+
+    #[test]
+    fn a_line_whose_target_is_gone_says_so_instead_of_running() {
+        let opened = entries(&full());
+        let gone = PaletteContext {
+            has_focus: false,
+            ..full()
+        };
+        let fresh = entries(&gone);
+        let confirm = opened
+            .iter()
+            .find(|e| e.label == "Confirm this finding")
+            .unwrap();
+        let note = stale_note(confirm, &fresh).unwrap();
+        assert!(note.contains("no longer available"), "{note}");
+        assert!(note.contains("Confirm this finding"));
+    }
+
+    #[test]
+    fn a_flipped_timer_line_is_not_run_as_the_opposite_action() {
+        let opened = entries(&full());
+        let flipped = PaletteContext {
+            timer_button: Some("Resume".to_string()),
+            ..full()
+        };
+        let fresh = entries(&flipped);
+        let pause = opened
+            .iter()
+            .find(|e| e.action == PaletteAction::ToggleTimer)
+            .unwrap();
+        let note = stale_note(pause, &fresh).unwrap();
+        assert!(note.contains("Pause the review timer"), "{note}");
+        assert!(note.contains("Resume the review timer"), "{note}");
+    }
+
+    #[test]
+    fn staleness_notes_have_no_dash_of_any_width() {
+        let opened = entries(&full());
+        let fresh = entries(&PaletteContext {
+            has_focus: false,
+            timer_button: Some("Resume".to_string()),
+            ..full()
+        });
+        for e in &opened {
+            if let Some(note) = stale_note(e, &fresh) {
+                assert!(
+                    !note.contains('\u{2014}') && !note.contains('\u{2013}'),
+                    "{note}"
+                );
+            }
+        }
     }
 }

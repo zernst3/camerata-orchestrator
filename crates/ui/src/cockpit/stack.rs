@@ -53,6 +53,9 @@ use super::viewer::{dom_key, focus_element, follow_selected, ViewerUndoBar};
 /// close hands the keyboard back to it.
 pub(super) const STACK_ID: &str = "camerata-stack";
 
+/// The DOM id of the stacked view's reason field (the Queue's has its own).
+const STACK_REASON_ID: &str = "camerata-stack-reason";
+
 /// DOM ids of the controls a mounted test needs to find (and a screen reader to name).
 pub(super) const STACK_UNDO_ID: &str = "camerata-stack-undo";
 pub(super) const STACK_CONFIRM_ID: &str = "camerata-stack-act-confirm";
@@ -456,7 +459,14 @@ pub(super) fn StackView(
                     }
                 }
                 if let Some(p) = prompt {
-                    QueueReasonPrompt { prompt: p, reason, on_reason, on_commit, on_cancel }
+                    QueueReasonPrompt {
+                        prompt: p,
+                        reason,
+                        on_reason,
+                        on_commit,
+                        on_cancel,
+                        input_id: STACK_REASON_ID.to_string(),
+                    }
                 }
                 ViewerUndoBar { undo_entry, now_ms, on_undo, button_id: STACK_UNDO_ID.to_string() }
                 div { class: if armed { "cv-keys armed" } else { "cv-keys" }, "{strip}" }
@@ -765,9 +775,12 @@ mod tests {
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
     use super::super::palette::{
-        option_id, PaletteRoot, PaletteSlot, PALETTE_BUTTON_ID, PALETTE_INPUT_ID, RESTORE_LOG_MARK,
+        option_id, route_chord, PaletteRoot, PaletteSlot, PALETTE_BUTTON_ID, PALETTE_INPUT_ID,
+        RESTORE_LOG_MARK,
     };
     use super::super::scan::FindingsTable;
+    use super::super::scan::{RuleHubRequest, PANE_REASON_ID};
+    use super::super::viewer::ViewerHubOpen;
     use super::super::viewer::{ViewerRoot, ViewerSlot, FOCUS_LOG, VIEWER_ID};
     use super::*;
 
@@ -1027,6 +1040,12 @@ mod tests {
     struct Probe {
         dispositions: Signal<HashMap<String, Disposition>>,
         toasts: Signal<Vec<crate::toast::Toast>>,
+        /// The finding the full-detail dialog is open on (the results root hosts the dialog).
+        detail: Signal<Option<FindingView>>,
+        /// The Rule Hub request the results root would be showing.
+        hub: Signal<Option<RuleHubRequest>>,
+        /// Where the Queue registers the palette (the review bridge routes the chord through it).
+        palette: PaletteSlot,
     }
 
     thread_local! {
@@ -1043,6 +1062,8 @@ mod tests {
         /// How many times the strip's Review time button's callback was called (the command
         /// palette's stats entry calls the same one).
         static STATS_OPENED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        /// The Rule Hub requests the Queue raised (`on_open_hub`), as `(repo, rule id)`.
+        static HUB_REQUESTS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
     }
 
     fn review() -> super::super::review::ReviewHandle {
@@ -1054,17 +1075,22 @@ mod tests {
         REVIEW.with(|r| *r.borrow_mut() = Some(review.clone()));
         use_context_provider(|| review.clone());
         let toasts = use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
-        use_context_provider(|| Signal::new(None::<FindingView>));
+        let detail = use_context_provider(|| Signal::new(None::<FindingView>));
         use_context_provider(|| Signal::new(ViewerCache::new()));
         use_context_provider(|| ViewerSlot(Signal::new(None)));
         use_context_provider(|| StackSlot(Signal::new(None)));
-        use_context_provider(|| PaletteSlot(Signal::new(None)));
+        let palette = use_context_provider(|| PaletteSlot(Signal::new(None)));
+        let hub = Signal::new(None::<RuleHubRequest>);
+        use_context_provider(|| ViewerHubOpen(hub));
         let dispositions = use_signal(|| INITIAL.with(|i| i.borrow().clone()));
         let order_preset = use_signal(|| PRESET.with(std::cell::Cell::get));
         PROBE.with(|p| {
             *p.borrow_mut() = Some(Probe {
                 dispositions,
                 toasts,
+                detail,
+                hub,
+                palette,
             })
         });
         let findings = ROWS.with(|r| r.borrow().clone());
@@ -1088,6 +1114,9 @@ mod tests {
                 audited_shas: shas,
                 review: Some(review),
                 on_open_stats: Callback::new(|()| STATS_OPENED.with(|n| n.set(n.get() + 1))),
+                on_open_hub: Callback::new(|req: RuleHubRequest| {
+                    HUB_REQUESTS.with(|r| r.borrow_mut().push((req.repo, req.rule_id)));
+                }),
             }
             StackRoot {}
             ViewerRoot {}
@@ -1289,6 +1318,8 @@ mod tests {
             "Enter" => Key::Enter,
             "Escape" => Key::Escape,
             "ArrowDown" => Key::ArrowDown,
+            "ArrowUp" => Key::ArrowUp,
+            "Tab" => Key::Tab,
             other => Key::Character(other.to_string()),
         };
         let data = SerializedKeyboardData::new(
@@ -3417,23 +3448,53 @@ mod tests {
     // entry reaches the function its button or key reaches, and the gate, the focus and the
     // timer behaviour that only a mounted Queue can show.
 
-    /// A key press with modifiers held.
-    fn chord(vdom: &VirtualDom, id: ElementId, pressed: &str, mods: Modifiers) {
+    /// A Ctrl or Cmd chord as the review bridge reports it, routed the way the bridge routes it:
+    /// `route_chord` through the palette slot the Queue registered. `dom_modal` is what the page
+    /// says about dialogs at the press (any `.rule-modal-overlay`).
+    async fn press_chord(
+        vdom: &mut VirtualDom,
+        seen: &mut Seen,
+        pressed: &str,
+        mods: KeyMods,
+        dom_modal: bool,
+    ) {
+        let slot = probe().palette;
+        vdom.in_runtime(|| route_chord(Some(slot), pressed, mods, dom_modal));
+        settle(vdom, seen).await;
+    }
+
+    fn ctrl() -> KeyMods {
+        KeyMods {
+            ctrl: true,
+            ..KeyMods::none()
+        }
+    }
+
+    /// Ctrl+K, anywhere on the results screen (the focused element does not matter, so `_at` is
+    /// only kept so the call sites read as before).
+    async fn ctrl_k(vdom: &mut VirtualDom, seen: &mut Seen, _at: ElementId) {
+        press_chord(vdom, seen, "k", ctrl(), false).await;
+    }
+
+    /// Whether the app prevented the default action of a keydown in the palette's field.
+    fn default_prevented(vdom: &VirtualDom, id: ElementId, named: Key, shift: bool) -> bool {
+        let mods = if shift {
+            Modifiers::SHIFT
+        } else {
+            Modifiers::empty()
+        };
         let data = SerializedKeyboardData::new(
-            Key::Character(pressed.to_string()),
+            named,
             Code::Unidentified,
             Location::Standard,
             false,
             mods,
             false,
         );
-        send(vdom, "keydown", id, Box::new(data));
-    }
-
-    /// Ctrl+K at the pane, which is where the press lands when the pane holds the focus.
-    async fn ctrl_k(vdom: &mut VirtualDom, seen: &mut Seen, at: ElementId) {
-        chord(vdom, at, "k", Modifiers::CONTROL);
-        settle(vdom, seen).await;
+        let platform: Rc<dyn Any> = Rc::new(dioxus::html::PlatformEventData::new(Box::new(data)));
+        let event = dioxus::dioxus_core::Event::new(platform, true);
+        vdom.runtime().handle_event("keydown", event.clone(), id);
+        !event.default_action_enabled()
     }
 
     /// Type `text` into the palette's field.
@@ -3518,9 +3579,16 @@ mod tests {
         settle(&mut vdom, &mut seen).await;
         assert!(html(&vdom).contains("pal-panel"), "the Commands button");
         press_in_palette(&mut vdom, &mut seen, "Escape").await;
-        chord(&vdom, pane, "k", Modifiers::META);
-        settle(&mut vdom, &mut seen).await;
+        let cmd = KeyMods {
+            meta: true,
+            ..KeyMods::none()
+        };
+        press_chord(&mut vdom, &mut seen, "k", cmd, false).await;
         assert!(html(&vdom).contains("pal-panel"), "Cmd+K");
+        // Only the palette's chord: Ctrl+J is nothing.
+        press_in_palette(&mut vdom, &mut seen, "Escape").await;
+        press_chord(&mut vdom, &mut seen, "j", ctrl(), false).await;
+        assert!(!html(&vdom).contains("pal-panel"));
     }
 
     /// Typing narrows the list as it goes, and a query nothing matches says so.
@@ -3748,8 +3816,28 @@ mod tests {
         );
         assert!(page.contains("Open the Rule Hub for this finding"));
         press_in_palette(&mut vdom, &mut seen, "Escape").await;
+        assert!(probe().detail.peek().is_none());
         run_entry(&mut vdom, &mut seen, pane, "full detail").await;
+        assert_eq!(
+            probe()
+                .detail
+                .peek()
+                .as_ref()
+                .map(|f| (f.rule_id.clone(), f.line)),
+            Some(("SQL-1".to_string(), 7)),
+            "the pane's Full detail callback was called with the focused finding"
+        );
+        // The dialog is up now, so the palette is (rightly) refused until it is closed.
+        let mut detail = probe().detail;
+        vdom.in_runtime(|| detail.set(None));
+        settle(&mut vdom, &mut seen).await;
+        let before = HUB_REQUESTS.with(|r| r.borrow().len());
         run_entry(&mut vdom, &mut seen, pane, "rule hub").await;
+        assert_eq!(
+            HUB_REQUESTS.with(|r| r.borrow()[before..].to_vec()),
+            vec![("me/api".to_string(), "SQL-1".to_string())],
+            "the pane's rule button callback was called for the focused rule"
+        );
         assert!(probe().dispositions.peek().is_empty());
     }
 
@@ -3839,8 +3927,57 @@ mod tests {
         ));
     }
 
+    /// REFUSED under every kind of dialog, with the reason said and nothing decided. The full
+    /// detail view and the Rule Hub are known by their state; the review-time view (and any dialog
+    /// not listed anywhere) is known by what the page reports from the DOM at the press.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_palette_is_refused_under_the_detail_the_hub_and_any_other_dialog() {
+        for dialog in ["detail", "hub", "dom"] {
+            let (mut vdom, mut seen, _server, _env) =
+                mount(vec![defect(7), defect(8)], OrderPreset::CriticalFirst, "ok").await;
+            let pane = arm_pane(&mut vdom, &mut seen).await;
+            let (mut detail, mut hub) = (probe().detail, probe().hub);
+            let dom_modal = dialog == "dom";
+            match dialog {
+                "detail" => vdom.in_runtime(|| detail.set(Some(defect(7)))),
+                "hub" => vdom.in_runtime(|| {
+                    hub.set(Some(RuleHubRequest {
+                        repo: "me/api".to_string(),
+                        rule_id: "SQL-1".to_string(),
+                    }))
+                }),
+                _ => {}
+            }
+            settle(&mut vdom, &mut seen).await;
+            press_chord(&mut vdom, &mut seen, "k", ctrl(), dom_modal).await;
+            assert!(!html(&vdom).contains("pal-panel"), "{dialog}: refused");
+            assert!(
+                toast_said("Close the open dialog first"),
+                "{dialog}: and says why"
+            );
+            // Enter would have been Confirm, the first line. Nothing can have run.
+            key(&vdom, pane, "Enter");
+            settle(&mut vdom, &mut seen).await;
+            assert!(probe().dispositions.peek().is_empty(), "{dialog}");
+
+            // Closed again, it opens.
+            vdom.in_runtime(|| {
+                detail.set(None);
+                hub.set(None);
+            });
+            settle(&mut vdom, &mut seen).await;
+            ctrl_k(&mut vdom, &mut seen, pane).await;
+            assert!(
+                html(&vdom).contains("pal-panel"),
+                "{dialog}: open once closed"
+            );
+        }
+    }
+
     /// The gate is checked again when an entry runs, not only when the palette opens: a reason
-    /// prompt that opens under an open palette (here by the pane's own key) stops the entry.
+    /// prompt that opens under an open palette (here by the pane's own key) stops the entry, and
+    /// the keyboard goes to that prompt, not to the pane (whose next key would drop the reason).
     #[tokio::test(flavor = "current_thread")]
     #[serial_test::serial(process_env)]
     async fn an_entry_is_refused_if_a_reason_prompt_opened_under_the_palette() {
@@ -3851,6 +3988,7 @@ mod tests {
         key(&vdom, pane, "i");
         settle(&mut vdom, &mut seen).await;
         assert!(html(&vdom).contains("pane-reason-prompt"));
+        FOCUS_LOG.with(|l| l.borrow_mut().clear());
         press_in_palette(&mut vdom, &mut seen, "Enter").await;
         assert!(
             probe().dispositions.peek().is_empty(),
@@ -3858,6 +3996,104 @@ mod tests {
         );
         assert!(toast_said("Finish or cancel the reason first"));
         assert!(html(&vdom).contains("pane-reason-prompt"));
+        assert!(!html(&vdom).contains("pal-panel"), "the palette closed");
+        assert_eq!(
+            last_focus(),
+            Some(PANE_REASON_ID.to_string()),
+            "the keyboard is in the open prompt"
+        );
+        assert!(
+            !FOCUS_LOG.with(|l| l.borrow().contains(&RESTORE_LOG_MARK.to_string())),
+            "and was not handed to the pane"
+        );
+    }
+
+    /// Tab and Shift+Tab stay in the palette (their default is prevented), and ordinary typing
+    /// is left alone.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn tab_and_shift_tab_are_trapped_in_the_palette() {
+        let (mut vdom, mut seen, _server, _env) =
+            mount(vec![defect(7), defect(8)], OrderPreset::CriticalFirst, "ok").await;
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        ctrl_k(&mut vdom, &mut seen, pane).await;
+        let field = seen.element(PALETTE_INPUT_ID);
+        assert!(default_prevented(&vdom, field, Key::Tab, false), "Tab");
+        assert!(default_prevented(&vdom, field, Key::Tab, true), "Shift+Tab");
+        assert!(
+            !default_prevented(&vdom, field, Key::Character("a".to_string()), false),
+            "a letter is still typed"
+        );
+        settle(&mut vdom, &mut seen).await;
+        assert!(html(&vdom).contains("pal-panel"), "and it is still open");
+        assert!(probe().dispositions.peek().is_empty());
+    }
+
+    /// A line is checked again when it runs. Here the focused row is decided from under the open
+    /// palette: "Confirm this finding" has nothing to act on, so it says so and runs nothing.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_line_whose_row_is_gone_says_so_and_runs_nothing() {
+        let (mut vdom, mut seen, _server, _env) =
+            mount(vec![defect(7)], OrderPreset::CriticalFirst, "ok").await;
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        ctrl_k(&mut vdom, &mut seen, pane).await;
+        // The one row is decided by its key; the table is empty and the palette still lists Confirm.
+        key(&vdom, pane, "c");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(state_count(TriageState::Confirmed), 1);
+        FOCUS_LOG.with(|l| l.borrow_mut().clear());
+        press_in_palette(&mut vdom, &mut seen, "Enter").await;
+        assert_eq!(
+            state_count(TriageState::Confirmed),
+            1,
+            "nothing further was decided"
+        );
+        assert!(
+            toast_said("is no longer available"),
+            "{:?}",
+            probe()
+                .toasts
+                .peek()
+                .iter()
+                .map(|t| t.message.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(!html(&vdom).contains("pal-panel"));
+        assert_eq!(
+            last_focus(),
+            Some(RESTORE_LOG_MARK.to_string()),
+            "the keyboard goes back to where it was"
+        );
+    }
+
+    /// The Pause line is not run as Resume. The timer is paused from under the open palette (as
+    /// the idle rule would), so the line saying "Pause" is stale: it says what it became.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_pause_line_is_not_run_as_resume_when_the_timer_flipped() {
+        let (mut vdom, mut seen, _server, _env) =
+            mount(vec![defect(7), defect(8)], OrderPreset::CriticalFirst, "ok").await;
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        ctrl_k(&mut vdom, &mut seen, pane).await;
+        assert!(html(&vdom).contains("Pause the review timer"));
+        let handle = review();
+        vdom.in_runtime(|| handle.toggle());
+        settle(&mut vdom, &mut seen).await;
+        assert!(
+            html(&vdom).contains(">Resume<"),
+            "the strip says Resume now"
+        );
+        type_in_palette(&mut vdom, &mut seen, "pause").await;
+        press_in_palette(&mut vdom, &mut seen, "Enter").await;
+        assert!(toast_said("changed while the palette was open"));
+        assert!(
+            html(&vdom).contains(">Resume<"),
+            "the timer was not resumed by the stale line"
+        );
+        // Reopened, the line says what is true.
+        ctrl_k(&mut vdom, &mut seen, pane).await;
+        assert!(html(&vdom).contains("Resume the review timer"));
     }
 
     /// Esc closes it, changes nothing, and gives the keyboard back.
@@ -3880,14 +4116,14 @@ mod tests {
         // The chord closes it too, and a second Ctrl+K opens a fresh one.
         ctrl_k(&mut vdom, &mut seen, pane).await;
         type_in_palette(&mut vdom, &mut seen, "false").await;
-        chord(
-            &vdom,
-            seen.element(PALETTE_INPUT_ID),
-            "k",
-            Modifiers::CONTROL,
+        FOCUS_LOG.with(|l| l.borrow_mut().clear());
+        ctrl_k(&mut vdom, &mut seen, pane).await;
+        assert!(!html(&vdom).contains("pal-panel"), "the chord closes it");
+        assert_eq!(
+            last_focus(),
+            Some(RESTORE_LOG_MARK.to_string()),
+            "and gives the keyboard back"
         );
-        settle(&mut vdom, &mut seen).await;
-        assert!(!html(&vdom).contains("pal-panel"));
         ctrl_k(&mut vdom, &mut seen, pane).await;
         assert!(
             html(&vdom).contains("Confirm this finding"),

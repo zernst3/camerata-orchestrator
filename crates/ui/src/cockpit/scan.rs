@@ -681,7 +681,8 @@ pub(super) use camerata_ui_core::triage::{deviation_groups, rule_group_label, De
 // five-second undo. This layer owns the focus signal, the keydown wiring and the rsx; it owns
 // none of the rules.
 use camerata_ui_core::palette::{
-    entries as palette_entries, palette_gate, palette_open_key, PaletteAction, PaletteContext,
+    entries as palette_entries, palette_gate, stale_note, PaletteAction, PaletteContext,
+    PaletteEntry,
 };
 pub(super) use camerata_ui_core::triage::{
     deviation_headline, next_pane_focus, pane_command, pane_keys_armed, site_count, state_hotkey,
@@ -2701,12 +2702,18 @@ pub(super) fn QueueReasonPrompt(
     on_reason: Callback<String>,
     on_commit: Callback<()>,
     on_cancel: Callback<()>,
+    /// The DOM id of the reason field, so a refused command can put the keyboard back in it. Each
+    /// place that mounts the prompt gives its own, because the stacked view's prompt can be up
+    /// while the Queue's is.
+    #[props(default = QUEUE_REASON_ID.to_string())]
+    input_id: String,
 ) -> Element {
     let heading = bulk_reason_heading(prompt.state, prompt.count());
     rsx! {
         div { class: "queue-reason-prompt",
             label { class: "rule-modal-label", "{heading}" }
             textarea {
+                id: "{input_id}",
                 class: "addressee-input queue-reason-input",
                 rows: "2",
                 autofocus: true,
@@ -3162,6 +3169,12 @@ pub(super) fn RuleHubModal(
         }
     }
 }
+
+/// The DOM id of the pane's reason field (the on-demand prompt `I` and `F` raise).
+pub(super) const PANE_REASON_ID: &str = "camerata-pane-reason";
+
+/// The DOM id of the Queue's own toolbar reason field.
+pub(super) const QUEUE_REASON_ID: &str = "camerata-queue-reason";
 
 /// The DOM id of the docked detail pane's focusable region.
 ///
@@ -3671,6 +3684,7 @@ pub(super) fn FindingDetailPane(
                             "Reason for \u{201c}{state.label()}\u{201d} (required)"
                         }
                         textarea {
+                            id: "{PANE_REASON_ID}",
                             class: "addressee-input pane-reason-input",
                             rows: "2",
                             autofocus: true,
@@ -4629,21 +4643,68 @@ pub(super) fn FindingsTable(
     let mut palette_open = use_signal(|| Option::<super::palette::PaletteOpen>::None);
     let mut palette_serial = use_signal(|| 0u64);
     // THE GATE, read from the live state: refused while ANY reason prompt is open (the pane's or
-    // the toolbar's, exactly like `stack_focus`) and while the viewer or the stack is up over the
-    // Queue. One closure, used by opening and by running, so they cannot disagree.
-    let palette_gate_now = move || {
+    // the toolbar's, exactly like `stack_focus`), while the viewer or the stack is up over the
+    // Queue, and while any dialog is up. The dialogs are read two ways: this table knows the
+    // full-detail view and the Rule Hub by their state, and the review bridge reports what the
+    // DOM holds (`dom_modal`: any `.rule-modal-overlay`) when the chord is pressed, which also
+    // catches the review-time view and any dialog added later. One closure, used by opening and
+    // by running, so they cannot disagree.
+    let hub_ctx = try_use_context::<super::viewer::ViewerHubOpen>();
+    let palette_gate_now = move |dom_modal: bool| {
+        let known_dialog =
+            detail_finding.peek().is_some() || hub_ctx.is_some_and(|h| h.0.peek().is_some());
         palette_gate(
             prompt.peek().is_some() || toolbar_prompt.peek().is_some(),
             *viewer_open.peek() || stack_open.peek().is_some(),
+            dom_modal || known_dialog,
         )
     };
-    let review_palette = review.clone();
-    let run_palette_action = use_callback(move |action: PaletteAction| {
-        if let Some(why) = palette_gate_now().refusal() {
-            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, why);
-            return;
+    // What the entries depend on, now. Used to build the list when the palette opens and again
+    // when a line is run, to see whether the line still means what it said.
+    let review_for_ctx = review.clone();
+    let palette_context = use_callback(move |()| -> PaletteContext {
+        // The timer's two controls live in the strip, which is drawn only with both a tally and
+        // a timer: the palette offers them under the same condition.
+        let strip = if has_counts {
+            review_for_ctx.as_ref()
+        } else {
+            None
+        };
+        PaletteContext {
+            has_focus: focused_for_palette.is_some(),
+            stackable: focused_for_palette.as_ref().is_some_and(is_stackable),
+            can_undo: undo_banner_of(&undo_entry.peek(), *now_ms.peek()).is_some(),
+            order: *order_preset.peek(),
+            timer_button: strip.map(|r| r.timer_button().to_string()),
+            has_stats: strip.is_some(),
         }
-        match action {
+    });
+    // A refused run leaves the keyboard where it belongs: in the reason prompt that refused it,
+    // never on the pane (whose next key would drop the half-written reason).
+    let focus_open_prompt = move || {
+        if prompt.peek().is_some() {
+            super::viewer::focus_element(PANE_REASON_ID);
+        } else if toolbar_prompt.peek().is_some() {
+            super::viewer::focus_element(QUEUE_REASON_ID);
+        }
+    };
+    let review_palette = review.clone();
+    // Run one line. Answers `true` only when its action ran.
+    let run_palette_action = use_callback(move |entry: PaletteEntry| -> bool {
+        if let Some(why) = palette_gate_now(false).refusal() {
+            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, why);
+            focus_open_prompt();
+            return false;
+        }
+        // The list was built when the palette opened. If what a line named is gone, or it now
+        // says something else (the timer paused itself), say so rather than do nothing or the
+        // opposite.
+        if let Some(note) = stale_note(&entry, &palette_entries(&palette_context.call(()))) {
+            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, note);
+            super::palette::restore_focus();
+            return false;
+        }
+        match entry.action {
             PaletteAction::Pane(cmd) => run_pane_command.call(cmd),
             PaletteAction::Undo => undo_action.call(()),
             PaletteAction::OpenHub => open_hub_for_focused.call(()),
@@ -4657,43 +4718,33 @@ pub(super) fn FindingsTable(
             }
             PaletteAction::OpenStats => on_open_stats.call(()),
         }
+        true
     });
-    let review_for_ctx = review.clone();
-    let open_palette = use_callback(move |()| {
-        if let Some(why) = palette_gate_now().refusal() {
+    // Ctrl+K / Cmd+K, and the Commands button: open the palette, or close it when it is open (and
+    // give the keyboard back). `dom_modal` is what the page reported about dialogs at the press.
+    let toggle_palette = use_callback(move |dom_modal: bool| {
+        if palette_open.peek().is_some() {
+            palette_open.set(None);
+            super::palette::restore_focus();
+            return;
+        }
+        if let Some(why) = palette_gate_now(dom_modal).refusal() {
             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, why);
             return;
         }
-        if palette_open.peek().is_some() {
-            return;
-        }
-        // The timer's two controls live in the strip, which is drawn only with both a tally and
-        // a timer: the palette offers them under the same condition.
-        let strip = if has_counts {
-            review_for_ctx.as_ref()
-        } else {
-            None
-        };
-        let ctx = PaletteContext {
-            has_focus: focused_for_palette.is_some(),
-            stackable: focused_for_palette.as_ref().is_some_and(is_stackable),
-            can_undo: undo_banner_of(&undo_entry.peek(), *now_ms.peek()).is_some(),
-            order: *order_preset.peek(),
-            timer_button: strip.map(|r| r.timer_button().to_string()),
-            has_stats: strip.is_some(),
-        };
         super::palette::remember_focus();
         let id = *palette_serial.peek() + 1;
         palette_serial.set(id);
         palette_open.set(Some(super::palette::PaletteOpen {
             id,
-            entries: palette_entries(&ctx),
+            entries: palette_entries(&palette_context.call(())),
         }));
     });
     {
         let link = use_hook(|| super::palette::PaletteLink {
             open: palette_open,
             on_run: run_palette_action,
+            on_chord: toggle_palette,
         });
         use_effect(move || {
             if let Some(mut slot) = palette_slot {
@@ -4850,26 +4901,10 @@ pub(super) fn FindingsTable(
         // Everything the reviewer works in (strip, toolbar, table, pane) is one review surface:
         // key and click activity inside it is what the review timer counts (the bridge in
         // `review.rs` checks for this attribute). `display: contents` keeps it out of the layout.
-        div {
-            style: "display: contents",
-            "data-review-surface": "true",
-            // THE PALETTE'S KEY, heard from anywhere in the Queue's surface (the table, the pane,
-            // the toolbar). A press the pane claims never gets here (it stops it), and the
-            // reason fields stop every key, so a chord typed in one cannot open the palette.
-            onkeydown: move |e: KeyboardEvent| {
-                let m = e.modifiers();
-                let mods = KeyMods {
-                    ctrl: m.contains(Modifiers::CONTROL),
-                    alt: m.contains(Modifiers::ALT),
-                    meta: m.contains(Modifiers::META),
-                    shift: m.contains(Modifiers::SHIFT),
-                };
-                if palette_open_key(&e.key().to_string(), mods) {
-                    e.prevent_default();
-                    e.stop_propagation();
-                    open_palette.call(());
-                }
-            },
+        //
+        // (The palette's Ctrl+K / Cmd+K is not heard here: the review bridge hears it at the
+        // document, so it works anywhere on the results screen. See `review.rs`.)
+        div { style: "display: contents", "data-review-surface": "true",
         // REMOVED, design §9.5: the two-swatch findings key ("Security findings
         // (deterministic, stop-the-line)" / "Architectural findings (everything else)").
         //
@@ -5010,7 +5045,7 @@ pub(super) fn FindingsTable(
                 class: "btn-edit-sm",
                 id: super::palette::PALETTE_BUTTON_ID,
                 title: "Open the command palette: every review action in one filtered list (Ctrl+K or Cmd+K).",
-                onclick: move |_| open_palette.call(()),
+                onclick: move |_| toggle_palette.call(false),
                 "Commands"
             }
         }

@@ -221,6 +221,12 @@ impl ReviewHandle {
 /// window gaining or losing focus or being hidden. It listens in the capture phase and never
 /// stops, prevents or consumes an event, so it cannot take a key from the pane.
 ///
+/// It also carries the command palette's chord, because it is the one document-level listener the
+/// results screen has: a key pressed with Ctrl or Cmd held is reported as it is (key, modifiers),
+/// with whether any `.rule-modal-overlay` (a dialog, the viewer, the stacked view) is up at that
+/// moment, read from the DOM so a dialog nobody listed is still seen. The Rust side decides
+/// whether it is the palette's chord and whether the gate allows it.
+///
 /// Desktop is Dioxus 0.7 on wry, so the signals are the webview's: `focus` / `blur` on the window
 /// and `visibilitychange` on the document, read as `document.hasFocus()` plus visibility. Whether
 /// wry delivers them for a real window switch is a manual check (see the step's report).
@@ -249,6 +255,14 @@ pub(super) const REVIEW_BRIDGE_JS: &str = r#"
             window.__camerataReviewSend({ k: "activity", s: surface });
         };
         document.addEventListener("keydown", activity, true);
+        document.addEventListener("keydown", function (e) {
+            if (!(e.ctrlKey || e.metaKey) || e.key === "Control" || e.key === "Meta") return;
+            window.__camerataReviewSend({
+                k: "chord", key: e.key, ctrl: !!e.ctrlKey, alt: !!e.altKey, meta: !!e.metaKey,
+                shift: !!e.shiftKey,
+                modal: !!document.querySelector(".rule-modal-overlay:not(.pal-overlay)")
+            });
+        }, true);
         document.addEventListener("pointerdown", activity, true);
         // Scrolling through code while reading is activity too (the 3-minute idle rule still
         // applies). Passive: the listener never blocks the scroll.
@@ -276,9 +290,29 @@ pub(super) fn parse_clock_message(msg: &serde_json::Value) -> Option<ClockEvent>
     }
 }
 
+/// A bridge message that is a key pressed with Ctrl or Cmd held, as `(key, modifiers, a dialog is
+/// up)`; `None` for anything else. Whether it is the palette's chord is the palette's call.
+pub(super) fn parse_chord_message(
+    msg: &serde_json::Value,
+) -> Option<(String, camerata_ui_core::triage::KeyMods, bool)> {
+    if msg.get("k")?.as_str()? != "chord" {
+        return None;
+    }
+    let flag = |name: &str| msg.get(name).and_then(serde_json::Value::as_bool);
+    let mods = camerata_ui_core::triage::KeyMods {
+        ctrl: flag("ctrl")?,
+        alt: flag("alt")?,
+        meta: flag("meta")?,
+        shift: flag("shift")?,
+    };
+    Some((msg.get("key")?.as_str()?.to_string(), mods, flag("modal")?))
+}
+
 /// Start the bridge and the one-second tick for `review`. Both stop when the component unmounts.
 /// Call once, unconditionally, from the results component.
 pub(super) fn use_review_clock(review: &ReviewHandle) {
+    // The palette's link, to hand it the chord (the results root provides the slot first).
+    let palette = try_use_context::<super::palette::PaletteSlot>();
     let bridge = review.clone();
     use_future(move || {
         let review = bridge.clone();
@@ -290,6 +324,8 @@ pub(super) fn use_review_clock(review: &ReviewHandle) {
                 while let Ok(msg) = listener.recv::<serde_json::Value>().await {
                     if let Some(event) = parse_clock_message(&msg) {
                         review.apply(event);
+                    } else if let Some((key, mods, modal)) = parse_chord_message(&msg) {
+                        super::palette::route_chord(palette, &key, mods, modal);
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -554,6 +590,45 @@ mod tests {
         ] {
             assert_eq!(p(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn a_chord_message_carries_the_key_the_modifiers_and_whether_a_dialog_is_up() {
+        let p = |s: &str| parse_chord_message(&serde_json::from_str(s).expect("json"));
+        let (key, mods, modal) = p(
+            r#"{"k":"chord","key":"k","ctrl":true,"alt":false,"meta":false,"shift":false,"modal":true}"#,
+        )
+        .unwrap();
+        assert_eq!(key, "k");
+        assert!(mods.ctrl && !mods.alt && !mods.meta && !mods.shift);
+        assert!(modal);
+        for bad in [
+            r#"{"k":"activity","s":true}"#,
+            r#"{"k":"chord","key":"k"}"#,
+            r#"{"k":"chord","key":1,"ctrl":true,"alt":false,"meta":false,"shift":false,"modal":false}"#,
+            r#"null"#,
+        ] {
+            assert_eq!(p(bad), None, "{bad}");
+        }
+        // A chord message is not a timer event.
+        assert_eq!(
+            parse_clock_message(
+                &serde_json::from_str(
+                    r#"{"k":"chord","key":"k","ctrl":true,"alt":false,"meta":false,"shift":false,"modal":false}"#
+                )
+                .unwrap()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_bridge_reports_chords_and_reads_the_dialog_state_from_the_dom() {
+        assert!(REVIEW_BRIDGE_JS.contains("k: \"chord\""));
+        assert!(REVIEW_BRIDGE_JS.contains("e.ctrlKey || e.metaKey"));
+        // Any dialog, whatever hosts it, except the palette's own overlay.
+        assert!(REVIEW_BRIDGE_JS
+            .contains("document.querySelector(\".rule-modal-overlay:not(.pal-overlay)\")"));
     }
 
     /// Activity outside the review surfaces (a key on the Conventions panel, a click on the kind
