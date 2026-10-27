@@ -33,6 +33,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use camerata_ui_core::decision_memory::shared_prefill;
 use camerata_ui_core::pane_context::{ContextTarget, PaneContext};
 use camerata_ui_core::stack::{
     stack_command, stack_focus, stack_keys_armed, StackFocus, StackOrigin, StackState,
@@ -101,6 +102,9 @@ pub(super) struct StackLink {
     /// close checks whether to hand the keyboard to the stack).
     pub open: Signal<Option<StackOpen>>,
     pub dispositions: Signal<HashMap<String, Disposition>>,
+    /// Every Queue row, for decision memory (B.5): the stack's reason prompt looks for what the
+    /// draft already decided about the checked cards' shapes among these.
+    pub all_findings: Arc<Vec<FindingView>>,
     /// The inspected commit per repo, from the report's `audited_refs`.
     pub shas: Arc<HashMap<String, String>>,
     pub project_id: String,
@@ -122,6 +126,7 @@ impl PartialEq for StackLink {
     fn eq(&self, other: &Self) -> bool {
         self.open == other.open
             && self.dispositions == other.dispositions
+            && Arc::ptr_eq(&self.all_findings, &other.all_findings)
             && Arc::ptr_eq(&self.shas, &other.shas)
             && self.project_id == other.project_id
             && self.undo_entry == other.undo_entry
@@ -475,6 +480,8 @@ fn StackHost(link: StackLink, open: StackOpen) -> Element {
     let cache = try_use_context::<Signal<ViewerCache>>();
     // The link's Copy parts, taken out so the closures below can each own them.
     let dispositions_sig = link.dispositions;
+    // A signal only so the closures below stay `Copy` (an `Arc` captured by value would not be).
+    let all_findings = use_signal(|| link.all_findings.clone());
     let on_dispose_cb = link.on_dispose;
     let on_open_viewer = link.on_open_viewer;
     let on_close_cb = link.on_close;
@@ -580,7 +587,18 @@ fn StackHost(link: StackLink, open: StackOpen) -> Element {
         }
         // The row set is snapshotted when the prompt opens, never re-read at commit time: the
         // heading promises a number, and the commit moves those rows.
-        reason.set(String::new());
+        //
+        // Decision memory (B.5): the field opens holding the reason this draft already gave for
+        // these cards' shapes, but only when EVERY checked card is offered the same one; any
+        // card without a prior, or with a different one, leaves it empty. It is a starting text:
+        // nothing is decided until the reviewer presses Enter, and what is stored is what the
+        // field holds then.
+        reason.set(shared_prefill(
+            &rows,
+            &all_findings.peek(),
+            &dispositions_sig.peek(),
+            decided,
+        ));
         prompt.set(Some(ToolbarReasonPrompt {
             state: decided,
             rows,
@@ -728,7 +746,7 @@ mod tests {
     use std::time::Duration;
 
     use camerata_ui_core::order_preset::OrderPreset;
-    use camerata_ui_core::triage::TechDebtBucket;
+    use camerata_ui_core::triage::{TechDebtBucket, TriageModel};
     use dioxus::dioxus_core::{ElementId, Mutation, Mutations};
     use dioxus::html::{
         Code, Key, Location, Modifiers, SerializedFocusData, SerializedFormData,
@@ -2474,6 +2492,528 @@ mod tests {
             html(&vdom).contains("2 of 2"),
             "the pane is on the second row: {}",
             html(&vdom)
+        );
+    }
+
+    // ── Decision memory (B.5) and the progress strip (B.7), mounted ──────────────────────
+
+    const CHIP: &str = "Previously on this shape";
+
+    /// A defect on `line` whose offending snippet is `snippet`, under one rule.
+    fn shaped(line: usize, snippet: &str) -> FindingView {
+        let mut f = defect(line);
+        f.snippet = snippet.to_string();
+        f
+    }
+
+    /// The same, as a deviation (so a bulk-bar group and a stack exist for it).
+    fn shaped_deviation(line: usize, snippet: &str) -> FindingView {
+        let mut f = deviation(line);
+        f.snippet = snippet.to_string();
+        f
+    }
+
+    fn seeded(
+        rows: &[&FindingView],
+        state: TriageState,
+        reason: &str,
+    ) -> HashMap<String, Disposition> {
+        rows.iter()
+            .map(|f| {
+                (
+                    finding_key(f),
+                    Disposition {
+                        state,
+                        reason: reason.into(),
+                        bucket: TechDebtBucket::Later,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The page with the HTML entities SSR writes for `'`, `<`, `>` and `&` undone, so a chip
+    /// reads as written.
+    fn plain(page: &str) -> String {
+        page.replace("&#39;", "'")
+            .replace("&#60;", "<")
+            .replace("&#62;", ">")
+            .replace("&#38;", "&")
+    }
+
+    /// What the reason field holds, read off the page: the `value` of the textarea whose class
+    /// is `class`.
+    fn field_text(page: &str, class: &str) -> String {
+        let at = page
+            .find(&format!("{class}\""))
+            .unwrap_or_else(|| panic!("no {class} in the page"));
+        let rest = &page[at..];
+        let tag_end = rest.find('>').expect("the tag closes");
+        let tag = &rest[..tag_end];
+        let Some(v) = tag.find("value=\"") else {
+            return String::new();
+        };
+        let v = v + "value=\"".len();
+        plain(&tag[v..v + tag[v..].find('"').expect("the value closes")])
+    }
+
+    async fn arm_pane(vdom: &mut VirtualDom, seen: &mut Seen) -> ElementId {
+        let pane = seen.element(super::super::scan::DETAIL_PANE_ID);
+        send(
+            vdom,
+            "focusin",
+            pane,
+            Box::new(SerializedFocusData::default()),
+        );
+        settle(vdom, seen).await;
+        pane
+    }
+
+    /// B.5 check 1: two rows with the same rule and fingerprint. Deciding the first puts the
+    /// chip on the second, whose own disposition stays Unresolved until a key is pressed; `I`
+    /// pre-fills the reason; editing it before Enter stores the edited text; a row with a
+    /// different fingerprint has no chip.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_decided_row_shows_the_chip_on_its_twin_and_i_prefills_but_never_decides() {
+        let rows = vec![
+            shaped(7, "same line"),
+            shaped(8, "same line"),
+            shaped(9, "a different line"),
+        ];
+        let (mut vdom, mut seen, _server, _env) =
+            mount(rows.clone(), OrderPreset::CriticalFirst, "ok").await;
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        assert!(!html(&vdom).contains(CHIP), "nothing is decided yet");
+
+        // Decide the first row: I, a reason, Enter.
+        let mark = seen.mark();
+        key(&vdom, pane, "i");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(
+            field_text(&html(&vdom), "pane-reason-input"),
+            "",
+            "no memory yet, so the field starts empty"
+        );
+        typed(
+            &vdom,
+            seen.first_after(mark, "input"),
+            "test fixture, not shipped",
+        );
+        settle(&mut vdom, &mut seen).await;
+        key(&vdom, seen.first_after(mark, "keydown"), "Enter");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(state_count(TriageState::Ignored), 1);
+
+        // The pane is now on the twin (line 8): the chip is there, and the twin is NOT decided.
+        let page = plain(&html(&vdom));
+        assert!(
+            page.contains("Previously on this shape: Ignored, 'test fixture, not shipped' (1 row)"),
+            "{page}"
+        );
+        assert!(page.contains("1 of 2"), "{page}");
+        assert!(
+            !probe()
+                .dispositions
+                .peek()
+                .contains_key(&finding_key(&rows[1])),
+            "the chip decided nothing"
+        );
+        assert_eq!(probe().dispositions.peek().len(), 1);
+
+        // I opens the prompt with the remembered reason in it. Still nothing decided.
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        let mark = seen.mark();
+        key(&vdom, pane, "i");
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert_eq!(
+            field_text(&page, "pane-reason-input"),
+            "test fixture, not shipped",
+            "{page}"
+        );
+        assert_eq!(
+            probe().dispositions.peek().len(),
+            1,
+            "pre-filled, not applied"
+        );
+
+        // Edit before Enter: the edited text is what is stored.
+        typed(
+            &vdom,
+            seen.first_after(mark, "input"),
+            "test fixture, not shipped in the demo either",
+        );
+        settle(&mut vdom, &mut seen).await;
+        key(&vdom, seen.first_after(mark, "keydown"), "Enter");
+        settle(&mut vdom, &mut seen).await;
+        let stored = probe()
+            .dispositions
+            .peek()
+            .get(&finding_key(&rows[1]))
+            .cloned();
+        assert_eq!(
+            stored.map(|d| (d.state, d.reason)),
+            Some((
+                TriageState::Ignored,
+                "test fixture, not shipped in the demo either".to_string()
+            ))
+        );
+
+        // The last row has another fingerprint: no chip, though two rows of its rule are decided.
+        let page = html(&vdom);
+        assert!(page.contains("1 of 1"), "{page}");
+        assert!(
+            !page.contains(CHIP),
+            "a different fingerprint has no chip: {page}"
+        );
+    }
+
+    /// Enter on a pre-filled prompt with no edit stores the remembered text as the reviewer's own
+    /// act, and Esc stores nothing.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_prefilled_prompt_decides_only_on_enter_and_escape_decides_nothing() {
+        let a = shaped(7, "same line");
+        let b = shaped(8, "same line");
+        let initial = seeded(&[&a], TriageState::FalsePositive, "parser misread");
+        let (mut vdom, mut seen, _server, _env) = mount_in(
+            vec![a.clone(), b.clone()],
+            OrderPreset::CriticalFirst,
+            "ok",
+            TriageState::Unresolved,
+            initial,
+        )
+        .await;
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        assert!(plain(&html(&vdom))
+            .contains("Previously on this shape: False positive, 'parser misread' (1 row)"));
+
+        // F with the memory: the field holds it. Esc: nothing decided, nothing stored.
+        let mark = seen.mark();
+        key(&vdom, pane, "f");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(
+            field_text(&html(&vdom), "pane-reason-input"),
+            "parser misread"
+        );
+        key(&vdom, seen.first_after(mark, "keydown"), "Escape");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(probe().dispositions.peek().len(), 1, "Esc decided nothing");
+
+        // I on a shape that was only marked false positive: the chip's own text is offered.
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        let mark = seen.mark();
+        key(&vdom, pane, "i");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(
+            field_text(&html(&vdom), "pane-reason-input"),
+            "parser misread"
+        );
+        // Enter with no edit stores exactly that.
+        key(&vdom, seen.first_after(mark, "keydown"), "Enter");
+        settle(&mut vdom, &mut seen).await;
+        let stored = probe().dispositions.peek().get(&finding_key(&b)).cloned();
+        assert_eq!(
+            stored.map(|d| (d.state, d.reason)),
+            Some((TriageState::Ignored, "parser misread".to_string()))
+        );
+    }
+
+    /// The chip never appears for a shape that was only Confirmed or saved as Tech debt.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn confirmed_and_tech_debt_twins_show_no_chip() {
+        for state in [TriageState::Confirmed, TriageState::TechDebt] {
+            let a = shaped(7, "same line");
+            let b = shaped(8, "same line");
+            let initial = seeded(&[&a], state, "");
+            let (mut vdom, mut seen, _server, _env) = mount_in(
+                vec![a, b],
+                OrderPreset::CriticalFirst,
+                "ok",
+                TriageState::Unresolved,
+                initial,
+            )
+            .await;
+            let pane = arm_pane(&mut vdom, &mut seen).await;
+            assert!(
+                !html(&vdom).contains(CHIP),
+                "{state:?} gives no chip: {}",
+                html(&vdom)
+            );
+            let mark = seen.mark();
+            key(&vdom, pane, "i");
+            settle(&mut vdom, &mut seen).await;
+            assert_eq!(field_text(&html(&vdom), "pane-reason-input"), "");
+            key(&vdom, seen.first_after(mark, "keydown"), "Escape");
+            settle(&mut vdom, &mut seen).await;
+        }
+    }
+
+    /// An undo removes the memory with the decision it came from.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn an_undo_takes_the_chip_back_off_the_twin() {
+        let rows = vec![shaped(7, "same line"), shaped(8, "same line")];
+        let (mut vdom, mut seen, _server, _env) =
+            mount(rows, OrderPreset::CriticalFirst, "ok").await;
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        let mark = seen.mark();
+        key(&vdom, pane, "i");
+        settle(&mut vdom, &mut seen).await;
+        typed(&vdom, seen.first_after(mark, "input"), "fixture");
+        settle(&mut vdom, &mut seen).await;
+        key(&vdom, seen.first_after(mark, "keydown"), "Enter");
+        settle(&mut vdom, &mut seen).await;
+        assert!(html(&vdom).contains(CHIP), "the twin shows it");
+
+        click(&vdom, seen.element(super::super::scan::PANE_UNDO_ID));
+        settle(&mut vdom, &mut seen).await;
+        assert!(
+            probe().dispositions.peek().is_empty(),
+            "the decision is undone"
+        );
+        // Both rows are back, the cursor on the first; walk to the twin: no chip.
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        key(&vdom, pane, "ArrowDown");
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("2 of 2"), "{page}");
+        assert!(
+            !page.contains(CHIP),
+            "the undone decision is not remembered: {page}"
+        );
+    }
+
+    /// The chip's reason is text, not markup.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_chip_renders_the_reason_as_text() {
+        let a = shaped(7, "same line");
+        let b = shaped(8, "same line");
+        let initial = seeded(&[&a], TriageState::Ignored, "<b>bold</b> & more");
+        let (mut vdom, mut seen, _server, _env) = mount_in(
+            vec![a, b],
+            OrderPreset::CriticalFirst,
+            "ok",
+            TriageState::Unresolved,
+            initial,
+        )
+        .await;
+        let _ = arm_pane(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(
+            page.contains("&#60;b&#62;bold&#60;/b&#62; &#38; more"),
+            "escaped: {page}"
+        );
+        assert!(!page.contains("<b>bold</b>"), "{page}");
+    }
+
+    /// The viewer's `I` starts its prompt with the remembered reason too, and decides nothing.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_viewers_prompt_starts_with_the_remembered_reason() {
+        let a = shaped(7, "same line");
+        let b = shaped(8, "same line");
+        let initial = seeded(&[&a], TriageState::Ignored, "test fixture");
+        let (mut vdom, mut seen, _server, _env) = mount_in(
+            vec![a, b],
+            OrderPreset::CriticalFirst,
+            "ok",
+            TriageState::Unresolved,
+            initial,
+        )
+        .await;
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        key(&vdom, pane, "o");
+        settle(&mut vdom, &mut seen).await;
+        let viewer = seen.element(VIEWER_ID);
+        let mark = seen.mark();
+        key(&vdom, viewer, "i");
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert_eq!(
+            field_text(&page, "pane-reason-input"),
+            "test fixture",
+            "{page}"
+        );
+        assert_eq!(probe().dispositions.peek().len(), 1, "nothing was applied");
+        key(&vdom, seen.first_after(mark, "keydown"), "Escape");
+        settle(&mut vdom, &mut seen).await;
+    }
+
+    /// The stack's prompt pre-fills only when every checked card is offered the same reason.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_stack_prompt_prefills_only_when_every_checked_card_shares_the_reason() {
+        // Two rows already ignored on the shape "alpha"; three undecided in the stack: two on
+        // "alpha" and one on a shape nobody has decided.
+        let p1 = shaped_deviation(1, "alpha");
+        let p2 = shaped_deviation(2, "alpha");
+        let rows = vec![
+            p1.clone(),
+            p2.clone(),
+            shaped_deviation(3, "alpha"),
+            shaped_deviation(4, "alpha"),
+            shaped_deviation(5, "beta"),
+        ];
+        let initial = seeded(&[&p1, &p2], TriageState::Ignored, "test fixture");
+        let (mut vdom, mut seen, _server, _env) = mount_in(
+            rows,
+            OrderPreset::Curated,
+            "ok",
+            TriageState::Unresolved,
+            initial,
+        )
+        .await;
+        let panel = open_from_bar(&mut vdom, &mut seen).await;
+        assert_eq!(checked_cards(&html(&vdom)), 3);
+
+        // All three checked, one of them with no prior: the field starts empty.
+        let mark = seen.mark();
+        key(&vdom, panel, "i");
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("3 findings (required)"), "{page}");
+        assert_eq!(field_text(&page, "queue-reason-input"), "", "{page}");
+        key(&vdom, seen.first_after(mark, "keydown"), "Escape");
+        settle(&mut vdom, &mut seen).await;
+        assert!(!html(&vdom).contains("queue-reason-prompt"));
+
+        // Uncheck the "beta" card (the third): the two left share the prior reason.
+        key(&vdom, panel, "j");
+        key(&vdom, panel, "j");
+        key(&vdom, panel, " ");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(checked_cards(&html(&vdom)), 2);
+        let mark = seen.mark();
+        key(&vdom, panel, "i");
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("2 findings (required)"), "{page}");
+        assert_eq!(
+            field_text(&page, "queue-reason-input"),
+            "test fixture",
+            "{page}"
+        );
+        assert_eq!(
+            state_count(TriageState::Ignored),
+            2,
+            "pre-filled, not applied"
+        );
+
+        // Enter is the reviewer's: both cards get the text the field holds.
+        key(&vdom, seen.first_after(mark, "keydown"), "Enter");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(state_count(TriageState::Ignored), 4);
+    }
+
+    /// Two checked cards whose priors differ get an empty field, not a guess.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_stack_prompt_stays_empty_when_the_priors_differ() {
+        let pa = shaped_deviation(1, "alpha");
+        let pb = shaped_deviation(2, "beta");
+        let rows = vec![
+            pa.clone(),
+            pb.clone(),
+            shaped_deviation(3, "alpha"),
+            shaped_deviation(4, "beta"),
+        ];
+        let mut initial = seeded(&[&pa], TriageState::Ignored, "test fixture");
+        initial.extend(seeded(&[&pb], TriageState::Ignored, "legacy path"));
+        let (mut vdom, mut seen, _server, _env) = mount_in(
+            rows,
+            OrderPreset::Curated,
+            "ok",
+            TriageState::Unresolved,
+            initial,
+        )
+        .await;
+        let panel = open_from_bar(&mut vdom, &mut seen).await;
+        key(&vdom, panel, "f");
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("2 findings (required)"), "{page}");
+        assert_eq!(field_text(&page, "queue-reason-input"), "", "{page}");
+    }
+
+    /// B.7: the strip is above the table, equals `TriageCounts` for every table, and moves with a
+    /// decision and an undo.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_strip_equals_triage_counts_for_every_table_and_moves_with_decisions_and_undo() {
+        use camerata_ui_core::progress::progress_text;
+        let rows: Vec<FindingView> = (1..=6).map(|n| shaped(n, &format!("line {n}"))).collect();
+        let mut initial = seeded(&[&rows[0]], TriageState::Confirmed, "");
+        initial.extend(seeded(
+            &[&rows[1], &rows[2]],
+            TriageState::Ignored,
+            "fixture",
+        ));
+        initial.extend(seeded(&[&rows[3]], TriageState::FalsePositive, "misread"));
+
+        let expected = |dispositions: &HashMap<String, Disposition>, view: TriageState| {
+            let model = TriageModel {
+                dispositions: dispositions.clone(),
+                triage_view: view,
+            };
+            progress_text(model.counts(&rows))
+        };
+
+        for view in TriageState::all() {
+            let (vdom, _seen, _server, _env) = mount_in(
+                rows.clone(),
+                OrderPreset::CriticalFirst,
+                "ok",
+                view,
+                initial.clone(),
+            )
+            .await;
+            let page = html(&vdom);
+            let want = expected(&initial, view);
+            assert!(page.contains(&want), "{view:?}: wanted {want} in {page}");
+            assert_eq!(
+                want,
+                "Undecided 2 of 6 \u{b7} Confirmed 1 \u{b7} Ignored 2 \u{b7} FP 1 \u{b7} Tech debt 0"
+            );
+            // Above the table, a labelled group of plain text; not a live region.
+            let strip = page.find("progress-strip").expect("the strip");
+            assert!(strip < page.find("findings-toolbar").unwrap());
+            assert!(page.contains("aria-label=\"Review progress\""));
+            assert!(
+                !page.contains("aria-live"),
+                "the strip does not announce itself"
+            );
+            // The ETA waits for the timer: nothing is drawn for it.
+            assert!(!page.contains("progress-eta"), "{page}");
+        }
+
+        // Live: decide the focused row, then undo.
+        let (mut vdom, mut seen, _server, _env) =
+            mount(rows.clone(), OrderPreset::CriticalFirst, "ok").await;
+        let none = HashMap::new();
+        assert!(html(&vdom).contains(&expected(&none, TriageState::Unresolved)));
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        key(&vdom, pane, "c");
+        settle(&mut vdom, &mut seen).await;
+        let after = probe().dispositions.peek().clone();
+        let page = html(&vdom);
+        assert!(
+            page.contains(&expected(&after, TriageState::Unresolved)),
+            "{page}"
+        );
+        assert!(
+            page.contains("Undecided 5 of 6 \u{b7} Confirmed 1"),
+            "{page}"
+        );
+        click(&vdom, seen.element(super::super::scan::PANE_UNDO_ID));
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(
+            page.contains("Undecided 6 of 6 \u{b7} Confirmed 0"),
+            "{page}"
         );
     }
 }

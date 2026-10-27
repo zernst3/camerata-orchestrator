@@ -1241,6 +1241,18 @@ html, body {
   margin: 0 0 8px; padding: 6px 8px; border-left: 3px solid #4a90e2;
   background: var(--surface-alt, transparent); color: var(--ink); font-weight: 600;
 }
+/* Decision memory (work order B.5): what the draft already decided about this shape. Information
+   only, so it is quiet: no fill, no button look. The reason in it is text. */
+.pane-previously {
+  margin: 0 0 8px; padding: 0 0 0 8px; border-left: 3px solid var(--line);
+  color: var(--ink-soft); font-size: 12px; overflow-wrap: anywhere;
+}
+/* The progress strip (work order B.7): one line of counts above the table. */
+.progress-strip {
+  margin: 0 0 8px; color: var(--ink-soft); font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.progress-strip .progress-counts { color: var(--ink); }
 .pane-snippet {
   margin: 0 0 8px; padding: 6px 8px; overflow-x: auto;
   border: 1px solid var(--line); border-radius: 3px;

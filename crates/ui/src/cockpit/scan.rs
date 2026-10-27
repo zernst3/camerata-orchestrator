@@ -635,6 +635,11 @@ pub(super) use camerata_ui_core::triage::{confidence_tag, confidence_tags};
 // selection cannot say how many rows the button next to it will move.
 pub(super) use camerata_ui_core::triage::bulk_reason_heading;
 
+// Work order B.5/B.7: decision memory (what the draft already decided about a shape) and the
+// progress strip's words. Both are pure and live in core; this layer draws them.
+use camerata_ui_core::decision_memory::{prefill_reason, prior_decisions, PriorDecision};
+use camerata_ui_core::progress::{progress_text, FP_MEANING};
+
 // ── `split_needs_review` IN THE UI: what §9.3 retires, and the two uses that survive ──
 //
 // §9.3 asks for "the `split_needs_review` prose-parsing path in the UI ... retired entirely
@@ -2707,6 +2712,45 @@ pub(super) fn QueueReasonPrompt(
     }
 }
 
+/// THE PROGRESS STRIP (work order B.7): one line of text above the Queue's table saying where the
+/// review stands, `Undecided 187 of 612 · Confirmed 310 · Ignored 71 · FP 29 · Tech debt 15`.
+///
+/// Props-only. The words are `camerata_ui_core::progress::progress_text` and the numbers are the
+/// `TriageCounts` the caller took from `TriageModel::counts`; nothing is counted here. It is the
+/// same tally for every triage table (it counts the whole Queue), and it re-renders whenever the
+/// disposition map changes, so a decision and an undo both move it.
+///
+/// *Accessibility.* It is plain text in a labelled group, readable in reading order. It is
+/// deliberately NOT an `aria-live` region: the reviewer's way of working is a run of single key
+/// presses, and every press changes two of these numbers, so a polite live region would queue a
+/// re-reading of the whole line after each one over the top of the reader's own pace. The undo
+/// bar already announces each decision; the strip is there to be read when asked for.
+#[component]
+pub(super) fn ProgressStrip(
+    /// The live tally over the Queue's rows.
+    counts: TriageCounts,
+    /// THE PLACE FOR THE ESTIMATED TIME LEFT. Always `None` today: the estimate needs the review
+    /// timer (`WORK_ORDER_REVIEW_TIME.md` item 2), which is not built, and this strip does not
+    /// invent a number. When the timer exists it passes its text here ("about 3h 10m left at your
+    /// pace") and it is drawn after the counts; until then nothing is drawn for it.
+    #[props(default)]
+    eta: Option<String>,
+) -> Element {
+    let text = progress_text(counts);
+    rsx! {
+        div {
+            class: "progress-strip",
+            role: "group",
+            "aria-label": "Review progress",
+            title: "{FP_MEANING}",
+            span { class: "progress-counts", "{text}" }
+            if let Some(eta) = eta {
+                span { class: "progress-eta", " \u{b7} {eta}" }
+            }
+        }
+    }
+}
+
 /// THE PROCESS GATE: the hint that says what is still outstanding, and the button that commits
 /// the ignored and tech-debt buckets.
 ///
@@ -3338,6 +3382,11 @@ pub(super) fn FindingDetailPane(
     /// this prop existed: the stored snippet alone. Anything but a good answer is `None`.
     #[props(default)]
     context: Option<PaneContext>,
+    /// What this draft already decided about the focused finding's shape (work order B.5), as the
+    /// chip text: `Previously on this shape: Ignored, 'test fixture, not shipped' (3 rows)`.
+    /// `None` shows nothing. It is the reviewer's own text from this draft, drawn as a text node.
+    #[props(default)]
+    previously: Option<String>,
 ) -> Element {
     let armed = pane_keys_armed(focus);
     let pane_key = row
@@ -3435,6 +3484,15 @@ pub(super) fn FindingDetailPane(
                 if let Some(d) = r.standard.clone() {
                     p { class: "rule-modal-label", "Cited standard" }
                     p { class: "rule-modal-detail", "{d}" }
+                }
+                // DECISION MEMORY (B.5). Information only: nothing here decides anything, and the
+                // chip is absent for a shape the draft has only confirmed or saved as tech debt.
+                if let Some(prev) = previously.clone() {
+                    p {
+                        class: "pane-previously",
+                        "data-prior-decision": "true",
+                        "{prev}"
+                    }
                 }
                 p { class: "rule-modal-label", "Evidence" }
                 pre { class: "pane-snippet", "{r.snippet}" }
@@ -3948,6 +4006,15 @@ pub(super) fn FindingsTable(
         )
     });
     let undo_banner = undo_banner_of(&undo_entry.read(), now_ms());
+    // DECISION MEMORY (B.5): what the draft already decided about the focused finding's shape,
+    // derived from the disposition map on every render (so a decision shows up at once and an
+    // undo removes it with no bookkeeping). The chip shows it; `I` and `F` start their reason
+    // prompt with it. It applies nothing.
+    let focused_prior: Option<PriorDecision> = focused_finding
+        .as_ref()
+        .and_then(|f| prior_decisions(&all_findings, &dispositions.read(), f));
+    let prior_for_keys = focused_prior.clone();
+    let prior_for_buttons = focused_prior.clone();
 
     // APPLY one disposition to the focused row, arm the undo, and advance the cursor.
     //
@@ -4382,6 +4449,7 @@ pub(super) fn FindingsTable(
         let link = use_hook(|| super::stack::StackLink {
             open: stack_open,
             dispositions,
+            all_findings: std::sync::Arc::new(all_findings.clone()),
             shas: std::sync::Arc::new(audited_shas.clone()),
             project_id: project_id.clone(),
             undo_entry,
@@ -4488,6 +4556,16 @@ pub(super) fn FindingsTable(
         // "Rule · enforced" on exactly the deterministic-floor ones.
         //
         // The red full-row critical highlight itself STAYS (§9.5 says so explicitly).
+        // THE PROGRESS STRIP (B.7): the same tally above whichever triage table is showing,
+        // taken from `TriageModel::counts` over every Queue row. `dispositions.read()` is what
+        // re-renders it on a decision and on an undo.
+        ProgressStrip {
+            counts: TriageModel {
+                dispositions: dispositions.read().clone(),
+                triage_view,
+            }
+            .counts(&all_findings),
+        }
         div { class: "findings-toolbar",
             // View-specific triage actions. A move writes the new disposition for each
             // selected finding and drops it from this table; it reappears under its target
@@ -4773,8 +4851,12 @@ pub(super) fn FindingsTable(
                         // export reads those reasons, and a keystroke is not a licence to
                         // drop them. Opening it also moves focus into the prompt, which
                         // disarms the keys for exactly as long as the curator is typing.
+                        //
+                        // Decision memory (B.5) only chooses what the field STARTS with. The
+                        // reviewer still presses Enter, and what is stored is what the field
+                        // holds then.
                         prompt.set(Some(state));
-                        prompt_reason.set(String::new());
+                        prompt_reason.set(prefill_reason(prior_for_keys.as_ref(), state));
                         pane_focus.set(PaneFocus::ReasonPrompt);
                     }
                     None => {}
@@ -4821,7 +4903,7 @@ pub(super) fn FindingsTable(
                 // exactly as its key does — one path, two triggers.
                 if state.requires_reason() {
                     prompt.set(Some(state));
-                    prompt_reason.set(String::new());
+                    prompt_reason.set(prefill_reason(prior_for_buttons.as_ref(), state));
                     pane_focus.set(PaneFocus::ReasonPrompt);
                 } else {
                     apply_disposition.call((state, String::new()));
@@ -4843,6 +4925,7 @@ pub(super) fn FindingsTable(
             on_open_code: Callback::new(move |()| viewer_open.set(true)),
             on_open_stack: open_stack_from_pane,
             context: pane_context,
+            previously: focused_prior.as_ref().map(PriorDecision::chip_text),
         }
         }
     }
@@ -13592,6 +13675,46 @@ mod render_tests {
         assert!(
             group_header_region(&html).contains("2 of 47 sites deviate from"),
             "the confirmed deviation rows render in this table; html=\n{html}"
+        );
+    }
+
+    /// B.7: the progress strip is the work order's line of text, a labelled group and not a live
+    /// region, and draws nothing for the ETA until the review timer supplies one.
+    #[test]
+    fn b7_progress_strip_is_plain_text_with_an_empty_named_eta_seam() {
+        #[component]
+        fn StripHarness(counts: TriageCounts, eta: Option<String>) -> Element {
+            rsx! { ProgressStrip { counts, eta } }
+        }
+        let render = |eta: Option<String>| {
+            let counts = TriageCounts {
+                unresolved: 187,
+                confirmed: 310,
+                ignored: 71,
+                false_positive: 29,
+                tech_debt: 15,
+            };
+            let mut vdom =
+                VirtualDom::new_with_props(StripHarness, StripHarnessProps { counts, eta });
+            vdom.rebuild_in_place();
+            dioxus_ssr::render(&vdom)
+        };
+        let html = render(None);
+        assert!(
+            html.contains(
+                "Undecided 187 of 612 \u{b7} Confirmed 310 \u{b7} Ignored 71 \u{b7} FP 29 \u{b7} Tech debt 15"
+            ),
+            "{html}"
+        );
+        assert!(html.contains("role=\"group\"") && html.contains("aria-label=\"Review progress\""));
+        assert!(!html.contains("aria-live"), "not a live region: {html}");
+        assert!(!html.contains("progress-eta"), "no ETA is invented: {html}");
+        assert!(!html.contains('\u{2014}'));
+        // The seam works the day the timer exists.
+        let with = render(Some("about 3h 10m left at your pace".to_string()));
+        assert!(
+            with.contains("progress-eta") && with.contains("about 3h 10m left"),
+            "{with}"
         );
     }
 
