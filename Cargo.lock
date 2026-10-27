@@ -713,6 +713,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "camerata-api-types",
  "camerata-core",
  "camerata-liveness",
  "camerata-worktracker",
@@ -887,6 +888,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "camerata-api-types",
  "camerata-core",
  "serde",
  "serde_json",

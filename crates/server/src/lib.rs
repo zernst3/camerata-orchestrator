@@ -357,7 +357,10 @@ impl AppState {
         }
     }
 
-    /// A clone of the shared `Llm` seam WITH the process-global usage ledger attached, so any
+    /// The keyless CLI-transport FLOOR `Llm` (kept for hermetic tests and label-only probes).
+    /// NO production model step uses it: project steps go through [`AppState::step_llm`] and
+    /// the chat through [`AppState::chat_llm`], so the backend a user selects is the backend
+    /// that runs. A clone of the shared `Llm` seam WITH the process-global usage ledger attached, so any
     /// model call made through it is recorded into the cumulative cockpit meter. Reads
     /// vendor/model from the environment; the TRANSPORT is fixed to `Backend::Cli`
     /// (`Llm::from_env`'s default per `docs/design/2026-09-22_per-project-backend.md` — no
@@ -378,15 +381,25 @@ impl AppState {
         crate::llm::Llm::from_env_with_ledger(self.usage_ledger.clone())
     }
 
-    /// The `Llm` for the project-less CHAT assistant, built on the transport the user chose in
-    /// Settings (`settings.chat_backend`): `Api` calls the Anthropic Messages API with the key
-    /// resolved RIGHT NOW (`credentials::anthropic_api_key`, store first), `Cli` drives the
-    /// logged-in Claude Code CLI. `Api` with no key is `Err(message)`, never a silent downgrade
-    /// to the CLI (same compliance-safety rule as every project-scoped seam).
-    pub fn chat_llm(&self) -> Result<crate::llm::Llm, String> {
+    /// The `Llm` for a model step, on the transport the SETTING says, with the key resolved RIGHT
+    /// NOW (`credentials::anthropic_api_key`: the key saved in the app first, env as fallback).
+    ///
+    /// - With a `project`, the project's own `backend` decides, exactly as the audit does.
+    /// - With no project, the global `settings.chat_backend` decides (the chat assistant, and any
+    ///   project-less step).
+    ///
+    /// `Api` calls the Anthropic Messages API with that key; `Cli` drives the logged-in Claude
+    /// Code CLI. `Api` with no key is `Err(message)`, never a silent downgrade to the CLI (the
+    /// same compliance-safety rule as every other seam).
+    pub fn llm_for_project(
+        &self,
+        project: Option<&crate::project::Project>,
+    ) -> Result<crate::llm::Llm, String> {
         let key = crate::credentials::anthropic_api_key(self.credential_store.as_ref());
-        let backend = match crate::llm::resolve_backend(self.settings.chat_backend(), key.is_some())
-        {
+        let setting = project
+            .map(|p| p.backend)
+            .unwrap_or_else(|| self.settings.chat_backend());
+        let backend = match crate::llm::resolve_backend(setting, key.is_some()) {
             crate::llm::BackendResolution::Blocked { message } => return Err(message),
             crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
             crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
@@ -396,6 +409,30 @@ impl AppState {
             key,
             self.usage_ledger.clone(),
         ))
+    }
+
+    /// The `Llm` for the project-less CHAT assistant: [`AppState::llm_for_project`] with no
+    /// project, so `settings.chat_backend` decides.
+    pub fn chat_llm(&self) -> Result<crate::llm::Llm, String> {
+        self.llm_for_project(None)
+    }
+
+    /// The `Llm` for a NON-FLEET step of the ACTIVE project (decomposition, clarification,
+    /// story authoring, escalation translation, diagrams, mockups): the active project's
+    /// backend decides; with no active project, the chat backend setting does.
+    pub fn step_llm(&self) -> Result<crate::llm::Llm, String> {
+        self.llm_for_project(self.projects.active().as_ref())
+    }
+
+    /// [`AppState::step_llm`] as a port, for seams that cannot return an error to the caller
+    /// (the L3 review and integration advisories). A refused backend becomes an `LlmPort` that
+    /// fails every call with the refusal message, so the step reports it instead of running on
+    /// the wrong transport.
+    pub fn step_llm_port(&self) -> Arc<dyn crate::llm::LlmPort> {
+        match self.step_llm() {
+            Ok(llm) => Arc::new(llm),
+            Err(message) => Arc::new(crate::llm::RefusedLlm::new(message)),
+        }
     }
 
     /// Record one governance event to the audit trail (Phase H1 foundation).
@@ -2376,7 +2413,12 @@ async fn spawn_brownfield_dev_run(
             let l3_model = proj.l3_model().to_string();
             let rules_prose = grounding.clone().unwrap_or_default();
             let story_text = format!("{title}\n\n{desc}");
-            let llm: Arc<dyn crate::llm::LlmPort> = Arc::new(state.llm());
+            // The L3 reviewer runs on THIS project's backend (a refused Api project reports the
+            // refusal from the review instead of running on the subscription).
+            let llm: Arc<dyn crate::llm::LlmPort> = match state.llm_for_project(Some(&proj)) {
+                Ok(l) => Arc::new(l),
+                Err(message) => Arc::new(crate::llm::RefusedLlm::new(message)),
+            };
             Some(crate::dev_implement_run::L3ReviewBundle {
                 story_text,
                 rules_prose,
@@ -2421,7 +2463,7 @@ async fn spawn_brownfield_dev_run(
             // The model advisory only runs with a prose contract; otherwise llm=None
             // keeps the gate deterministic-only.
             let llm: Option<Arc<dyn crate::llm::LlmPort>> = if has_contract {
-                Some(Arc::new(state.llm()))
+                Some(state.step_llm_port())
             } else {
                 None
             };
@@ -9896,7 +9938,7 @@ async fn decompose_propose(
         .map_err(AppError)?
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("story not found: {story_id}")))?;
     // AI decomposition (grounded children), with the deterministic propose as fallback.
-    let llm = state.llm();
+    let llm = state.step_llm().map_err(backend_refused)?;
     // Decomposition is a NON-FLEET step: model from the active project's per-step config.
     let model = step_model(&state, crate::project::StepKind::Decomposition);
     let grounding = state.project_grounding().await;
@@ -9935,7 +9977,7 @@ async fn suggest_clarifications(
         "Story: {}\n\nDescription: {}",
         story.title, story.description
     );
-    let llm = state.llm();
+    let llm = state.step_llm().map_err(backend_refused)?;
     // Clarification authoring is a NON-FLEET step: model from the active project's per-step
     // config (DEFAULT_MODEL floor only when there is no active project).
     let model = step_model(&state, crate::project::StepKind::Clarification);
@@ -10074,15 +10116,31 @@ async fn draft_routine_prompt(
         "Permission scope: {}\n\nWhat the user wants:\n{}",
         req.scope, req.intent
     );
+    let scaffold = || {
+        Json(crate::routine::DraftPromptResp {
+            prompt: crate::routine::scaffold_prompt(
+                &req.intent,
+                &crate::routine::RoutineScope::from_legacy_string(&req.scope),
+            ),
+            authored_by: "scaffold".to_string(),
+        })
+    };
+    // The step runs on the active project's backend. An `Api` project with no key is REFUSED
+    // (never run on the subscription); the form still gets the deterministic scaffold, which
+    // is labelled `authored_by: scaffold` so it is never mistaken for a model draft.
+    let Ok(llm) = state.step_llm() else {
+        return scaffold();
+    };
+    let llm = std::sync::Arc::new(llm);
     let completer = crate::llm::build_completer(
         &req.model,
         &state.model_registry,
         state.credential_store.as_ref(),
-        std::sync::Arc::new(state.llm()),
+        llm.clone(),
         state.rate_limiter.clone(),
         &state.settings.provider_policy(),
     )
-    .unwrap_or_else(|_| std::sync::Arc::new(state.llm()));
+    .unwrap_or(llm);
     match completer
         .complete(
             crate::llm::LlmRequest::new(user)
@@ -10095,13 +10153,7 @@ async fn draft_routine_prompt(
             prompt: resp.text,
             authored_by: "claude".to_string(),
         }),
-        _ => Json(crate::routine::DraftPromptResp {
-            prompt: crate::routine::scaffold_prompt(
-                &req.intent,
-                &crate::routine::RoutineScope::from_legacy_string(&req.scope),
-            ),
-            authored_by: "scaffold".to_string(),
-        }),
+        _ => scaffold(),
     }
 }
 
@@ -10250,9 +10302,10 @@ async fn chat_escalation(
         None => crate::escalation::chat_system_prompt(&esc),
     };
     let user = crate::escalation::chat_user_prompt(&esc, &req.message);
-    // The chat assistant runs on the transport chosen in Settings (Chat backend), not on the
-    // keyless CLI floor; `Api` with no key refuses rather than downgrading.
-    let chat_llm = state.chat_llm().map_err(|m| AppError(anyhow::anyhow!(m)))?;
+    // The review chat is grounded in the active project, so it runs on THAT project's backend
+    // (the chat setting when there is none), not on the keyless CLI floor; `Api` with no key
+    // refuses rather than downgrading.
+    let chat_llm = state.step_llm().map_err(backend_refused)?;
     let completer = crate::llm::build_completer(
         &req.model,
         &state.model_registry,
@@ -10308,7 +10361,7 @@ async fn answer_escalation(
     // Translate the human answer into a structured resume payload via the real LLM seam
     // (model-selectable, with a deterministic fallback inside translate_answer_ai).
     let driver = crate::escalation::LlmTranslator {
-        llm: state.llm(),
+        llm: state.step_llm().map_err(backend_refused)?,
         // MULTI-REPO READ: let the translator read across ALL the active project's repo clones.
         repo_dirs: state.active_repo_dirs(),
     };
@@ -10780,7 +10833,7 @@ async fn chat(
     // others. Returns an error when the model is OpenRouter-provider but no key is set.
     // The Anthropic side runs on the transport chosen in Settings (Chat backend), with the key
     // resolved now; `Api` with no key refuses rather than silently downgrading to the CLI.
-    let chat_llm = state.chat_llm().map_err(|m| AppError(anyhow::anyhow!(m)))?;
+    let chat_llm = state.chat_llm().map_err(backend_refused)?;
     let completer = crate::llm::build_completer(
         &model,
         &state.model_registry,
@@ -11089,6 +11142,12 @@ async fn set_credential(
         StatusCode::OK,
         Json(serde_json::json!({ "ok": true, "masked": masked })),
     )
+}
+
+/// The refusal for a model step whose backend setting is `Api` with no key configured: a 409
+/// that carries the reason, never a silent fallback to the CLI.
+fn backend_refused(message: String) -> AppError {
+    AppError::with_status(StatusCode::CONFLICT, anyhow::anyhow!(message))
 }
 
 /// Re-select the work-tracker provider when the `github_token` credential changed (saved or
@@ -12419,7 +12478,7 @@ async fn uow_author(
     let prior = before.authoring.unwrap_or_default();
     let prompt = build_author_prompt(&prior.chat, &message);
 
-    let llm = state.llm();
+    let llm = state.step_llm().map_err(backend_refused)?;
     // Story authoring is a NON-FLEET step: its model comes from the active project's
     // per-step config (no env/const fallback once a project exists). The project-less edge
     // (no active project) is the only place the DEFAULT_MODEL floor applies. An explicit
@@ -12850,7 +12909,13 @@ async fn uow_generate_diagram(
         .with_model(model)
         .with_system(system);
 
-    let diagram_text = state.llm().complete(request).await.map_err(AppError)?.text;
+    let diagram_text = state
+        .step_llm()
+        .map_err(backend_refused)?
+        .complete(request)
+        .await
+        .map_err(AppError)?
+        .text;
 
     // Strip any accidental fences the model may have added despite instructions.
     let stripped = strip_mermaid_fence(&diagram_text);
@@ -13026,7 +13091,13 @@ async fn uow_generate_mockup(
         .with_model(model)
         .with_system(system);
 
-    let html = state.llm().complete(request).await.map_err(AppError)?.text;
+    let html = state
+        .step_llm()
+        .map_err(backend_refused)?
+        .complete(request)
+        .await
+        .map_err(AppError)?
+        .text;
 
     // Save as the `mockup.html` attachment (last-writer-wins).
     let updated = state.uow.add_attachment(
@@ -13278,7 +13349,8 @@ async fn design_author(
     if !repo_dirs.is_empty() {
         request = request.with_repo_read_dirs(repo_dirs);
     }
-    let (title, body, reply, mut proposed) = match state.llm().complete(request).await {
+    let design_llm = state.step_llm().map_err(backend_refused)?;
+    let (title, body, reply, mut proposed) = match design_llm.complete(request).await {
         Ok(resp) => {
             let (t, b, r, children) = parse_design_author_response(&resp.text);
             let title = if t.is_empty() {
@@ -28454,6 +28526,153 @@ mod tests {
         )
         .await;
         assert_eq!(state.provider.current().label, before);
+    }
+
+    /// A project whose backend is `backend`, made active.
+    fn state_with_active_project(backend: crate::project::ProjectBackend) -> AppState {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("StepLlm", vec![]).unwrap();
+        state.projects.set_backend(&p.id, backend).unwrap();
+        state
+    }
+
+    /// The model steps of a project (decompose, clarify, authoring, escalation, diagrams, L3 ...)
+    /// run on THAT project's backend, the way the audit does: Cli by default, Api with the key
+    /// resolved now, and Api with no key REFUSED, never run on the subscription.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn step_llm_follows_the_active_projects_backend() {
+        use crate::project::ProjectBackend;
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+
+        // Cli project: a Cli Llm, no key needed.
+        let state = state_with_active_project(ProjectBackend::Cli);
+        assert_eq!(state.step_llm().unwrap().backend_label(), "anthropic/cli");
+
+        // Api project, no key anywhere: refused (and the port form reports the same refusal).
+        let state = state_with_active_project(ProjectBackend::Api);
+        let refusal = state
+            .step_llm()
+            .expect_err("api with no key must be refused");
+        assert!(refusal.contains("no API key"), "{refusal}");
+        let port = state.step_llm_port();
+        let err = futures::executor::block_on(port.complete(crate::llm::LlmRequest::new("x")))
+            .expect_err("the refused port fails every call");
+        assert_eq!(err.to_string(), refusal);
+
+        // Key saved after startup: the next step Llm is Api and carries exactly that key.
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-step")
+            .unwrap();
+        let llm = state.step_llm().unwrap();
+        assert_eq!(llm.backend_label(), "anthropic/api");
+        assert_eq!(llm.api_key(), Some("sk-ant-step"));
+
+        // Switching the PROJECT to Cli switches the step, whatever the chat setting says.
+        let id = state.projects.active().unwrap().id;
+        state
+            .projects
+            .set_backend(&id, ProjectBackend::Cli)
+            .unwrap();
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        assert_eq!(state.step_llm().unwrap().backend_label(), "anthropic/cli");
+    }
+
+    /// With no project at all, the global chat backend setting decides (like the chat).
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn step_llm_without_a_project_uses_the_chat_backend_setting() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(state.projects.active().is_none());
+        assert_eq!(state.step_llm().unwrap().backend_label(), "anthropic/cli");
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        assert!(state.step_llm().is_err(), "api chat setting + no key");
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-nop")
+            .unwrap();
+        let llm = state.step_llm().unwrap();
+        assert_eq!(llm.backend_label(), "anthropic/api");
+        assert_eq!(llm.api_key(), Some("sk-ant-nop"));
+    }
+
+    /// Every step endpoint refuses (409, with the reason) when the active project is Api with no
+    /// key, instead of quietly running on the subscription CLI.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn every_project_step_endpoint_refuses_an_api_project_with_no_key() {
+        use crate::project::ProjectBackend;
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = state_with_active_project(ProjectBackend::Api);
+        let app = router(state.clone());
+        // A UoW (blank) and an escalation to address; a story for the story-keyed steps.
+        let blank = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/uow/blank")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let uow_id = body_json(blank).await["uow_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let esc = state.escalations.raise(
+            crate::escalation::RaiseEscalationReq {
+                subject_kind: crate::escalation::SubjectKind::Uow,
+                checkpoint_id: None,
+                routine_id: uow_id.clone(),
+                reason: "r".to_string(),
+                stopped_for: "s".to_string(),
+                suggestions: vec![],
+                raw_context: String::new(),
+            },
+            "Add login",
+        );
+        let story = camerata_worktracker::InMemoryStoryStore::seeded()
+            .list()
+            .await
+            .unwrap()
+            .remove(0);
+        let story_id = story.id.clone();
+        state.stories.upsert(story).await.unwrap();
+
+        let cases: Vec<(String, &str)> = vec![
+            (format!("/api/stories/{story_id}/decompose"), "{}"),
+            (format!("/api/stories/{story_id}/clarify/suggest"), "{}"),
+            (format!("/api/uow/{uow_id}/author"), r#"{"message":"hi"}"#),
+            (format!("/api/uow/{uow_id}/diagram"), "{}"),
+            (
+                format!("/api/escalations/{}/chat", esc.id),
+                r#"{"message":"hi"}"#,
+            ),
+        ];
+        for (uri, body) in cases {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT, "{uri}");
+        }
     }
 
     /// The Chat backend setting must DO what the UI says: `api` builds an Api `Llm` carrying the

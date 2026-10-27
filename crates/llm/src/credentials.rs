@@ -363,15 +363,6 @@ pub fn github_token(store: &dyn CredentialStore) -> Option<String> {
     resolve_credential(store, GITHUB_TOKEN)
 }
 
-/// Keep the Anthropic API key out of a subscription-billed `claude` subprocess: the Cli
-/// (Claude Code subscription) backend must never silently bill the API because a `.env` key was
-/// inherited from the parent. With the variable removed, `claude` can only use its own login.
-/// (Removing a variable from a child's environment is not a read, and lives here so this file
-/// stays the only one that names the env var.)
-pub fn scrub_anthropic_key_env(cmd: &mut tokio::process::Command) {
-    cmd.env_remove(ANTHROPIC_API_KEY_ENV);
-}
-
 /// The user-facing fix for a missing Anthropic API key, shared by every error and help text
 /// so the wording cannot drift (no em-dashes in user-facing text).
 pub const API_KEY_FIX_HINT: &str = "add the key in the app (Settings, Chat backend, API) or set \

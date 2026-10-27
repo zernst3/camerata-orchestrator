@@ -123,7 +123,12 @@ pub async fn orchestrator_message(
         );
     }
 
-    let llm = RealTurnLlm { llm: state.llm() };
+    // The turn runs on the PROJECT's backend (Api with no key is refused, never downgraded).
+    let turn_llm = match state.llm_for_project(Some(&project)) {
+        Ok(l) => l,
+        Err(message) => return honest_error(axum::http::StatusCode::CONFLICT, message),
+    };
+    let llm = RealTurnLlm { llm: turn_llm };
     let executor = RealTurnExecutor {
         state: state.clone(),
         repo,

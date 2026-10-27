@@ -320,8 +320,10 @@ fn scan_all() -> Vec<(PathBuf, Vec<(usize, String)>)> {
 fn no_production_code_reads_a_saved_credential_from_env_directly() {
     let mut offenders = Vec::new();
     for (path, lines) in scan_all() {
-        // The resolver itself is the one place allowed to name them.
-        if path.ends_with("llm/src/credentials.rs") {
+        // The resolver itself is the one place allowed to name them for READING, and the
+        // `claude_cli` module the one place that names the key to REMOVE it from a child env.
+        if path.ends_with("llm/src/credentials.rs") || path.ends_with("api-types/src/claude_cli.rs")
+        {
             continue;
         }
         for (n, line) in lines {
@@ -360,7 +362,7 @@ fn every_production_llm_build_gets_its_key_from_the_resolver() {
                 || line.contains("Llm::for_backend_and_ledger("))
                 && !line.contains("fn ");
             if is_call {
-                let lo = idx.saturating_sub(8);
+                let lo = idx.saturating_sub(14);
                 let hi = (idx + 6).min(lines.len());
                 let near_resolver = lines[lo..hi]
                     .iter()
@@ -376,4 +378,40 @@ fn every_production_llm_build_gets_its_key_from_the_resolver() {
         }
     }
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}
+
+/// Every non-test spawn of the `claude` binary must scrub `ANTHROPIC_API_KEY` from the child's
+/// environment (`camerata_api_types::claude_cli::scrub_anthropic_key_env`), so the subscription
+/// CLI can never silently bill the API because a `.env` key was inherited.
+#[test]
+fn every_production_claude_spawn_scrubs_the_anthropic_key() {
+    let mut spawns = 0;
+    let mut offenders = Vec::new();
+    for (path, lines) in scan_all() {
+        for (idx, (n, line)) in lines.iter().enumerate() {
+            if !line.contains("Command::new(\"claude\")") {
+                continue;
+            }
+            spawns += 1;
+            let hi = (idx + 12).min(lines.len());
+            let scrubbed = lines[idx..hi]
+                .iter()
+                .any(|(_, l)| l.contains("scrub_anthropic_key_env("));
+            if !scrubbed {
+                offenders.push(format!("{}:{n}: {}", path.display(), line.trim()));
+            }
+        }
+    }
+    // The scan must have found the known spawns (llm, agent, intake x2), or it is vacuous.
+    assert!(
+        spawns >= 4,
+        "expected at least 4 production `claude` spawns, the scan saw {spawns}"
+    );
+    assert!(
+        offenders.is_empty(),
+        "a `claude` subprocess inherits ANTHROPIC_API_KEY; call \
+         `camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut())` right after \
+         `Command::new(\"claude\")`:\n{}",
+        offenders.join("\n")
+    );
 }

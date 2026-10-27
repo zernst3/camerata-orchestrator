@@ -2937,10 +2937,19 @@ The GitHub provider carries its token, so `ProviderCell` (the swappable provider
 `AppState`) is re-selected whenever the `github_token` credential is saved or deleted, and the
 tracker poller reads the cell on every tick; a token saved after launch is used immediately.
 
-The project-less chat assistant builds its `Llm` with `AppState::chat_llm()`, which follows
-`settings.chat_backend` (Api builds an Api `Llm` with the key resolved now; Api with no key is an
-error, never a silent downgrade to the CLI). The `claude -p` subprocess has `ANTHROPIC_API_KEY`
-removed from its environment so the subscription backend can never silently bill the API.
+Every model step builds its `Llm` through `AppState::llm_for_project(project)`: with a project
+the PROJECT's `backend` decides (the same rule as the audit), with none `settings.chat_backend`
+decides. `step_llm()` (the active project) serves decomposition, clarification, story/design
+authoring, diagrams, mockups, escalation chat and translation, and the L3 / integration
+advisories (`step_llm_port()` hands the latter a `RefusedLlm` when refused); `chat_llm()` is the
+project-less chat. Api builds an Api `Llm` with the key resolved now; Api with no key is refused
+(HTTP 409 on the step endpoints), never a silent downgrade to the CLI. `AppState::llm()` is only
+the keyless CLI floor for hermetic tests and label probes.
+
+Every `claude` subprocess (`camerata-llm`, `camerata-agent`, `camerata-intake` x2) calls
+`camerata_api_types::claude_cli::scrub_anthropic_key_env`, so the subscription CLI can never
+silently bill the API because a `.env` key was inherited. A source-scan test fails if a
+production spawn of `claude` does not call it.
 
 Call sites: the gate (`anthropic_api_key_present`), the audit and rescan `Llm`
 (`onboard::build_llm` -> `Llm::for_backend[_and_ledger]`, which take the key explicitly and read

@@ -162,7 +162,7 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
     // and responds at once.
     // The Cli backend is the SUBSCRIPTION path: it must never silently bill the API because an
     // `ANTHROPIC_API_KEY` from `.env` was inherited into this subprocess.
-    crate::credentials::scrub_anthropic_key_env(&mut cmd);
+    camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
     cmd.kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .arg("-p")
@@ -656,6 +656,42 @@ impl LlmPort for Llm {
         // The inherent `complete_streaming` already takes `&mut (dyn FnMut(&str) + Send)`,
         // so this is a straight pass-through.
         Llm::complete_streaming(self, req, on_delta).await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// An [`LlmPort`] that refuses every call with a fixed message. Used where a model seam must be
+/// handed out but the backend setting forbids running it (the project is set to the API backend
+/// and no key is configured): the step then fails LOUDLY with the reason, instead of silently
+/// downgrading to the Claude Code subscription.
+#[derive(Debug, Clone)]
+pub struct RefusedLlm {
+    message: String,
+}
+
+impl RefusedLlm {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmPort for RefusedLlm {
+    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        Err(anyhow::anyhow!(self.message.clone()))
+    }
+
+    async fn complete_streaming(
+        &self,
+        _req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        Err(anyhow::anyhow!(self.message.clone()))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

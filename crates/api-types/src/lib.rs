@@ -49,6 +49,7 @@
 //! (`camerata_app_core::uow::X`, `crate::llm::LlmResponse`, etc.) resolve unchanged.
 
 pub mod audit;
+pub mod claude_cli;
 pub mod credentials;
 pub mod feedback;
 pub mod fingerprint;

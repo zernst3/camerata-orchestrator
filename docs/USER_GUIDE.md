@@ -118,7 +118,9 @@ no key required. Switch a project to **API** for client work, since it is metere
 and nameable in a contract, which a subscription running on your own machine is not.
 
 If a project is set to **API** and no Anthropic API key is configured, AI steps on that project
-do not run: the scan/audit page shows an **"AI review did not run"** banner explaining why, and
+(scan, decomposition, clarification questions, story and design authoring, diagrams, mockups,
+escalation chat, code review) do not run and report why; they never fall back to the Claude Code
+subscription: the scan/audit page shows an **"AI review did not run"** banner explaining why, and
 the deterministic security floor still runs on its own. To unblock it, add an **Anthropic API
 Key** in **Settings** (stored in the OS keychain, never in files or the repo; it takes effect on
 the next run, no restart needed) or switch that project's backend back to **CLI**.
