@@ -1,7 +1,16 @@
 # Overnight autonomous run — decisions needed + progress log
 
-> ## ▶ RESUME HERE (paused 2026-10-25 at Zach's request, after item 24 Firebase)
-> **CURRENT (newest first; older entries below are history):** item 24 Firebase/Firestore
+> ## ▶ RESUME HERE (paused 2026-10-26 at Zach's request, after code viewer step 4)
+> **CURRENT (newest first; older entries below are history):** code viewer steps 1 to 4 MERGED
+> and pushed 2026-10-26 (step 4: batch finding-context endpoint, pane ±3 lines context, Queue
+> order presets; Fable's 3 medium + 13 low fixed, plus the GIT_CONFIG test race made impossible).
+> No agent worktrees are in flight. **Resume with viewer step 5** (B.2 stacked group view; the
+> batch endpoint it needs already exists). Step-4 manual checks: the table scrolls to the cursor
+> row after a preset switch; the arrows and `C` work right after choosing in the Order select;
+> look of the select and the pane context block; feel of the flat Critical-first cut on a few
+> hundred real rows; pane context matches `git show <sha>:<path>`, and a scan with no recorded
+> commit shows none. Known soft spot: the pane's stale-answer test uses real delays with wide
+> margins (not a flake so far). Item 24 Firebase/Firestore
 > coverage is MERGED (13 rules, rules-file reader, apiKey twin; all 11 Fable review items fixed).
 > Token-efficiency ranks 1, 3, 5, 6, the 22a API backend default (CLI and UI halves), eslint
 > EINVAL hardening, and the CLI `bookkeeping_is_never_written...` flake fix are all merged. No
@@ -15,7 +24,7 @@
 > highlighter), step 2 (viewer overlay, navigation, in-viewer dispositions) and step 3 (A.5
 > popover, A.6 search / symbol refs / permalink, Rule Hub key; Fable review fixed: honest search
 > failure status, one isolated git command builder, a 4-slot git read gate, shared key-body
-> redaction) MERGED 2026-10-26; next is step 4 (B.3 pane context + B.4 order presets), then 5
+> redaction) and step 4 (B.3 pane context + B.4 order presets) MERGED 2026-10-26; next is 5
 > (B.2 stacked groups), 6 (B.5 decision memory + B.7 counts strip), 7 (B.6 notes + ETA, then B.8
 > palette). Step-3 manual checks: `Down` past the visible rows of a long references list keeps
 > the selection in view; the Rule Hub opened from the pane, closed with `Esc`, leaves `C` and the
