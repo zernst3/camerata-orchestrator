@@ -515,14 +515,9 @@ impl AppState {
     /// `CAMERATA_GITHUB_TOKEN` environment variable as a back-compat fallback.
     /// Returns `None` when neither is set or non-empty.
     pub fn github_token(&self) -> Option<String> {
-        // Keychain first, then CAMERATA_GITHUB_TOKEN. `resolve` warns (not swallows) on a
-        // keychain read error before falling back to the env var.
-        crate::credentials::resolve(
-            self.credential_store.as_ref(),
-            crate::credentials::GITHUB_TOKEN,
-            "CAMERATA_GITHUB_TOKEN",
-        )
-        .filter(|v| !v.is_empty())
+        // Keychain first, then CAMERATA_GITHUB_TOKEN, via the one credential resolver (which
+        // warns, not swallows, on a keychain read error before falling back to env).
+        crate::credentials::github_token(self.credential_store.as_ref())
     }
 
     /// Resolve the AUTHENTICATED GitHub login for the configured token, memoized so the
@@ -996,7 +991,10 @@ impl AppState {
     /// connection test. `seeded()` remains for tests and the canned demos.
     pub fn from_env() -> Self {
         let mut state = Self::new(Arc::new(InMemoryStoryStore::new()));
-        state.provider = ProviderHandle::from_env();
+        // The real credential store is installed FIRST so the provider is selected from the
+        // GitHub token saved in the app (env only as the fallback), not from env alone.
+        state.credential_store = Arc::new(crate::credentials::KeyringCredentialStore);
+        state.provider = ProviderHandle::from_credentials(state.credential_store.as_ref());
         // Projects (their configs + pointers, NOT repo contents) persist across
         // launches in the per-user data dir, so an architect's projects survive a
         // restart. Falls back to an in-memory store if the data dir can't be
@@ -1125,10 +1123,8 @@ impl AppState {
         // deletion removes copies of client code from exactly these.
         state.storage_roots =
             Arc::new(crate::client_source::storage::StorageRoots::from_environment());
-        // Production path: use the OS keychain (macOS Keychain, Windows Credential
-        // Manager, Secret Service on Linux) so credentials survive restarts without
-        // living in any file on disk.
-        state.credential_store = Arc::new(crate::credentials::KeyringCredentialStore);
+        // (The production credential store, the OS keychain, was installed at the top of this
+        // function so the provider could be chosen from the GitHub token saved in the app.)
         // NOTE: the Anthropic API key is deliberately NOT copied into process env here (or
         // anywhere). Every model client reads it through `credentials::anthropic_api_key`
         // (credential store first, `ANTHROPIC_API_KEY` env as the fallback) at the moment it
@@ -10576,12 +10572,7 @@ async fn get_model_providers(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<ModelProvidersQuery>,
 ) -> Json<ModelProvidersResp> {
-    let api_key = state
-        .credential_store
-        .get(crate::credentials::OPENROUTER_API_KEY)
-        .ok()
-        .flatten()
-        .filter(|k| !k.trim().is_empty());
+    let api_key = crate::credentials::openrouter_api_key(state.credential_store.as_ref());
     state
         .model_registry
         .ensure_safe_providers_loaded(api_key.as_deref(), &q.model_id)
@@ -15973,7 +15964,7 @@ async fn development_context(State(state): State<AppState>) -> Json<serde_json::
 /// rule's `version`) on the selection; the drift check compares it to the corpus.
 async fn updates_check(State(state): State<AppState>) -> Json<serde_json::Value> {
     // ── App-version check (the only part that touches the network) ────────────
-    let app_update = check_github_release().await;
+    let app_update = check_github_release(state.credential_store.as_ref()).await;
     Json(updates_payload(&state, app_update.unwrap_or(serde_json::Value::Null)).await)
 }
 
@@ -16011,13 +16002,13 @@ async fn updates_payload(state: &AppState, app_update: serde_json::Value) -> ser
 
 /// Check the latest Camerata release on GitHub and return a JSON object with
 /// the version comparison. Returns `None` on network / auth failure.
-async fn check_github_release() -> Option<serde_json::Value> {
+async fn check_github_release(
+    creds: &dyn crate::credentials::CredentialStore,
+) -> Option<serde_json::Value> {
     let current = env!("CARGO_PKG_VERSION");
     // The GitHub releases API for the camerata-orchestrator repo.
     let url = "https://api.github.com/repos/zernst3/camerata-orchestrator/releases/latest";
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = crate::credentials::github_token(creds);
 
     let client = reqwest::Client::builder()
         .user_agent("camerata-server/1.0")

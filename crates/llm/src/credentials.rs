@@ -209,6 +209,48 @@ pub fn resolve(store: &dyn CredentialStore, cred_name: &str, env_var: &str) -> O
 
 /// The env var that backs [`anthropic_api_key`] when the credential store holds no key.
 pub const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+/// The env var that backs [`openrouter_api_key`] when the credential store holds no key.
+pub const OPENROUTER_API_KEY_ENV: &str = "OPENROUTER_API_KEY";
+/// The env var that backs [`github_token`] when the credential store holds no token.
+pub const GITHUB_TOKEN_ENV: &str = "CAMERATA_GITHUB_TOKEN";
+
+/// The env-var fallback for a known credential name, `None` for an unknown one.
+pub fn env_var_for(cred_name: &str) -> Option<&'static str> {
+    match cred_name {
+        ANTHROPIC_API_KEY => Some(ANTHROPIC_API_KEY_ENV),
+        OPENROUTER_API_KEY => Some(OPENROUTER_API_KEY_ENV),
+        GITHUB_TOKEN => Some(GITHUB_TOKEN_ENV),
+        _ => None,
+    }
+}
+
+/// THE one rule for every credential (Anthropic key, OpenRouter key, GitHub token): the value
+/// saved in the credential store (the OS keychain, set from the app's Settings) first, the
+/// credential's env var ([`env_var_for`]) only as a fallback (CI, existing `.env` setups).
+/// Blank / whitespace-only values count as absent at both layers. Read it at the moment a
+/// client is built and never cache it, so a credential saved or replaced in the UI takes
+/// effect on the next call with no restart. A name with no env var resolves from the store
+/// alone. The result is the secret itself: never log or print it (use [`mask_value`]).
+pub fn resolve_credential(store: &dyn CredentialStore, cred_name: &str) -> Option<String> {
+    match env_var_for(cred_name) {
+        Some(env_var) => resolve(store, cred_name, env_var),
+        None => store
+            .get(cred_name)
+            .ok()
+            .flatten()
+            .filter(|v| !v.trim().is_empty()),
+    }
+}
+
+/// The OpenRouter API key: [`resolve_credential`] for `openrouter_api_key`.
+pub fn openrouter_api_key(store: &dyn CredentialStore) -> Option<String> {
+    resolve_credential(store, OPENROUTER_API_KEY)
+}
+
+/// The GitHub token: [`resolve_credential`] for `github_token`.
+pub fn github_token(store: &dyn CredentialStore) -> Option<String> {
+    resolve_credential(store, GITHUB_TOKEN)
+}
 
 /// The user-facing fix for a missing Anthropic API key, shared by every error and help text
 /// so the wording cannot drift (no em-dashes in user-facing text).
@@ -226,7 +268,7 @@ pub const API_KEY_FIX_HINT: &str =
 ///
 /// The returned value is the secret itself: never log or print it (use [`mask_value`]).
 pub fn anthropic_api_key(store: &dyn CredentialStore) -> Option<String> {
-    resolve(store, ANTHROPIC_API_KEY, ANTHROPIC_API_KEY_ENV)
+    resolve_credential(store, ANTHROPIC_API_KEY)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -397,6 +439,74 @@ mod tests {
         let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let token = resolve(s.as_ref(), GITHUB_TOKEN, "CAMERATA_GITHUB_TOKEN");
         assert_eq!(token, None);
+    }
+
+    // ── resolve_credential (all three credentials, one rule) ──────────────────
+
+    /// (credential name, env var) for every credential the app knows.
+    const ALL_THREE: [(&str, &str); 3] = [
+        (ANTHROPIC_API_KEY, "ANTHROPIC_API_KEY"),
+        (OPENROUTER_API_KEY, "OPENROUTER_API_KEY"),
+        (GITHUB_TOKEN, "CAMERATA_GITHUB_TOKEN"),
+    ];
+
+    #[test]
+    fn every_known_credential_has_an_env_fallback() {
+        for name in ALL_CREDENTIALS {
+            assert!(env_var_for(name).is_some(), "{name} has no env fallback");
+        }
+        for (name, env_var) in ALL_THREE {
+            assert_eq!(env_var_for(name), Some(env_var));
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn all_three_credentials_follow_store_then_env_with_blank_as_absent() {
+        for (name, env_var) in ALL_THREE {
+            let s = store();
+            let _unset = camerata_test_env::EnvGuard::remove(env_var);
+            assert_eq!(resolve_credential(s.as_ref(), name), None, "{name}: empty");
+            // Saved after "startup": the next read sees it; replaced: the next read sees that.
+            s.set(name, "store-1").unwrap();
+            assert_eq!(
+                resolve_credential(s.as_ref(), name).as_deref(),
+                Some("store-1")
+            );
+            s.set(name, "store-2").unwrap();
+            assert_eq!(
+                resolve_credential(s.as_ref(), name).as_deref(),
+                Some("store-2")
+            );
+            // Store wins over env.
+            let _env = camerata_test_env::EnvGuard::set(env_var, "env-value");
+            assert_eq!(
+                resolve_credential(s.as_ref(), name).as_deref(),
+                Some("store-2")
+            );
+            // Blank store value falls through to env; blank env is absent.
+            s.set(name, "  ").unwrap();
+            assert_eq!(
+                resolve_credential(s.as_ref(), name).as_deref(),
+                Some("env-value")
+            );
+            let _blank = camerata_test_env::EnvGuard::set(env_var, "  ");
+            assert_eq!(resolve_credential(s.as_ref(), name), None, "{name}: blank");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn thin_wrappers_agree_with_resolve_credential() {
+        let s = store();
+        let _a = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let _o = camerata_test_env::EnvGuard::remove("OPENROUTER_API_KEY");
+        let _g = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
+        s.set(OPENROUTER_API_KEY, "or").unwrap();
+        s.set(GITHUB_TOKEN, "gh").unwrap();
+        assert_eq!(openrouter_api_key(s.as_ref()).as_deref(), Some("or"));
+        assert_eq!(github_token(s.as_ref()).as_deref(), Some("gh"));
+        assert_eq!(anthropic_api_key(s.as_ref()), None);
     }
 
     // ── anthropic_api_key (the one resolver) ──────────────────────────────────

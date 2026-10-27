@@ -133,11 +133,18 @@ fn production_sources() -> Vec<PathBuf> {
         .collect()
 }
 
-/// The ONLY place that may name the `ANTHROPIC_API_KEY` env var in a read is the resolver in
-/// `camerata-llm`'s `credentials.rs` (via its `ANTHROPIC_API_KEY_ENV` constant). Any other
-/// non-test code that reads it directly would skip the app-saved key again.
+/// The env fallbacks of the three credentials the app saves (Anthropic key, OpenRouter key,
+/// GitHub token). Only the resolver in `camerata-llm`'s `credentials.rs` (via its `*_ENV`
+/// constants) may name them as string literals; any other non-test code that does is reading
+/// env directly and skips the app-saved credential.
+const CREDENTIAL_ENV_VARS: [&str; 3] = [
+    "ANTHROPIC_API_KEY",
+    "OPENROUTER_API_KEY",
+    "CAMERATA_GITHUB_TOKEN",
+];
+
 #[test]
-fn no_production_code_reads_anthropic_api_key_from_env_directly() {
+fn no_production_code_reads_a_saved_credential_from_env_directly() {
     let mut offenders = Vec::new();
     let sources = production_sources();
     // The scan must actually see the code (a wrong path would make it vacuously pass).
@@ -156,14 +163,18 @@ fn no_production_code_reads_anthropic_api_key_from_env_directly() {
             continue;
         }
         for (n, line) in production_lines(&path) {
-            if line.contains("\"ANTHROPIC_API_KEY\"") {
-                offenders.push(format!("{}:{n}: {}", path.display(), line.trim()));
+            for var in CREDENTIAL_ENV_VARS {
+                if line.contains(&format!("\"{var}\"")) {
+                    offenders.push(format!("{}:{n}: {}", path.display(), line.trim()));
+                }
             }
         }
     }
     assert!(
         offenders.is_empty(),
-        "read the key through `credentials::anthropic_api_key`, never from env directly:\n{}",
+        "resolve credentials through `credentials::resolve_credential` (or its \
+         `anthropic_api_key` / `openrouter_api_key` / `github_token` wrappers), never from env \
+         directly:\n{}",
         offenders.join("\n")
     );
 }

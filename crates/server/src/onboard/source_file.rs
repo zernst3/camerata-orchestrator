@@ -56,7 +56,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use camerata_checks::extract::enclosing::{enclosing_block, EnclosingBlock};
 use camerata_checks::extract::highlight::{
-    highlight, highlight_lang_for_path, HighlightStatus, TokenClass,
+    highlight_lang_for_path, highlight_with_budget, HighlightStatus, TokenClass, DEFAULT_BUDGET,
 };
 
 use super::files::MAX_FILE_BYTES;
@@ -271,7 +271,7 @@ pub(crate) async fn read_rendered(
     let shared = Arc::new(prepared);
     let job = {
         let (shared, path) = (Arc::clone(&shared), path);
-        tokio::task::spawn_blocking(move || decorate(&shared, &path, around))
+        tokio::task::spawn_blocking(move || decorate(&shared, &path, around, DEFAULT_BUDGET))
     };
     let decorated = match tokio::time::timeout(limits.decorate, job).await {
         Ok(Ok(decorated)) => decorated,
@@ -371,7 +371,17 @@ pub(crate) fn prepare(
 
 /// The enclosing block of `around` and the highlighted segments of the window. Pure CPU; run on
 /// the blocking pool.
-pub(crate) fn decorate(prepared: &Prepared, rel_path: &str, around: Option<usize>) -> Decorated {
+///
+/// `highlight_budget` is the highlighter's own wall-clock allowance (production passes
+/// [`DEFAULT_BUDGET`]); past it the highlight is abandoned and the lines come back plain
+/// (`Skipped`). It is a parameter, not a constant, so a test that asserts the highlighted
+/// outcome can pass a budget no loaded machine can exceed instead of racing a 250 ms clock.
+pub(crate) fn decorate(
+    prepared: &Prepared,
+    rel_path: &str,
+    around: Option<usize>,
+    highlight_budget: Duration,
+) -> Decorated {
     #[cfg(test)]
     test_stage_delay();
     let Prepared {
@@ -391,7 +401,11 @@ pub(crate) fn decorate(prepared: &Prepared, rel_path: &str, around: Option<usize
         .get(hl_from.saturating_sub(1)..to.min(lines.len()))
         .map(|slice| slice.join("\n"))
         .unwrap_or_default();
-    let highlighted = highlight(highlight_lang_for_path(rel_path), &hl_text);
+    let highlighted = highlight_with_budget(
+        highlight_lang_for_path(rel_path),
+        &hl_text,
+        highlight_budget,
+    );
 
     let mut out = Vec::with_capacity(to.saturating_sub(from) + 1);
     for n in from..=to {
@@ -639,6 +653,13 @@ pub async fn source_file_with(
 mod tests {
     use super::*;
 
+    /// The highlighter's budget in these tests: effectively unbounded. Production uses a
+    /// 250 ms wall-clock budget, which a debug build under a loaded parallel test run can
+    /// exceed (that is what made `a_file_between_the_two_caps_is_windowed_around_the_line`
+    /// flaky: the highlight came back `Skipped`), so a test that asserts the highlighted outcome
+    /// must not race the clock. The over-budget behaviour has its own deterministic tests.
+    const TEST_HIGHLIGHT_BUDGET: Duration = Duration::from_secs(600);
+
     /// `prepare` + `decorate` without the runtime, as one value.
     fn render(
         bytes: Vec<u8>,
@@ -646,7 +667,7 @@ mod tests {
         around: Option<usize>,
     ) -> Result<(Prepared, Decorated), Refused> {
         let prepared = prepare(bytes, path, around)?;
-        let decorated = decorate(&prepared, path, around);
+        let decorated = decorate(&prepared, path, around, TEST_HIGHLIGHT_BUDGET);
         Ok((prepared, decorated))
     }
 
@@ -731,6 +752,23 @@ mod tests {
         assert!(segments("", &[])
             .iter()
             .all(|(c, t)| c.is_none() && t.is_empty()));
+    }
+
+    /// The over-budget path, deterministically: a zero budget ALWAYS abandons the highlight, so
+    /// the lines come back plain and intact with the status `Skipped`, whatever the machine load.
+    #[test]
+    fn a_zero_highlight_budget_always_skips_and_keeps_the_text() {
+        let src = "fn f() {\n    let s = \"x\";\n}\n";
+        let prepared = prepare(src.as_bytes().to_vec(), "src/lib.rs", Some(2)).unwrap();
+        let d = decorate(&prepared, "src/lib.rs", Some(2), Duration::ZERO);
+        assert_eq!(d.highlight, HighlightStatus::Skipped);
+        for n in 0..3 {
+            assert_eq!(text(&d, n), src.lines().nth(n).unwrap());
+        }
+        assert!(d
+            .lines
+            .iter()
+            .all(|segs| segs.iter().all(|(class, _)| class.is_none())));
     }
 
     #[test]

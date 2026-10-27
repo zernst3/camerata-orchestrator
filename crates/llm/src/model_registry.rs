@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
-use crate::credentials::{CredentialStore, OPENROUTER_API_KEY};
+use crate::credentials::CredentialStore;
 use crate::provider_policy::SafeProviders;
 
 // ── Registry entry (the unified shape) ───────────────────────────────────────
@@ -340,9 +340,8 @@ impl ModelRegistry {
     /// (even on error — the cache is updated to `Some([])` on failure so the UI doesn't
     /// keep re-fetching automatically).
     pub async fn try_refresh_from_store(&self, creds: &dyn CredentialStore) -> bool {
-        let key = match creds.get(OPENROUTER_API_KEY) {
-            Ok(Some(k)) if !k.is_empty() => k,
-            _ => return false,
+        let Some(key) = crate::credentials::openrouter_api_key(creds) else {
+            return false;
         };
         self.refresh_openrouter(&key).await;
         true

@@ -33,22 +33,28 @@ impl ProviderHandle {
         }
     }
 
-    /// Select the provider from the environment: GitHub when credentials are present,
-    /// otherwise native.
-    pub fn from_env() -> Self {
-        github_from_env().unwrap_or_else(Self::native)
+    /// Select the provider: GitHub when a token is available, otherwise native. The token comes
+    /// from the credential store first (the one saved in the app), with `CAMERATA_GITHUB_TOKEN`
+    /// as the fallback; the optional default repo still comes from env.
+    ///
+    /// The provider is built once at startup (its transport carries the token), so a token saved
+    /// after launch is picked up by everything that resolves it per call (`AppState::github_token`)
+    /// but only wires this provider on the next start.
+    pub fn from_credentials(creds: &dyn crate::credentials::CredentialStore) -> Self {
+        github_from_token(crate::credentials::github_token(creds)).unwrap_or_else(Self::native)
     }
 }
 
-/// Build a GitHub provider handle from env vars, or `None` if no token is set.
+/// Build a GitHub provider handle from the resolved token (and the optional default-repo env
+/// vars), or `None` if there is no token.
 ///
 /// Per the credential-delegated-scope decision, the TOKEN alone is sufficient: the
 /// provider serves every repo the token can reach, resolving the repo per request
 /// from each story's container. `CAMERATA_GITHUB_REPO` (`owner/repo`, or
 /// `CAMERATA_GITHUB_OWNER` + `_REPO`) is now an OPTIONAL default for container-less
 /// operations (e.g. the inbound `poll`), never a hard scope ceiling.
-fn github_from_env() -> Option<ProviderHandle> {
-    let token = non_empty("CAMERATA_GITHUB_TOKEN")?;
+fn github_from_token(token: Option<String>) -> Option<ProviderHandle> {
+    let token = token?;
 
     // Optional default repo: present -> a labeled default; absent -> token-only,
     // every operation must name its repo via the story container.

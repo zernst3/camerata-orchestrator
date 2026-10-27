@@ -2305,16 +2305,13 @@ pub fn build_completer(
 
     match provider.as_str() {
         "openrouter" => {
-            let key = creds
-                .get(crate::credentials::OPENROUTER_API_KEY)
-                .map_err(|e| anyhow::anyhow!("credential store error: {e}"))?
-                .filter(|k| !k.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "model `{model_id}` is an OpenRouter model but OPENROUTER_API_KEY is not \
-                         set — add it via Settings → Credentials before using this model"
-                    )
-                })?;
+            let key = crate::credentials::openrouter_api_key(creds).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "model `{model_id}` is an OpenRouter model but no OpenRouter API key is \
+                     configured; add it in the app (Settings, Credentials) or set \
+                     OPENROUTER_API_KEY before using this model"
+                )
+            })?;
             Ok(std::sync::Arc::new(OpenRouterCompleter {
                 api_key: key,
                 limiter,

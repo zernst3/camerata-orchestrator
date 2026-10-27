@@ -131,10 +131,6 @@ pub struct ConnectionsReport {
 
 // ── GitHub probe ───────────────────────────────────────────────────────────────
 
-fn env_nonempty(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.is_empty())
-}
-
 /// Call `GET https://api.github.com/user` with the given token, return a
 /// structured [`GitHubProbeOutcome`].
 ///
@@ -250,7 +246,8 @@ pub async fn probe(creds: &dyn crate::credentials::CredentialStore) -> Connectio
     let mut connections = Vec::new();
 
     // ── GitHub: code host (repos) + work tracker (issues/projects), one token. ──
-    match env_nonempty("CAMERATA_GITHUB_TOKEN") {
+    // The token saved in the app first, `CAMERATA_GITHUB_TOKEN` only as the fallback.
+    match crate::credentials::github_token(creds) {
         None => {
             connections.push(Connection {
                 id: "github",

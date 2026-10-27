@@ -2193,16 +2193,13 @@ pub fn build_agent_driver(
 
     match provider.as_str() {
         "openrouter" => {
-            let key = creds
-                .get(crate::credentials::OPENROUTER_API_KEY)
-                .map_err(|e| anyhow::anyhow!("credential store error: {e}"))?
-                .filter(|k| !k.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "model `{model_id}` is an OpenRouter model but OPENROUTER_API_KEY is not \
-                         set — add it via Settings → Credentials before using this model"
-                    )
-                })?;
+            let key = crate::credentials::openrouter_api_key(creds).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "model `{model_id}` is an OpenRouter model but no OpenRouter API key is \
+                     configured; add it in the app (Settings, Credentials) or set \
+                     OPENROUTER_API_KEY before using this model"
+                )
+            })?;
 
             let mut or_completer = crate::llm::OpenRouterCompleter::for_agent(
                 key,
@@ -2541,18 +2538,16 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                 // children inherit (the orchestrator session's role subset).
                 let rule_subset = ctx.session.role_rule_subset.clone();
 
-                let key = self
-                    .creds
-                    .get(crate::credentials::OPENROUTER_API_KEY)
-                    .map_err(|e| anyhow::anyhow!("credential store error: {e}"))?
-                    .filter(|k| !k.trim().is_empty())
-                    .ok_or_else(|| {
+                let key = crate::credentials::openrouter_api_key(self.creds.as_ref()).ok_or_else(
+                    || {
                         anyhow::anyhow!(
-                            "lead model `{}` is an OpenRouter model but OPENROUTER_API_KEY is \
-                             not set — add it via Settings → Credentials before using this model",
+                            "lead model `{}` is an OpenRouter model but no OpenRouter API key is \
+                             configured; add it in the app (Settings, Credentials) or set \
+                             OPENROUTER_API_KEY before using this model",
                             ctx.strongest_model
                         )
-                    })?;
+                    },
+                )?;
 
                 let mut or_completer = crate::llm::OpenRouterCompleter::for_agent(
                     key,
