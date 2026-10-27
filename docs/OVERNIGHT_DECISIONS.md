@@ -1,7 +1,10 @@
 # Overnight autonomous run — decisions needed + progress log
 
 > ## ▶ RESUME HERE (paused 2026-10-26 at Zach's request, after code viewer step 4)
-> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Zach): W27 PDF brand
+> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Zach, standing
+> approval): Opus decides and acts without asking, including commit and push; record each decision
+> here with its reason. Ask Zach only for truly irreversible actions or deletion of real work or
+> data (throwaway builds and worktrees are fine). 2026-10-27 (Zach): W27 PDF brand
 > assets supplied: the Cantus Works website draft is the style guide (not final, but the final
 > site will closely match). Extracted to `docs/design/2026-10-27_pdf-brand-guide.md` with the logo
 > marks in `docs/design/brand/`. W27 is no longer blocked on assets. Font decided (Zach): Inter for
