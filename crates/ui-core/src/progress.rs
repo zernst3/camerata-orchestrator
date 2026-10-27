@@ -8,9 +8,10 @@
 //! [`TriageCounts::total`], the same two numbers the Process gate and the sub-tabs read, so the
 //! strip can never disagree with them.
 //!
-//! The estimated time left is NOT here. It needs the review timer (`WORK_ORDER_REVIEW_TIME.md`
-//! item 2), which is not built, and a strip that guessed a number would be inventing one. The
-//! component that draws this line has a named, empty seam for it (`ProgressStrip`'s `eta`).
+//! The estimated time left is NOT computed here either. It comes from the review timer
+//! (`crate::review_timer::eta`, which shows nothing until 20 decisions carry measured time) and is
+//! handed to the component that draws this line through its `eta` prop, so this module still
+//! counts and words only.
 //!
 //! [`TriageModel::counts`]: crate::triage::TriageModel::counts
 

@@ -14,10 +14,9 @@ workspace = true
 # The BFF view types (e.g. the model registry response) deserialize from the API; serde is a data
 # concern, not a rendering one, so it belongs in the framework-agnostic core.
 serde = { workspace = true }
+# The internal review-time stats are written as a JSON document (`review_stats::ReviewStats::to_json`).
+# A data format, not a rendering concern, like serde itself.
+serde_json = { workspace = true }
 # The pure-serde wire-contract leaf (no camerata deps, no framework code). `govdev::GovDevState`
 # caches the last work-item pull, and the `WorkItem` wire mirror lives there.
 camerata-api-types = { path = "../api-types" }
-
-[dev-dependencies]
-# Tests deserialize sample API payloads to exercise the view types + grouping logic.
-serde_json = { workspace = true }

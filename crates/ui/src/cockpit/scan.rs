@@ -530,14 +530,17 @@ pub(super) use camerata_ui_core::rules::csv_field;
 
 /// Pop a native save dialog and write `content`. Returns true on success.
 pub(super) async fn save_csv(default_name: &str, content: String) -> bool {
-    match rfd::AsyncFileDialog::new()
+    save_text(default_name, content).await == Some(true)
+}
+
+/// [`save_csv`] that tells a cancelled dialog (`None`) from a failed write (`Some(false)`), for
+/// callers that report a failure.
+pub(super) async fn save_text(default_name: &str, content: String) -> Option<bool> {
+    let file = rfd::AsyncFileDialog::new()
         .set_file_name(default_name)
         .save_file()
-        .await
-    {
-        Some(file) => file.write(content.as_bytes()).await.is_ok(),
-        None => false,
-    }
+        .await?;
+    Some(file.write(content.as_bytes()).await.is_ok())
 }
 
 /// Byte-based sibling of `save_csv` — same native-save-dialog idiom, but for raw bytes
@@ -1133,6 +1136,14 @@ pub(super) struct OnboardingDraft {
     /// saved before presets existed reads as the curated order.
     #[serde(default, deserialize_with = "camerata_ui_core::lenient::deserialize")]
     pub order_preset: OrderPreset,
+    /// The review timer's saved record: per-group active time and the per-row "reviewed" record
+    /// (step 7a). INTERNAL ONLY: it lives in the draft and in the internal stats view and is
+    /// never part of an export request (`export_product_zip` sends the dispositions and the
+    /// report options only; the server's release-gate tests inspect every client artifact for its
+    /// field names). A draft saved before it existed reads as an empty log, and a log of a shape
+    /// this build does not know reads as an empty log, so the scan and the dispositions still load.
+    #[serde(default)]
+    pub review_log: camerata_ui_core::review_timer::SavedReviewLog,
 }
 
 /// Load the saved onboarding draft, or None when nothing is in progress.
@@ -1155,6 +1166,31 @@ pub(super) async fn save_onboarding_draft(draft: &OnboardingDraft) {
         .json(draft)
         .send()
         .await;
+}
+
+/// Save the draft through `queue` so saves cannot cross: the server replaces the whole blob on
+/// every save, so with two in flight an older draft could land after a newer one and undo a
+/// decision. Only one save is out at a time; a draft submitted while one is out replaces any
+/// older one waiting, and the newest is sent when the save finishes. `after_each` runs after each
+/// completed request. THE one way the draft is auto-saved.
+pub(super) async fn save_onboarding_draft_ordered(
+    queue: &std::rc::Rc<
+        std::cell::RefCell<camerata_ui_core::save_queue::SaveQueue<OnboardingDraft>>,
+    >,
+    draft: OnboardingDraft,
+    mut after_each: impl FnMut(),
+) {
+    let first = queue.borrow_mut().submit(draft);
+    let Some(mut next) = first else { return };
+    loop {
+        save_onboarding_draft(&next).await;
+        after_each();
+        let following = queue.borrow_mut().complete();
+        match following {
+            Some(newer) => next = newer,
+            None => break,
+        }
+    }
 }
 
 /// Drop the saved draft (a fresh scan starts a new session; clearing avoids re-seeding the
@@ -2722,6 +2758,14 @@ pub(super) fn QueueReasonPrompt(
 /// same tally for every triage table (it counts the whole Queue), and it re-renders whenever the
 /// disposition map changes, so a decision and an undo both move it.
 ///
+/// *The review timer's part (INTERNAL, step 7a).* `eta` is the time-left text ("about 3h 10m left
+/// at your pace"), drawn after the counts; the caller passes `None` until 20 decisions carry
+/// measured time, and this strip never invents a number. `timer` is the timer's state text and
+/// its Pause / Resume button (always visible, a native button so Tab reaches it), and
+/// `on_open_stats` the door to the internal stats view. The button binds no key of its own, so
+/// the pane keeps all of its keys, and it is marked so that pressing it is not itself counted as
+/// the activity that resumes an idle timer.
+///
 /// *Accessibility.* It is plain text in a labelled group, readable in reading order. It is
 /// deliberately NOT an `aria-live` region: the reviewer's way of working is a run of single key
 /// presses, and every press changes two of these numbers, so a polite live region would queue a
@@ -2731,12 +2775,20 @@ pub(super) fn QueueReasonPrompt(
 pub(super) fn ProgressStrip(
     /// The live tally over the Queue's rows.
     counts: TriageCounts,
-    /// THE PLACE FOR THE ESTIMATED TIME LEFT. Always `None` today: the estimate needs the review
-    /// timer (`WORK_ORDER_REVIEW_TIME.md` item 2), which is not built, and this strip does not
-    /// invent a number. When the timer exists it passes its text here ("about 3h 10m left at your
-    /// pace") and it is drawn after the counts; until then nothing is drawn for it.
+    /// THE ESTIMATED TIME LEFT, as text ("about 3h 10m left at your pace"), drawn after the
+    /// counts. `None` draws nothing: the estimate needs 20 measured decisions and this strip does
+    /// not invent a number.
     #[props(default)]
     eta: Option<String>,
+    /// The review timer's state text and button. `None` draws no timer.
+    #[props(default)]
+    timer: Option<camerata_ui_core::review_timer::TimerStripView>,
+    /// The Pause / Resume button was pressed.
+    #[props(default)]
+    on_toggle_timer: Callback<()>,
+    /// Open the internal stats view. `None` draws no door to it.
+    #[props(default)]
+    on_open_stats: Option<Callback<()>>,
 ) -> Element {
     let text = progress_text(counts);
     rsx! {
@@ -2748,6 +2800,19 @@ pub(super) fn ProgressStrip(
             span { class: "progress-counts", "{text}" }
             if let Some(eta) = eta {
                 span { class: "progress-eta", " \u{b7} {eta}" }
+            }
+            if let Some(timer) = timer {
+                span { " \u{b7} " }
+                // The one timer control, the same component the viewer and the stack draw.
+                super::review::TimerControl { timer, on_toggle: on_toggle_timer }
+            }
+            if let Some(open) = on_open_stats {
+                button {
+                    class: "btn-edit-sm progress-stats-btn",
+                    title: "Internal review-time stats. Never part of an export.",
+                    onclick: move |_| open.call(()),
+                    "Review time"
+                }
             }
         }
     }
@@ -3733,6 +3798,14 @@ pub(super) fn FindingsTable(
     /// strip above the table. `None` draws no strip.
     #[props(default)]
     counts: Option<TriageCounts>,
+    /// The review timer (INTERNAL, step 7a). It observes the decisions `apply_rows` writes and the
+    /// group the cursor is in, and the strip shows its state, Pause / Resume and time left. `None`
+    /// (a table mounted without one) draws the plain counts strip and times nothing.
+    #[props(default)]
+    review: Option<super::review::ReviewHandle>,
+    /// Open the internal review-time stats view (the strip's "Review time" button).
+    #[props(default)]
+    on_open_stats: Callback<()>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     // Every queue row, before this table's triage-state filter: the viewer's gutter marks the
@@ -3992,6 +4065,26 @@ pub(super) fn FindingsTable(
     let pane_context: Option<PaneContext> =
         super::pane_context::use_pane_context(focused_target, project_id.clone());
 
+    // THE REVIEW TIMER's "opened a group": the rule group the cursor is in (INTERNAL, step 7a).
+    // A memo, so the effect below runs when the GROUP changes and not on every move within it.
+    // Keyed on the rule group (repo and rule id), which does not change when the Queue is re-cut.
+    let focused_group = use_memo({
+        let id_map = id_map.clone();
+        let key_to_row_id = key_to_row_id.clone();
+        move || {
+            focused_key(&cursor.read(), &visible_keys())
+                .and_then(|k| key_to_row_id.get(&k))
+                .and_then(|rid| id_map.get(rid))
+                .map(camerata_ui_core::review_timer::group_key_of)
+        }
+    });
+    let review_group = review.clone();
+    use_effect(move || {
+        if let (Some(review), Some(group)) = (&review_group, focused_group()) {
+            review.open_group(&group);
+        }
+    });
+
     // THE ORDER PRESET (work order B.4). `applied` is what the table is cut by now (the preset
     // it mounted with, until a change); it is PEEKED so this effect subscribes to the preset
     // alone. The re-cut keeps every row and its id, so the cursor, which holds a finding KEY, is
@@ -4043,6 +4136,10 @@ pub(super) fn FindingsTable(
     // the finding the cursor is on now, not the one it was on when the viewer opened.
     let key_to_row_id_pane = key_to_row_id.clone();
     let focused_for_apply = focused_finding.clone();
+    // The review timer is told after a decision is written, never before, and never writes one.
+    let review_apply = review.clone();
+    let review_undo = review.clone();
+    let review_stack = review.clone();
     // THE ONE WRITE PATH for a decision with an undo: these rows to this state. The pane's keys
     // and buttons pass the focused row; the stacked view passes its checked cards. It answers
     // `true` only when a disposition was written (see `apply_disposition`).
@@ -4079,6 +4176,11 @@ pub(super) fn FindingsTable(
                 return false;
             };
             dispositions.set(model.dispositions);
+            // The review timer observes the decision (INTERNAL, step 7a): the row is now
+            // "reviewed by the operator, at this time, after this much active time".
+            if let Some(review) = &review_apply {
+                review.decided(&rows, state);
+            }
             // Drop the rows from THIS triage table. Remember where each was (its position in the
             // table's own row list BEFORE the removal, so re-inserting in ascending order puts
             // each back where it was) so Undo can restore the screen too. A row that is not in
@@ -4179,6 +4281,21 @@ pub(super) fn FindingsTable(
         };
         match model.undo(&mut entry, now) {
             UndoOutcome::Reverted(n) => {
+                // A row the undo put back to Unresolved is no longer reviewed (a row it put back
+                // to an earlier decision still is).
+                if let Some(review) = &review_undo {
+                    let now_undecided: Vec<String> = entry
+                        .row_keys()
+                        .filter(|k| {
+                            model
+                                .dispositions
+                                .get(*k)
+                                .is_none_or(|d| d.state == TriageState::Unresolved)
+                        })
+                        .map(str::to_string)
+                        .collect();
+                    review.undone(&now_undecided);
+                }
                 dispositions.set(model.dispositions);
                 // A reason being typed in the pane was for the row the cursor was on; the
                 // restore below moves the cursor, so the prompt goes first.
@@ -4416,6 +4533,10 @@ pub(super) fn FindingsTable(
                 );
                 return;
             }
+            // Opening a group's stacked view is opening the group, for the review timer.
+            if let (Some(review), Some(first)) = (&review_stack, rows.first()) {
+                review.open_group(&camerata_ui_core::review_timer::group_key_of(first));
+            }
             let id = *stack_serial.peek() + 1;
             stack_serial.set(id);
             stack_open.set(Some(super::stack::StackOpen {
@@ -4582,6 +4703,10 @@ pub(super) fn FindingsTable(
     };
 
     rsx! {
+        // Everything the reviewer works in (strip, toolbar, table, pane) is one review surface:
+        // key and click activity inside it is what the review timer counts (the bridge in
+        // `review.rs` checks for this attribute). `display: contents` keeps it out of the layout.
+        div { style: "display: contents", "data-review-surface": "true",
         // REMOVED, design §9.5: the two-swatch findings key ("Security findings
         // (deterministic, stop-the-line)" / "Architectural findings (everything else)").
         //
@@ -4600,7 +4725,17 @@ pub(super) fn FindingsTable(
         // taken from `TriageModel::counts` over every Queue row. `dispositions.read()` is what
         // re-renders it on a decision and on an undo.
         if let Some(counts) = counts {
-            ProgressStrip { counts }
+            if let Some(review) = review.clone() {
+                super::review::LiveProgressStrip {
+                    counts,
+                    review,
+                    on_open_stats,
+                    // The button took DOM focus; the pane's keys need it back.
+                    on_toggled: Callback::new(move |()| focus_detail_pane()),
+                }
+            } else {
+                ProgressStrip { counts }
+            }
         }
         div { class: "findings-toolbar",
             // View-specific triage actions. A move writes the new disposition for each
@@ -4963,6 +5098,7 @@ pub(super) fn FindingsTable(
             on_open_stack: open_stack_from_pane,
             context: pane_context,
             previously: focused_prior.as_ref().map(PriorDecision::chip_text),
+        }
         }
         }
     }
@@ -7339,6 +7475,22 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // reload comes back to the same cut. Lifted here so it outlives the table, which remounts
     // on a triage-view switch.
     let order_preset = use_signal(OrderPreset::default);
+    // THE REVIEW TIMER (INTERNAL ONLY, step 7a): per-group active time and the per-row reviewed
+    // record. Created here so it outlives the table, which remounts on a triage-view switch; its
+    // log is saved in the draft beside the dispositions. The bridge starts with it and stops when
+    // this view unmounts.
+    let review = super::review::use_review_handle();
+    // The draft's auto-save goes through one in-flight slot (`save_onboarding_draft_ordered`).
+    let save_queue = use_hook(|| {
+        std::rc::Rc::new(std::cell::RefCell::new(
+            camerata_ui_core::save_queue::SaveQueue::<OnboardingDraft>::default(),
+        ))
+    });
+    super::review::use_review_clock(&review);
+    // The viewer and the stacked view draw the timer's Pause / Resume control too (they cover the
+    // strip), and find the one timer here.
+    use_context_provider(|| review.clone());
+    let mut stats_open = use_signal(|| false);
     // Which kind surface is on screen (Pass 2 step 1). Session state, deliberately NOT
     // persisted in the draft: it is a lens, not a decision, and the curator always wants to
     // resume on the Queue. Adding it to `OnboardingDraft` would change a persisted wire shape
@@ -7384,11 +7536,24 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     use_context_provider(|| draft_loaded);
     {
         let report_repos = report.repos.clone();
+        let review_restore = review.clone();
         use_future(move || {
             let report_repos = report_repos.clone();
+            let review_restore = review_restore.clone();
             async move {
                 if let Some(d) = load_onboarding_draft().await {
                     if d.scan.repos == report_repos {
+                        if d.review_log.just_failed {
+                            // Part of the saved review-time record could not be read. What could
+                            // be read is loaded, and the original is kept verbatim in the draft.
+                            eprintln!("[camerata-ui] part of the saved review log could not be read; the original is kept in the draft");
+                            crate::toast::push_toast(
+                                toasts,
+                                crate::toast::ToastKind::Warning,
+                                "Part of the saved review-time record could not be read. The rest was loaded, and the original is kept untouched in your saved review.",
+                            );
+                        }
+                        review_restore.restore(d.review_log.clone());
                         if d.audit.is_some() {
                             audit_w.set(d.audit);
                         }
@@ -7417,6 +7582,8 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     }
     {
         let report = report.clone();
+        let review_save = review.clone();
+        let save_queue = save_queue.clone();
         use_effect(move || {
             // Track every persisted slice so the effect re-runs on any change.
             let audit_v = audit.read().clone();
@@ -7427,8 +7594,29 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
             let vr = viewed_repo();
             let tv = triage_view();
             let op = order_preset();
+            // The review log as last flushed by the timer (decisions, group changes, pauses and
+            // every 30 seconds of work). Reading the handle's signal is what re-runs this on a
+            // flush; the timer's own state is not a signal.
+            let mut review_log = camerata_ui_core::review_timer::SavedReviewLog {
+                log: review_save.saved_log(),
+                // Whatever could not be read when the draft was loaded is written back verbatim.
+                unreadable: review_save.unreadable(),
+                just_failed: false,
+            };
             if !draft_loaded() {
                 return;
+            }
+            // Each group's reviewed flag is refreshed from the dispositions right here, the one
+            // place the log is written out, so it can never be stale in the draft.
+            let queue_rows = audit_v
+                .as_ref()
+                .map(|a| findings_on_surface(&a.findings, KindSurface::Queue));
+            if let Some(rows) = queue_rows {
+                review_log
+                    .log
+                    .sync_groups(&camerata_ui_core::review_timer::undecided_by_group(
+                        &rows, &disp,
+                    ));
             }
             let draft = OnboardingDraft {
                 scan: report.clone(),
@@ -7440,13 +7628,17 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 viewed_repo: vr,
                 triage_view: tv,
                 order_preset: op,
+                review_log,
             };
+            let queue = save_queue.clone();
             spawn(async move {
-                save_onboarding_draft(&draft).await;
-                // Stamp the local time so the UI can show "auto-saved at HH:MM:SS".
-                last_saved.set(Some(
-                    chrono::Local::now().format("%-I:%M:%S %p").to_string(),
-                ));
+                save_onboarding_draft_ordered(&queue, draft, || {
+                    // Stamp the local time so the UI can show "auto-saved at HH:MM:SS".
+                    last_saved.set(Some(
+                        chrono::Local::now().format("%-I:%M:%S %p").to_string(),
+                    ));
+                })
+                .await;
             });
         });
     }
@@ -7527,6 +7719,43 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
         // Row-detail modal: hosted here, at the results-subtree root, so it is NOT a
         // sibling of the chorale table (see RuleDetailModal for why).
         RuleDetailModal {}
+        // THE INTERNAL REVIEW-TIME STATS (step 7a): per repo, per group type, per severity.
+        // Hosted here for the same reason as every overlay. Computed when it opens from the live
+        // log and the current dispositions; close and reopen to refresh. Not part of any export.
+        if stats_open() {
+            {
+                let stats = camerata_ui_core::review_stats::ReviewStats::compute(
+                    &review.log(),
+                    &queue_findings,
+                    &dispositions.read(),
+                );
+                let json = stats.to_json();
+                rsx! {
+                    super::review::ReviewStatsModal {
+                        stats,
+                        on_save: Callback::new(move |()| {
+                            let json = json.clone();
+                            spawn(async move {
+                                // A cancelled dialog is silent; a failed write is not.
+                                if save_text("camerata-review-time.json", json).await
+                                    == Some(false)
+                                {
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Error,
+                                        "Could not save the review-time stats file. Check the folder and try again.",
+                                    );
+                                }
+                            });
+                        }),
+                        on_close: Callback::new(move |()| {
+                            stats_open.set(false);
+                            focus_detail_pane();
+                        }),
+                    }
+                }
+            }
+        }
         // THE STACKED GROUP VIEW (work order B.2), hosted here for the same reason. It is a
         // layer UNDER the code viewer (lower z-index, and first in the DOM so order agrees).
         super::stack::StackRoot {}
@@ -8569,6 +8798,8 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 audited_origins: audited_origins(&report, audited.as_ref()),
                                 project_id: project_id.clone(),
                                 counts: Some(triage_counts),
+                                review: Some(review.clone()),
+                                on_open_stats: Callback::new(move |()| stats_open.set(true)),
                             }
                         }
                     }
@@ -12417,6 +12648,9 @@ mod render_tests {
             3,
             "every panel states its own empty case; html=\n{html}"
         );
+        // Key and click activity here is not review activity for the timer: only the Queue
+        // table (with its strip and pane), the viewer and the stack are review surfaces.
+        assert!(!html.contains("data-review-surface"), "{html}");
     }
 
     // ── Pass 2 step 2: MANUAL column sorting over the curated default ────────
@@ -16885,6 +17119,126 @@ mod order_preset_tests {
         let back: OnboardingDraft = serde_json::from_value(wire).unwrap();
         assert_eq!(back.order_preset, OrderPreset::ByFile);
     }
+
+    /// The review log (INTERNAL, step 7a) is saved with the draft under the one key the export
+    /// tests know it by; a draft from before it existed reads as an empty log; a log of a shape
+    /// this build does not know reads as an empty log and the dispositions and view survive.
+    #[test]
+    fn the_review_log_is_saved_in_the_draft_and_an_old_or_unknown_one_reads_as_empty() {
+        use camerata_ui_core::review_timer::{GroupTiming, ReviewLog};
+        let scan = serde_json::json!({
+            "files_scanned": 0, "findings": [], "proposed_rules": [], "gated": false
+        });
+        let old: OnboardingDraft =
+            serde_json::from_value(serde_json::json!({ "scan": scan })).expect("old draft");
+        assert_eq!(old.review_log.log, ReviewLog::default());
+        assert!(old.review_log.unreadable.is_none() && !old.review_log.just_failed);
+
+        let mut draft = old.clone();
+        draft.review_log.log.review_groups.insert(
+            "me/api\u{1f}R-A".to_string(),
+            GroupTiming {
+                opened_at_ms: 5,
+                active_ms: 90_000,
+                group_reviewed: true,
+            },
+        );
+        let wire = serde_json::to_value(&draft).unwrap();
+        assert_eq!(
+            wire[camerata_api_types::review_timing::REVIEW_LOG_KEY]["review_groups"]
+                ["me/api\u{1f}R-A"]["active_ms"],
+            90_000
+        );
+        let back: OnboardingDraft = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.review_log, draft.review_log);
+
+        for bad in [
+            serde_json::json!("future"),
+            serde_json::json!({ "review_groups": [1, 2] }),
+            serde_json::json!(7),
+        ] {
+            let draft: OnboardingDraft = serde_json::from_value(serde_json::json!({
+                "scan": scan, "triage_view": "TechDebt", "review_log": bad,
+            }))
+            .expect("a bad log never fails the draft");
+            assert_eq!(draft.review_log.log, ReviewLog::default());
+            assert_eq!(
+                draft.review_log.unreadable.as_ref(),
+                Some(&bad),
+                "the original is kept, not dropped"
+            );
+            assert_eq!(draft.triage_view, TriageState::TechDebt);
+            // And it is written back verbatim by the next save.
+            let wire = serde_json::to_value(&draft).unwrap();
+            assert_eq!(
+                wire[camerata_api_types::review_timing::REVIEW_LOG_KEY]["review_unreadable"],
+                bad
+            );
+        }
+    }
+
+    /// The request that asks the server for the client's export carries the dispositions and the
+    /// report options and nothing else, so the review log cannot ride along even by accident.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_product_export_request_carries_no_review_log() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p1/product-export"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"zip".to_vec()))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let mut dispositions = std::collections::HashMap::new();
+        dispositions.insert(
+            "k".to_string(),
+            Disposition {
+                state: TriageState::Confirmed,
+                ..Disposition::default()
+            },
+        );
+        export_product_zip("p1", &dispositions, "Client", "Title", "Me", None)
+            .await
+            .expect("the export answers");
+        let requests = server.received_requests().await.expect("recorded");
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("json");
+        let mut keys: Vec<&str> = body
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["dispositions", "options"]);
+        let text = body.to_string();
+        for key in camerata_api_types::review_timing::INTERNAL_ONLY_KEYS {
+            assert!(!text.contains(key), "{key} in the export request: {text}");
+        }
+    }
+
+    /// TRIPWIRE, not proof. The Queue's own CSV button exports findings, which carry no
+    /// review-time field; this checks the header row (no rows) and one serialized finding against
+    /// the deny-list, so a review-time column or field added later is caught here. The structural
+    /// guard is that `FindingView` has no such field and the CSV is built from it alone.
+    #[test]
+    fn the_queue_csv_carries_no_review_time_field() {
+        let csv = findings_csv(&[]);
+        for key in camerata_api_types::review_timing::INTERNAL_ONLY_KEYS {
+            assert!(!csv.contains(key), "{key} in the Queue CSV header: {csv}");
+        }
+        let json = serde_json::to_string(&serde_json::json!({
+            "rule_id": "R", "severity": "high", "snippet": "s", "detail": "d",
+            "path": "a.rs", "line": 1
+        }))
+        .unwrap();
+        let finding: FindingView = serde_json::from_str(&json).unwrap();
+        let written = serde_json::to_string(&finding).unwrap();
+        for key in camerata_api_types::review_timing::INTERNAL_ONLY_KEYS {
+            assert!(!written.contains(key), "{key} on a finding: {written}");
+        }
+    }
 }
 
 /// B.4 check 1, the reload half: a saved draft that names a preset brings the Queue back cut
@@ -16981,6 +17335,182 @@ mod order_preset_reload_tests {
             .next_back()
             .expect("the restored view saved the draft");
         assert_eq!(saved["order_preset"], "by_file", "{saved}");
+    }
+
+    /// M1: two saves queued out of order (the second submitted while the first is still on the
+    /// wire, and a third behind it) reach the server one at a time and the NEWEST lands last. The
+    /// first response is slow on purpose; without the single in-flight slot the later ones would
+    /// overtake it and the older draft would be the one the server keeps.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn queued_saves_reach_the_server_in_order_and_the_newest_wins() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let server = MockServer::start().await;
+        // The first POST answers slowly; the rest at once.
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true}))
+                    .set_delay(Duration::from_millis(300)),
+            )
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .with_priority(5)
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let draft = |mark: &str| -> OnboardingDraft {
+            let mut d: OnboardingDraft = serde_json::from_value(serde_json::json!({
+                "scan": scan_with(serde_json::json!([])),
+                "viewed_repo": mark,
+            }))
+            .expect("draft");
+            d.viewed_repo = mark.to_string();
+            d
+        };
+        let queue = Rc::new(RefCell::new(camerata_ui_core::save_queue::SaveQueue::<
+            OnboardingDraft,
+        >::default()));
+        let first = save_onboarding_draft_ordered(&queue, draft("first"), || {});
+        let later = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Both arrive while the first is still in flight; the second is superseded.
+            save_onboarding_draft_ordered(&queue, draft("second"), || {}).await;
+            save_onboarding_draft_ordered(&queue, draft("third"), || {}).await;
+        };
+        tokio::join!(first, later);
+
+        let bodies: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/onboard/draft")
+            .map(|r| {
+                serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["viewed_repo"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            bodies,
+            vec!["first", "third"],
+            "one at a time; the superseded draft is never sent; the newest is last"
+        );
+    }
+
+    /// M2, end to end: a saved review log with one unreadable entry loads (the good entries and
+    /// the time survive), the next save writes the readable log AND the original verbatim, and
+    /// the user is told.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_draft_with_an_unreadable_review_entry_keeps_the_original_and_saves_it_back() {
+        let good = "me/api\u{1f}R-B";
+        let log = serde_json::json!({
+            "review_groups": {
+                good: { "opened_at_ms": 5, "active_ms": 72_000_000, "group_reviewed": false },
+                "me/api\u{1f}R-A": { "active_ms": "twenty hours" },
+            },
+            "review_rows": {},
+        });
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "scan": scan_with(serde_json::json!([])),
+                "audit": scan_with(findings()),
+                "review_log": log,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(results);
+        vdom.rebuild_in_place();
+        pump(&mut vdom, 800).await;
+
+        let saved = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/onboard/draft")
+            .map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).unwrap())
+            .next_back()
+            .expect("the restored view saved the draft");
+        let saved_log = &saved["review_log"];
+        assert_eq!(
+            saved_log["review_groups"][good]["active_ms"], 72_000_000,
+            "the readable entry survived: {saved}"
+        );
+        assert_eq!(
+            saved_log["review_unreadable"], log,
+            "the whole original is kept verbatim: {saved}"
+        );
+    }
+
+    /// Step 7a: a draft's review log comes back with the review and is saved again, with each
+    /// group's reviewed flag refreshed from the dispositions (here: nothing is decided, so a
+    /// group the old log called reviewed is not).
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_draft_brings_its_review_log_back_and_saves_it_with_fresh_group_flags() {
+        let group = "me/api\u{1f}R-B";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "scan": scan_with(serde_json::json!([])),
+                "audit": scan_with(findings()),
+                "review_log": {
+                    "review_groups": {
+                        group: { "opened_at_ms": 5, "active_ms": 90_000, "group_reviewed": true }
+                    },
+                    "review_rows": {},
+                },
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(results);
+        vdom.rebuild_in_place();
+        pump(&mut vdom, 800).await;
+
+        let saved = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/onboard/draft")
+            .map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).unwrap())
+            .next_back()
+            .expect("the restored view saved the draft");
+        let timing = &saved["review_log"]["review_groups"][group];
+        assert_eq!(timing["active_ms"], 90_000, "the time survived: {saved}");
+        assert_eq!(
+            timing["group_reviewed"], false,
+            "no row of the group is decided, whatever the old flag said: {saved}"
+        );
     }
 }
 

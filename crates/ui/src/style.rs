@@ -1253,6 +1253,16 @@ html, body {
   font-variant-numeric: tabular-nums;
 }
 .progress-strip .progress-counts { color: var(--ink); }
+/* The review timer's part of the strip (step 7a, internal): its state, the Pause / Resume button
+   and the door to the internal stats. Wraps on a narrow window instead of overflowing. */
+.progress-strip { display: flex; flex-wrap: wrap; align-items: center; column-gap: 2px; row-gap: 4px; }
+.progress-timer { display: inline-flex; align-items: center; gap: 6px; }
+.progress-timer-btn, .progress-stats-btn { margin-left: 6px; }
+.review-stats { max-width: 760px; }
+.review-stats-head { margin: 14px 0 4px; font-size: 13px; }
+.review-stats-total { margin: 4px 0; font-variant-numeric: tabular-nums; }
+.review-stats-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.review-stats-table th, .review-stats-table td { text-align: left; padding: 3px 8px 3px 0; border-bottom: 1px solid var(--line); }
 .pane-snippet {
   margin: 0 0 8px; padding: 6px 8px; overflow-x: auto;
   border: 1px solid var(--line); border-radius: 3px;
