@@ -1,7 +1,12 @@
 # Overnight autonomous run — decisions needed + progress log
 
 > ## ▶ RESUME HERE (paused 2026-10-26 at Zach's request, after code viewer step 4)
-> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Zach, standing
+> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Opus): three more
+> cloud builders on branches `cloud/w27-pdf` (W27 PDF + confidentiality + 22c + 22d + export
+> gates 2/6/7; owns export code), `cloud/w29-wave-d` (Wave D + 22e; Fable reviews locally before
+> merge since cloud sessions cannot run Fable), `cloud/item21` (2b follow-ups). Decision:
+> `camerata-check` treats low-severity consistency findings as advisory (exit 0); medium and above
+> fail the build; one constant. 2026-10-27 (Zach, standing
 > approval): Opus decides and acts without asking, including commit and push; record each decision
 > here with its reason. Ask Zach only for truly irreversible actions or deletion of real work or
 > data (throwaway builds and worktrees are fine). 2026-10-27 (Zach): W27 PDF brand
