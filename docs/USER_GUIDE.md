@@ -616,6 +616,28 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    the app saved a view setting this version does not know (an order, or which table was open), it
    falls back to the default; your decisions are never lost to it.
 
+   **Command palette.** Press **Ctrl+K** (**Cmd+K** on a Mac) anywhere in the Queue, or click
+   **Commands** at the end of the toolbar, to open one list of the review actions. Type to filter
+   it as you go: every word you type must appear in a line, in any order and either case, and the
+   keys shown at the right (`C`, `Down`) are matched too. **Up** and **Down** move the highlight,
+   **Enter** runs the highlighted line (clicking a line runs it too), and **Esc** closes the
+   palette and puts the keyboard back where it was (on the detail pane if it was nowhere useful),
+   so the decision keys work again without a click. Pressing **Ctrl+K** inside the palette closes
+   it. A letter typed in the palette's field is text; it is never read as `C` / `I` / `T` / `F`.
+
+   The palette adds no action of its own. Each line runs exactly what its button or key runs:
+   deciding the focused finding (Confirm, Ignore, Tech debt, False positive), the next and
+   previous finding, **Open in the code viewer** (`O`), **Review this group stacked** (`B`, offered
+   only on a deviation or defect row), the pane's **Full detail** and Rule Hub buttons, **Undo**
+   (offered only while the five-second undo is live), the four **Order** cuts (the cut you are in
+   is not listed), the strip's **Pause** / **Resume** button and its **Review time** button. A
+   decision line has the same rules as its key: Confirm and Tech debt apply at once with the
+   five-second undo, while Ignore and False positive open the reason prompt and write nothing
+   until you commit a reason. A line whose control is not on screen is not listed. The palette
+   does not open while a reason prompt is open (the pane's or the toolbar's), nor over the code
+   viewer or the stacked view; it says so instead. Keys and clicks inside the palette count as
+   review activity for the internal review timer.
+
    **Scan-time deterministic preview.** For each **mechanical** rule you selected that maps to a tool
    Camerata can drive (clippy, ruff, eslint, semgrep), the deterministic scan **runs that tool itself**
    with a Camerata-supplied config and folds the results into triage as **preview findings** — even if

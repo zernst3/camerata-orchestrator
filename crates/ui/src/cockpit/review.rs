@@ -201,6 +201,11 @@ impl ReviewHandle {
         self.flush();
     }
 
+    /// The word on the strip's Pause / Resume button right now (`Pause` or `Resume`).
+    pub(super) fn timer_button(&self) -> &'static str {
+        self.strip.peek().button
+    }
+
     /// The strip's Pause / Resume button.
     pub(super) fn toggle(&self) {
         let now = self.now();
