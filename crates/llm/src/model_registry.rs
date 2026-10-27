@@ -292,8 +292,10 @@ pub fn conform_messages_body(model_id: &str, body: &mut serde_json::Value) {
         let cfg = obj
             .entry("output_config")
             .or_insert_with(|| serde_json::json!({}));
+        // Only the API's implicit default is replaced; an effort the caller chose stays.
         if let Some(c) = cfg.as_object_mut() {
-            c.insert("effort".into(), serde_json::json!("high"));
+            c.entry("effort")
+                .or_insert_with(|| serde_json::json!("high"));
         }
     }
 }
@@ -2660,6 +2662,16 @@ mod tests {
         conform_messages_body("claude-opus-5-5", &mut b);
         assert_eq!(b["output_config"]["effort"], "high");
         assert_eq!(b["output_config"]["format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn conform_keeps_an_effort_the_caller_chose() {
+        let mut b = serde_json::json!({
+            "messages": [{"role": "user", "content": "q"}],
+            "output_config": {"effort": "low"}
+        });
+        conform_messages_body("claude-haiku-5-5", &mut b);
+        assert_eq!(b["output_config"]["effort"], "low");
     }
 
     #[test]
