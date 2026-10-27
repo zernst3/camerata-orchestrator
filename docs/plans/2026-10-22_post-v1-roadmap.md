@@ -167,6 +167,32 @@ Order: (1) security-tag backfill across the corpus (data work, mostly Haiku, Fab
 (2) ASVS gap analysis and the missing rules; (3) exposure ranking from route reachability;
 (4) Juice Shop benchmark; (5) only then the report section.
 
+## 7. PHP rules, mostly Laravel (Zach, 2026-10-27)
+
+No PHP support today (no `php` domain in the corpus, no PHP grammar, no PHP linters in the
+registry). Follow the Ruby / Rails shape, which is the closest precedent (`ruby`, `ruby:rails`,
+`ruby:testing` domains; rubocop in the linter registry).
+
+- **Engine:** `tree-sitter-php` for extraction and for viewer highlighting (it must match the
+  0.25 tree-sitter ABI the other grammars use; check before adding). Composer awareness:
+  `composer.json` / `composer.lock` for the framework and version, `composer audit` (Packagist
+  advisories) feeding the same dependency findings and KEV/EPSS enrichment as the other
+  ecosystems, and PHP + Laravel end-of-life in V2 item 0.
+- **Linters to register:** PHPStan with Larastan, Psalm, Laravel Pint / PHP-CS-Fixer, so rules
+  can cite real tool checks the way rubocop cops are cited.
+- **Domains:** `php`, `php:laravel`, `php:testing` (PHPUnit / Pest).
+- **Laravel rule candidates:** mass assignment (`$guarded = []`, unguarded models, `$fillable`
+  holding privileged fields); raw SQL (`DB::raw`, `whereRaw`, `selectRaw` with interpolation);
+  unescaped Blade output (`{!! !!}`); `APP_DEBUG=true` or debug tooling in production config;
+  `env()` called outside `config/` (breaks config caching); validation in FormRequests at the
+  boundary; authorization via Policies / Gates, and route model binding without ownership
+  scoping (IDOR); CSRF exemptions in `VerifyCsrfToken::$except`; N+1 Eloquent access without
+  eager loading; reversible migrations; idempotent queued jobs; secrets committed in `.env`.
+- **Ties to item 6:** mass assignment, unescaped Blade, debug mode and unscoped route binding are
+  classic pen-test findings, so tag them for security from the start.
+- **Benchmark:** a public Laravel app plus an intentionally vulnerable PHP app (DVWA) for recall,
+  before claiming PHP coverage in a proposal.
+
 ## Keep V1 forward-compatible (no extra V1 work)
 
 When V1 work touches the project data model (the deletion record, re-fetch, provenance), store
