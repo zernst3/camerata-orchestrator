@@ -23,6 +23,7 @@ pub mod run;
 pub mod scan;
 pub mod schedule;
 pub mod source;
+pub mod stack;
 pub mod triage;
 pub mod viewer;
 pub mod viewer_find;

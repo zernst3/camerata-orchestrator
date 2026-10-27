@@ -957,7 +957,7 @@ pub fn confidence_tags() -> Vec<String> {
 pub fn bulk_reason_heading(state: TriageState, count: usize) -> String {
     let noun = if count == 1 { "finding" } else { "findings" };
     format!(
-        "Reason for \u{201c}{}\u{201d} \u{2014} {count} {noun} (required)",
+        "Reason for \u{201c}{}\u{201d}: {count} {noun} (required)",
         state.label()
     )
 }
@@ -1098,30 +1098,6 @@ impl TriageModel {
         self.move_to(findings, TriageState::Confirmed);
     }
 
-    /// RULE-LEVEL BULK: confirm every row of a deviation group, in one act (design §2/§4).
-    ///
-    /// The deviation case the design singles out: "if the curator believes the convention is
-    /// real, all N sites are confirmed together far more often than not." This is that
-    /// gesture.
-    ///
-    /// Returns `Some(n)` with the number of rows moved, or `None` for the ONE refusal — an
-    /// empty group, where nothing moved so nothing may be claimed to have moved. There is no
-    /// reason check here because [`TriageModel::confirm`] has none; see its doc comment for
-    /// why that asymmetry with [`TriageModel::bulk_false_positive`] is correct rather than an
-    /// oversight.
-    ///
-    /// Like its false-positive sibling it is a thin wrapper over the PER-ROW path given the
-    /// group's rows, not a second write path. That is what makes "one click equals N
-    /// gestures" a property of the code rather than a hope — see
-    /// `req_pass2_10_bulk_confirm_equals_confirming_each_row_individually`.
-    pub fn bulk_confirm(&mut self, group: &DeviationGroup) -> Option<usize> {
-        if group.rows.is_empty() {
-            return None;
-        }
-        self.confirm(&group.rows);
-        Some(group.rows.len())
-    }
-
     /// Ignore each finding: set state = Ignored AND record the (required) reason together, so a
     /// durable ignore never lands without its baseline-recorded reason.
     pub fn ignore(&mut self, findings: &[FindingView], reason: &str) {
@@ -1144,32 +1120,6 @@ impl TriageModel {
             e.state = TriageState::FalsePositive;
             e.reason = reason.to_string();
         }
-    }
-
-    /// RULE-LEVEL BULK: mark every row of a deviation group as a false positive, in one act.
-    ///
-    /// Returns `Some(n)` with the number of rows moved, or `None` when the call was REFUSED
-    /// and nothing was written. There are exactly two refusals, and both are silent-failure
-    /// risks worth making explicit rather than leaving to the call site:
-    ///
-    /// * a blank reason — the same require-reason invariant as the per-row button. A bulk
-    ///   gesture is where a reasonless disposition would be cheapest and most costly: one
-    ///   click, N rows excluded from the report with no audit trail.
-    /// * an empty group — nothing to move, so nothing is claimed to have moved.
-    ///
-    /// It is deliberately a thin wrapper over [`TriageModel::mark_false_positive`] given the
-    /// group's rows, NOT a second write path. That is what makes "one click equals N
-    /// gestures" a property of the code rather than a hope (see
-    /// `req_pass2_9_bulk_false_positive_equals_marking_each_row_individually`).
-    ///
-    /// Its affirmative sibling is [`TriageModel::bulk_confirm`] (Pass 2 step 3), the same
-    /// shape against `TriageState::Confirmed` and without the reason check.
-    pub fn bulk_false_positive(&mut self, group: &DeviationGroup, reason: &str) -> Option<usize> {
-        if reason.trim().is_empty() || group.rows.is_empty() {
-            return None;
-        }
-        self.mark_false_positive(&group.rows, reason);
-        Some(group.rows.len())
     }
 
     /// Bucket each tech-debt finding (resolve later / now). Leaves the state unchanged; only the
@@ -1498,6 +1448,11 @@ pub enum PaneCommand {
     /// Open the in-app code viewer on the focused finding. Moves no row and writes nothing,
     /// so it needs no undo and no reason.
     OpenCode,
+    /// Open the stacked group view (`B`, "bulk") on the focused finding's rule group: every row
+    /// of the group as a card with its surrounding code, so one fix can be confirmed in many
+    /// places from one screen. Moves no row and writes nothing, so it needs no undo and no
+    /// reason; the decisions made inside it go through the same paths as every other.
+    OpenStack,
 }
 
 /// The single-key hotkey for a disposition, or `None` for a state that has none.
@@ -1538,7 +1493,7 @@ pub fn state_hotkey(state: TriageState) -> Option<&'static str> {
 /// into `Ignored` with an empty reason for as long as it takes the curator to type one, and
 /// the curator's next gesture in this UI is cursor-down. A reasonless `Ignored` row is a
 /// baseline waiver with no audit trail — the exact hole the require-reason invariant and
-/// [`TriageModel::bulk_false_positive`]'s refusal both exist to close. Keys-only-for-the-
+/// [`TriageModel::dispose_with_undo`]'s refusal both exist to close. Keys-only-for-the-
 /// reasonless was rejected because it drops two of the four keys the ruling names.
 ///
 /// The prompt also composes with the scoping instead of fighting it: opening it moves focus to
@@ -1569,6 +1524,11 @@ pub fn pane_command(focus: PaneFocus, key: &str, mods: KeyMods) -> Option<PaneCo
     // hotkey loop and can never collide with one (`state_hotkey` has no `o`).
     if pressed == "o" {
         return Some(PaneCommand::OpenCode);
+    }
+    // `B` ("bulk") opens the stacked group view. Not a disposition either (`state_hotkey` has
+    // no `b`), and a modifier chord was rejected for it: this map refuses modifier presses.
+    if pressed == "b" {
+        return Some(PaneCommand::OpenStack);
     }
     let state = TriageState::all()
         .into_iter()
@@ -1701,16 +1661,16 @@ impl TriageModel {
     /// Returns `None` — having written NOTHING — for the two refusals:
     ///
     /// * a reason-carrying state ([`TriageState::requires_reason`]) with a blank reason. The
-    ///   same invariant the buttons and [`TriageModel::bulk_false_positive`] enforce, at the
-    ///   same point. The keyboard is where dropping it would be cheapest and least visible,
+    ///   same invariant the buttons enforce, at the same point. The keyboard is where dropping it would be cheapest and least visible,
     ///   which is exactly why it is checked here rather than at the call site.
     /// * an empty row set. Nothing moved, so no undo may be offered for it.
     ///
     /// Routes every write through the EXISTING per-row paths (`confirm` / `ignore` /
     /// `mark_false_positive` / `move_to`) rather than touching the map itself, so the
     /// keyboard provably leaves the state the buttons leave instead of becoming a second,
-    /// divergent write path — the same discipline `bulk_confirm` and `bulk_false_positive`
-    /// are built on.
+    /// divergent write path. It is also THE entry point of every bulk door (the rule-level bar's
+    /// buttons, the toolbar's reason prompt and the stacked view), so one refusal and one undo
+    /// serve them all.
     pub fn dispose_with_undo(
         &mut self,
         rows: &[FindingView],
@@ -2753,13 +2713,21 @@ mod tests {
             "three distinct rows, no key collision"
         );
 
-        // One act on the group — through the SHIPPED entry point, not a hand-rolled loop, so
-        // this proves the product's own path rather than a convenient stand-in for it.
+        // One act on the group — through the SHIPPED entry point every bulk door uses, not a
+        // hand-rolled loop, so this proves the product's own path rather than a stand-in.
         let mut bulk = TriageModel::new();
+        let entry = bulk
+            .dispose_with_undo(
+                &group.rows,
+                TriageState::FalsePositive,
+                "the linter mis-parsed the router macro",
+                0,
+            )
+            .expect("a reason was given");
         assert_eq!(
-            bulk.bulk_false_positive(&group, "the linter mis-parsed the router macro"),
-            Some(3),
-            "the bulk call reports exactly the rows it moved"
+            entry.row_count(),
+            3,
+            "the call reports exactly the rows it moved"
         );
 
         // The same thing, one row at a time.
@@ -2807,15 +2775,17 @@ mod tests {
         let group = deviation_groups(std::slice::from_ref(&f)).remove(0);
         let mut m = TriageModel::new();
         for blank in ["", "   ", "\n\t "] {
-            assert_eq!(
-                m.bulk_false_positive(&group, blank),
-                None,
+            assert!(
+                m.dispose_with_undo(&group.rows, TriageState::FalsePositive, blank, 0)
+                    .is_none(),
                 "refused: {blank:?}"
             );
             assert!(m.dispositions.is_empty(), "and nothing was written");
             assert_eq!(m.state_of(&f), TriageState::Unresolved);
         }
-        assert_eq!(m.bulk_false_positive(&group, "tool mis-parse"), Some(1));
+        assert!(m
+            .dispose_with_undo(&group.rows, TriageState::FalsePositive, "tool mis-parse", 0)
+            .is_some());
         assert_eq!(m.state_of(&f), TriageState::FalsePositive);
     }
 
@@ -2833,7 +2803,9 @@ mod tests {
             },
             rows: Vec::new(),
         };
-        assert_eq!(m.bulk_false_positive(&empty, "a real reason"), None);
+        assert!(m
+            .dispose_with_undo(&empty.rows, TriageState::FalsePositive, "a real reason", 0)
+            .is_none());
         assert!(m.dispositions.is_empty());
     }
 
@@ -3063,12 +3035,15 @@ mod tests {
             "three distinct rows, no key collision"
         );
 
-        // One act on the group, through the SHIPPED entry point.
+        // One act on the group, through the SHIPPED entry point every bulk door uses.
         let mut bulk = TriageModel::new();
+        let entry = bulk
+            .dispose_with_undo(&group.rows, TriageState::Confirmed, "", 0)
+            .expect("confirming needs no reason");
         assert_eq!(
-            bulk.bulk_confirm(&group),
-            Some(3),
-            "the bulk call reports exactly the rows it moved"
+            entry.row_count(),
+            3,
+            "the call reports exactly the rows it moved"
         );
 
         // The same thing, one row at a time.
@@ -3108,11 +3083,15 @@ mod tests {
         let group = deviation_groups(std::slice::from_ref(&f)).remove(0);
 
         let mut confirming = TriageModel::new();
-        assert_eq!(confirming.bulk_confirm(&group), Some(1));
+        assert!(confirming
+            .dispose_with_undo(&group.rows, TriageState::Confirmed, "", 0)
+            .is_some());
         assert_eq!(confirming.state_of(&f), TriageState::Confirmed);
 
         let mut fp = TriageModel::new();
-        assert_eq!(fp.bulk_false_positive(&group, "   "), None);
+        assert!(fp
+            .dispose_with_undo(&group.rows, TriageState::FalsePositive, "   ", 0)
+            .is_none());
         assert!(fp.dispositions.is_empty());
     }
 
@@ -3130,7 +3109,9 @@ mod tests {
             },
             rows: Vec::new(),
         };
-        assert_eq!(m.bulk_confirm(&empty), None);
+        assert!(m
+            .dispose_with_undo(&empty.rows, TriageState::Confirmed, "", 0)
+            .is_none());
         assert!(m.dispositions.is_empty());
     }
 
@@ -3625,6 +3606,41 @@ mod tests {
         assert!(TriageState::all()
             .into_iter()
             .all(|s| state_hotkey(s) != Some("o")));
+    }
+
+    /// Code viewer B.2: `B` opens the stacked group view, scoped exactly like `O`: only while the
+    /// pane's cursor holds focus, never with a modifier, and never as a disposition.
+    #[test]
+    fn b_opens_the_stacked_view_under_the_same_scope_as_the_disposition_keys() {
+        let m = KeyMods::none();
+        for key in ["b", "B"] {
+            assert_eq!(
+                pane_command(PaneFocus::Cursor, key, m),
+                Some(PaneCommand::OpenStack)
+            );
+        }
+        for focus in [PaneFocus::ReasonPrompt, PaneFocus::Elsewhere] {
+            assert_eq!(pane_command(focus, "b", m), None, "{focus:?}");
+        }
+        for mods in [
+            KeyMods {
+                ctrl: true,
+                ..KeyMods::none()
+            },
+            KeyMods {
+                alt: true,
+                ..KeyMods::none()
+            },
+            KeyMods {
+                meta: true,
+                ..KeyMods::none()
+            },
+        ] {
+            assert_eq!(pane_command(PaneFocus::Cursor, "b", mods), None);
+        }
+        assert!(TriageState::all()
+            .into_iter()
+            .all(|s| state_hotkey(s) != Some("b")));
     }
 
     /// req_pass2_11: the keys the pane does not claim stay unclaimed, so Tab, Escape, Enter
@@ -4337,6 +4353,7 @@ mod tests {
                 h.contains("required"),
                 "the invariant is stated up front; {h}"
             );
+            assert!(!h.contains('\u{2014}'), "no em-dash in user text; {h}");
         }
     }
 

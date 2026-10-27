@@ -3327,6 +3327,7 @@ pub mod live_run;
 mod pane_context;
 pub mod rules;
 pub mod scan;
+mod stack;
 pub mod table;
 pub mod uow;
 pub mod viewer;

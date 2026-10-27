@@ -703,6 +703,9 @@ pub fn viewer_command(focus: ViewerFocus, key: &str, mods: KeyMods) -> Option<Vi
             PaneCommand::MoveFocus(d) => Some(ViewerCommand::MoveRow(d)),
             // `O` opens the viewer; inside it there is nothing to open.
             PaneCommand::OpenCode => None,
+            // Likewise the stacked view: it is opened from the pane, and the viewer is a
+            // layer above it.
+            PaneCommand::OpenStack => None,
         };
     }
     if key.chars().count() != 1 {

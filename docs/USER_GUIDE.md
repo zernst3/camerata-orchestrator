@@ -474,6 +474,61 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    taken from the working tree. It is kept for the session, and a file the code viewer has already
    opened supplies it without asking again.
 
+   **Stacked group view ("same fix, many places").** When one rule has many findings and the
+   question is the same for all of them (is this convention real, is this pattern a bug), read them
+   together instead of one at a time. Press **B** while the detail pane has focus on a finding of a
+   deviation or defect group, or click **Stack** in the pane, or click **Review all N stacked** in
+   the rule-level bar above the table. An overlay lists every row of that rule group in the table
+   you are in, as cards. Each card shows `path:line`, a dot in the severity colour, the finding's
+   line with three lines of code either side (the finding's line highlighted), the row's status, and
+   a checkbox. Undecided cards start checked; a card that is already decided shows its status and
+   starts unchecked. All the code comes from the inspected commit in one request when the stack
+   opens and has been through the secret redactor. A card whose code cannot be read at that commit
+   (it is not in this clone, the file is gone, the line no longer matches the stored snippet)
+   shows the stored line only, and a note under the header says how many cards are like that. If
+   the server does not answer the request at all, the note says that instead (it says nothing about
+   the code), and the page is asked again when you come back to it or reopen the stack.
+
+   | Key | What it does |
+   |---|---|
+   | `J` `K` (or `Down` `Up`) | Next or previous card; the list scrolls to keep it on screen |
+   | `Space` | Check or uncheck the focused card |
+   | `C` | Confirm the checked cards (applied at once) |
+   | `T` | Save the checked cards as tech debt (applied at once) |
+   | `F` `I` | False positive, ignore: ONE reason prompt for all the checked cards (Enter commits, Esc cancels, a blank reason is refused and the prompt stays open) |
+   | `Enter` | Open the focused card in the code viewer; `Esc` there comes back to the stack on the same card |
+   | `>` `<` | Next or previous page (see below) |
+   | `Esc` | Close the stack and go back to where it was opened from (the detail pane, or the bar's button), with the Queue's cursor on the card you were on |
+
+   The buttons above the cards do the same as `C`, `T`, `I` and `F`. A decision acts on exactly
+   the cards that are checked, and the Undo that appears at the bottom (five seconds, the same one
+   the pane uses) names the count, for example `Confirmed 29 findings.`; one click puts all of them
+   back, also in the Queue's table. The same Undo now follows every way of deciding a finding in the Queue:
+   the rule-level bar's **Confirm all N**, all the toolbar buttons (**Confirm**, **Save as tech
+   debt**, the **Move to ...** buttons and their reason prompts), as well as the pane's keys. A
+   blank reason is refused in the same words everywhere, and **Move to Ignored** in the Tech debt
+   table now asks for the reason Ignored requires. The cards you decided update in place and the stack stays open,
+   so you can leave a few unchecked, confirm the rest, and then deal with the exceptions one by
+   one. A card you left unchecked stays Unresolved. If nothing is checked, a decision key says so
+   instead of doing nothing. Decided rows leave the Queue's table, so **Enter** on a decided card
+   cannot open the viewer and says so ("That finding has left the table. Undo its decision to bring
+   it back."). Keys that hold Ctrl, Alt or Cmd are left alone. While the reason prompt is open every
+   key is text and the buttons that act on cards (the four decisions, the page buttons, each card's
+   **Code** button, the checkboxes) do nothing and are greyed out, so a stray click cannot change
+   which cards the prompt's count and reason apply to; finish or cancel the prompt first. If you
+   decide a card somewhere else while the stack is open (in the viewer, for example), it comes back
+   decided and unchecked, whatever you had clicked on it before.
+
+   A group of more than 200 rows is shown 200 cards at a time. A line under the header says which
+   cards are on screen (`Showing cards 1 to 200 of 312`), `>` and `<` (or the **Next page** and
+   **Previous page** buttons) turn the page, and the keys act on the cards of the page on screen
+   only. Each page makes one request for its code.
+
+   **A reason prompt belongs to its row.** When you press `I` or `F` (or click Ignore or False
+   positive) in the detail pane, the reason you type is for the row the prompt was opened on.
+   Clicking another row of the table while the prompt is open does nothing but say so; commit or
+   press Esc first, then pick the next row.
+
    **Order of the Queue.** The **Order** select above the table cuts the Queue four ways.
    **Curated** (the default) is severity, then kind, then the cheapest deviations first, grouped by
    rule then file. **By file** groups by file (in path order) then rule, with the rows in line order,

@@ -15,36 +15,105 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use camerata_ui_core::pane_context::{
-    accept, BatchRequest, BatchResponse, ContextTarget, PaneContext, SettleGate, SETTLE_MS,
+    accept, BatchItem, BatchRequest, BatchResponse, ContextTarget, PaneContext, SettleGate,
+    SETTLE_MS,
 };
 use camerata_ui_core::viewer::ViewerCache;
 use dioxus::prelude::*;
 
-/// `POST /api/onboard/finding-context/batch` for one finding. `None` when the server cannot be
-/// reached or does not answer with JSON; a refusal is an answer whose entries are not `ok`.
-pub(super) async fn fetch_context(
-    target: &ContextTarget,
+/// `POST /api/onboard/finding-context/batch` for these items (the pane sends one, the stacked
+/// view up to a page). `None` when the server cannot be reached or does not answer with JSON; a
+/// refusal is an answer whose entries are not `ok`. THE request: both surfaces call it.
+pub(super) async fn fetch_batch(
+    items: &[BatchItem],
     project: Option<&str>,
 ) -> Option<BatchResponse> {
     #[cfg(test)]
     {
         REQUESTS.with(|c| c.set(c.get() + 1));
-        REQUESTED.with(|r| r.borrow_mut().push(target.item.line));
+        REQUESTED.with(|r| r.borrow_mut().extend(items.iter().map(|i| i.line)));
     }
-    let items = [target.item.clone()];
     let resp = reqwest::Client::new()
         .post(format!(
             "{}/api/onboard/finding-context/batch",
             crate::bff_base()
         ))
-        .json(&BatchRequest {
-            project,
-            items: &items,
-        })
+        .json(&BatchRequest { project, items })
         .send()
         .await
         .ok()?;
     resp.json::<BatchResponse>().await.ok()
+}
+
+/// `fetch_batch` for one finding.
+pub(super) async fn fetch_context(
+    target: &ContextTarget,
+    project: Option<&str>,
+) -> Option<BatchResponse> {
+    fetch_batch(std::slice::from_ref(&target.item), project).await
+}
+
+/// The context windows for `targets`, by finding key, for the stacked view: what the viewer's
+/// cache already holds (an earlier answer, or a whole file the viewer read) costs nothing, and
+/// every other target goes in ONE batch request. Each answer is judged by `accept`, the pane's
+/// own gate, so a card shows code only when the pane would; a refusal, a failed request or a
+/// stale answer leaves that card without a window and it shows its stored snippet. Accepted
+/// answers are kept in the cache's context lane, where the pane finds them too.
+///
+/// `answered` is `false` only when a request was needed and the server did not answer it. The
+/// caller must not count such a page as asked (it is asked again when the curator returns to
+/// it) and must not tell the curator the code "could not be read at the inspected commit": the
+/// server was never asked a question it could answer. Windows the cache already held are returned
+/// either way.
+pub(super) async fn load_windows(
+    cache: Option<Signal<ViewerCache>>,
+    targets: &[ContextTarget],
+    project: Option<&str>,
+) -> Windows {
+    let mut windows: Vec<(String, PaneContext)> = Vec::new();
+    let mut missing: Vec<&ContextTarget> = Vec::new();
+    for t in targets {
+        match cache.and_then(|c| c.peek().context(&t.cache, t.item.expect.as_deref())) {
+            Some(window) => windows.push((t.finding_key.clone(), (*window).clone())),
+            None => missing.push(t),
+        }
+    }
+    if missing.is_empty() {
+        return Windows {
+            found: windows,
+            answered: true,
+        };
+    }
+    let items: Vec<BatchItem> = missing.iter().map(|t| t.item.clone()).collect();
+    let Some(response) = fetch_batch(&items, project).await else {
+        return Windows {
+            found: windows,
+            answered: false,
+        };
+    };
+    for t in missing {
+        let Some(window) = accept(t, &response) else {
+            continue;
+        };
+        if let Some(mut cache) = cache {
+            cache
+                .write()
+                .put_context(t.cache.clone(), Arc::new(window.clone()));
+        }
+        windows.push((t.finding_key.clone(), window));
+    }
+    Windows {
+        found: windows,
+        answered: true,
+    }
+}
+
+/// What [`load_windows`] found.
+pub(super) struct Windows {
+    /// `(finding key, window)` for every target that has code to show.
+    pub found: Vec<(String, PaneContext)>,
+    /// Whether every request that was needed got an answer (a refusal is an answer).
+    pub answered: bool,
 }
 
 #[cfg(test)]
