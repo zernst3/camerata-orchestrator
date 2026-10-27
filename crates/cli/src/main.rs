@@ -243,6 +243,27 @@ enum CorpusAction {
     /// REFUSES, writing nothing, when a rule changed without a `version` bump. Edit the rule,
     /// bump its `version`, run this, commit both.
     Lock,
+    /// Check every rule's cited sources (Part A of the corpus freshness routine): fetch each
+    /// `[[sources]]` URL, record ok / redirected / dead (or unreachable), and compare each cited
+    /// section's text hash with the last run. Prints a date-stamped report; changes no rule.
+    /// Writes only the sidecar crates/rules/CORPUS_SOURCE_HASHES.json (commit it afterward).
+    CheckSources {
+        /// Print the report as JSON instead of text.
+        #[arg(long)]
+        json: bool,
+        /// Write the report to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// The sidecar to read and update (default: crates/rules/CORPUS_SOURCE_HASHES.json).
+        #[arg(long)]
+        sidecar: Option<PathBuf>,
+        /// Do not write the sidecar back (dry run: nothing is recorded).
+        #[arg(long)]
+        no_save: bool,
+        /// Pause between two requests to the same host, in milliseconds.
+        #[arg(long, default_value_t = 1500)]
+        delay_ms: u64,
+    },
 }
 
 /// `--backend`'s `value_parser`: `ProjectBackend` lives in `camerata-api-types`, a foreign
@@ -375,6 +396,24 @@ async fn main() -> anyhow::Result<()> {
                 camerata::corpus_cmd::run_corpus_confirm(domain, date).await
             }
             CorpusAction::Lock => camerata::corpus_cmd::run_corpus_lock().await,
+            CorpusAction::CheckSources {
+                json,
+                out,
+                sidecar,
+                no_save,
+                delay_ms,
+            } => {
+                camerata::corpus_sources_cmd::run_corpus_check_sources(
+                    camerata::corpus_sources_cmd::CheckSourcesArgs {
+                        json,
+                        out,
+                        sidecar,
+                        no_save,
+                        delay_ms,
+                    },
+                )
+                .await
+            }
         },
     }
 }

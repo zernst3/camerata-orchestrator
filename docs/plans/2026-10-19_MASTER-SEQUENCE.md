@@ -475,6 +475,11 @@ Slotted RIGHT AFTER the delete/re-fetch blocker, blocking items first, all befor
   `_workspace/brownfield-audits/CORPUS_FRESHNESS_WORK_ORDER.md` (monthly source check command;
   quarterly review). `camerata corpus check` and the due-soon warning exist; build what the work
   order still needs (the source-check command / sweep). Slotted with the item-21 engine follow-ups.
+  **Part A built (2026-10-27):** `camerata corpus check-sources` (crate `camerata-source-check`),
+  sidecar `crates/rules/CORPUS_SOURCE_HASHES.json`, text + JSON report. Part B is a runbook in
+  `docs/USER_GUIDE.md` §9. NOT yet wired into exports: the export builder calls
+  `camerata_source_check::source_confidence(rule, &sidecar, today, DEFAULT_CHANGED_WINDOW_DAYS)`
+  per rule (lowered confidence on `lowered`, "Source re-checked <date>" from `.line()`).
 - **22g (handoff item 16, protected: corpus, Zach already asked): clean three showcase rule files**
   of internal notes for the website overlay: SEC-NO-HARDCODED-SECRETS-1 (drop the internal
   docs/ENFORCEMENT.md source or relabel it), ARCH-IDEMPOTENCY-KEYS-1 (replace the boilerplate

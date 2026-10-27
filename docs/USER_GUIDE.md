@@ -1482,6 +1482,63 @@ reviewed PR), not from inside the app.
 > "update to current version" diff so you decide whether to take it. It is informational and never
 > auto-updates an applied rule. Tracked in [#66](https://github.com/zernst3/camerata-orchestrator/issues/66).
 
+### Keeping the corpus's sources current (maintainer runbook)
+
+This is a maintainer routine, not something a client sees. It has two halves: a mechanical monthly
+check that costs nothing, and a judgment pass once a quarter. Neither one edits a rule; every change
+to the corpus is a human decision.
+
+**Part A, monthly: check the sources.** Run:
+
+```
+camerata corpus check-sources                       # text report on stdout
+camerata corpus check-sources --json --out report.json
+camerata corpus check-sources --no-save             # dry run: records nothing
+```
+
+For every `[[sources]]` URL in every rule it records one of four outcomes:
+
+- **ok**: the page answered.
+- **redirected**: it answered after a redirect; the report shows where it lives now, so the rule's
+  source can be updated.
+- **dead**: the server says the page is gone (404 or 410, or a redirect that never ends).
+- **unreachable**: no usable answer this run (timeout, refused connection, a 5xx, a bot wall). This is
+  never a verdict on the page; run again before acting on it.
+
+When a rule cites an anchor (`...#section`), the section's text is normalised, hashed, and compared with
+the hash from the last run. A changed section is shown as removed and added sentences. A cited anchor the
+page no longer contains is listed separately (some pages build their content with JavaScript, so check
+before assuming the section was removed). Sources that are repo documents rather than web URLs are
+counted but not fetched. The report ends with the rules that have no source at all.
+
+The hashes live in the sidecar `crates/rules/CORPUS_SOURCE_HASHES.json`, never in a rule file. The first
+run only records baselines; changes show from the second run on. Commit the sidecar after a run so the
+next one has something to compare against. Requests are polite: one at a time per host, a pause between
+them (`--delay-ms`, default 1500), a timeout, and a user agent that names the tool.
+
+**Part B, quarterly: the judgment pass.** A model session with web access, run by hand, with Part A's
+latest report as its input. Steps:
+
+1. Run Part A (or take the most recent report) and keep the JSON.
+2. Start a session with web access and give it the report plus the list of pattern-level rules
+   (architecture, UI and framework conventions) in the domains due for review (see `camerata corpus check`
+   for which are due). Use a rotating quarter of the pattern rules each time, so the whole set is
+   covered in a year.
+3. For each rule the report flags (dead, redirected, changed section, no source) and each rule in that
+   quarter's slice, ask: is this still the vendor's or ecosystem's current guidance? If it was
+   superseded, since when and by what? Require links.
+4. The session's output is a proposed-edits file, one entry per rule: a new source, `superseded_since`
+   with `current_recommendation`, or a revised directive. It is a diff file only. Nothing is applied.
+5. Review it rule by rule and give the go for each. Apply approved edits as normal rule changes (bump
+   the rule's `version`, run `camerata corpus lock`, commit).
+6. When a domain is reviewed and you are confident it is current, run
+   `camerata corpus confirm <domain> <date>` and commit `CORPUS_FRESHNESS.toml`. Running the check never
+   advances that watermark; only your confirmation does.
+
+Why only the first half is monthly: most rules do not change in a quarter, so a monthly model pass over
+the whole corpus would spend tokens to confirm nothing moved. The mechanical check catches the common
+case (a vendor page moved or changed) for free.
+
 ---
 
 ## 10. Single-rule editing (project and repo scope)
