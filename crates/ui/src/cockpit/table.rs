@@ -56,6 +56,21 @@ pub(super) const fn collapse_page_size() -> usize {
     COLLAPSE_LOAD_PAGE_SIZE
 }
 
+/// Group `handle`'s table by `group_by` (outermost first; empty = a flat list), load every row
+/// into one view, and collapse every group: the sequence [`CamerataTable`] runs on mount, as one
+/// function so a table that is re-grouped later (the Queue's order presets) goes through the
+/// SAME steps in the SAME order. Setting the grouping re-opens every group, which is why the
+/// collapse comes last; a caller that needs one row visible opens just the groups that hold it.
+pub(super) fn apply_grouping<TRow: Clone + 'static>(
+    handle: UseTableHandle<TRow>,
+    group_by: &[ColumnId],
+) {
+    handle.set_grouping(group_by.to_vec());
+    handle.set_pagination_mode(PaginationMode::InfiniteScroll);
+    let _ = handle.set_page_size(collapse_page_size());
+    handle.collapse_all_groups();
+}
+
 /// The central Camerata table. Wraps chorale's [`Table`] and applies the house
 /// defaults (`Theme::Dark`, `sticky_header`). Pass only what varies per table.
 ///
@@ -105,20 +120,21 @@ pub(super) fn CamerataTable<TRow: Clone + PartialEq + 'static>(
     /// order) AND every group is collapsed on mount. Empty (default) = ungrouped.
     #[props(default)]
     group_by: Vec<ColumnId>,
+    /// Load every row into one view (no pages) even when ungrouped, for a flat list a keyboard
+    /// cursor must be able to walk end to end. Grouped tables always do. Defaults to `false`.
+    #[props(default = false)]
+    load_all: bool,
 ) -> Element {
     // Collapse-by-default, ONCE on mount, for grouped tables. Order is load-bearing:
     // group → switch to a non-paginated view with a huge page size → collapse. This
     // is the workaround for chorale's `collapse_all_groups` only collapsing the
     // groups currently on the page (see module docs). Ungrouped tables (`group_by`
-    // empty) skip this entirely and keep chorale's default pagination.
+    // empty) skip this entirely and keep chorale's default pagination, unless `load_all`.
     {
         let group_by = group_by.clone();
         use_hook(move || {
-            if !group_by.is_empty() {
-                handle.set_grouping(group_by.clone());
-                handle.set_pagination_mode(PaginationMode::InfiniteScroll);
-                let _ = handle.set_page_size(collapse_page_size());
-                handle.collapse_all_groups();
+            if !group_by.is_empty() || load_all {
+                apply_grouping(handle, &group_by);
             }
         });
     }

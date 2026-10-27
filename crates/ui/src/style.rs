@@ -1164,6 +1164,13 @@ html, body {
   flex: none; text-transform: uppercase; letter-spacing: 0.06em;
   font-size: 10px; font-weight: 700; color: var(--ink-faint);
 }
+/* The order preset select (work order B.4): how the Queue is cut, beside the sentence that says
+   which order is on screen. */
+.queue-order-preset { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.queue-order-select {
+  padding: 3px 8px; border: 1px solid var(--line); border-radius: 7px; font: inherit;
+  font-size: 12px; background: var(--paper); color: var(--ink); cursor: pointer;
+}
 .queue-order-value { color: var(--ink-soft); cursor: help; }
 .queue-order-value.manual { color: var(--ink); font-weight: 600; }
 .findings-toolbar + .queue-order { margin-top: 2px; }
@@ -1240,6 +1247,10 @@ html, body {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
   white-space: pre-wrap; word-break: break-word;
 }
+/* The pane's code context (work order B.3): the stored line and three lines either side, under
+   the stored snippet. Reuses the finding modal's `.finding-ctx-*` line styling; only the frame
+   differs, to sit tight under the snippet it extends. */
+.pane-ctx { margin: -4px 0 8px; font-size: 11px; line-height: 1.5; border-radius: 3px; }
 /* Absorbed sites (design §6) — the full-disclosure surface C5 lacked. A consequence site is
    visually subordinated rather than hidden: it IS a place the defect reaches, it just has no
    independently-fixable code of its own. */

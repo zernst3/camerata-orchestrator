@@ -3085,6 +3085,41 @@ whole records before the last line feed are parsed, so a half line is never reda
 The endpoint is an existence oracle (`path:line` even for a `[redacted]` hit); that is accepted for
 a search surface. Read-only; `no-store`.
 
+**Batch context for many findings** (`POST /api/onboard/finding-context/batch`,
+`onboard/finding_context_batch.rs`): body `{project?, items: [{repo, path, line, sha?, expect?,
+key?}]}`, at most 200 items (more is a 400 `too_many_items`; a `sha` that is not 40 hex is a 400
+`invalid_sha` for the whole request, as elsewhere). The answer is `{items: [...]}`, one entry per
+tuple in request order, each echoing `index`, `key`, `repo`, `path`, `line` and `sha` (as sent, `""`
+when none) so a client can match it to a finding. An `ok` entry carries `source` (`git` or
+`working_tree`), `commit`, `head_differs`, `start_line`, `end_line`, `violation_line`, `lines`
+(the stored line and 3 either side, clipped to the file, redacted), `language`, `kind: "window"` and
+`matches_snippet` (the one comparison `finding_context::snippet_matches`, fed the optional
+`expect`). Every other entry is the shared `FindingContextOutcome` vocabulary (`commit_unavailable`,
+`source_deleted`, `file_missing`, `not_utf8`, `too_large` at the 400 KB cap, `line_gone`,
+`path_traversal`, `unavailable` for `Busy`).
+
+Nothing is re-implemented. Where code may be read from is `source_for_read` (called once per
+distinct `(repo, sha)`); the path jail and the read are `source_file::read_bytes` (which is
+`resolve_contained_path`, `is_plain_relative_path` and `read_git_blob`, and which `read_rendered`
+now calls too); redaction is `source_file::redacted_lines` (which is `redact_block`, and which
+`prepare` now calls too). The WHOLE file is redacted as one text before any slice is cut, so a key
+block that begins above a window is caught inside it. Differences from finding-context, on
+purpose: there is no working-tree fallback (a missing commit answers `commit_unavailable` with no
+lines, because code from another commit under a stored snippet is a false positive); the window
+is not the enclosing block; and `path_traversal` is a per-item status in a 200 (one bad tuple must
+not blank the other 199), with no file read for it. A deleted source answers `source_deleted` per
+item and reads nothing. Responses are `no-store`; the endpoint is a POST only because the tuples
+do not fit a query string, and writes nothing.
+
+*The read gate.* Items are grouped by `(repo, sha, path)` so a file is read, decoded and redacted
+once however many tuples cite it, and files are read `READ_CONCURRENCY` (2) at a time. The gate
+slot is taken per file read, inside `read_git_blob`, and released when that blob is read, so a
+batch never holds a slot between files: holding one for the whole batch would starve the symbol
+search and the viewer, and reading all files at once would queue most of a 200-item batch past the
+gate's 3 second wait and answer them `unavailable`. A read takes one slot, runs and releases (no
+hold-and-wait), so two batches cannot deadlock; the worst a loaded gate does is answer one item
+`unavailable`. Decode and redaction run on the blocking pool under the viewer's prepare limit.
+
 **Starting git for code reads** (`workspace::git_command`, `GitEnv`, `GitReadGate`): the one
 builder for every `git` this crate starts (`workspace::git`, `read_git_blob`, `ls-tree`, the symbol
 search). It removes `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
@@ -3139,6 +3174,48 @@ own gutter, and never writes the Queue's cursor (`location_plan`); decision keys
 file other than the finding's is on screen (`allowed_in_reference_view`). The back stack
 (`HistoryEntry {key, path, line}`) holds both go-to-line and reference hops. The host is tested by
 dispatching real `keydown` and `input` events to the mounted `VirtualDom` (`host_tests`).
+
+**Pane context** (work order B.3; pure logic in `camerata_ui_core::pane_context`, the hook in
+`crates/ui/src/cockpit/pane_context.rs`). The pane's Evidence block renders the stored snippet at
+once (`FindingDetailPane`'s `context` prop is `None`, which is byte-identical to the pane before
+the prop existed). `use_pane_context` watches the focused finding (`ContextTarget`, a memo, so it
+only notifies when the finding changes). `SettleGate` is the debounce: pure and clock-free, it is
+told every move and asked again 150 ms later, and hands a key out once and only when it has been
+the focused one for the whole time, so three moves inside 200 ms issue one request (the last
+key); a test mounts the hook and counts the POSTs the fake server received. The request is a batch
+of one with the `key` set to the finding key. `accept` is the answer's gate and shows nothing
+unless the entry is `ok`, read from `git` (never the working tree), echoes the finding's key,
+repo, path and line, has `matches_snippet` true (absent means false) and is a sound window (at
+most 7 lines, holding the line); every other status, a hostile body or a failed request leaves
+`None`, and an answer is drawn only while its finding is still the focused one (the resource is
+also cancelled when a newer finding settles). *Cache:* `ViewerCache` gains a context lane beside
+its file lane: `ContextKey` is `(repo, sha, path, line)` (a window belongs to one line, a file does
+not), capacity 64, never evicts a file and is never evicted by one, and nothing is kept without a
+commit. `ViewerCache::context` also cuts the same window from a whole `git` file the viewer holds
+(`context_from_file`, lines only, never the file's `block`, which belongs to another line, and
+only while the line still matches the stored snippet), so an open viewer answers the pane with no
+request. Both paths read the cache with `peek`, so the pane does not re-render on the viewer's
+writes.
+
+**Order presets** (work order B.4; `camerata_ui_core::order_preset`, `recut_table` and
+`group_columns` in `scan.rs`, `table::apply_grouping`). `OrderPreset` is `Curated` (default),
+`ByFile`, `ByRule` or `CriticalFirst`; `order_findings` / `order_rows` are the orders and
+`OrderPreset::grouping` is the grouping, which `group_columns` maps onto chorale columns (rule is
+always the hidden `RULE_GROUP_COLUMN`). Every order leads with enforcement status, then: curated
+and critical-first are `queue_sort_key` (critical-first is the curated key ungrouped, since that
+key is severity-led); by file is path, rule id, line; by rule is rule id, severity, path, line.
+chorale builds a group at its first row, so row order is group order. The preset is a
+`Signal<OrderPreset>` lifted into the results view, saved in `OnboardingDraft.order_preset`
+beside `triage_view` (`serde(default)`: an older draft reads as `Curated`; the server stores the
+draft opaque). At mount the rows are built in the preset's order and `CamerataTable` is given its
+grouping (and `load_all`, so a flat list is one view the cursor can walk end to end). Changing the
+preset on a live table runs `recut_table`: `set_rows` with the same `RowId`s reordered (selection
+put back, since `set_rows` clears it), `clear_sort` (a column sort would hide the new order),
+`apply_grouping` (the sequence `CamerataTable` runs on mount: group, load all, collapse), then
+`reach_finding` on the cursor's key, which opens only the groups that hold it. The cursor holds a
+finding key and is resolved against the visible rows, so the pane's existing rule keeps it on the
+same finding. `order_indicator_text` names the preset's order (and, under a column sort, what lies
+underneath).
 
 Every parser that recurses over a client file (syn, the tree-sitter walkers, the clone tokenizer,
 the enclosing-block resolver) sits behind one bracket-depth guard, `camerata_checks::extract::nesting`:

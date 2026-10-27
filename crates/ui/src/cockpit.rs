@@ -3324,6 +3324,7 @@ fn DocsView() -> Element {
 
 mod freshness;
 pub mod live_run;
+mod pane_context;
 pub mod rules;
 pub mod scan;
 pub mod table;

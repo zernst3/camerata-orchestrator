@@ -1,5 +1,8 @@
 use super::*;
 
+use camerata_ui_core::order_preset::{order_findings, order_rows, Grouping, OrderPreset};
+use camerata_ui_core::pane_context::{ContextTarget, PaneContext};
+
 /// One repo's local-path resolution status (issue #33), from `/api/projects/:id/repo-health`.
 #[derive(Clone, PartialEq, serde::Deserialize)]
 pub(super) struct RepoResolutionView {
@@ -1116,6 +1119,10 @@ pub(super) struct OnboardingDraft {
     pub viewed_repo: String,
     #[serde(default)]
     pub triage_view: TriageState,
+    /// How the Queue is cut (work order B.4): sticky view state, like `triage_view`. A draft
+    /// saved before presets existed reads as the curated order.
+    #[serde(default)]
+    pub order_preset: OrderPreset,
 }
 
 /// Load the saved onboarding draft, or None when nothing is in progress.
@@ -2203,16 +2210,40 @@ pub(super) fn finding_table_state(
     state
 }
 
-/// What the Queue's order indicator says when NO manual column sort is active: the curated
-/// default from design §5, named rather than implied.
-///
-/// A blank indicator would be the failure mode worth avoiding — the default order is a
-/// JUDGEMENT (the `unspecified` alarm floated to the top of its severity band, Defect before
-/// Deviation at equal severity, cheapest deviations first), and a curator 300 rows into a
-/// sitting has to be able to tell at a glance whether he is looking at that judgement or at
-/// his own re-cut.
-pub(super) const DEFAULT_ORDER_LABEL: &str =
-    "Camerata default order \u{2014} severity, then kind, then cheapest deviations first";
+/// The columns the Queue is grouped by under `preset`, outermost first. The one place a preset's
+/// grouping (`OrderPreset::grouping`) is mapped onto chorale's columns; the rule is always the
+/// hidden `RULE_GROUP_COLUMN`, whose value is the group header's text (the deviation sentence).
+pub(super) fn group_columns(preset: OrderPreset) -> Vec<ColumnId> {
+    match preset.grouping() {
+        Grouping::RuleThenFile => vec![RULE_GROUP_COLUMN, ColumnId("file")],
+        Grouping::FileThenRule => vec![ColumnId("file"), RULE_GROUP_COLUMN],
+        Grouping::Flat => Vec::new(),
+    }
+}
+
+/// Re-cut the mounted Queue table by `preset`: reorder the rows it holds (the same ids, so
+/// nothing about a row's identity changes), drop any manual column sort that would hide the new
+/// order, regroup, and open the groups that hold `focused` (the cursor's finding key) so the
+/// cursor stays on it. The selection survives: `set_rows` clears it, so it is put back.
+pub(super) fn recut_table(
+    handle: chorale_dioxus::UseTableHandle<FindingView>,
+    preset: OrderPreset,
+    focused: Option<&str>,
+) {
+    let selected = handle.selected_ids();
+    let rows: Vec<(RowId, FindingView)> = handle.signal().peek().rows.as_ref().clone();
+    handle.set_rows(order_rows(preset, rows));
+    for id in selected {
+        handle.set_selection(id, true);
+    }
+    handle.clear_sort();
+    super::table::apply_grouping(handle, &group_columns(preset));
+    if let Some(key) = focused {
+        // A row the table no longer holds (just decided) has nothing to open; the cursor then
+        // clamps to its neighbour as it always does.
+        let _ = super::viewer::reach_finding(handle, key);
+    }
+}
 
 /// Human name of a findings column, for the order indicator. Resolved from the live column
 /// set (never a second hand-written table), so a renamed or new column can't leave the
@@ -2226,20 +2257,25 @@ fn finding_column_header(cols: &[ColumnDef<FindingView>], id: ColumnId) -> Strin
 
 /// The sentence the Queue's order indicator shows for `sort` (chorale's own sort state).
 ///
-/// Empty sort = the curated default, which is also what `clear_sort` restores: chorale's
+/// Empty sort = the order `preset` gave the rows (the curated default, design §5, unless the
+/// curator picked another cut), which is also what `clear_sort` restores: chorale's
 /// `filtered_sorted_pairs` only reorders when `state.sort` is non-empty, so an empty sort
-/// hands back `state.rows` exactly as `TriageModel::visible` ordered them.
+/// hands back `state.rows` exactly as they were ordered. It is NAMED rather than implied: the
+/// default order is a JUDGEMENT (the `unspecified` alarm floated to the top of its severity
+/// band, Defect before Deviation, cheapest deviations first), and a curator 300 rows in has to
+/// be able to tell at a glance whether he is looking at that judgement or at his own re-cut.
 ///
 /// A manual cut names its column(s) and direction, and says the default is still underneath —
 /// which is literally true, because chorale's sort is STABLE: ties in the manual key keep the
 /// curated order, so e.g. a cut by Kind still lists the deviations cheapest-ratio-first within
 /// the Deviation block. Multi-column (shift+click) cuts are listed in priority order.
 pub(super) fn order_indicator_text(
+    preset: OrderPreset,
     sort: &[chorale_core::SortState],
     cols: &[ColumnDef<FindingView>],
 ) -> String {
     if sort.is_empty() {
-        return DEFAULT_ORDER_LABEL.to_string();
+        return preset.sentence();
     }
     let cuts: Vec<String> = sort
         .iter()
@@ -2252,8 +2288,9 @@ pub(super) fn order_indicator_text(
         })
         .collect();
     format!(
-        "Your sort: {} \u{2014} Camerata default order underneath",
-        cuts.join(", then ")
+        "Your sort: {} \u{2014} {} underneath",
+        cuts.join(", then "),
+        preset.underneath()
     )
 }
 
@@ -2274,11 +2311,12 @@ pub(super) struct QueueOrder {
 
 /// Resolve chorale's sort state into what the order bar shows.
 pub(super) fn queue_order(
+    preset: OrderPreset,
     sort: &[chorale_core::SortState],
     cols: &[ColumnDef<FindingView>],
 ) -> QueueOrder {
     QueueOrder {
-        text: order_indicator_text(sort, cols),
+        text: order_indicator_text(preset, sort, cols),
         manual: !sort.is_empty(),
     }
 }
@@ -2299,11 +2337,39 @@ pub(super) fn QueueOrderBar(
     order: QueueOrder,
     /// Invoked by `Default order`. The call site clears chorale's whole sort list.
     on_reset: Callback<()>,
+    /// How the Queue is cut (work order B.4), shown in the select.
+    #[props(default)]
+    preset: OrderPreset,
+    /// Invoked with the preset the curator picked.
+    #[props(default)]
+    on_preset: Callback<OrderPreset>,
 ) -> Element {
     let QueueOrder { text, manual } = order;
     rsx! {
         div { class: "queue-order",
             span { class: "queue-order-eyebrow", "Order" }
+            label { class: "queue-order-preset",
+                select {
+                    class: "queue-order-select",
+                    title: "{preset.title()}",
+                    "aria-label": "Order the Queue",
+                    value: "{preset.key()}",
+                    onchange: move |e| {
+                        if let Some(p) = OrderPreset::from_key(&e.value()) {
+                            on_preset.call(p);
+                        }
+                    },
+                    for p in OrderPreset::ALL {
+                        option {
+                            key: "{p.key()}",
+                            value: "{p.key()}",
+                            selected: p == preset,
+                            title: "{p.title()}",
+                            "{p.label()}"
+                        }
+                    }
+                }
+            }
             span {
                 class: if manual { "queue-order-value manual" } else { "queue-order-value" },
                 title: "Click any column header to re-cut the list; click it again to reverse. The curated default is severity, then kind (the unspecified alarm first, then defects, then deviations), then the cheapest deviations first.",
@@ -3180,6 +3246,11 @@ pub(super) fn FindingDetailPane(
     /// are two of its doors (the `O` key and the modal's button are the others).
     #[props(default)]
     on_open_code: Callback<()>,
+    /// The stored line plus three lines either side, once the batch context endpoint has
+    /// answered for this finding (work order B.3). `None` is the pane exactly as it was before
+    /// this prop existed: the stored snippet alone. Anything but a good answer is `None`.
+    #[props(default)]
+    context: Option<PaneContext>,
 ) -> Element {
     let armed = pane_keys_armed(focus);
     let pane_key = row
@@ -3272,6 +3343,19 @@ pub(super) fn FindingDetailPane(
                 }
                 p { class: "rule-modal-label", "Evidence" }
                 pre { class: "pane-snippet", "{r.snippet}" }
+                // The surrounding code fills in beneath the snippet once it arrives.
+                if let Some(c) = context.clone() {
+                    pre { class: "finding-ctx-pre pane-ctx", "data-pane-context": "ok",
+                        for (n, text, hit) in c.rows() {
+                            div {
+                                key: "{n}",
+                                class: if hit { "finding-ctx-line finding-ctx-line-hit" } else { "finding-ctx-line" },
+                                span { class: "finding-ctx-gutter", "{n}" }
+                                span { class: "finding-ctx-code", "{text}" }
+                            }
+                        }
+                    }
+                }
                 if !r.explanation.trim().is_empty() {
                     p { class: "rule-modal-detail",
                         "{r.explanation}"
@@ -3463,6 +3547,11 @@ pub(super) fn FindingsTable(
     // The lifted finding -> disposition map. Move actions write here; the row is then dropped
     // from this table (remove_rows) and reappears under its new table on the next switch.
     #[props(default)] dispositions: Signal<std::collections::HashMap<String, Disposition>>,
+    /// How the Queue is cut (work order B.4): lifted into the results view so it is saved in the
+    /// draft and survives this table remounting on a triage-view switch. The select above the
+    /// table writes it; an effect below re-orders and re-groups the table to match.
+    #[props(default)]
+    order_preset: Signal<OrderPreset>,
     /// Open the RULE HUB (design §8). Raised from the two surfaces inside this table that
     /// carry a rule id and CAN carry a click: the docked detail pane (which is how a Queue row
     /// reaches it) and the deviation bulk bar (which is how a deviation group header does).
@@ -3517,9 +3606,17 @@ pub(super) fn FindingsTable(
     // component remounts on each new audit (it's gated behind `audited.is_some()` and the
     // re-audit clears it first), so freezing rows per mount tracks fresh findings while
     // keeping ids stable within a mount.
+    let initial_preset = *order_preset.peek();
     let rows: Vec<(RowId, FindingView)> = use_hook({
         let findings = findings.clone();
-        move || findings.iter().map(|f| (RowId::new(), f.clone())).collect()
+        move || {
+            // The rows are mounted in the preset's order: chorale keeps rows in the order it is
+            // given and builds a group at the first row that belongs to it.
+            order_findings(initial_preset, &findings)
+                .into_iter()
+                .map(|f| (RowId::new(), f))
+                .collect()
+        }
     });
     let id_map: std::collections::HashMap<RowId, FindingView> =
         rows.iter().map(|(r, f)| (*r, f.clone())).collect();
@@ -3826,6 +3923,41 @@ pub(super) fn FindingsTable(
         }
     });
     let focused_fix: Option<String> = fix_res.read().clone().flatten();
+    // The focused finding's code-context request (work order B.3): the stored line plus three
+    // lines either side, fetched once the cursor settles and drawn under the stored snippet.
+    // A memo, for the reason `focused_rule` is one: it only notifies when the finding changes.
+    let focused_target = use_memo({
+        let id_map = id_map.clone();
+        let key_to_row_id = key_to_row_id.clone();
+        let shas = audited_shas.clone();
+        move || {
+            cursor
+                .read()
+                .resolve(&visible_keys())
+                .key()
+                .and_then(|k| key_to_row_id.get(k))
+                .and_then(|rid| id_map.get(rid))
+                .and_then(|f| ContextTarget::for_finding(f, shas.get(&f.repo).map(String::as_str)))
+        }
+    });
+    let pane_context: Option<PaneContext> =
+        super::pane_context::use_pane_context(focused_target, project_id.clone());
+
+    // THE ORDER PRESET (work order B.4). `applied` is what the table is cut by now (the preset
+    // it mounted with, until a change); it is PEEKED so this effect subscribes to the preset
+    // alone. The re-cut keeps every row and its id, so the cursor, which holds a finding KEY, is
+    // untouched; the only thing a re-group can do to it is collapse the group it is in, so that
+    // group is opened again.
+    let mut applied_preset = use_signal(|| initial_preset);
+    use_effect(move || {
+        let want = order_preset();
+        if want == *applied_preset.peek() {
+            return;
+        }
+        applied_preset.set(want);
+        let focused = cursor.peek().key().map(str::to_string);
+        recut_table(handle, want, focused.as_deref());
+    });
     let pane_row = focused_finding.as_ref().map(|f| {
         DetailPaneRow::from_finding(
             f,
@@ -4366,8 +4498,13 @@ pub(super) fn FindingsTable(
         // hands back `state.rows` — the rows exactly as `TriageModel::visible` ordered them —
         // so the restored default is byte-identical, not approximately restored.
         QueueOrderBar {
-            order: queue_order(&active_sort(), &order_columns),
+            order: queue_order(order_preset(), &active_sort(), &order_columns),
             on_reset: Callback::new(move |()| handle.clear_sort()),
+            preset: order_preset(),
+            on_preset: Callback::new(move |p: OrderPreset| {
+                let mut order_preset = order_preset;
+                order_preset.set(p);
+            }),
         }
         // The rule-level deviation decisions, one row per group. Renders nothing when the
         // view holds no deviations.
@@ -4458,7 +4595,9 @@ pub(super) fn FindingsTable(
             // `rule_group_label` is what puts the deviation sentence on the header (design
             // §2/§4). It partitions identically to the rule id: the sentence's numbers are
             // group-level and repeat verbatim on every row of a rule.
-            group_by: vec![RULE_GROUP_COLUMN, ColumnId("file")],
+            group_by: group_columns(initial_preset),
+            // A flat cut has no groups, but the cursor must still walk every row.
+            load_all: true,
             // 0.2.3: an expand-all / collapse-all control in the grouped header (the
             // findings table groups by rule -> file), so a long audit collapses at once.
             group_expand_toggle: true,
@@ -4580,6 +4719,7 @@ pub(super) fn FindingsTable(
                 }
             }),
             on_open_code: Callback::new(move |()| viewer_open.set(true)),
+            context: pane_context,
         }
         }
     }
@@ -6950,6 +7090,10 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let mut finishing = use_signal(|| false);
     let mut dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
     let mut triage_view = use_signal(|| TriageState::Unresolved);
+    // How the Queue is cut (work order B.4). Saved in the draft beside `triage_view`, so a
+    // reload comes back to the same cut. Lifted here so it outlives the table, which remounts
+    // on a triage-view switch.
+    let order_preset = use_signal(OrderPreset::default);
     // Which kind surface is on screen (Pass 2 step 1). Session state, deliberately NOT
     // persisted in the draft: it is a lens, not a decision, and the curator always wants to
     // resume on the Queue. Adding it to `OnboardingDraft` would change a persisted wire shape
@@ -6990,6 +7134,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let mut dispositions_w = dispositions;
     let mut chosen_w = chosen;
     let mut custom_rules_w = custom_rules;
+    let mut order_preset_w = order_preset;
     let mut draft_loaded = use_signal(|| false);
     use_context_provider(|| draft_loaded);
     {
@@ -7018,6 +7163,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             viewed_repo.set(d.viewed_repo);
                         }
                         triage_view.set(d.triage_view);
+                        order_preset_w.set(d.order_preset);
                     }
                 }
                 draft_loaded.set(true);
@@ -7035,6 +7181,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
             let disp = dispositions.read().clone();
             let vr = viewed_repo();
             let tv = triage_view();
+            let op = order_preset();
             if !draft_loaded() {
                 return;
             }
@@ -7047,6 +7194,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 dispositions: disp,
                 viewed_repo: vr,
                 triage_view: tv,
+                order_preset: op,
             };
             spawn(async move {
                 save_onboarding_draft(&draft).await;
@@ -8165,6 +8313,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 descriptions: descriptions.clone(),
                                 triage_view: triage_view(),
                                 dispositions,
+                                order_preset,
                                 on_open_hub: Callback::new(move |r: RuleHubRequest| hub_open.set(Some(r))),
                                 queue_rule_filter,
                                 audited_shas: sha_choice.shas.clone(),
@@ -12177,7 +12326,7 @@ mod render_tests {
             let cols = finding_columns(vec!["me/api".to_string()], false);
             rsx! {
                 QueueOrderBar {
-                    order: queue_order(&sort, &cols),
+                    order: queue_order(OrderPreset::Curated, &sort, &cols),
                     on_reset: Callback::new(|()| {}),
                 }
             }
@@ -12192,7 +12341,10 @@ mod render_tests {
 
         // Default state: names the curated order, no reset control, no accent.
         let html = bar(vec![]);
-        assert!(html.contains(DEFAULT_ORDER_LABEL), "html=\n{html}");
+        assert!(
+            html.contains(camerata_ui_core::order_preset::CURATED_SENTENCE),
+            "html=\n{html}"
+        );
         assert!(!html.contains("queue-order-reset"), "html=\n{html}");
         assert!(!html.contains("queue-order-value manual"), "html=\n{html}");
 
@@ -12215,7 +12367,7 @@ mod render_tests {
             "the way back must be visible and labelled; html=\n{html}"
         );
         assert!(
-            !html.contains(DEFAULT_ORDER_LABEL),
+            !html.contains(camerata_ui_core::order_preset::CURATED_SENTENCE),
             "the bar must not claim to be showing the default while a cut is active; html=\n{html}"
         );
     }
@@ -12303,8 +12455,12 @@ mod render_tests {
             "a newly mounted findings table carries no manual sort"
         );
         assert_eq!(
-            order_indicator_text(&state.sort, &finding_columns(vec![], false)),
-            DEFAULT_ORDER_LABEL,
+            order_indicator_text(
+                OrderPreset::Curated,
+                &state.sort,
+                &finding_columns(vec![], false)
+            ),
+            camerata_ui_core::order_preset::CURATED_SENTENCE,
             "and the indicator says so"
         );
     }
@@ -12483,10 +12639,13 @@ mod render_tests {
         use chorale_core::{SortDirection, SortState};
 
         let cols = finding_columns(vec!["me/api".to_string()], false);
-        assert_eq!(order_indicator_text(&[], &cols), DEFAULT_ORDER_LABEL);
+        assert_eq!(
+            order_indicator_text(OrderPreset::Curated, &[], &cols),
+            camerata_ui_core::order_preset::CURATED_SENTENCE
+        );
 
         let one = [SortState::new(ColumnId("severity"), SortDirection::Desc)];
-        let text = order_indicator_text(&one, &cols);
+        let text = order_indicator_text(OrderPreset::Curated, &one, &cols);
         assert!(
             text.contains("Severity"),
             "names the column header; got {text}"
@@ -12501,7 +12660,7 @@ mod render_tests {
             SortState::new(ColumnId("file"), SortDirection::Asc),
             SortState::new(ColumnId("severity"), SortDirection::Desc),
         ];
-        let text = order_indicator_text(&two, &cols);
+        let text = order_indicator_text(OrderPreset::Curated, &two, &cols);
         assert!(
             text.find("File").expect("File named") < text.find("Severity").expect("Severity named"),
             "a multi-column cut is listed in priority order; got {text}"
@@ -12513,7 +12672,7 @@ mod render_tests {
             ColumnId("no-such-column"),
             SortDirection::Asc,
         )];
-        assert!(order_indicator_text(&gone, &cols).contains("no-such-column"));
+        assert!(order_indicator_text(OrderPreset::Curated, &gone, &cols).contains("no-such-column"));
     }
 
     /// req_pass2_8: the whole Queue is re-cuttable. Every column the curator would re-cut by is
@@ -16171,5 +16330,365 @@ mod convention_commit_tests {
                 .is_empty(),
             "no request may be made for an empty commit"
         );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Work order B.4 — THE ORDER PRESETS, mounted
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The ordering itself is unit-tested in `camerata_ui_core::order_preset`. These mount the real
+// `FindingsTable` and check the three things only a mounted table can show: each preset cuts the
+// rows and the groups the way it says, switching preset on a live table keeps the cursor on the
+// same finding, and the choice is part of the draft.
+#[cfg(test)]
+mod order_preset_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::time::Duration;
+
+    fn finding(rule: &str, sev: &str, path: &str, line: usize) -> FindingView {
+        serde_json::from_value(serde_json::json!({
+            "repo": "me/api", "path": path, "line": line, "rule_id": rule, "severity": sev,
+            "snippet": format!("snip-{rule}-{line}"), "detail": "d", "status": "active",
+            "kind": "defect"
+        }))
+        .expect("fixture")
+    }
+
+    /// Five findings across three files and three rules, chosen so that every preset gives a
+    /// different order of groups.
+    fn rows() -> Vec<FindingView> {
+        vec![
+            finding("R-A", "high", "src/z.rs", 40),
+            finding("R-B", "critical", "src/a.rs", 2),
+            finding("R-A", "critical", "src/a.rs", 9),
+            finding("R-A", "high", "src/a.rs", 1),
+            finding("R-0", "low", "src/m.rs", 3),
+        ]
+    }
+
+    #[derive(Clone, Copy)]
+    struct Probe {
+        preset: Signal<OrderPreset>,
+        request: Signal<Option<String>>,
+    }
+
+    thread_local! {
+        static PROBE: RefCell<Option<Probe>> = const { RefCell::new(None) };
+    }
+
+    /// The table as the results view mounts it, with the preset lifted into a signal the test
+    /// can flip, and the finding-modal's "open in viewer" request as the way to aim the cursor.
+    fn app() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        use_context_provider(|| Signal::new(None::<FindingView>));
+        let request = use_signal(|| Option::<String>::None);
+        use_context_provider(|| super::super::viewer::ViewerRequest(request));
+        let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
+        let preset = use_signal(|| PRESET_AT_MOUNT.with(|p| p.get()));
+        PROBE.with(|p| *p.borrow_mut() = Some(Probe { preset, request }));
+        rsx! {
+            FindingsTable {
+                findings: rows(),
+                repos: vec!["me/api".to_string()],
+                descriptions: std::collections::HashMap::new(),
+                triage_view: TriageState::Unresolved,
+                dispositions,
+                order_preset: preset,
+            }
+        }
+    }
+
+    thread_local! {
+        static PRESET_AT_MOUNT: std::cell::Cell<OrderPreset> =
+            const { std::cell::Cell::new(OrderPreset::Curated) };
+    }
+
+    fn mount(preset: OrderPreset) -> VirtualDom {
+        PRESET_AT_MOUNT.with(|p| p.set(preset));
+        let mut vdom = VirtualDom::new(app);
+        vdom.rebuild_in_place();
+        vdom
+    }
+
+    async fn pump(vdom: &mut VirtualDom, ms: u64) {
+        let until = tokio::time::Instant::now() + Duration::from_millis(ms);
+        while tokio::time::Instant::now() < until {
+            let _ = tokio::time::timeout(Duration::from_millis(10), vdom.wait_for_work()).await;
+            let _ = vdom.render_immediate_to_vec();
+        }
+    }
+
+    /// The text of each chorale group header, in the order the table shows them.
+    fn headers(html: &str) -> Vec<String> {
+        let marker = "class=\"chorale-group-header\"";
+        let mut out = Vec::new();
+        let mut rest = html;
+        while let Some(at) = rest.find(marker) {
+            rest = &rest[at + marker.len()..];
+            let end = rest.find("</tr>").unwrap_or(rest.len());
+            let text = strip_tags(&rest[..end]);
+            out.push(text);
+        }
+        out
+    }
+
+    fn strip_tags(s: &str) -> String {
+        let mut out = String::new();
+        let mut in_tag = false;
+        for c in s.chars() {
+            match c {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                c if !in_tag => out.push(c),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// The first group header whose text starts with `prefix`, in the order shown.
+    fn position(headers: &[String], prefix: &str) -> usize {
+        headers
+            .iter()
+            .position(|h| h.contains(prefix))
+            .unwrap_or_else(|| panic!("no header with {prefix}: {headers:?}"))
+    }
+
+    /// B.4: each preset cuts the groups the way it says, at mount (what a reloaded draft does).
+    #[test]
+    fn each_preset_orders_and_groups_the_mounted_queue_its_own_way() {
+        // Curated: rule groups, worst first.
+        let h = headers(&dioxus_ssr::render(&mount(OrderPreset::Curated)));
+        assert!(
+            position(&h, "R-A") < position(&h, "R-B") && position(&h, "R-B") < position(&h, "R-0"),
+            "{h:?}"
+        );
+        // By rule: rule groups in rule id order.
+        let h = headers(&dioxus_ssr::render(&mount(OrderPreset::ByRule)));
+        assert!(
+            position(&h, "R-0") < position(&h, "R-A") && position(&h, "R-A") < position(&h, "R-B"),
+            "{h:?}"
+        );
+        // By file: the top level is the file, in path order, and no rule heads a group yet.
+        let h = headers(&dioxus_ssr::render(&mount(OrderPreset::ByFile)));
+        assert_eq!(h.len(), 3, "one collapsed group per file: {h:?}");
+        assert!(
+            position(&h, "src/a.rs") < position(&h, "src/m.rs")
+                && position(&h, "src/m.rs") < position(&h, "src/z.rs"),
+            "{h:?}"
+        );
+        assert!(h.iter().all(|t| !t.contains("R-")), "{h:?}");
+        // Critical first: no groups at all, and the rows run worst first.
+        let html = dioxus_ssr::render(&mount(OrderPreset::CriticalFirst));
+        assert!(headers(&html).is_empty(), "flat: no group headers");
+        let at = |s: &str| {
+            html.find(s)
+                .unwrap_or_else(|| panic!("{s} missing: {html}"))
+        };
+        assert!(at("snip-R-A-9") < at("snip-R-A-1"), "critical before high");
+        assert!(at("snip-R-B-2") < at("snip-R-A-40"), "critical before high");
+        assert!(at("snip-R-A-40") < at("snip-R-0-3"), "high before low");
+    }
+
+    /// The select names every preset and shows the current one.
+    #[test]
+    fn the_select_lists_the_four_cuts_and_marks_the_current_one() {
+        let html = dioxus_ssr::render(&mount(OrderPreset::ByFile));
+        for p in OrderPreset::ALL {
+            assert!(html.contains(&format!("value=\"{}\"", p.key())), "{html}");
+            assert!(html.contains(p.label()), "{}", p.label());
+        }
+        let by_file = html
+            .find("<option value=\"by_file\"")
+            .unwrap_or_else(|| panic!("no by_file option: {html}"));
+        let tag_start = by_file;
+        let tag_end = by_file + html[by_file..].find('>').unwrap();
+        assert!(
+            html[tag_start..tag_end].contains("selected"),
+            "By file is the selected option: {}",
+            &html[tag_start..tag_end]
+        );
+        // And the bar names the order on screen.
+        assert!(html.contains(&OrderPreset::ByFile.sentence()), "{html}");
+        assert!(!html.contains(&OrderPreset::Curated.sentence()));
+    }
+
+    /// B.4 check 1: selecting a preset on the live table regroups it, and the cursor stays on
+    /// the same finding key through every re-cut.
+    #[tokio::test(flavor = "current_thread")]
+    async fn switching_preset_regroups_the_live_table_and_the_cursor_keeps_its_finding() {
+        let mut vdom = mount(OrderPreset::Curated);
+        pump(&mut vdom, 50).await;
+        let probe = PROBE.with(|p| p.borrow().expect("probe"));
+        // Aim the cursor at one finding in the middle of the list (what the finding modal's
+        // "Open in viewer" does), which opens the groups that hold it.
+        let target = rows()[2].clone();
+        let want = super::super::viewer::dom_key(&finding_key(&target));
+        vdom.in_runtime(|| {
+            let mut request = probe.request;
+            request.set(Some(finding_key(&target)));
+        });
+        pump(&mut vdom, 100).await;
+        let key_on_pane = |html: &str| {
+            let attr = "data-finding-key=\"";
+            let i = html.find(attr).expect("the pane is rendered") + attr.len();
+            html[i..i + html[i..].find('"').unwrap()].to_string()
+        };
+        let html = dioxus_ssr::render(&vdom);
+        assert_eq!(
+            key_on_pane(&html),
+            want,
+            "the cursor is on the aimed finding"
+        );
+
+        for preset in [
+            OrderPreset::ByFile,
+            OrderPreset::CriticalFirst,
+            OrderPreset::ByRule,
+            OrderPreset::Curated,
+        ] {
+            vdom.in_runtime(|| {
+                let mut p = probe.preset;
+                p.set(preset);
+            });
+            pump(&mut vdom, 100).await;
+            let html = dioxus_ssr::render(&vdom);
+            assert_eq!(
+                key_on_pane(&html),
+                want,
+                "{preset:?}: the cursor stays on the same finding"
+            );
+            // The pane describes that finding, and the bar names the cut now on screen.
+            assert!(html.contains("src/a.rs:9"), "{preset:?}: pane location");
+            assert!(html.contains(&preset.sentence()), "{preset:?}: the bar");
+            let h = headers(&html);
+            match preset.grouping() {
+                Grouping::Flat => assert!(h.is_empty(), "{preset:?}: {h:?}"),
+                Grouping::FileThenRule => {
+                    assert!(h.first().is_some_and(|t| t.contains("src/")), "{h:?}");
+                }
+                Grouping::RuleThenFile => {
+                    assert!(h.first().is_some_and(|t| t.contains("R-")), "{h:?}");
+                }
+            }
+        }
+    }
+
+    /// The choice is draft state, like `triage_view`: it round-trips through the saved draft,
+    /// and a draft saved before presets existed reads as the curated order.
+    #[test]
+    fn the_preset_is_saved_in_the_draft_and_an_old_draft_reads_as_curated() {
+        let scan = serde_json::json!({
+            "files_scanned": 0, "findings": [], "proposed_rules": [], "gated": false
+        });
+        let old: OnboardingDraft =
+            serde_json::from_value(serde_json::json!({ "scan": scan })).expect("old draft");
+        assert_eq!(old.order_preset, OrderPreset::Curated);
+
+        let mut draft = old.clone();
+        draft.order_preset = OrderPreset::ByFile;
+        let wire = serde_json::to_value(&draft).unwrap();
+        assert_eq!(wire["order_preset"], "by_file");
+        let back: OnboardingDraft = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.order_preset, OrderPreset::ByFile);
+    }
+}
+
+/// B.4 check 1, the reload half: a saved draft that names a preset brings the Queue back cut
+/// that way, and the next save carries it. Mounts the real results view against a fake BFF.
+#[cfg(test)]
+mod order_preset_reload_tests {
+    use super::*;
+    use std::time::Duration;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn scan_with(findings: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "repos": ["me/api"], "files_scanned": 1, "findings": findings,
+            "proposed_rules": [], "gated": false
+        })
+    }
+
+    fn findings() -> serde_json::Value {
+        serde_json::json!([
+            { "repo": "me/api", "path": "src/z.rs", "line": 40, "rule_id": "R-A",
+              "severity": "high", "snippet": "z", "detail": "d", "status": "active",
+              "kind": "defect" },
+            { "repo": "me/api", "path": "src/a.rs", "line": 9, "rule_id": "R-B",
+              "severity": "critical", "snippet": "a", "detail": "d", "status": "active",
+              "kind": "defect" },
+        ])
+    }
+
+    fn results() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        use_context_provider(|| Signal::new(None::<ScanReportView>));
+        use_context_provider(|| Signal::new(CockpitView::Stories));
+        use_context_provider(|| Signal::new(None::<String>));
+        use_context_provider(|| Signal::new(0_usize) as crate::loading::LoadingCount);
+        let report: ScanReportView = serde_json::from_value(scan_with(serde_json::json!([])))
+            .expect("the scan the draft belongs to");
+        rsx! { ScanResults { report } }
+    }
+
+    async fn pump(vdom: &mut VirtualDom, ms: u64) {
+        let until = tokio::time::Instant::now() + Duration::from_millis(ms);
+        while tokio::time::Instant::now() < until {
+            let _ = tokio::time::timeout(Duration::from_millis(10), vdom.wait_for_work()).await;
+            let _ = vdom.render_immediate_to_vec();
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_draft_that_names_a_preset_brings_the_queue_back_cut_that_way_and_saves_it_again() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "scan": scan_with(serde_json::json!([])),
+                "audit": scan_with(findings()),
+                "order_preset": "by_file",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(results);
+        vdom.rebuild_in_place();
+        pump(&mut vdom, 800).await;
+        let html = dioxus_ssr::render(&vdom);
+
+        // The select shows the restored cut, and the Queue is grouped by file.
+        let by_file = html
+            .find("<option value=\"by_file\"")
+            .unwrap_or_else(|| panic!("the Queue is not mounted: {html}"));
+        let tag = &html[by_file..by_file + html[by_file..].find('>').unwrap()];
+        assert!(tag.contains("selected"), "{tag}");
+        assert!(html.contains(&OrderPreset::ByFile.sentence()), "{html}");
+        assert!(
+            html.contains("src/a.rs") && html.contains("src/z.rs"),
+            "file groups: {html}"
+        );
+
+        // And the draft saved after the restore still carries it.
+        let saved = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/onboard/draft")
+            .map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).unwrap())
+            .next_back()
+            .expect("the restored view saved the draft");
+        assert_eq!(saved["order_preset"], "by_file", "{saved}");
     }
 }

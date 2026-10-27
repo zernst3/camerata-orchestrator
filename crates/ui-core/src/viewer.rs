@@ -26,6 +26,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::pane_context::{context_from_file, ContextKey, PaneContext, CONTEXT_CAPACITY};
 use crate::source::{context_note, short_sha, ContextNote};
 use crate::triage::{
     finding_key, finding_state, pane_command, rule_group_label, Disposition, FindingView,
@@ -268,7 +269,8 @@ pub struct FileKey {
     pub path: String,
 }
 
-/// An LRU of the last [`CACHE_CAPACITY`] files, so moving between findings in one file never
+/// An LRU of the last [`CACHE_CAPACITY`] files (and, in a lane of their own, the detail pane's
+/// context windows), so moving between findings in one file never
 /// refetches and returning to a file in the same group is instant.
 ///
 /// Keyed by [`FileKey`]. A file with no recorded commit (`sha` empty) is never kept, because
@@ -279,6 +281,9 @@ pub struct FileKey {
 pub struct ViewerCache {
     /// Least recently used first.
     entries: Vec<(FileKey, Arc<SourceFileView>)>,
+    /// The detail pane's small windows (see [`crate::pane_context`]), in their own lane so they
+    /// are never mistaken for a file and never push one out. Oldest first.
+    contexts: Vec<(ContextKey, Arc<PaneContext>)>,
 }
 
 impl ViewerCache {
@@ -331,6 +336,48 @@ impl ViewerCache {
         self.entries.push((key, view));
         while self.entries.len() > CACHE_CAPACITY {
             self.entries.remove(0);
+        }
+        true
+    }
+
+    /// How many context windows are kept.
+    pub fn context_len(&self) -> usize {
+        self.contexts.len()
+    }
+
+    /// The pane's window for one finding, if one is held: first a window fetched for exactly
+    /// that finding (same repo, commit, path AND line), else the same window cut from a whole
+    /// file this cache holds, so an open viewer and the pane share what has been read. `expect`
+    /// is the first line of the stored snippet; a held file whose line no longer matches it
+    /// yields nothing. A key with no commit is never answered (the server's default can change).
+    ///
+    /// Only the lines of a file are used, never its `block`: that is for another line.
+    pub fn context(&self, key: &ContextKey, expect: Option<&str>) -> Option<Arc<PaneContext>> {
+        if key.sha.is_empty() {
+            return None;
+        }
+        if let Some((_, held)) = self.contexts.iter().find(|(k, _)| k == key) {
+            return Some(Arc::clone(held));
+        }
+        let file = FileKey {
+            repo: key.repo.clone(),
+            sha: key.sha.clone(),
+            path: key.path.clone(),
+        };
+        let (_, view) = self.entries.iter().find(|(k, _)| *k == file)?;
+        context_from_file(view, key.line, expect).map(Arc::new)
+    }
+
+    /// Keep a pane window under `key`, newest last, dropping the oldest beyond
+    /// [`CONTEXT_CAPACITY`]. Returns whether it was kept (a key with no commit is not).
+    pub fn put_context(&mut self, key: ContextKey, context: Arc<PaneContext>) -> bool {
+        if key.sha.is_empty() {
+            return false;
+        }
+        self.contexts.retain(|(k, _)| *k != key);
+        self.contexts.push((key, context));
+        while self.contexts.len() > CONTEXT_CAPACITY {
+            self.contexts.remove(0);
         }
         true
     }
@@ -1508,6 +1555,108 @@ mod tests {
             Arc::new(parse(serde_json::json!({"status": "too_large"})))
         ));
         assert!(c.is_empty());
+    }
+
+    // ── the pane's context lane ──
+
+    fn ctx_key(path: &str, line: usize) -> ContextKey {
+        ContextKey {
+            repo: "o/r".into(),
+            sha: "a".repeat(40),
+            path: path.into(),
+            line,
+        }
+    }
+
+    fn window(first: usize) -> Arc<PaneContext> {
+        Arc::new(PaneContext {
+            start_line: first,
+            violation_line: first + 1,
+            lines: vec!["a".into(), "b".into(), "c".into()],
+        })
+    }
+
+    #[test]
+    fn a_pane_window_is_keyed_by_its_line_and_never_touches_the_file_lane() {
+        let mut c = ViewerCache::new();
+        assert!(c.put(key("f"), cached()));
+        assert!(c.put_context(ctx_key("f", 5), window(4)));
+        assert!(c.put_context(ctx_key("f", 9), window(8)));
+        // The two windows of one file are two entries, and neither is a file.
+        assert_eq!(c.context_len(), 2);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c.context(&ctx_key("f", 5), None), Some(window(4)));
+        assert_eq!(c.context(&ctx_key("f", 9), None), Some(window(8)));
+        // The file lane still answers for the file as before.
+        assert!(c.lookup(&key("f"), 1).is_some());
+        // A window kept for one line does not answer for another.
+        assert_eq!(c.context(&ctx_key("f", 6), None), None);
+    }
+
+    #[test]
+    fn pane_windows_have_their_own_capacity_and_never_evict_a_file() {
+        let mut c = ViewerCache::new();
+        for i in 0..CACHE_CAPACITY {
+            assert!(c.put(key(&format!("f{i}")), cached()));
+        }
+        for line in 1..=CONTEXT_CAPACITY + 10 {
+            assert!(c.put_context(ctx_key("g", line), window(line)));
+        }
+        assert_eq!(c.context_len(), CONTEXT_CAPACITY);
+        assert_eq!(c.len(), CACHE_CAPACITY, "windows never push a file out");
+        assert_eq!(
+            c.context(&ctx_key("g", 1), None),
+            None,
+            "the oldest went first"
+        );
+        assert!(c
+            .context(&ctx_key("g", CONTEXT_CAPACITY + 10), None)
+            .is_some());
+        // And files never push a window out.
+        for i in 100..120 {
+            c.put(key(&format!("f{i}")), cached());
+        }
+        assert_eq!(c.context_len(), CONTEXT_CAPACITY);
+    }
+
+    #[test]
+    fn a_window_with_no_commit_is_not_kept_or_answered() {
+        let mut c = ViewerCache::new();
+        let mut k = ctx_key("f", 5);
+        k.sha.clear();
+        assert!(!c.put_context(k.clone(), window(4)));
+        assert_eq!(c.context(&k, None), None);
+        assert_eq!(c.context_len(), 0);
+    }
+
+    /// The viewer and the pane share what has been read: a window can be cut from a whole file
+    /// the viewer holds, and it is the lines of THAT file at THAT line, never its block.
+    #[test]
+    fn a_held_whole_file_answers_for_the_pane_with_the_right_lines() {
+        let mut c = ViewerCache::new();
+        let mut file = parse(ok_json());
+        file.block = Some(BlockView {
+            start_line: 1,
+            end_line: 3,
+            kind: "function".into(),
+        });
+        let total = file.total();
+        assert!(c.put(key("f"), Arc::new(file)));
+        assert!(total >= 1);
+        let got = c
+            .context(&ctx_key("f", 1), None)
+            .expect("cut from the held file");
+        assert_eq!(got.violation_line, 1);
+        assert_eq!(got.start_line, 1);
+        // Asking again for another line of the same file cuts that line's window.
+        if total >= 2 {
+            let second = c.context(&ctx_key("f", 2), None).expect("second line");
+            assert_eq!(second.violation_line, 2);
+        }
+        // A file that is not held yields nothing.
+        assert_eq!(c.context(&ctx_key("other", 1), None), None);
+        // Nothing was written to the pane lane by reading.
+        assert_eq!(c.context_len(), 0);
     }
 
     #[test]
