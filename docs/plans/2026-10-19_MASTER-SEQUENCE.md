@@ -553,6 +553,15 @@ V2, the V2 items (keyed fixture, Dart grammar, Flutter rules) move to the front.
   false critical on the apiKey. Keyed calibration fixture: V2.
 - **Slot:** with W29 Wave D and 22e (the corpus/detector block), after token efficiency.
 
+### 2f. Item 25: inspection walkthrough (added 2026-10-27, Zach, V1)
+
+A guided mode that points at each real control in the Inspection flow with a short explanation,
+from an empty app to an exported package. Turned on by a "Guided inspection" switch, offered once
+on first launch, restartable from Help and the command palette. Design:
+`docs/design/2026-10-27_inspection-walkthrough.md` (12 steps, one step table, `data-tour` ids
+enforced by a test so a renamed button breaks the build). V1 is Inspection only; other tours V2.
+**Slot:** after viewer 7d merges (same UI files); can run in parallel with the efficiency ranks.
+
 ## 3. Explicitly NOT doing
 
 - `ARCH-OBSERVABILITY-CORRELATION-ID-1` stays `decision` — prior ruling, recorded in the roster.
