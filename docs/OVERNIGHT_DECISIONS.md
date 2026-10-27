@@ -1,7 +1,19 @@
 # Overnight autonomous run — decisions needed + progress log
 
 > ## ▶ RESUME HERE (paused 2026-10-26 at Zach's request, after code viewer step 4)
-> **CURRENT (newest first; older entries below are history):** 2026-10-27: viewer step 6 (B.5
+> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Zach): **PRIORITY
+> CHANGE: finish ALL token-efficiency work first, then test it on the API** with the $100 credit
+> (expires 2026-11-02). Zach's GO on the protected ranks 4 (terse scan output; calibration and
+> merge inputs), 7 (routing on `applies_to`; corpus field), 8 (deterministic `candidates`
+> pre-filter; corpus field) and 9 (CLI pre-flight estimate + `--max-cost-usd` stop-loudly cap).
+> Rank 2 (batch default + per-item resubmission + routing and truncation retry in batch) also
+> to build. Each rank ships behind its own setting (default on) so the fixture sweep can isolate
+> a regression without a rebuild. Order (Zach): the Keychain bug first, then every efficiency
+> rank (Opus adds rank 10, fix stage on Haiku, so ALL efficiency work is tested on the credit),
+> then one API sweep. Viewer 7a finishes; 7b to 7d wait. FOUND 2026-10-27: the
+> credential store has never persisted (keyring 3 built with no platform feature = mock store;
+> Zach's saved key was lost); fix in flight with the Keychain-first key resolver. Earlier
+> 2026-10-27: viewer step 6 (B.5
 > decision memory + B.7 counts strip) MERGED. Pre-fill is SAME-STATE only (an Ignored reason is a
 > false statement under False positive); memory is shared across repos (it only pre-fills, never
 > applies); Undo closes an open reason prompt first. Step-6 manual checks: caret position in a
