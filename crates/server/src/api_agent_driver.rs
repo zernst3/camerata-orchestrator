@@ -919,6 +919,9 @@ fn build_anthropic_request_body(
         body["tool_choice"] = serde_json::json!({"type": "auto"});
     }
 
+    // The one place a body is made valid for its model (effort default, rejected fields).
+    crate::model_registry::conform_messages_body(model, &mut body);
+
     (body, use_caching)
 }
 
@@ -971,6 +974,11 @@ async fn call_anthropic_with_tools(
 
     let v: Value = serde_json::from_str(&text)
         .map_err(|e| anyhow::anyhow!("parse Anthropic response JSON: {e}"))?;
+    // `stop_reason: "refusal"` arrives with HTTP 200 and no usable content. Parsed as a
+    // normal turn it would be an empty final answer; fail the turn instead.
+    if let Some(refusal) = crate::llm::refusal_error(&v) {
+        return Err(refusal);
+    }
 
     // Pass the FULL response object through as `text`: it has the `content` array the
     // normalizer's Anthropic branch reads (`content[].type=="tool_use"` / `"text"`).
@@ -4362,6 +4370,44 @@ mod tests {
         // No tools → no tools/tool_choice keys.
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
+    }
+
+    /// The agentic request (tools + tool_choice) for every strict model: no rejected field,
+    /// `tool_choice` stays the valid `auto`, and the effort default is pinned to `high` where
+    /// the model defaults lower.
+    #[test]
+    fn anthropic_agent_request_is_valid_for_every_new_model() {
+        let schemas = build_tool_schemas_for(false, ApiShape::Anthropic);
+        let messages = vec![
+            serde_json::json!({"role": "user", "content": "do it"}),
+            serde_json::json!({"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "x", "input": {}}
+            ]}),
+            serde_json::json!({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+            ]}),
+        ];
+        for model in [
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+        ] {
+            let (body, _) =
+                build_anthropic_request_body(model, Some("You are governed."), &messages, &schemas);
+            for key in ["thinking", "temperature", "top_p", "top_k"] {
+                assert!(body.get(key).is_none(), "{model}: `{key}` must not be sent");
+            }
+            assert_eq!(body["tool_choice"]["type"], "auto", "{model}");
+            assert_eq!(body["messages"].as_array().unwrap().len(), 3, "{model}");
+            assert_eq!(body["messages"][2]["role"], "user", "{model}: no prefill");
+            let wants_high = matches!(model, "claude-opus-5-5" | "claude-haiku-5-5");
+            assert_eq!(
+                body["output_config"]["effort"] == "high",
+                wants_high,
+                "{model}: effort"
+            );
+        }
     }
 
     // ── Anthropic shape: Layer-2 grounding cache breakpoint ───────────────────

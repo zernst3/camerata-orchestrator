@@ -7442,6 +7442,20 @@ pub async fn audit_repo(
         if let Some(e) = last_err {
             return Err(e);
         }
+    } else if let Some(e) = last_err {
+        // PARTIAL failure: some passes answered, at least one did not (a timeout, an HTTP
+        // error, or a model REFUSAL, `stop_reason: "refusal"`). Those chunks' findings are
+        // missing from this result, so the export must say so rather than present the survivors
+        // as the whole audit. `last_err` is only the last such error; the pass runners do not
+        // count failures, hence "at least one".
+        failed_passes.push(FailedPass {
+            repo: repo.to_string(),
+            pass: "audit passes (partial)".to_string(),
+            reason: format!(
+                "{ok_passes} pass(es) completed but at least one failed, so findings from the \
+                 failed pass(es) are missing; last error: {e}"
+            ),
+        });
     }
 
     // ── Resolution round ────────────────────────────────────────────────────────────
@@ -13107,6 +13121,141 @@ mod tests {
         assert!(
             err.to_string().contains("simulated LLM unavailable"),
             "streaming-path error should carry the underlying failure, got: {err}"
+        );
+    }
+
+    /// A completer whose FIRST call comes back as a model refusal (`stop_reason: "refusal"`,
+    /// which the transport turns into an error via `refusal_error`) and whose later calls
+    /// answer `{"findings":[]}`. `refuse_all` makes every call refuse.
+    struct RefusingCompleter {
+        calls: std::sync::atomic::AtomicUsize,
+        refuse_all: bool,
+    }
+
+    impl RefusingCompleter {
+        fn respond(&self) -> anyhow::Result<LlmResponse> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.refuse_all || n == 0 {
+                let refusal = crate::llm::refusal_error(&serde_json::json!({
+                    "stop_reason": "refusal", "content": []
+                }))
+                .expect("a refusal stop_reason is an error");
+                return Err(refusal);
+            }
+            Ok(LlmResponse {
+                text: r#"{"findings":[]}"#.to_string(),
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for RefusingCompleter {
+        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            self.respond()
+        }
+        async fn complete_streaming(
+            &self,
+            _req: LlmRequest,
+            _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            self.respond()
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// A model REFUSAL is a failed pass, never an empty finding list: when every pass is
+    /// refused the audit returns `Err` (it does not report a clean Ok([])).
+    #[tokio::test]
+    async fn audit_repo_treats_a_total_refusal_as_failure_not_a_clean_scan() {
+        let llm = RefusingCompleter {
+            calls: Default::default(),
+            refuse_all: true,
+        };
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() { db.execute(query); }\n".to_string(),
+        )];
+        let selected = vec![(
+            "ARCH-NO-DIRECT-DB-1".to_string(),
+            "Controllers must not call the database directly.".to_string(),
+        )];
+        let res = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            &[],
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let err = res.expect_err("every pass refused -> Err, never Ok([])");
+        assert!(err.to_string().contains("refus"), "{err}");
+    }
+
+    /// One refused pass among several that answered: the survivors' findings are returned but
+    /// the gap is DISCLOSED in `failed_passes` (so the export is marked incomplete), not
+    /// swallowed.
+    #[tokio::test]
+    async fn audit_repo_discloses_a_single_refused_pass_as_a_failed_pass() {
+        let llm = RefusingCompleter {
+            calls: Default::default(),
+            refuse_all: false,
+        };
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() { db.execute(query); }\n".to_string(),
+        )];
+        // More rules than one rule-batch holds, so Parallel mode issues more than one pass.
+        let selected: Vec<(String, String)> = (0..(RULE_BATCH_SIZE + 1))
+            .map(|i| {
+                (
+                    format!("ARCH-NO-DIRECT-DB-{i}"),
+                    "Controllers must not call the database directly.".to_string(),
+                )
+            })
+            .collect();
+        let (_findings, _proposed, _recs, failed_passes, _samples) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            &[],
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("some passes answered -> Ok with the gap disclosed");
+        assert!(
+            failed_passes
+                .iter()
+                .any(|f| f.pass.contains("partial") && f.reason.contains("refus")),
+            "a refused pass must be disclosed in failed_passes: {failed_passes:?}"
         );
     }
 

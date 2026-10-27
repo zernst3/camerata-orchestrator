@@ -371,7 +371,7 @@ mod tests {
             "claude-sonnet-5",
             &anthropic_resp("claude-sonnet-5", 100, 100, 0.0018),
         );
-        // sonnet pricing 3/15: 1M in + 1M out -> 3 + 15 = 18.0.
+        // sonnet pricing 2/10: 1M in + 1M out -> 2 + 10 = 12.0.
         l.record(
             "claude-sonnet-5",
             &gemini_shape_resp("claude-sonnet-5", 1_000_000, 1_000_000),
@@ -379,9 +379,9 @@ mod tests {
         let s = l.snapshot();
         assert_eq!(s.calls, 2);
         assert_eq!(s.input_tokens, 1_000_100);
-        // 0.0018 (reported) + 18.0 (derived) = 18.0018.
+        // 0.0018 (reported) + 12.0 (derived) = 12.0018.
         assert!(
-            (s.total_cost_usd - 18.0018).abs() < 1e-6,
+            (s.total_cost_usd - 12.0018).abs() < 1e-6,
             "got {}",
             s.total_cost_usd
         );

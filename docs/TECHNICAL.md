@@ -848,11 +848,48 @@ Key design points:
 - **Per-model provider coupling**: a model always runs on its own provider's transport.
   When the fleet mixes models from different providers, each model is dispatched through
   the provider it belongs to rather than being forced onto one shared transport.
-- **Model registry**: `crates/agent/src/model_registry.rs` combines a static
+- **Model registry**: `crates/llm/src/model_registry.rs` combines a static
   list of Claude model entries with live OpenRouter discovery
   (`GET /api/v1/models`). Each entry is tagged with capability flags:
   `free`, `tool_use`, `caching`, `vision`, plus `input_price`/`output_price`
-  (per-million-token). The registry is fetched once per session and cached.
+  (per-million-token). The registry is fetched once per session and cached. Every
+  model picker is populated from it, so adding a row to `CLAUDE_REGISTRY_MODELS`
+  adds it to every picker.
+
+  The Claude catalog (first-party list prices, USD per million tokens, reference
+  dated 2026-10-06; `weight` is the relative subscription-quota cost the profile
+  cascade uses):
+
+  | id | input | output | cache read | context | max output | weight |
+  |---|---|---|---|---|---|---|
+  | `claude-fable-5-1` | 10.00 | 50.00 | 0.25 | 1M | 128K | 15 |
+  | `claude-fable-5` | 10.00 | 50.00 | 1.00 (0.1x) | 1M | 128K | 15 |
+  | `claude-opus-5-5` | 4.00 | 20.00 | 0.20 | 1M | 128K | 8 |
+  | `claude-opus-5` | 5.00 | 25.00 | 0.50 (0.1x) | 1M | 128K | 10 |
+  | `claude-sonnet-5-5` | 2.00 | 10.00 | 0.20 | 1M | 128K | 3 |
+  | `claude-sonnet-5` | 2.00 | 10.00 | 0.20 (0.1x) | 1M | 128K | 3 |
+  | `claude-haiku-5-5` | 0.10 / 0.50 | 0.50 / 2.50 | 0.01 / 0.05 (0.1x) | 1M | 128K | 1 |
+  | `claude-haiku-4-5-20251001` | 1.00 | 5.00 | 0.10 (0.1x) | 200K | n/a | 1 |
+
+  Haiku 5.5 has a long-prompt tier: the first figure applies to prompts up to
+  100K tokens, the second to the whole request once the prompt is above 100K.
+  Cache writes are 1.25x input (5 minute) or 2x input (1 hour); the Batch API is
+  0.5x input and output. A per-model cache-read price (`cache_read_price`) and the
+  Haiku tier (`long_prompt`) are data on the entry; `rates_for(model, prompt_tokens)`
+  returns the per-token rates for a request.
+
+  **Request shape.** Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1 answer HTTP 400
+  to `thinking` (disabled or `budget_tokens`), non-default `temperature` / `top_p` /
+  `top_k`, assistant prefill, and (Fable 5.1, Opus 5.5, Sonnet 5.5) a forced
+  `tool_choice`. Opus 5.5 and Haiku 5.5 default to `medium` effort, so a call that
+  relies on the old `high` default sets `output_config.effort`. All of that is data on
+  the registry entry (`shape`), applied by ONE function,
+  `conform_messages_body(model, &mut body)`, which every Messages request passes
+  through (`Llm::complete_api`, the batch `params`, and the agentic driver in
+  `api_agent_driver.rs`). An id absent from the catalog gets the stripping but no
+  effort. A response with `stop_reason: "refusal"` (HTTP 200, no content) is an error
+  (`refusal_error`), so the pass lands in FAILED PASSES instead of reading as
+  "no findings".
 - **Prompt caching + geological layering**: every agent prompt is assembled in a
   strict, prefix-cache-optimal order (static at the top, volatile at the bottom) so
   the cacheable prefix stays byte-identical across calls that differ only in the tail.

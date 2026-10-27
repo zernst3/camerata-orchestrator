@@ -83,15 +83,70 @@ fn default_price_known() -> bool {
     true
 }
 
+/// A long-prompt price tier: when a request's prompt (input + cache read + cache write tokens)
+/// is ABOVE `above_prompt_tokens`, the whole request is billed at these higher rates instead
+/// of the entry's base `price_in` / `price_out`. USD per million tokens. (Haiku 5.5:
+/// $0.10 / $0.50 up to 100K prompt tokens, $0.50 / $2.50 beyond.)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LongPromptTier {
+    pub above_prompt_tokens: u64,
+    pub price_in: f64,
+    pub price_out: f64,
+}
+
+/// What a model needs in `output_config.effort` so a call behaves as the code was written
+/// for. Every audit pass was tuned against the old `high` default; a model that now defaults
+/// to `medium` must be told `high` explicitly or its answers silently get shallower.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffortPolicy {
+    /// Send no `output_config` at all (the model's own default is what we want, or the model
+    /// predates the parameter).
+    Omit,
+    /// Send `output_config: {effort: "high"}` (the model defaults to `medium`).
+    SetHigh,
+}
+
+/// Which Messages-API request fields a model REJECTS (HTTP 400). Pure data on the registry
+/// entry; `camerata_llm::model_registry::conform_messages_body` is the one function that
+/// turns it into a valid body, so no call site string-matches model ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestShapeSpec {
+    /// Rejects `thinking` (disabled, or enabled with `budget_tokens`), non-default
+    /// `temperature` / `top_p` / `top_k`, and assistant prefill.
+    pub strict_params: bool,
+    /// Rejects a forced `tool_choice` (`any` / `tool`); only `auto` is valid.
+    pub no_forced_tool_choice: bool,
+    /// What to put in `output_config.effort`.
+    pub effort: EffortPolicy,
+}
+
+impl RequestShapeSpec {
+    /// The shape of models that predate the strict rules: nothing is stripped, nothing added.
+    pub const LEGACY: RequestShapeSpec = RequestShapeSpec {
+        strict_params: false,
+        no_forced_tool_choice: false,
+        effort: EffortPolicy::Omit,
+    };
+}
+
 /// A compile-time-only helper for the Claude static list. Converted to [`RegistryEntry`]
 /// at runtime (so `RegistryEntry` can own `String` fields without const-string gymnastics).
 pub struct RegistryEntryStatic {
     pub display: &'static str,
     pub id: &'static str,
     pub context: u64,
+    /// Maximum output tokens per response (`0` = not recorded).
+    pub max_output: u32,
     pub weight: u8,
     pub price_in: f64,
     pub price_out: f64,
+    /// USD per million CACHE-READ tokens when it is not the default `0.1x price_in`
+    /// (Fable 5.1 is 0.025x, Opus 5.5 is 0.05x). `None` = fall back to `0.1x` input.
+    pub cache_read_price: Option<f64>,
+    /// Higher rates for long prompts, if the model has such a tier.
+    pub long_prompt: Option<LongPromptTier>,
+    /// Which request fields this model rejects.
+    pub shape: RequestShapeSpec,
 }
 
 impl RegistryEntryStatic {

@@ -910,6 +910,19 @@ fn messages_response(msg: &serde_json::Value, model: &str, backend: &str) -> Llm
     }
 }
 
+/// The error for a Messages response that ended with `stop_reason: "refusal"`. These models
+/// can decline a request with HTTP 200 and no usable content; read as a normal response that
+/// is an empty answer, which a scan would take for "no findings" and report a clean pass.
+/// Returning an error instead makes the pass a FAILED PASS (disclosed, export incomplete).
+/// `None` for any other stop reason.
+pub fn refusal_error(msg: &serde_json::Value) -> Option<anyhow::Error> {
+    (msg["stop_reason"].as_str() == Some("refusal")).then(|| {
+        anyhow::anyhow!(
+            "model refused the request (stop_reason: refusal); this pass produced no answer"
+        )
+    })
+}
+
 fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>, u64, u64) {
     let base = usage["input_tokens"].as_u64();
     let cache_read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
@@ -1503,21 +1516,7 @@ impl Llm {
             )
         })?;
 
-        let user_content = cached_user_content(
-            &req.prompt,
-            &req.cache_breakpoints,
-            true,
-            CacheTtl::from_env(),
-        );
-
-        let mut body = serde_json::json!({
-            "model": model,
-            "max_tokens": req.max_tokens,
-            "messages": [{ "role": "user", "content": user_content }],
-        });
-        if let Some(system) = &req.system {
-            body["system"] = serde_json::json!(system);
-        }
+        let body = messages_request_body(req, model);
 
         // NOTE: no `anthropic-beta` header — `prompt-caching-2024-07-31` is GA now (the
         // feature activates whenever a `cache_control` block is present, beta or not).
@@ -1535,6 +1534,9 @@ impl Llm {
         }
         let v: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse API JSON: {e}"))?;
+        if let Some(refusal) = refusal_error(&v) {
+            return Err(refusal);
+        }
         Ok(messages_response(&v, model, "api"))
     }
 }
@@ -1591,6 +1593,10 @@ pub struct BatchItemParams {
     pub max_tokens: u32,
     pub system: Option<String>,
     pub messages: Vec<BatchMessage>,
+    /// `output_config` (effort) for models whose default effort is not the one the audit was
+    /// tuned for; absent otherwise. Filled by [`build_batch_item`] from the model registry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<serde_json::Value>,
 }
 
 /// One message in the `messages` array of a batch item.
@@ -1598,6 +1604,30 @@ pub struct BatchItemParams {
 pub struct BatchMessage {
     pub role: String,
     pub content: serde_json::Value,
+}
+
+/// Pure request-body builder for [`Llm::complete_api`]: the user message (split into cached
+/// blocks per `req.cache_breakpoints`), the optional system prompt, and then
+/// [`crate::model_registry::conform_messages_body`], the one place a body is made valid for
+/// its model (effort default, fields the model rejects). Kept separate from the HTTP call so
+/// the exact request shape is unit-testable without a network.
+fn messages_request_body(req: &LlmRequest, model: &str) -> serde_json::Value {
+    let user_content = cached_user_content(
+        &req.prompt,
+        &req.cache_breakpoints,
+        true,
+        CacheTtl::from_env(),
+    );
+    let mut body = serde_json::json!({
+        "model": model,
+        "max_tokens": req.max_tokens,
+        "messages": [{ "role": "user", "content": user_content }],
+    });
+    if let Some(system) = &req.system {
+        body["system"] = serde_json::json!(system);
+    }
+    crate::model_registry::conform_messages_body(model, &mut body);
+    body
 }
 
 /// Pure request-body builder for [`Llm::count_tokens`] — mirrors `complete_api`'s content
@@ -1655,6 +1685,11 @@ pub async fn exact_input_token_count(llm: &Llm, req: &LlmRequest, model: &str) -
 /// the 5-minute default (see [`CacheTtl::from_env`]).
 pub fn build_batch_item(custom_id: impl Into<String>, req: &LlmRequest, model: &str) -> BatchItem {
     let content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, CacheTtl::OneHour);
+    // Run the SAME conformer `complete_api` uses on the equivalent body, then lift what it
+    // added (`output_config`) onto the typed params. The typed struct has no field for any
+    // rejected parameter, so there is nothing to strip.
+    let mut shape = serde_json::json!({ "messages": [{ "role": "user", "content": "" }] });
+    crate::model_registry::conform_messages_body(model, &mut shape);
     BatchItem {
         custom_id: custom_id.into(),
         params: BatchItemParams {
@@ -1665,6 +1700,7 @@ pub fn build_batch_item(custom_id: impl Into<String>, req: &LlmRequest, model: &
                 role: "user".to_string(),
                 content,
             }],
+            output_config: shape.get("output_config").cloned(),
         },
     }
 }
@@ -1922,6 +1958,16 @@ pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultR
         if result_type == "succeeded" {
             // The response mirrors the /v1/messages response shape.
             let msg = &v["result"]["message"];
+            if let Some(refusal) = refusal_error(msg) {
+                // A refusal is a failed item, never an empty answer: no response, so the
+                // reassembler reports it missing and the pass is disclosed as failed.
+                rows.push(BatchResultRow {
+                    custom_id,
+                    response: None,
+                    error: Some(refusal.to_string()),
+                });
+                continue;
+            }
             let model_id = msg["model"].as_str().unwrap_or("");
             rows.push(BatchResultRow {
                 custom_id,
@@ -4247,5 +4293,138 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
             elapsed < std::time::Duration::from_secs(15),
             "the wedged call must die in BOUNDED time, took {elapsed:?}"
         );
+    }
+
+    // ── Request shape for the strict models (HTTP 400 if wrong) ───────────────────────────
+
+    const STRICT_MODELS: [&str; 4] = [
+        "claude-fable-5-1",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+    ];
+
+    /// Every field the strict models answer with HTTP 400, asserted absent from a body.
+    fn assert_no_rejected_fields(body: &serde_json::Value, what: &str) {
+        for key in ["thinking", "temperature", "top_p", "top_k"] {
+            assert!(body.get(key).is_none(), "{what}: `{key}` must not be sent");
+        }
+        let tc = body.get("tool_choice");
+        assert!(
+            tc.is_none() || tc.unwrap()["type"] == "auto",
+            "{what}: tool_choice must be absent or auto, got {tc:?}"
+        );
+        if let Some(msgs) = body["messages"].as_array() {
+            assert_ne!(
+                msgs.last().and_then(|m| m["role"].as_str()),
+                Some("assistant"),
+                "{what}: the last message must not be an assistant prefill"
+            );
+        }
+    }
+
+    fn shape_request() -> LlmRequest {
+        LlmRequest::new("review this code\nsecond segment\ntail")
+            .with_system("You are an auditor.")
+            .with_max_tokens(8192)
+            .with_cache_breakpoints(vec![17, 32])
+    }
+
+    #[test]
+    fn complete_request_for_every_new_model_has_no_rejected_fields() {
+        for model in STRICT_MODELS {
+            let body = messages_request_body(&shape_request(), model);
+            assert_no_rejected_fields(&body, &format!("complete/{model}"));
+            assert_eq!(body["model"], model);
+            assert_eq!(body["max_tokens"], 8192);
+        }
+    }
+
+    #[test]
+    fn batch_item_for_every_new_model_has_no_rejected_fields() {
+        for model in STRICT_MODELS {
+            let item = build_batch_item("c0-b0", &shape_request(), model);
+            let v = serde_json::to_value(&item).unwrap();
+            assert_no_rejected_fields(&v["params"], &format!("batch/{model}"));
+        }
+    }
+
+    #[test]
+    fn count_tokens_request_for_every_new_model_has_no_rejected_fields() {
+        for model in STRICT_MODELS {
+            let body = count_tokens_body(&shape_request(), model);
+            assert_no_rejected_fields(&body, &format!("count_tokens/{model}"));
+        }
+    }
+
+    /// Opus 5.5 and Haiku 5.5 default to `medium` effort; every audit call was tuned on the old
+    /// `high` default, so both request kinds that run the model must ask for `high` explicitly.
+    /// The other two default to the effort we want and must not carry an `output_config`.
+    #[test]
+    fn effort_is_set_high_only_where_the_model_defaults_lower() {
+        for model in STRICT_MODELS {
+            let wants_high = matches!(model, "claude-opus-5-5" | "claude-haiku-5-5");
+            let complete = messages_request_body(&shape_request(), model);
+            let batch =
+                serde_json::to_value(build_batch_item("c0-b0", &shape_request(), model)).unwrap();
+            if wants_high {
+                assert_eq!(complete["output_config"]["effort"], "high", "{model}");
+                assert_eq!(
+                    batch["params"]["output_config"]["effort"], "high",
+                    "{model}"
+                );
+            } else {
+                assert!(complete.get("output_config").is_none(), "{model}");
+                assert!(batch["params"].get("output_config").is_none(), "{model}");
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_models_get_the_request_they_always_got() {
+        for model in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5-20251001",
+        ] {
+            let body = messages_request_body(&shape_request(), model);
+            assert!(body.get("output_config").is_none(), "{model}");
+        }
+    }
+
+    // ── Refusal: stop_reason "refusal" with HTTP 200 is a FAILED pass, never "no findings" ──
+
+    #[test]
+    fn a_refusal_stop_reason_is_an_error() {
+        let msg = serde_json::json!({
+            "model": "claude-opus-5-5",
+            "content": [],
+            "stop_reason": "refusal",
+            "usage": {"input_tokens": 10, "output_tokens": 0}
+        });
+        let err = refusal_error(&msg).expect("refusal must be an error");
+        assert!(err.to_string().contains("refus"), "{err}");
+        for ok in ["end_turn", "max_tokens", "tool_use", "stop_sequence"] {
+            let m = serde_json::json!({"stop_reason": ok});
+            assert!(refusal_error(&m).is_none(), "{ok} is not a refusal");
+        }
+        assert!(refusal_error(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn a_refused_batch_item_is_an_error_row_and_is_absent_from_the_results_map() {
+        let refused = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-opus-5-5","content":[],"stop_reason":"refusal","usage":{"input_tokens":1,"output_tokens":0}}}}"#;
+        let fine = r#"{"custom_id":"c0-b1","result":{"type":"succeeded","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"{}"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}}}"#;
+        let rows = parse_batch_results_jsonl(&format!("{refused}\n{fine}\n")).unwrap();
+        assert_eq!(rows.len(), 2);
+        let r0 = rows.iter().find(|r| r.custom_id == "c0-b0").unwrap();
+        assert!(r0.response.is_none(), "a refusal carries no response");
+        assert!(r0.error.as_deref().unwrap().contains("refus"));
+        let map = reassemble_batch_results(rows);
+        assert!(
+            !map.contains_key("c0-b0"),
+            "the refused item reads as missing"
+        );
+        assert!(map.contains_key("c0-b1"));
     }
 }

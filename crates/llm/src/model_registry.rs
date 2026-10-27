@@ -32,7 +32,8 @@ use crate::provider_policy::SafeProviders;
 // fetch types below. Re-exported so every existing `crate::model_registry::X` call site
 // keeps resolving unchanged.
 pub use camerata_api_types::model_registry::{
-    AnthropicRefreshResp, RefreshResp, RegistryEntry, RegistryEntryStatic, RegistryResp,
+    AnthropicRefreshResp, EffortPolicy, LongPromptTier, RefreshResp, RegistryEntry,
+    RegistryEntryStatic, RegistryResp, RequestShapeSpec,
 };
 
 // ── Static Claude catalog ────────────────────────────────────────────────────
@@ -41,52 +42,261 @@ pub use camerata_api_types::model_registry::{
 ///
 /// No list-models API exists for the Claude Code CLI, so this is data. Trivial to update
 /// when new models ship. Weights are relative subscription-quota cost: Haiku=1, Sonnet=3,
-/// Opus=10, Fable=15 (the priciest, most-capable tier — an option, never the default).
+/// Opus=10, Fable=15 (the priciest, most-capable tier — an option, never the default). A
+/// newer model in a tier is weighted by its list price relative to its predecessor (Opus 5.5
+/// is $4/$20 against Opus 5's $5/$25, so 8 against 10).
+///
+/// Prices, contexts and max-output are from Anthropic's first-party model reference dated
+/// 2026-10-06 (USD per million tokens). Cache writes are 1.25x input (5 minute) / 2x input
+/// (1 hour); the Batch API is 0.5x input and output; neither is stored per entry. The
+/// entries also carry the Messages-API request shape each model accepts
+/// ([`RequestShapeSpec`], consumed by [`conform_messages_body`]) and the per-model cache-read
+/// price / long-prompt tier (consumed via [`rates_for`]).
 pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
+    RegistryEntryStatic {
+        display: "Fable 5.1",
+        id: "claude-fable-5-1",
+        context: 1_000_000,
+        max_output: 128_000,
+        weight: 15,
+        price_in: 10.0,
+        price_out: 50.0,
+        // 0.025x input, not the usual 0.1x.
+        cache_read_price: Some(0.25),
+        long_prompt: None,
+        // Rejects thinking, sampling params, prefill AND forced tool_choice; the effort
+        // default is already the high we want.
+        shape: RequestShapeSpec {
+            strict_params: true,
+            no_forced_tool_choice: true,
+            effort: EffortPolicy::Omit,
+        },
+    },
     RegistryEntryStatic {
         display: "Fable 5",
         id: "claude-fable-5",
         context: 1_000_000,
+        max_output: 128_000,
         weight: 15,
-        // Anthropic list price: $10 / $50 per million tokens (input / output). NOT
-        // live-verified against the Anthropic /v1/models API (no key in this
-        // environment) — corroborated instead via the owner's own CLI default
-        // (`~/.claude/settings.json`) and a live OpenRouter pull of
-        // `anthropic/claude-fable-5` on 2026-08-06. Same caveat as the opus-5/sonnet-5
-        // refresh. This is the priciest, most-capable tier — an OPTION, never the
-        // default (see `camerata_api_types::project::DEFAULT_MODEL`, which stays
-        // `claude-sonnet-5`).
+        // Anthropic list price: $10 / $50 per million tokens (input / output). This is the
+        // priciest, most-capable tier — an OPTION, never the default (see
+        // `camerata_api_types::project::DEFAULT_MODEL`, which stays `claude-sonnet-5`).
         price_in: 10.0,
         price_out: 50.0,
+        cache_read_price: None,
+        long_prompt: None,
+        shape: RequestShapeSpec::LEGACY,
+    },
+    RegistryEntryStatic {
+        display: "Opus 5.5",
+        id: "claude-opus-5-5",
+        context: 1_000_000,
+        max_output: 128_000,
+        weight: 8,
+        price_in: 4.0,
+        price_out: 20.0,
+        // 0.05x input, not the usual 0.1x.
+        cache_read_price: Some(0.20),
+        long_prompt: None,
+        // Defaults to `medium` effort, so every call must ask for `high` explicitly.
+        shape: RequestShapeSpec {
+            strict_params: true,
+            no_forced_tool_choice: true,
+            effort: EffortPolicy::SetHigh,
+        },
     },
     RegistryEntryStatic {
         display: "Opus 5",
         id: "claude-opus-5",
-        context: 200_000,
+        context: 1_000_000,
+        max_output: 128_000,
         weight: 10,
         // Anthropic list price: $5 / $25 per million tokens (input / output).
         price_in: 5.0,
         price_out: 25.0,
+        cache_read_price: None,
+        long_prompt: None,
+        shape: RequestShapeSpec::LEGACY,
+    },
+    RegistryEntryStatic {
+        display: "Sonnet 5.5",
+        id: "claude-sonnet-5-5",
+        context: 1_000_000,
+        max_output: 128_000,
+        weight: 3,
+        price_in: 2.0,
+        price_out: 10.0,
+        // 0.1x input (the default ratio), stated explicitly because the reference lists it.
+        cache_read_price: Some(0.20),
+        long_prompt: None,
+        shape: RequestShapeSpec {
+            strict_params: true,
+            no_forced_tool_choice: true,
+            effort: EffortPolicy::Omit,
+        },
     },
     RegistryEntryStatic {
         display: "Sonnet 5",
         id: "claude-sonnet-5",
-        context: 200_000,
+        context: 1_000_000,
+        max_output: 128_000,
         weight: 3,
-        // Anthropic list price: $3 / $15 per million tokens (input / output).
-        price_in: 3.0,
-        price_out: 15.0,
+        // Anthropic list price: $2 / $10 per million tokens (input / output).
+        price_in: 2.0,
+        price_out: 10.0,
+        cache_read_price: None,
+        long_prompt: None,
+        shape: RequestShapeSpec::LEGACY,
+    },
+    RegistryEntryStatic {
+        display: "Haiku 5.5",
+        id: "claude-haiku-5-5",
+        context: 1_000_000,
+        max_output: 128_000,
+        weight: 1,
+        // $0.10 / $0.50 for prompts up to 100K tokens; $0.50 / $2.50 beyond (whole request).
+        price_in: 0.10,
+        price_out: 0.50,
+        cache_read_price: None,
+        long_prompt: Some(LongPromptTier {
+            above_prompt_tokens: 100_000,
+            price_in: 0.50,
+            price_out: 2.50,
+        }),
+        // Defaults to `medium` effort; forced tool_choice is still accepted.
+        shape: RequestShapeSpec {
+            strict_params: true,
+            no_forced_tool_choice: false,
+            effort: EffortPolicy::SetHigh,
+        },
     },
     RegistryEntryStatic {
         display: "Haiku 4.5",
         id: "claude-haiku-4-5-20251001",
         context: 200_000,
+        max_output: 0,
         weight: 1,
         // Anthropic list price: $1 / $5 per million tokens (input / output).
         price_in: 1.0,
         price_out: 5.0,
+        cache_read_price: None,
+        long_prompt: None,
+        shape: RequestShapeSpec::LEGACY,
     },
 ];
+
+// ── Per-model rates and request shape (pure functions over the catalog) ──────────
+
+/// Find a model's catalog entry. Exact id first; otherwise a dated alias
+/// (`<id>-YYYYMMDD`) resolves to its undated base id, so a pinned snapshot is priced and
+/// shaped like the model it snapshots. `None` for an id the catalog does not know.
+pub fn registry_entry_for(model_id: &str) -> Option<&'static RegistryEntryStatic> {
+    if let Some(e) = CLAUDE_REGISTRY_MODELS.iter().find(|m| m.id == model_id) {
+        return Some(e);
+    }
+    let (base, suffix) = model_id.rsplit_once('-')?;
+    if suffix.len() == 8 && suffix.bytes().all(|b| b.is_ascii_digit()) {
+        return CLAUDE_REGISTRY_MODELS.iter().find(|m| m.id == base);
+    }
+    None
+}
+
+/// Per-token USD rates for one request, resolved for a model and the request's prompt size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelRates {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    /// 5-minute cache write (1.25x input).
+    pub cache_write_5m: f64,
+    /// 1-hour cache write (2x input).
+    pub cache_write_1h: f64,
+}
+
+/// The per-token rates (USD per TOKEN, not per million) for `model_id` on a request whose
+/// prompt is `prompt_tokens` long (input + cache read + cache write, i.e. everything the
+/// model read). Applies the model's own cache-read price (else 0.1x input) and, for a model
+/// with a long-prompt tier, the higher rates once the prompt is ABOVE the tier threshold
+/// (the whole request is billed at the higher rates). `None` for a model not in the catalog.
+///
+/// The Batch API discount (0.5x input and output) is NOT applied here: the caller knows
+/// whether a request went through a batch.
+pub fn rates_for(model_id: &str, prompt_tokens: u64) -> Option<ModelRates> {
+    let e = registry_entry_for(model_id)?;
+    let (price_in, price_out) = match e.long_prompt {
+        Some(t) if prompt_tokens > t.above_prompt_tokens => (t.price_in, t.price_out),
+        _ => (e.price_in, e.price_out),
+    };
+    let cache_read = e.cache_read_price.unwrap_or(price_in * 0.1);
+    let per_token = |per_million: f64| per_million / 1_000_000.0;
+    Some(ModelRates {
+        input: per_token(price_in),
+        output: per_token(price_out),
+        cache_read: per_token(cache_read),
+        cache_write_5m: per_token(price_in * 1.25),
+        cache_write_1h: per_token(price_in * 2.0),
+    })
+}
+
+/// THE one place a Messages-API request body is made valid for its model. Every Anthropic
+/// `/v1/messages` (and batch `params`) body is passed through this just before it is sent;
+/// no call site tests a model id itself.
+///
+/// For a model whose catalog shape is strict (and for any id the catalog does not know, since
+/// the safe assumption about a model newer than this table is that it is strict too), removes
+/// what the API answers with HTTP 400:
+/// - `thinking` (both `{type:"disabled"}` and `{type:"enabled", budget_tokens}`),
+/// - `temperature`, `top_p`, `top_k`,
+/// - a trailing assistant message (prefill).
+///
+/// For a model that rejects forced tool use, a `tool_choice` of `any` / `tool` is replaced by
+/// `{type:"auto"}`. Where the model's default effort is `medium`, sets
+/// `output_config.effort = "high"` (merging into any existing `output_config`), so a call
+/// keeps the depth it was tuned for. Idempotent.
+pub fn conform_messages_body(model_id: &str, body: &mut serde_json::Value) {
+    let (strict, no_forced_tool, effort) = match registry_entry_for(model_id) {
+        Some(e) => (
+            e.shape.strict_params,
+            e.shape.no_forced_tool_choice,
+            e.shape.effort,
+        ),
+        // Unknown id: strip what could 400, add nothing.
+        None => (true, false, EffortPolicy::Omit),
+    };
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    if strict {
+        for key in ["thinking", "temperature", "top_p", "top_k"] {
+            obj.remove(key);
+        }
+        if let Some(msgs) = obj.get_mut("messages").and_then(|m| m.as_array_mut()) {
+            if msgs.last().and_then(|m| m["role"].as_str()) == Some("assistant") {
+                msgs.pop();
+            }
+        }
+    }
+    if no_forced_tool {
+        let forced = match obj.get("tool_choice") {
+            Some(tc) => matches!(
+                tc.get("type").and_then(|t| t.as_str()),
+                Some("any" | "tool")
+            ),
+            None => false,
+        };
+        if forced {
+            obj.insert("tool_choice".into(), serde_json::json!({"type": "auto"}));
+        }
+    }
+    if effort == EffortPolicy::SetHigh {
+        let cfg = obj
+            .entry("output_config")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(c) = cfg.as_object_mut() {
+            c.insert("effort".into(), serde_json::json!("high"));
+        }
+    }
+}
 
 /// Heuristic: does this model support prompt caching?
 ///
@@ -1050,7 +1260,19 @@ mod tests {
     #[test]
     fn claude_entries_has_all_four_tiers() {
         let entries = claude_entries();
-        assert_eq!(entries.len(), 4, "expect exactly 4 Claude tiers");
+        assert_eq!(
+            entries.len(),
+            8,
+            "expect the 4 tiers plus the 4 newer models"
+        );
+        for id in [
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+        ] {
+            assert!(entries.iter().any(|e| e.id == id), "{id} must be listed");
+        }
         assert!(entries.iter().any(|e| e.id == "claude-fable-5"));
         assert!(entries.iter().any(|e| e.id == "claude-opus-5"));
         assert!(entries.iter().any(|e| e.id == "claude-sonnet-5"));
@@ -1174,17 +1396,17 @@ mod tests {
     }
 
     #[test]
-    fn claude_sonnet_carries_list_price_3_15() {
+    fn claude_sonnet_carries_list_price_2_10() {
         let entries = claude_entries();
         let sonnet = entries.iter().find(|e| e.id == "claude-sonnet-5").unwrap();
         assert!(
-            (sonnet.price_in - 3.0).abs() < f64::EPSILON,
-            "Sonnet 5 price_in must be $3/M, got {}",
+            (sonnet.price_in - 2.0).abs() < f64::EPSILON,
+            "Sonnet 5 price_in must be $2/M, got {}",
             sonnet.price_in
         );
         assert!(
-            (sonnet.price_out - 15.0).abs() < f64::EPSILON,
-            "Sonnet 5 price_out must be $15/M, got {}",
+            (sonnet.price_out - 10.0).abs() < f64::EPSILON,
+            "Sonnet 5 price_out must be $10/M, got {}",
             sonnet.price_out
         );
     }
@@ -2035,7 +2257,7 @@ mod tests {
         );
         assert_eq!(entry.price_in, 5.0);
         assert_eq!(entry.price_out, 25.0);
-        assert_eq!(entry.context, 200_000);
+        assert_eq!(entry.context, 1_000_000);
         assert_eq!(entry.weight, 10);
         assert!(entry.tool_use);
         assert!(entry.caching);
@@ -2072,11 +2294,15 @@ mod tests {
     }
 
     #[test]
-    fn price_join_for_claude_id_finds_all_four_static_tiers() {
+    fn price_join_for_claude_id_finds_every_static_model() {
         for id in [
+            "claude-fable-5-1",
             "claude-fable-5",
+            "claude-opus-5-5",
             "claude-opus-5",
+            "claude-sonnet-5-5",
             "claude-sonnet-5",
+            "claude-haiku-5-5",
             "claude-haiku-4-5-20251001",
         ] {
             assert!(
@@ -2242,5 +2468,206 @@ mod tests {
             vision: true,
             price_known: false,
         }
+    }
+
+    // ── Newer models: catalog data, rates, request shape ─────────────────────────
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-12
+    }
+
+    #[test]
+    fn newer_models_carry_the_verified_prices_context_and_output_limits() {
+        // (id, in, out, context, max_output)
+        for (id, pin, pout, ctx, max_out) in [
+            ("claude-fable-5-1", 10.0, 50.0, 1_000_000, 128_000),
+            ("claude-opus-5-5", 4.0, 20.0, 1_000_000, 128_000),
+            ("claude-sonnet-5-5", 2.0, 10.0, 1_000_000, 128_000),
+            ("claude-haiku-5-5", 0.10, 0.50, 1_000_000, 128_000),
+        ] {
+            let e = registry_entry_for(id).unwrap_or_else(|| panic!("{id} missing"));
+            assert!(close(e.price_in, pin) && close(e.price_out, pout), "{id}");
+            assert_eq!(e.context, ctx, "{id}");
+            assert_eq!(e.max_output, max_out, "{id}");
+        }
+    }
+
+    #[test]
+    fn weights_follow_the_tier_and_price_ordering() {
+        let w = |id: &str| registry_entry_for(id).unwrap().weight;
+        assert!(w("claude-fable-5-1") >= w("claude-fable-5"));
+        assert!(w("claude-opus-5-5") <= w("claude-opus-5"));
+        assert!(w("claude-opus-5-5") > w("claude-sonnet-5-5"));
+        assert!(w("claude-sonnet-5-5") > w("claude-haiku-5-5"));
+        assert!(w("claude-fable-5-1") > w("claude-opus-5-5"));
+        assert!(w("claude-haiku-5-5") >= 1);
+    }
+
+    #[test]
+    fn cache_read_is_per_model_falling_back_to_a_tenth_of_input() {
+        let per_m = |id: &str, toks: u64| rates_for(id, toks).unwrap().cache_read * 1_000_000.0;
+        assert!(
+            close(per_m("claude-fable-5-1", 1000), 0.25),
+            "0.025x of $10"
+        );
+        assert!(close(per_m("claude-opus-5-5", 1000), 0.20), "0.05x of $4");
+        assert!(close(per_m("claude-sonnet-5-5", 1000), 0.20), "0.1x of $2");
+        // No override: the 0.1x fallback, for old and new models alike.
+        assert!(close(per_m("claude-opus-5", 1000), 0.50));
+        assert!(close(per_m("claude-sonnet-5", 1000), 0.20));
+        assert!(close(per_m("claude-haiku-5-5", 1000), 0.01));
+    }
+
+    #[test]
+    fn cache_write_rates_are_1_25x_and_2x_input() {
+        let r = rates_for("claude-opus-5-5", 1000).unwrap();
+        assert!(close(r.cache_write_5m, r.input * 1.25));
+        assert!(close(r.cache_write_1h, r.input * 2.0));
+    }
+
+    #[test]
+    fn rates_are_per_token_not_per_million() {
+        let r = rates_for("claude-sonnet-5-5", 1000).unwrap();
+        assert!(close(r.input, 2.0 / 1_000_000.0));
+        assert!(close(r.output, 10.0 / 1_000_000.0));
+    }
+
+    #[test]
+    fn haiku_5_5_switches_to_the_long_prompt_tier_above_100k() {
+        let at = |toks: u64| rates_for("claude-haiku-5-5", toks).unwrap();
+        // Up to and including 100K: the base tier.
+        for toks in [0, 1, 100_000] {
+            let r = at(toks);
+            assert!(close(r.input * 1e6, 0.10), "{toks}");
+            assert!(close(r.output * 1e6, 0.50), "{toks}");
+        }
+        // Beyond it: the whole request moves to the higher rates, and the 0.1x cache-read
+        // fallback follows the tier input.
+        let r = at(100_001);
+        assert!(close(r.input * 1e6, 0.50));
+        assert!(close(r.output * 1e6, 2.50));
+        assert!(close(r.cache_read * 1e6, 0.05));
+        assert!(close(r.cache_write_5m * 1e6, 0.625));
+    }
+
+    #[test]
+    fn models_without_a_tier_ignore_prompt_size() {
+        assert_eq!(
+            rates_for("claude-opus-5-5", 10),
+            rates_for("claude-opus-5-5", 900_000)
+        );
+    }
+
+    #[test]
+    fn rates_for_unknown_model_is_none_and_dated_aliases_resolve() {
+        assert!(rates_for("totally-unknown-id", 10).is_none());
+        assert_eq!(
+            rates_for("claude-opus-5-5-20261001", 10),
+            rates_for("claude-opus-5-5", 10)
+        );
+        // The existing dated haiku id still resolves exactly, not via the alias path.
+        assert!(rates_for("claude-haiku-4-5-20251001", 10).is_some());
+        // `-5` is a version, not a date: no stripping.
+        assert!(registry_entry_for("claude-opus-5-9").is_none());
+    }
+
+    /// A body carrying EVERY field the strict models reject.
+    fn hostile_body() -> serde_json::Value {
+        serde_json::json!({
+            "model": "m",
+            "max_tokens": 100,
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "top_k": 40,
+            "thinking": {"type": "enabled", "budget_tokens": 2000},
+            "tool_choice": {"type": "tool", "name": "x"},
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "{"}
+            ]
+        })
+    }
+
+    #[test]
+    fn conform_strips_everything_the_strict_models_reject() {
+        for id in [
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+        ] {
+            let mut b = hostile_body();
+            conform_messages_body(id, &mut b);
+            for k in ["thinking", "temperature", "top_p", "top_k"] {
+                assert!(b.get(k).is_none(), "{id}: {k}");
+            }
+            assert_eq!(b["messages"].as_array().unwrap().len(), 1, "{id}: prefill");
+            assert_eq!(b["messages"][0]["role"], "user", "{id}");
+            // Haiku 5.5 still accepts forced tool use; the other three do not.
+            if id == "claude-haiku-5-5" {
+                assert_eq!(b["tool_choice"]["type"], "tool", "{id}");
+            } else {
+                assert_eq!(
+                    b["tool_choice"],
+                    serde_json::json!({"type": "auto"}),
+                    "{id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conform_leaves_legacy_models_untouched() {
+        for id in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5-20251001",
+        ] {
+            let mut b = hostile_body();
+            conform_messages_body(id, &mut b);
+            assert_eq!(b, hostile_body(), "{id} must be passed through unchanged");
+        }
+    }
+
+    #[test]
+    fn conform_unknown_model_strips_rejectable_fields_but_adds_nothing() {
+        let mut b = hostile_body();
+        conform_messages_body("claude-from-the-future", &mut b);
+        assert!(b.get("thinking").is_none() && b.get("temperature").is_none());
+        assert!(b.get("output_config").is_none());
+    }
+
+    #[test]
+    fn conform_sets_high_effort_only_where_the_default_is_medium_and_merges() {
+        for (id, expect) in [
+            ("claude-opus-5-5", true),
+            ("claude-haiku-5-5", true),
+            ("claude-sonnet-5-5", false),
+            ("claude-fable-5-1", false),
+        ] {
+            let mut b = serde_json::json!({"messages": [{"role": "user", "content": "q"}]});
+            conform_messages_body(id, &mut b);
+            assert_eq!(b.get("output_config").is_some(), expect, "{id}");
+            if expect {
+                assert_eq!(b["output_config"]["effort"], "high", "{id}");
+            }
+        }
+        // Merges into an existing output_config instead of replacing it.
+        let mut b = serde_json::json!({
+            "messages": [{"role": "user", "content": "q"}],
+            "output_config": {"format": {"type": "json_schema"}}
+        });
+        conform_messages_body("claude-opus-5-5", &mut b);
+        assert_eq!(b["output_config"]["effort"], "high");
+        assert_eq!(b["output_config"]["format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn conform_is_idempotent() {
+        let mut once = hostile_body();
+        conform_messages_body("claude-opus-5-5", &mut once);
+        let mut twice = once.clone();
+        conform_messages_body("claude-opus-5-5", &mut twice);
+        assert_eq!(once, twice);
     }
 }
