@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
-use crate::credentials::{CredentialStore, OPENROUTER_API_KEY};
+use crate::credentials::CredentialStore;
 use crate::provider_policy::SafeProviders;
 
 // ── Registry entry (the unified shape) ───────────────────────────────────────
@@ -340,9 +340,8 @@ impl ModelRegistry {
     /// (even on error — the cache is updated to `Some([])` on failure so the UI doesn't
     /// keep re-fetching automatically).
     pub async fn try_refresh_from_store(&self, creds: &dyn CredentialStore) -> bool {
-        let key = match creds.get(OPENROUTER_API_KEY) {
-            Ok(Some(k)) if !k.is_empty() => k,
-            _ => return false,
+        let Some(key) = crate::credentials::openrouter_api_key(creds) else {
+            return false;
         };
         self.refresh_openrouter(&key).await;
         true
@@ -402,9 +401,10 @@ impl ModelRegistry {
     /// `false`) when the key is not set; returns `true` when the fetch was attempted (even
     /// on error). Mirrors [`Self::try_refresh_from_store`].
     pub async fn try_refresh_anthropic_from_store(&self, creds: &dyn CredentialStore) -> bool {
-        let key = match creds.get(crate::credentials::ANTHROPIC_API_KEY) {
-            Ok(Some(k)) if !k.is_empty() => k,
-            _ => return false,
+        // The one resolver (store first, `ANTHROPIC_API_KEY` env fallback), so the live model
+        // list is fetched with the same key every other call uses.
+        let Some(key) = crate::credentials::anthropic_api_key(creds) else {
+            return false;
         };
         self.refresh_anthropic(&key).await;
         true

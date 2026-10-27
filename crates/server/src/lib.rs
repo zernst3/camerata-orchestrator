@@ -180,7 +180,7 @@ pub struct AppState {
     /// endpoint consumes it to resume. Persisted alongside the clarify store so a pause
     /// point survives a restart.
     clarify_resume: crate::clarify_resume::ClarifyResumeStore,
-    provider: ProviderHandle,
+    provider: crate::provider::ProviderCell,
     decompositions: DecompositionStore,
     routines: RoutineStore,
     notifications: crate::notify::NotificationStore,
@@ -314,7 +314,7 @@ impl AppState {
             runs: RunStore::new(),
             clarifications: ClarificationStore::new(),
             clarify_resume: crate::clarify_resume::ClarifyResumeStore::new(),
-            provider: ProviderHandle::native(),
+            provider: crate::provider::ProviderCell::new(ProviderHandle::native()),
             decompositions: DecompositionStore::new(),
             routines: RoutineStore::new(),
             notifications: crate::notify::NotificationStore::new(),
@@ -357,12 +357,16 @@ impl AppState {
         }
     }
 
-    /// A clone of the shared `Llm` seam WITH the process-global usage ledger attached, so any
+    /// The keyless CLI-transport FLOOR `Llm` (kept for hermetic tests and label-only probes).
+    /// NO production model step uses it: project steps go through [`AppState::step_llm`] and
+    /// the chat through [`AppState::chat_llm`], so the backend a user selects is the backend
+    /// that runs. A clone of the shared `Llm` seam WITH the process-global usage ledger attached, so any
     /// model call made through it is recorded into the cumulative cockpit meter. Reads
-    /// vendor/key/model from the environment, same as before; the TRANSPORT is fixed to
-    /// `Backend::Cli` (`Llm::from_env`'s new default per
-    /// `docs/design/2026-09-22_per-project-backend.md` — no `CAMERATA_LLM_BACKEND` env read
-    /// exists anymore).
+    /// vendor/model from the environment; the TRANSPORT is fixed to `Backend::Cli`
+    /// (`Llm::from_env`'s default per `docs/design/2026-09-22_per-project-backend.md` — no
+    /// `CAMERATA_LLM_BACKEND` env read exists anymore). The `claude` CLI transport uses no
+    /// API key, so this carries none; anything that may run on the `api` backend builds its
+    /// `Llm` with `Llm::for_backend*` and a key from `credentials::anthropic_api_key`.
     ///
     /// This is the FLOOR constructor for call sites that have not (yet) been threaded with an
     /// explicit per-project or chat backend — today: the non-fleet AI steps driven purely by
@@ -371,10 +375,64 @@ impl AppState {
     /// loop, and misc content generation (PR title/body, HTML report rendering). The five
     /// NAMED seams (brownfield scan, alternative recommendation, rescan, the gov-dev agent
     /// driver, and the chat assistant) do NOT use this — they resolve `project.backend` /
-    /// `settings.chat_backend` explicitly and call `Llm::from_env_with_backend_and_ledger`
+    /// `settings.chat_backend` explicitly and call `Llm::for_backend_and_ledger`
     /// themselves.
     pub fn llm(&self) -> crate::llm::Llm {
         crate::llm::Llm::from_env_with_ledger(self.usage_ledger.clone())
+    }
+
+    /// The `Llm` for a model step, on the transport the SETTING says, with the key resolved RIGHT
+    /// NOW (`credentials::anthropic_api_key`: the key saved in the app first, env as fallback).
+    ///
+    /// - With a `project`, the project's own `backend` decides, exactly as the audit does.
+    /// - With no project, the global `settings.chat_backend` decides (the chat assistant, and any
+    ///   project-less step).
+    ///
+    /// `Api` calls the Anthropic Messages API with that key; `Cli` drives the logged-in Claude
+    /// Code CLI. `Api` with no key is `Err(message)`, never a silent downgrade to the CLI (the
+    /// same compliance-safety rule as every other seam).
+    pub fn llm_for_project(
+        &self,
+        project: Option<&crate::project::Project>,
+    ) -> Result<crate::llm::Llm, String> {
+        let key = crate::credentials::anthropic_api_key(self.credential_store.as_ref());
+        let setting = project
+            .map(|p| p.backend)
+            .unwrap_or_else(|| self.settings.chat_backend());
+        let backend = match crate::llm::resolve_backend(setting, key.is_some()) {
+            crate::llm::BackendResolution::Blocked { message } => return Err(message),
+            crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
+            crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
+        };
+        Ok(crate::llm::Llm::for_backend_and_ledger(
+            backend,
+            key,
+            self.usage_ledger.clone(),
+        ))
+    }
+
+    /// The `Llm` for the project-less CHAT assistant: [`AppState::llm_for_project`] with no
+    /// project, so `settings.chat_backend` decides.
+    pub fn chat_llm(&self) -> Result<crate::llm::Llm, String> {
+        self.llm_for_project(None)
+    }
+
+    /// The `Llm` for a NON-FLEET step of the ACTIVE project (decomposition, clarification,
+    /// story authoring, escalation translation, diagrams, mockups): the active project's
+    /// backend decides; with no active project, the chat backend setting does.
+    pub fn step_llm(&self) -> Result<crate::llm::Llm, String> {
+        self.llm_for_project(self.projects.active().as_ref())
+    }
+
+    /// [`AppState::step_llm`] as a port, for seams that cannot return an error to the caller
+    /// (the L3 review and integration advisories). A refused backend becomes an `LlmPort` that
+    /// fails every call with the refusal message, so the step reports it instead of running on
+    /// the wrong transport.
+    pub fn step_llm_port(&self) -> Arc<dyn crate::llm::LlmPort> {
+        match self.step_llm() {
+            Ok(llm) => Arc::new(llm),
+            Err(message) => Arc::new(crate::llm::RefusedLlm::new(message)),
+        }
     }
 
     /// Record one governance event to the audit trail (Phase H1 foundation).
@@ -514,14 +572,9 @@ impl AppState {
     /// `CAMERATA_GITHUB_TOKEN` environment variable as a back-compat fallback.
     /// Returns `None` when neither is set or non-empty.
     pub fn github_token(&self) -> Option<String> {
-        // Keychain first, then CAMERATA_GITHUB_TOKEN. `resolve` warns (not swallows) on a
-        // keychain read error before falling back to the env var.
-        crate::credentials::resolve(
-            self.credential_store.as_ref(),
-            crate::credentials::GITHUB_TOKEN,
-            "CAMERATA_GITHUB_TOKEN",
-        )
-        .filter(|v| !v.is_empty())
+        // Keychain first, then CAMERATA_GITHUB_TOKEN, via the one credential resolver (which
+        // warns, not swallows, on a keychain read error before falling back to env).
+        crate::credentials::github_token(self.credential_store.as_ref())
     }
 
     /// Resolve the AUTHENTICATED GitHub login for the configured token, memoized so the
@@ -995,7 +1048,12 @@ impl AppState {
     /// connection test. `seeded()` remains for tests and the canned demos.
     pub fn from_env() -> Self {
         let mut state = Self::new(Arc::new(InMemoryStoryStore::new()));
-        state.provider = ProviderHandle::from_env();
+        // The real credential store is installed FIRST so the provider is selected from the
+        // GitHub token saved in the app (env only as the fallback), not from env alone.
+        state.credential_store = Arc::new(crate::credentials::KeyringCredentialStore);
+        state.provider = crate::provider::ProviderCell::new(ProviderHandle::from_credentials(
+            state.credential_store.as_ref(),
+        ));
         // Projects (their configs + pointers, NOT repo contents) persist across
         // launches in the per-user data dir, so an architect's projects survive a
         // restart. Falls back to an in-memory store if the data dir can't be
@@ -1124,32 +1182,13 @@ impl AppState {
         // deletion removes copies of client code from exactly these.
         state.storage_roots =
             Arc::new(crate::client_source::storage::StorageRoots::from_environment());
-        // Production path: use the OS keychain (macOS Keychain, Windows Credential
-        // Manager, Secret Service on Linux) so credentials survive restarts without
-        // living in any file on disk.
-        state.credential_store = Arc::new(crate::credentials::KeyringCredentialStore);
-        // Hydrate the Anthropic API key from the keychain into the `ANTHROPIC_API_KEY`
-        // env var so the existing env-driven selection sites (the agent driver's
-        // `anthropic_api_backend_key`) honor a keychain-stored key. The keychain wins
-        // over any pre-existing env value (set_var runs after dotenv load), matching the
-        // backend-setting precedence above (keychain/setting > `.env` > default).
-        // Edition 2021, so `set_var` is safe (single-threaded startup).
-        match state
-            .credential_store
-            .get(crate::credentials::ANTHROPIC_API_KEY)
-        {
-            Ok(Some(key)) if !key.trim().is_empty() => {
-                // The one sanctioned production env write (see `clippy.toml`): single-threaded
-                // startup, before any request thread exists, so there is no concurrent reader.
-                #[allow(clippy::disallowed_methods)]
-                std::env::set_var("ANTHROPIC_API_KEY", key);
-            }
-            Ok(_) => {}
-            // A read error here silently leaves the API path keyless with no trace.
-            Err(e) => eprintln!(
-                "[camerata-server] keychain read of ANTHROPIC_API_KEY failed during startup hydration: {e}"
-            ),
-        }
+        // (The production credential store, the OS keychain, was installed at the top of this
+        // function so the provider could be chosen from the GitHub token saved in the app.)
+        // NOTE: the Anthropic API key is deliberately NOT copied into process env here (or
+        // anywhere). Every model client reads it through `credentials::anthropic_api_key`
+        // (credential store first, `ANTHROPIC_API_KEY` env as the fallback) at the moment it
+        // is built, so a key saved in the app takes effect on the next call with no restart
+        // and no process-global env write.
         state
     }
 }
@@ -1615,9 +1654,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/product-export", post(export_product))
         // ── App-wide credential manager ───────────────────────────────────────
         // POST /api/credentials/:name  — store a credential (body: { "value": "…" })
+        // DELETE /api/credentials/:name — remove a saved credential
         // GET  /api/credentials        — list all known credentials with masked values
         .route("/api/credentials", get(list_credentials))
-        .route("/api/credentials/:name", post(set_credential))
+        .route(
+            "/api/credentials/:name",
+            post(set_credential).delete(delete_credential),
+        )
         .with_state(state)
 }
 
@@ -1768,10 +1811,7 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // Background event-ingest pollers (tracker events -> notification feed -> UI
     // toasts). Cadences are env-configurable; see crate::notify. Spawned here, not
     // in `router`, so unit tests that build the router don't start background work.
-    crate::notify::spawn_tracker_poller(
-        state.provider.provider.clone(),
-        state.notifications.clone(),
-    );
+    crate::notify::spawn_tracker_poller(state.provider.clone(), state.notifications.clone());
     crate::notify::spawn_deploy_poller(state.notifications.clone());
 
     // Auto-fire scheduler: runs provisioned + enabled routines when their schedule
@@ -2373,7 +2413,12 @@ async fn spawn_brownfield_dev_run(
             let l3_model = proj.l3_model().to_string();
             let rules_prose = grounding.clone().unwrap_or_default();
             let story_text = format!("{title}\n\n{desc}");
-            let llm: Arc<dyn crate::llm::LlmPort> = Arc::new(state.llm());
+            // The L3 reviewer runs on THIS project's backend (a refused Api project reports the
+            // refusal from the review instead of running on the subscription).
+            let llm: Arc<dyn crate::llm::LlmPort> = match state.llm_for_project(Some(&proj)) {
+                Ok(l) => Arc::new(l),
+                Err(message) => Arc::new(crate::llm::RefusedLlm::new(message)),
+            };
             Some(crate::dev_implement_run::L3ReviewBundle {
                 story_text,
                 rules_prose,
@@ -2418,7 +2463,7 @@ async fn spawn_brownfield_dev_run(
             // The model advisory only runs with a prose contract; otherwise llm=None
             // keeps the gate deterministic-only.
             let llm: Option<Arc<dyn crate::llm::LlmPort>> = if has_contract {
-                Some(Arc::new(state.llm()))
+                Some(state.step_llm_port())
             } else {
                 None
             };
@@ -3693,12 +3738,13 @@ async fn post_clarification(
         req.allow_free_text,
     );
 
-    if state.provider.live {
+    if state.provider.current().live {
         if let Ok(Some(story)) = state.stories.get(&story_id).await {
             if let Some(reference) = story.external_ref.as_ref() {
                 let questions = [req.question.clone()];
                 if let Err(e) = state
                     .provider
+                    .current()
                     .provider
                     .post_clarifying_questions(reference, &questions)
                     .await
@@ -3780,8 +3826,8 @@ async fn answer_clarification(
 /// Which work-tracker provider is active, and whether it is a live external tracker.
 async fn provider_info(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "provider": state.provider.label,
-        "live": state.provider.live,
+        "provider": state.provider.current().label,
+        "live": state.provider.current().live,
     }))
 }
 
@@ -4614,7 +4660,7 @@ struct RescanAlternativesReq {
 /// run). Routes through the SAME compliance-safety gate as the main audit
 /// (`resolve_backend_for_project` -> `Blocked` refuses with the message; `Api`/`Cli` build the
 /// `Llm` on that EXACT resolved transport) and builds its `Llm` via
-/// `from_env_with_backend_and_ledger`, so this endpoint's spend folds into the same cumulative
+/// `onboard::build_llm` (with the key from `credentials::anthropic_api_key`), so this endpoint's spend folds into the same cumulative
 /// ledger as every other model call.
 ///
 /// Also updates this project's stored `last_scan` in place: the rescanned rules' findings
@@ -4735,9 +4781,12 @@ async fn rescan_alternatives_handler(
     // Same session bookkeeping as `audit_repos`: this rescan re-reads client source into model
     // prompts, so the Claude Code sessions it spawns belong on the inspection entry too.
     let model_sessions = crate::llm::SessionSink::new();
-    let llm =
-        crate::llm::Llm::from_env_with_backend_and_ledger(llm_backend, state.usage_ledger.clone())
-            .with_session_sink(model_sessions.clone());
+    let llm = crate::onboard::build_llm(
+        state.credential_store.as_ref(),
+        llm_backend,
+        Some(state.usage_ledger.clone()),
+    )
+    .with_session_sink(model_sessions.clone());
     let (sources, source_notes) = resolve_local_sources(&state, &project.repos);
     run_notes.extend(source_notes);
 
@@ -5315,8 +5364,10 @@ async fn reconcile_project(
 /// GitHub reachability when a token is set so a 401/403/5xx surfaces as a real
 /// error; integrations being absent is reported as "not configured" (a warning,
 /// not an error, in the UI).
-async fn connections_status() -> Json<crate::connections::ConnectionsReport> {
-    Json(crate::connections::probe().await)
+async fn connections_status(
+    State(state): State<AppState>,
+) -> Json<crate::connections::ConnectionsReport> {
+    Json(crate::connections::probe(state.credential_store.as_ref()).await)
 }
 
 /// Request to scan repo(s) for the brownfield audit. Accepts a SET of repos (a
@@ -5897,6 +5948,7 @@ async fn onboard_audit(
     use futures::FutureExt;
     let outcome = std::panic::AssertUnwindSafe(async move {
         let (mut report, manifest) = crate::onboard::audit_repos(
+            state.credential_store.as_ref(),
             &sources,
             &selected,
             notes,
@@ -7075,6 +7127,7 @@ pub(crate) async fn start_audit_job(
             }
 
             let (mut report, manifest) = crate::onboard::audit_repos(
+                state.credential_store.as_ref(),
                 &sources,
                 &selected,
                 notes,
@@ -9765,7 +9818,7 @@ async fn adopt_story(
     Json(req): Json<AdoptReq>,
 ) -> Result<Json<CanonicalStory>, AppError> {
     let reference = ExternalRef {
-        provider: state.provider.provider.kind(),
+        provider: state.provider.current().provider.kind(),
         external_id: req.external_id.clone(),
         container: req.container.clone(),
         url: String::new(),
@@ -9773,6 +9826,7 @@ async fn adopt_story(
     };
     let story = state
         .provider
+        .current()
         .provider
         .ingest_story(&reference)
         .await
@@ -9884,7 +9938,7 @@ async fn decompose_propose(
         .map_err(AppError)?
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("story not found: {story_id}")))?;
     // AI decomposition (grounded children), with the deterministic propose as fallback.
-    let llm = state.llm();
+    let llm = state.step_llm().map_err(backend_refused)?;
     // Decomposition is a NON-FLEET step: model from the active project's per-step config.
     let model = step_model(&state, crate::project::StepKind::Decomposition);
     let grounding = state.project_grounding().await;
@@ -9923,7 +9977,7 @@ async fn suggest_clarifications(
         "Story: {}\n\nDescription: {}",
         story.title, story.description
     );
-    let llm = state.llm();
+    let llm = state.step_llm().map_err(backend_refused)?;
     // Clarification authoring is a NON-FLEET step: model from the active project's per-step
     // config (DEFAULT_MODEL floor only when there is no active project).
     let model = step_model(&state, crate::project::StepKind::Clarification);
@@ -10062,15 +10116,31 @@ async fn draft_routine_prompt(
         "Permission scope: {}\n\nWhat the user wants:\n{}",
         req.scope, req.intent
     );
+    let scaffold = || {
+        Json(crate::routine::DraftPromptResp {
+            prompt: crate::routine::scaffold_prompt(
+                &req.intent,
+                &crate::routine::RoutineScope::from_legacy_string(&req.scope),
+            ),
+            authored_by: "scaffold".to_string(),
+        })
+    };
+    // The step runs on the active project's backend. An `Api` project with no key is REFUSED
+    // (never run on the subscription); the form still gets the deterministic scaffold, which
+    // is labelled `authored_by: scaffold` so it is never mistaken for a model draft.
+    let Ok(llm) = state.step_llm() else {
+        return scaffold();
+    };
+    let llm = std::sync::Arc::new(llm);
     let completer = crate::llm::build_completer(
         &req.model,
         &state.model_registry,
         state.credential_store.as_ref(),
-        std::sync::Arc::new(state.llm()),
+        llm.clone(),
         state.rate_limiter.clone(),
         &state.settings.provider_policy(),
     )
-    .unwrap_or_else(|_| std::sync::Arc::new(state.llm()));
+    .unwrap_or(llm);
     match completer
         .complete(
             crate::llm::LlmRequest::new(user)
@@ -10083,13 +10153,7 @@ async fn draft_routine_prompt(
             prompt: resp.text,
             authored_by: "claude".to_string(),
         }),
-        _ => Json(crate::routine::DraftPromptResp {
-            prompt: crate::routine::scaffold_prompt(
-                &req.intent,
-                &crate::routine::RoutineScope::from_legacy_string(&req.scope),
-            ),
-            authored_by: "scaffold".to_string(),
-        }),
+        _ => scaffold(),
     }
 }
 
@@ -10238,15 +10302,19 @@ async fn chat_escalation(
         None => crate::escalation::chat_system_prompt(&esc),
     };
     let user = crate::escalation::chat_user_prompt(&esc, &req.message);
+    // The review chat is grounded in the active project, so it runs on THAT project's backend
+    // (the chat setting when there is none), not on the keyless CLI floor; `Api` with no key
+    // refuses rather than downgrading.
+    let chat_llm = state.step_llm().map_err(backend_refused)?;
     let completer = crate::llm::build_completer(
         &req.model,
         &state.model_registry,
         state.credential_store.as_ref(),
-        std::sync::Arc::new(state.llm()),
+        std::sync::Arc::new(chat_llm.clone()),
         state.rate_limiter.clone(),
         &state.settings.provider_policy(),
     )
-    .unwrap_or_else(|_| std::sync::Arc::new(state.llm()));
+    .unwrap_or_else(|_| std::sync::Arc::new(chat_llm));
     let reply = match completer
         .complete(
             crate::llm::LlmRequest::new(user)
@@ -10293,7 +10361,7 @@ async fn answer_escalation(
     // Translate the human answer into a structured resume payload via the real LLM seam
     // (model-selectable, with a deterministic fallback inside translate_answer_ai).
     let driver = crate::escalation::LlmTranslator {
-        llm: state.llm(),
+        llm: state.step_llm().map_err(backend_refused)?,
         // MULTI-REPO READ: let the translator read across ALL the active project's repo clones.
         repo_dirs: state.active_repo_dirs(),
     };
@@ -10440,8 +10508,27 @@ async fn delete_routine(
 
 // ── AI: model provider ────────────────────────────────────────────────────────
 
+/// The label (`anthropic/cli` or `anthropic/api`) for the backend the CHAT actually runs on, from
+/// the same selection the chat uses ([`AppState::chat_llm`]), plus the refusal reason when the
+/// setting is `Api` but no key is configured (the label then still names the SETTING, so it is
+/// never claiming a transport the chat will not use).
+fn chat_backend_label(state: &AppState) -> (String, Option<String>) {
+    match state.chat_llm() {
+        Ok(llm) => (llm.backend_label(), None),
+        Err(reason) => {
+            // `Blocked` only arises for the Api setting with no key: name the setting.
+            let transport = match state.settings.chat_backend() {
+                crate::llm::ProjectBackend::Api => "api",
+                crate::llm::ProjectBackend::Cli => "cli",
+            };
+            (format!("anthropic/{transport}"), Some(reason))
+        }
+    }
+}
+
 /// The models the UI offers in its selector.
-async fn list_models() -> Json<serde_json::Value> {
+async fn list_models(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let (backend, backend_error) = chat_backend_label(&state);
     let models: Vec<_> = crate::llm::models()
         .iter()
         .map(|m| {
@@ -10457,7 +10544,8 @@ async fn list_models() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "models": models,
         "default": crate::llm::DEFAULT_MODEL,
-        "backend": crate::llm::Llm::from_env().backend_label(),
+        "backend": backend,
+        "backend_error": backend_error,
     }))
 }
 
@@ -10506,8 +10594,8 @@ async fn refresh_model_registry(
 
 /// `POST /api/models/registry/refresh/anthropic` — (re-)fetch the LIVE Anthropic
 /// `/v1/models` catalog using the Anthropic key stored in the OS keychain (or its
-/// `ANTHROPIC_API_KEY` env fallback — see `try_refresh_anthropic_from_store` /
-/// `crate::credentials::ANTHROPIC_API_KEY`). Feature A's manual refresh trigger, mirroring
+/// `ANTHROPIC_API_KEY` env fallback, both via `credentials::anthropic_api_key` — see
+/// `try_refresh_anthropic_from_store`). Feature A's manual refresh trigger, mirroring
 /// [`refresh_model_registry`] for OpenRouter. Returns `{ attempted: false,
 /// anthropic_count: 0 }` when no Anthropic key is present; on any fetch error the cache is
 /// set to empty (fail-soft) and the returned registry falls back to the hardcoded
@@ -10585,12 +10673,7 @@ async fn get_model_providers(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<ModelProvidersQuery>,
 ) -> Json<ModelProvidersResp> {
-    let api_key = state
-        .credential_store
-        .get(crate::credentials::OPENROUTER_API_KEY)
-        .ok()
-        .flatten()
-        .filter(|k| !k.trim().is_empty());
+    let api_key = crate::credentials::openrouter_api_key(state.credential_store.as_ref());
     state
         .model_registry
         .ensure_safe_providers_loaded(api_key.as_deref(), &q.model_id)
@@ -10768,11 +10851,14 @@ async fn chat(
     let model = resolve_chat_model(Some(&req.model), state.settings.get().chat_model.as_deref());
     // Route to the right LlmPort: OpenRouter for openrouter-provider models, Anthropic for all
     // others. Returns an error when the model is OpenRouter-provider but no key is set.
+    // The Anthropic side runs on the transport chosen in Settings (Chat backend), with the key
+    // resolved now; `Api` with no key refuses rather than silently downgrading to the CLI.
+    let chat_llm = state.chat_llm().map_err(backend_refused)?;
     let completer = crate::llm::build_completer(
         &model,
         &state.model_registry,
         state.credential_store.as_ref(),
-        std::sync::Arc::new(state.llm()),
+        std::sync::Arc::new(chat_llm),
         state.rate_limiter.clone(),
         &state.settings.provider_policy(),
     )
@@ -10797,23 +10883,13 @@ async fn usage(State(state): State<AppState>) -> Json<crate::usage_ledger::Usage
 
 // ── local workspace (checkouts) ───────────────────────────────────────────────
 
-/// Whether an Anthropic API key is available for the `api` backend. The key can live in
-/// EITHER the keychain (the `anthropic_api_key` credential) OR the `ANTHROPIC_API_KEY`
-/// env var. Startup + on-save hydration mirrors the keychain into the env var, so the env
-/// check usually suffices; the keychain is checked too so this is correct even before any
-/// hydration has run.
-fn anthropic_api_key_present(store: &dyn crate::credentials::CredentialStore) -> bool {
-    // Keychain-stored key.
-    if let Ok(Some(k)) = store.get(crate::credentials::ANTHROPIC_API_KEY) {
-        if !k.trim().is_empty() {
-            return true;
-        }
-    }
-    // Env var (back-compat: existing dotenv/CI setups keep working).
-    std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false)
+/// Whether an Anthropic API key is available for the `api` backend: exactly whether
+/// [`crate::credentials::anthropic_api_key`] (the one resolver every model client uses: the key
+/// saved in the app first, the `ANTHROPIC_API_KEY` env var as the fallback) finds one. The gate
+/// and the clients share that function, so "the UI says the key is present" and "the call has
+/// the key" cannot disagree.
+pub(crate) fn anthropic_api_key_present(store: &dyn crate::credentials::CredentialStore) -> bool {
+    crate::credentials::anthropic_api_key(store).is_some()
 }
 
 /// Whether the model-registry picker should be served the LIVE Anthropic `/v1/models`
@@ -11026,7 +11102,9 @@ async fn set_credential(
             })),
         );
     }
-    if req.value.is_empty() {
+    // Whitespace-only counts as empty: the resolver treats a blank value as absent, so saving
+    // one would show "set" in the UI while no model call could ever use it.
+    if req.value.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -11061,14 +11139,18 @@ async fn set_credential(
         &state.model_registry,
         state.credential_store.clone(),
     );
+    // The GitHub provider carries its token: re-select it so a token saved now is used now.
+    reselect_provider_if_github(&name, &state);
     // ROUTES-9: this handler used to `std::env::set_var("ANTHROPIC_API_KEY", ...)` so a
     // freshly-saved key took effect for the `api` backend without a restart. That mutated
     // process-global env from a request-handler thread while worker threads read the same var
     // via `getenv` — undefined behaviour on POSIX, and the concurrent writer made the
-    // credential env-fallback test flaky. The env write is gone: the driver-selection path
-    // now reads the Anthropic key from the credential store (this same store) with an env
-    // fallback for back-compat, so a freshly-saved key takes effect without a restart AND
-    // without touching process env. See `anthropic_api_backend_key`.
+    // credential env-fallback test flaky. The env write is gone, and nothing needs it:
+    // EVERY model client (audit/rescan `Llm`, chat and fleet agent drivers, the live model
+    // list, the gate) reads the key from this same store through
+    // `credentials::anthropic_api_key` when it is built (env only as the fallback), so a
+    // freshly-saved or replaced key takes effect on the next call without a restart AND
+    // without touching process env.
     // Return the masked form so the UI can confirm what was stored.
     let masked = state
         .credential_store
@@ -11080,6 +11162,52 @@ async fn set_credential(
         StatusCode::OK,
         Json(serde_json::json!({ "ok": true, "masked": masked })),
     )
+}
+
+/// The refusal for a model step whose backend setting is `Api` with no key configured: a 409
+/// that carries the reason, never a silent fallback to the CLI.
+fn backend_refused(message: String) -> AppError {
+    AppError::with_status(StatusCode::CONFLICT, anyhow::anyhow!(message))
+}
+
+/// Re-select the work-tracker provider when the `github_token` credential changed (saved or
+/// removed), so the running app uses the new token with no restart. No-op for every other name.
+fn reselect_provider_if_github(name: &str, state: &AppState) {
+    if name == crate::credentials::GITHUB_TOKEN {
+        state.provider.reselect(state.credential_store.as_ref());
+    }
+}
+
+/// `DELETE /api/credentials/:name` — remove a saved credential from the OS keychain.
+///
+/// A credential saved in the app takes precedence over its env var, so this is the way to hand
+/// a credential back to the env fallback (or to remove it entirely). Removing one that is not
+/// set succeeds. Response: `{ "ok": true }`.
+async fn delete_credential(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    use crate::credentials::ALL_CREDENTIALS;
+    if !ALL_CREDENTIALS.contains(&name.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": format!("unknown credential name: {name}")
+            })),
+        );
+    }
+    if let Err(e) = state.credential_store.delete(&name) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": format!("failed to remove credential: {e}")
+            })),
+        );
+    }
+    reselect_provider_if_github(&name, &state);
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
 }
 
 /// `GET /api/credentials` — list all known credentials with their set-status and
@@ -12370,7 +12498,7 @@ async fn uow_author(
     let prior = before.authoring.unwrap_or_default();
     let prompt = build_author_prompt(&prior.chat, &message);
 
-    let llm = state.llm();
+    let llm = state.step_llm().map_err(backend_refused)?;
     // Story authoring is a NON-FLEET step: its model comes from the active project's
     // per-step config (no env/const fallback once a project exists). The project-less edge
     // (no active project) is the only place the DEFAULT_MODEL floor applies. An explicit
@@ -12429,7 +12557,8 @@ async fn uow_author(
             // Token-less / LLM-off: don't crash; record a clear note and keep the draft.
             let note = format!(
                 "AI drafting is unavailable right now ({}). Your message was saved; configure \
-                 a model (CLI or ANTHROPIC_API_KEY) and try again.",
+                 a model (the Claude Code CLI, or an Anthropic API key added in the app under \
+                 Settings, Chat backend, API, or set as ANTHROPIC_API_KEY) and try again.",
                 e
             );
             (
@@ -12800,7 +12929,13 @@ async fn uow_generate_diagram(
         .with_model(model)
         .with_system(system);
 
-    let diagram_text = state.llm().complete(request).await.map_err(AppError)?.text;
+    let diagram_text = state
+        .step_llm()
+        .map_err(backend_refused)?
+        .complete(request)
+        .await
+        .map_err(AppError)?
+        .text;
 
     // Strip any accidental fences the model may have added despite instructions.
     let stripped = strip_mermaid_fence(&diagram_text);
@@ -12976,7 +13111,13 @@ async fn uow_generate_mockup(
         .with_model(model)
         .with_system(system);
 
-    let html = state.llm().complete(request).await.map_err(AppError)?.text;
+    let html = state
+        .step_llm()
+        .map_err(backend_refused)?
+        .complete(request)
+        .await
+        .map_err(AppError)?
+        .text;
 
     // Save as the `mockup.html` attachment (last-writer-wins).
     let updated = state.uow.add_attachment(
@@ -13228,7 +13369,8 @@ async fn design_author(
     if !repo_dirs.is_empty() {
         request = request.with_repo_read_dirs(repo_dirs);
     }
-    let (title, body, reply, mut proposed) = match state.llm().complete(request).await {
+    let design_llm = state.step_llm().map_err(backend_refused)?;
+    let (title, body, reply, mut proposed) = match design_llm.complete(request).await {
         Ok(resp) => {
             let (t, b, r, children) = parse_design_author_response(&resp.text);
             let title = if t.is_empty() {
@@ -13251,7 +13393,8 @@ async fn design_author(
         Err(e) => {
             let note = format!(
                 "AI drafting is unavailable right now ({}). Your message was saved; \
-                 configure a model (CLI or ANTHROPIC_API_KEY) and try again.",
+                 configure a model (the Claude Code CLI, or an Anthropic API key added in the app \
+                 under Settings, Chat backend, API, or set as ANTHROPIC_API_KEY) and try again.",
                 e
             );
             (
@@ -15988,7 +16131,7 @@ async fn development_context(State(state): State<AppState>) -> Json<serde_json::
 /// rule's `version`) on the selection; the drift check compares it to the corpus.
 async fn updates_check(State(state): State<AppState>) -> Json<serde_json::Value> {
     // ── App-version check (the only part that touches the network) ────────────
-    let app_update = check_github_release().await;
+    let app_update = check_github_release(state.credential_store.as_ref()).await;
     Json(updates_payload(&state, app_update.unwrap_or(serde_json::Value::Null)).await)
 }
 
@@ -16026,13 +16169,13 @@ async fn updates_payload(state: &AppState, app_update: serde_json::Value) -> ser
 
 /// Check the latest Camerata release on GitHub and return a JSON object with
 /// the version comparison. Returns `None` on network / auth failure.
-async fn check_github_release() -> Option<serde_json::Value> {
+async fn check_github_release(
+    creds: &dyn crate::credentials::CredentialStore,
+) -> Option<serde_json::Value> {
     let current = env!("CARGO_PKG_VERSION");
     // The GitHub releases API for the camerata-orchestrator repo.
     let url = "https://api.github.com/repos/zernst3/camerata-orchestrator/releases/latest";
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = crate::credentials::github_token(creds);
 
     let client = reqwest::Client::builder()
         .user_agent("camerata-server/1.0")
@@ -25777,6 +25920,7 @@ mod tests {
         );
 
         let (mut report, _manifest) = crate::onboard::audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &selected,
             Vec::new(),
@@ -28245,6 +28389,402 @@ mod tests {
             Ok("sk-ant-sentinel"),
             "the handler must not mutate ANTHROPIC_API_KEY"
         );
+    }
+
+    /// The defect this guards: a key saved in the running app passed the gate but the audit /
+    /// rescan `Llm` (which read ONLY env) failed with "key unset" until a restart. Saving through
+    /// the real endpoint, with env unset, must make the gate say present AND the very next `Llm`
+    /// the server builds carry that key; replacing the key must change the next `Llm` too.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn key_saved_through_the_endpoint_reaches_the_gate_and_the_next_llm() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let llm_key = |state: &AppState| {
+            crate::onboard::build_llm(
+                state.credential_store.as_ref(),
+                crate::llm::Backend::Api,
+                Some(state.usage_ledger.clone()),
+            )
+            .api_key()
+            .map(str::to_string)
+        };
+        assert!(!anthropic_api_key_present(state.credential_store.as_ref()));
+        assert_eq!(llm_key(&state), None);
+
+        for key in ["sk-ant-first", "sk-ant-replacement"] {
+            let resp = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/credentials/anthropic_api_key")
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"value":"{key}"}}"#)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(anthropic_api_key_present(state.credential_store.as_ref()));
+            assert_eq!(llm_key(&state).as_deref(), Some(key));
+        }
+    }
+
+    /// Send one credentials request through the real router and return (status, body).
+    async fn credential_request(
+        state: &AppState,
+        method: &str,
+        name: &str,
+        body: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(format!("/api/credentials/{name}"));
+        if body.is_some() {
+            b = b.header("content-type", "application/json");
+        }
+        let resp = router(state.clone())
+            .oneshot(b.body(Body::from(body.unwrap_or("").to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    /// A key saved in the app beats the env var, so there must be a way to REMOVE it: DELETE
+    /// clears the store and the env fallback takes over again; deleting what is not set is fine.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn delete_credential_removes_the_saved_key_and_hands_back_to_env() {
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let (status, _) = credential_request(
+            &state,
+            "POST",
+            "anthropic_api_key",
+            Some(r#"{"value":"sk-ant-saved"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            crate::credentials::anthropic_api_key(state.credential_store.as_ref()).as_deref(),
+            Some("sk-ant-saved")
+        );
+
+        let (status, json) = credential_request(&state, "DELETE", "anthropic_api_key", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ok"], true);
+        assert!(!state.credential_store.is_set("anthropic_api_key").unwrap());
+        assert_eq!(
+            crate::credentials::anthropic_api_key(state.credential_store.as_ref()).as_deref(),
+            Some("sk-ant-env"),
+            "with the saved key removed the env fallback applies again"
+        );
+
+        // Removing a credential that is not set succeeds; an unknown name is refused.
+        let (status, _) = credential_request(&state, "DELETE", "anthropic_api_key", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, json) = credential_request(&state, "DELETE", "not_a_credential", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["ok"], false);
+    }
+
+    /// A whitespace-only value is not a credential: the resolver would treat it as absent, so
+    /// saving one must be refused instead of showing "set" in the UI.
+    #[tokio::test]
+    async fn set_credential_rejects_whitespace_only_values() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        for body in [r#"{"value":"   "}"#, "{\"value\":\"\\n\\t \"}"] {
+            let (status, json) =
+                credential_request(&state, "POST", "anthropic_api_key", Some(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(json["ok"], false);
+        }
+        assert!(!state.credential_store.is_set("anthropic_api_key").unwrap());
+    }
+
+    /// The same defect class as the Anthropic key: the work-tracker provider carries the GitHub
+    /// token, so a token saved (or removed) in the app must re-select it with no restart.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn saving_or_removing_the_github_token_reselects_the_provider_without_a_restart() {
+        let _t = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
+        let _r = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_REPO");
+        let _o = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_OWNER");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(!state.provider.current().live, "no token: native provider");
+
+        let (status, _) = credential_request(
+            &state,
+            "POST",
+            "github_token",
+            Some(r#"{"value":"ghp_saved_after_launch"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let live = state.provider.current();
+        assert!(
+            live.live,
+            "a token saved now must wire the GitHub provider now"
+        );
+        assert!(live.label.contains("github"), "{}", live.label);
+
+        let (status, _) = credential_request(&state, "DELETE", "github_token", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !state.provider.current().live,
+            "removing the token (no env fallback) goes back to the native provider"
+        );
+
+        // A credential that is not the GitHub token never touches the provider.
+        let before = state.provider.current().label;
+        credential_request(
+            &state,
+            "POST",
+            "openrouter_api_key",
+            Some(r#"{"value":"sk-or-x"}"#),
+        )
+        .await;
+        assert_eq!(state.provider.current().label, before);
+    }
+
+    /// A project whose backend is `backend`, made active.
+    fn state_with_active_project(backend: crate::project::ProjectBackend) -> AppState {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("StepLlm", vec![]).unwrap();
+        state.projects.set_backend(&p.id, backend).unwrap();
+        state
+    }
+
+    /// The model steps of a project (decompose, clarify, authoring, escalation, diagrams, L3 ...)
+    /// run on THAT project's backend, the way the audit does: Cli by default, Api with the key
+    /// resolved now, and Api with no key REFUSED, never run on the subscription.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn step_llm_follows_the_active_projects_backend() {
+        use crate::project::ProjectBackend;
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+
+        // Cli project: a Cli Llm, no key needed.
+        let state = state_with_active_project(ProjectBackend::Cli);
+        assert_eq!(state.step_llm().unwrap().backend_label(), "anthropic/cli");
+
+        // Api project, no key anywhere: refused (and the port form reports the same refusal).
+        let state = state_with_active_project(ProjectBackend::Api);
+        let refusal = state
+            .step_llm()
+            .expect_err("api with no key must be refused");
+        assert!(refusal.contains("no API key"), "{refusal}");
+        let port = state.step_llm_port();
+        let err = futures::executor::block_on(port.complete(crate::llm::LlmRequest::new("x")))
+            .expect_err("the refused port fails every call");
+        assert_eq!(err.to_string(), refusal);
+
+        // Key saved after startup: the next step Llm is Api and carries exactly that key.
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-step")
+            .unwrap();
+        let llm = state.step_llm().unwrap();
+        assert_eq!(llm.backend_label(), "anthropic/api");
+        assert_eq!(llm.api_key(), Some("sk-ant-step"));
+
+        // Switching the PROJECT to Cli switches the step, whatever the chat setting says.
+        let id = state.projects.active().unwrap().id;
+        state
+            .projects
+            .set_backend(&id, ProjectBackend::Cli)
+            .unwrap();
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        assert_eq!(state.step_llm().unwrap().backend_label(), "anthropic/cli");
+    }
+
+    /// With no project at all, the global chat backend setting decides (like the chat).
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn step_llm_without_a_project_uses_the_chat_backend_setting() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(state.projects.active().is_none());
+        assert_eq!(state.step_llm().unwrap().backend_label(), "anthropic/cli");
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        assert!(state.step_llm().is_err(), "api chat setting + no key");
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-nop")
+            .unwrap();
+        let llm = state.step_llm().unwrap();
+        assert_eq!(llm.backend_label(), "anthropic/api");
+        assert_eq!(llm.api_key(), Some("sk-ant-nop"));
+    }
+
+    /// Every step endpoint refuses (409, with the reason) when the active project is Api with no
+    /// key, instead of quietly running on the subscription CLI.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn every_project_step_endpoint_refuses_an_api_project_with_no_key() {
+        use crate::project::ProjectBackend;
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = state_with_active_project(ProjectBackend::Api);
+        let app = router(state.clone());
+        // A UoW (blank) and an escalation to address; a story for the story-keyed steps.
+        let blank = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/uow/blank")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let uow_id = body_json(blank).await["uow_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let esc = state.escalations.raise(
+            crate::escalation::RaiseEscalationReq {
+                subject_kind: crate::escalation::SubjectKind::Uow,
+                checkpoint_id: None,
+                routine_id: uow_id.clone(),
+                reason: "r".to_string(),
+                stopped_for: "s".to_string(),
+                suggestions: vec![],
+                raw_context: String::new(),
+            },
+            "Add login",
+        );
+        let story = camerata_worktracker::InMemoryStoryStore::seeded()
+            .list()
+            .await
+            .unwrap()
+            .remove(0);
+        let story_id = story.id.clone();
+        state.stories.upsert(story).await.unwrap();
+
+        let cases: Vec<(String, &str)> = vec![
+            (format!("/api/stories/{story_id}/decompose"), "{}"),
+            (format!("/api/stories/{story_id}/clarify/suggest"), "{}"),
+            (format!("/api/uow/{uow_id}/author"), r#"{"message":"hi"}"#),
+            (format!("/api/uow/{uow_id}/diagram"), "{}"),
+            (
+                format!("/api/escalations/{}/chat", esc.id),
+                r#"{"message":"hi"}"#,
+            ),
+        ];
+        for (uri, body) in cases {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT, "{uri}");
+        }
+    }
+
+    /// `GET /api/models` reports the backend the chat will actually use (the chat setting and
+    /// the resolved key), not a hard-coded CLI label.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn models_endpoint_backend_label_follows_the_chat_setting() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let fetch = |state: AppState| async move {
+            let resp = router(state)
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/models")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            body_json(resp).await
+        };
+
+        // Default Cli setting: says cli.
+        let json = fetch(state.clone()).await;
+        assert_eq!(json["backend"], "anthropic/cli");
+        assert!(json["backend_error"].is_null());
+
+        // Api setting with a key: says api.
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-label")
+            .unwrap();
+        let json = fetch(state.clone()).await;
+        assert_eq!(json["backend"], "anthropic/api");
+        assert!(json["backend_error"].is_null());
+
+        // Api setting, key removed: still names the setting, and says why it cannot run.
+        state
+            .credential_store
+            .delete(crate::credentials::ANTHROPIC_API_KEY)
+            .unwrap();
+        let json = fetch(state).await;
+        assert_eq!(json["backend"], "anthropic/api");
+        assert!(json["backend_error"]
+            .as_str()
+            .unwrap()
+            .contains("no API key"));
+    }
+
+    /// The Chat backend setting must DO what the UI says: `api` builds an Api `Llm` carrying the
+    /// key resolved now (store first); `cli` builds a Cli `Llm`; `api` with no key refuses
+    /// instead of silently downgrading to the CLI.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn chat_llm_follows_the_chat_backend_setting_and_the_stored_key() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+
+        // Default (Cli): a Cli Llm, no key needed.
+        let llm = state.chat_llm().expect("cli chat needs no key");
+        assert_eq!(llm.backend_label(), "anthropic/cli");
+
+        // Api with no key anywhere: refused, not downgraded.
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        assert!(state.chat_llm().is_err());
+
+        // Key saved after startup: the next chat Llm is Api and carries exactly that key.
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-chat")
+            .unwrap();
+        let llm = state.chat_llm().expect("api chat with a stored key");
+        assert_eq!(llm.backend_label(), "anthropic/api");
+        assert_eq!(llm.api_key(), Some("sk-ant-chat"));
+
+        // Replaced key: the next one carries the new key.
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-chat-2")
+            .unwrap();
+        assert_eq!(state.chat_llm().unwrap().api_key(), Some("sk-ant-chat-2"));
+
+        // Back to Cli: a Cli Llm again (the CLI transport carries the key but never uses it).
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Cli);
+        assert_eq!(state.chat_llm().unwrap().backend_label(), "anthropic/cli");
     }
 
     /// `AppState::github_token()` prefers the credential store over the env var.

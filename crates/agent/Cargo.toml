@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 camerata-core = { path = "../core" }
+# The one `claude` subprocess env policy (scrubs ANTHROPIC_API_KEY); a pure leaf crate.
+camerata-api-types = { path = "../api-types" }
 camerata-liveness = { path = "../liveness" }
 camerata-worktracker = { path = "../worktracker" }
 tokio = { workspace = true }

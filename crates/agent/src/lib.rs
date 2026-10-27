@@ -489,6 +489,8 @@ impl ClaudeCliDriver {
     /// note in `crates/agent/src/generic.rs` for the full disk-safety design.
     fn build_command(&self, role: &Role, task: &str) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new("claude");
+        // The subscription CLI must never inherit an API key from the parent's `.env`.
+        camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
         cmd.args(self.build_args(role, task));
         if let Some(wt) = &self.worktree {
             cmd.current_dir(wt);
@@ -549,6 +551,18 @@ mod tests {
             rule_subset: vec![RuleId("GOV-1".to_string())],
             allowed_paths: vec!["crates/core".to_string()],
         }
+    }
+
+    /// The governed agent runs on the Claude Code SUBSCRIPTION: an `ANTHROPIC_API_KEY` inherited
+    /// from the parent's `.env` must never reach the child (it would silently bill the API).
+    #[test]
+    fn the_claude_subprocess_never_inherits_the_anthropic_api_key() {
+        let driver = ClaudeCliDriver::new("/tmp/mcp.json");
+        let cmd = driver.build_command(&role(), "do the thing");
+        assert!(cmd
+            .as_std()
+            .get_envs()
+            .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v.is_none()));
     }
 
     #[test]

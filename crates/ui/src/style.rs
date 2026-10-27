@@ -6041,6 +6041,15 @@ select:focus {
 .credentials-save-btn {
   flex-shrink: 0;
 }
+.credentials-remove-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: inherit;
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
 
 /* ── Bombe animation settings (inside the Settings panel) ── */
 .bombe-settings-section {

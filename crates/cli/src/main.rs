@@ -137,10 +137,11 @@ enum Command {
         /// Where to write the product-export ZIP. Its parent directory must already exist.
         #[arg(long)]
         export: PathBuf,
-        /// `api` (the Anthropic Messages API, needs `ANTHROPIC_API_KEY`; the DEFAULT, because
+        /// `api` (the Anthropic Messages API; uses the key saved in the app, or
+        /// `ANTHROPIC_API_KEY` as the fallback; the DEFAULT, because
         /// a client inspection runs on a metered, single-party chain) or `cli` (the operator's
         /// own Claude Code subscription, for internal benchmark runs only; choose it
-        /// explicitly) — same compliance-safety setting a project's `backend` field carries.
+        /// explicitly); the same compliance-safety setting a project's `backend` field carries.
         #[arg(long, default_value = "api", value_parser = parse_backend)]
         backend: ProjectBackend,
         /// Use the Anthropic Message Batches path (~50% cheaper; latency is not returned

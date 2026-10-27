@@ -73,10 +73,25 @@ paths you use:
    - **Claude CLI (subscription):** the `claude` CLI on your PATH, logged in. Camerata drives it as
      a subprocess (`ClaudeCliDriver`). No key needed. Set `CAMERATA_LIVE_BUILD=1` to activate the
      live fleet.
-   - **API path (OpenRouter or Anthropic API):** set an **OpenRouter API key** in Settings (or
-     `ANTHROPIC_API_KEY` for direct Anthropic). The `ApiAgentDriver` owns the MCP tool-use loop
+   - **API path (OpenRouter or Anthropic API):** set an **OpenRouter API key** in Settings, or an
+     **Anthropic API key** in Settings (Chat backend, API). The Anthropic key saved in the app is
+     the one every model call uses, in the app and in the `camerata` command line, and a key you
+     save or replace takes effect on the next call with no restart. The `ANTHROPIC_API_KEY`
+     environment variable is only a fallback (for CI and existing `.env` setups) and is used only
+     when no key has been saved in the app. The `ApiAgentDriver` owns the MCP tool-use loop
      in-process and works with any provider the model registry discovers (Claude, and every
      OpenRouter-listed model flagged for tool use).
+
+   Each saved credential row has a **Remove** button. A value saved in the app takes precedence
+   over its environment variable, so remove it there to hand the credential back to the
+   environment. A GitHub token saved or removed in Settings is used immediately, with no restart.
+
+   **macOS Keychain prompt.** The first time Camerata reads a saved credential after you launch
+   it, macOS may ask whether the app may use your confidential information. Choose **Always
+   Allow** so it does not ask again. The app reads the Keychain once per launch and then keeps
+   the values in memory (saving or removing a credential updates both). A build that is not
+   code-signed looks like a new app to macOS after every rebuild, so the prompt returns after
+   each rebuild; a signed build avoids that.
 
    These credentials are global (one keychain entry each, shared by every project); which path is
    actually **active** is a separate choice made **per project**, described in the next section.
@@ -103,10 +118,12 @@ no key required. Switch a project to **API** for client work, since it is metere
 and nameable in a contract, which a subscription running on your own machine is not.
 
 If a project is set to **API** and no Anthropic API key is configured, AI steps on that project
-do not run: the scan/audit page shows an **"AI review did not run"** banner explaining why, and
+(scan, decomposition, clarification questions, story and design authoring, diagrams, mockups,
+escalation chat, code review) do not run and report why; they never fall back to the Claude Code
+subscription: the scan/audit page shows an **"AI review did not run"** banner explaining why, and
 the deterministic security floor still runs on its own. To unblock it, add an **Anthropic API
-Key** in **Settings** (stored in the OS keychain, never in files or the repo) or switch that
-project's backend back to **CLI**.
+Key** in **Settings** (stored in the OS keychain, never in files or the repo; it takes effect on
+the next run, no restart needed) or switch that project's backend back to **CLI**.
 
 **Chat backend (a separate, global setting).** One global toggle in **Settings**, labeled **Chat
 backend**, controls only the project-less chat assistant (the chatbox that lives outside any
@@ -1529,8 +1546,9 @@ cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip>
 ```
 
 Useful flags: `--backend api|cli` (the same API-vs-CLI compliance setting a project carries; `api`, the
-Anthropic API, is the default and needs `ANTHROPIC_API_KEY`: with no key the run fails and tells you to
-add one, it never falls back to the Claude Code subscription; `--backend cli` is an explicit choice for
+Anthropic API, is the default and uses the Anthropic key you saved in the app (Settings), with the
+`ANTHROPIC_API_KEY` environment variable only as the fallback when no key is saved there; with no key
+anywhere the run fails and tells you to add one, it never falls back to the Claude Code subscription; `--backend cli` is an explicit choice for
 internal benchmark runs, and the export's `manifest.json` and `README.txt` record the backend and provider,
 for example `api` / `anthropic`), `--batch` (the Anthropic Message Batches path, roughly half the token cost, results
 arrive asynchronously, needs `--backend api`), `--model` / `--calibration-model`, `--full` to ignore
@@ -1943,9 +1961,13 @@ scopes.
 - **OpenRouter API key**: for API-path model access. Stored in the system keychain; shown masked.
 - **Anthropic API key**: needed by any project whose own Backend is set to **API** (see below), and
   by the chat assistant when the **Chat backend** is set to API. Stored in the system keychain;
-  shown masked.
+  shown masked. A key saved or replaced here is used by the very next call, in the app and in the
+  `camerata` command line, with no restart. The `ANTHROPIC_API_KEY` environment variable is only a
+  fallback when no key is saved here.
 - **GitHub token**: for push, PR, and Issues operations. Stored in the system keychain; shown masked.
-- **Chat backend**: a CLI/API toggle for the project-less **chat assistant only**. It has no effect
+- **Chat backend**: a CLI/API toggle for the project-less **chat assistant only**. API makes the
+  chat call the Anthropic API with your saved key (with no key it refuses rather than falling back
+  to the CLI). It has no effect
   on any project's scan, alternative recommendations, rescans, or governed dev loop: those always
   read that project's own Backend setting, described next.
 - **Bombe animation**: a global ON/OFF toggle and a Play/Pause preview control. ON by default;

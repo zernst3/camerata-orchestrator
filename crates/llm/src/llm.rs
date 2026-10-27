@@ -20,9 +20,10 @@
 //!   NEVER read from an env var — every project-scoped call resolves it from
 //!   `project.backend`, and the project-less chat assistant from `settings.chat_backend`,
 //!   both via [`resolve_backend`], then builds the `Llm` explicitly with
-//!   [`Llm::from_env_with_backend`] (or its ledger-attached sibling). [`Llm::from_env`]
-//!   remains only as a Cli-default construction convenience for hermetic tests and any
-//!   caller with no project/chat context to resolve.
+//!   [`Llm::for_backend`] (or its ledger-attached sibling), passing the Anthropic key it
+//!   resolved with [`crate::credentials::anthropic_api_key`] (credential store first, env
+//!   fallback). [`Llm::from_env`] remains only as a keyless Cli-default construction
+//!   convenience for hermetic tests and any caller that will never make an `api` call.
 //!
 //! Model selected by `CAMERATA_LLM_MODEL`, overridable per call (the research chat).
 
@@ -159,6 +160,9 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
     // nothing (shell tests were fast only because their stdin was a TTY/closed).
     // Redirecting stdin to /dev/null gives an immediate EOF so claude uses the -p arg
     // and responds at once.
+    // The Cli backend is the SUBSCRIPTION path: it must never silently bill the API because an
+    // `ANTHROPIC_API_KEY` from `.env` was inherited into this subprocess.
+    camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
     cmd.kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .arg("-p")
@@ -652,6 +656,42 @@ impl LlmPort for Llm {
         // The inherent `complete_streaming` already takes `&mut (dyn FnMut(&str) + Send)`,
         // so this is a straight pass-through.
         Llm::complete_streaming(self, req, on_delta).await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// An [`LlmPort`] that refuses every call with a fixed message. Used where a model seam must be
+/// handed out but the backend setting forbids running it (the project is set to the API backend
+/// and no key is configured): the step then fails LOUDLY with the reason, instead of silently
+/// downgrading to the Claude Code subscription.
+#[derive(Debug, Clone)]
+pub struct RefusedLlm {
+    message: String,
+}
+
+impl RefusedLlm {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmPort for RefusedLlm {
+    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        Err(anyhow::anyhow!(self.message.clone()))
+    }
+
+    async fn complete_streaming(
+        &self,
+        _req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        Err(anyhow::anyhow!(self.message.clone()))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1183,21 +1223,22 @@ impl std::fmt::Debug for Llm {
 }
 
 impl Llm {
-    /// Build with an EXPLICIT [`Backend`] — no env read for backend selection at all. Vendor
-    /// (`CAMERATA_LLM_VENDOR`, default anthropic), the Anthropic key (`ANTHROPIC_API_KEY`),
-    /// and the default model (`CAMERATA_LLM_MODEL`) still come from env exactly like the old
-    /// `from_env`; only the backend axis moved to an explicit parameter.
+    /// Build with an EXPLICIT [`Backend`] and an EXPLICIT Anthropic key. No env read for
+    /// backend selection and NONE for the key: the caller resolves the key with
+    /// [`crate::credentials::anthropic_api_key`] (credential store first, `ANTHROPIC_API_KEY`
+    /// env only as the fallback) at the moment it builds the client, so a key saved or replaced
+    /// in the app takes effect on the next call with no restart. Only the vendor
+    /// (`CAMERATA_LLM_VENDOR`, default anthropic) and the default model (`CAMERATA_LLM_MODEL`)
+    /// still come from env.
     ///
-    /// This is the constructor every project-scoped or chat-scoped call site uses now
+    /// This is the constructor every project-scoped or chat-scoped call site uses
     /// (`docs/design/2026-09-22_per-project-backend.md`): the caller resolves `Cli`/`Api`
     /// itself — from `project.backend` or `settings.chat_backend` via [`resolve_backend`] —
     /// and passes the resolved [`Backend`] in here. No usage ledger attached (see
-    /// [`Llm::from_env_with_backend_and_ledger`] for the cockpit's recording path).
-    pub fn from_env_with_backend(backend: Backend) -> Self {
+    /// [`Llm::for_backend_and_ledger`] for the cockpit's recording path).
+    pub fn for_backend(backend: Backend, api_key: Option<String>) -> Self {
         let vendor = Vendor::parse(std::env::var("CAMERATA_LLM_VENDOR").ok().as_deref());
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .filter(|k| !k.trim().is_empty());
+        let api_key = api_key.filter(|k| !k.trim().is_empty());
         let default_model = std::env::var("CAMERATA_LLM_MODEL")
             .ok()
             .filter(|m| !m.trim().is_empty())
@@ -1212,24 +1253,25 @@ impl Llm {
         }
     }
 
-    /// Same as [`Llm::from_env_with_backend`] but with the process-global usage ledger
+    /// Same as [`Llm::for_backend`] but with the process-global usage ledger
     /// attached, so every call this instance makes is recorded into the cumulative cockpit
     /// meter. This is the constructor every HTTP handler / feature uses, so ALL LLM call
     /// paths feed one ledger.
-    pub fn from_env_with_backend_and_ledger(
+    pub fn for_backend_and_ledger(
         backend: Backend,
+        api_key: Option<String>,
         ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>,
     ) -> Self {
-        Self::from_env_with_backend(backend).with_ledger(ledger)
+        Self::for_backend(backend, api_key).with_ledger(ledger)
     }
 
-    /// Construction-only convenience for callers that have not yet resolved a per-project or
-    /// chat backend (hermetic tests, and any remaining non-project misc call site): builds
-    /// with [`Backend::Cli`] — the zero-setup default both `project.backend` and
-    /// `settings.chat_backend` share — reading NO backend-selecting env var. Vendor/key/model
-    /// still come from env, same as [`Llm::from_env_with_backend`].
+    /// Construction-only convenience for callers that have no credential store and never make
+    /// an `api` call (hermetic tests, the `backend_label` probe, and the CLI-transport floor
+    /// seam): builds with [`Backend::Cli`] and NO API key, reading no key and no backend-
+    /// selecting env var. The `claude` CLI transport never uses an API key. Anything that may
+    /// run on the `api` backend MUST use [`Llm::for_backend`] with a resolved key instead.
     pub fn from_env() -> Self {
-        Self::from_env_with_backend(Backend::Cli)
+        Self::for_backend(Backend::Cli, None)
     }
 
     /// Same as [`Llm::from_env`] but with the process-global usage ledger attached.
@@ -1455,7 +1497,10 @@ impl Llm {
     /// not a reason to silently answer from a different one.
     async fn complete_api(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
         let key = self.api_key.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("API backend selected but ANTHROPIC_API_KEY is unset")
+            anyhow::anyhow!(
+                "API backend selected but no Anthropic API key is configured; {}",
+                crate::credentials::API_KEY_FIX_HINT
+            )
         })?;
 
         let user_content = cached_user_content(
@@ -1667,7 +1712,7 @@ pub struct BatchResultRow {
 impl Llm {
     /// Submit a batch of requests to the Anthropic Message Batches API. Returns the
     /// `batch_id` + initial counts, or an error if the submission failed. Requires the
-    /// `api` backend and a valid `ANTHROPIC_API_KEY`. The batch processes asynchronously;
+    /// `api` backend and a configured Anthropic API key. The batch processes asynchronously;
     /// poll with [`poll_batch_status`] and fetch results with [`fetch_batch_results`].
     ///
     /// CAP ENFORCEMENT: logs a warning when `items.len() > 100_000` (the API hard cap);
@@ -1681,7 +1726,8 @@ impl Llm {
     pub async fn submit_batch(&self, items: Vec<BatchItem>) -> anyhow::Result<BatchSubmitResult> {
         let key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "Message Batches API requires the `api` backend and ANTHROPIC_API_KEY to be set"
+                "Message Batches API requires the `api` backend and an Anthropic API key; {}",
+                crate::credentials::API_KEY_FIX_HINT
             )
         })?;
         if items.len() > 100_000 {
@@ -1729,10 +1775,12 @@ impl Llm {
     /// hours-long batch must not die because of one bad polling window after the tokens
     /// are already spent — see that function's `poll_batch_until_ended` helper.
     pub async fn poll_batch_status(&self, batch_id: &str) -> anyhow::Result<BatchStatus> {
-        let key = self
-            .api_key
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("batch polling requires ANTHROPIC_API_KEY"))?;
+        let key = self.api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "batch polling requires an Anthropic API key; {}",
+                crate::credentials::API_KEY_FIX_HINT
+            )
+        })?;
         let make_request = || {
             shared_http_client()
                 .get(format!(
@@ -1769,10 +1817,12 @@ impl Llm {
     /// batch has already run to completion (tokens spent) would be a pure waste, so this
     /// retries transient failures rather than surfacing immediately.
     pub async fn fetch_batch_results(&self, batch_id: &str) -> anyhow::Result<Vec<BatchResultRow>> {
-        let key = self
-            .api_key
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("batch result fetch requires ANTHROPIC_API_KEY"))?;
+        let key = self.api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "batch result fetch requires an Anthropic API key; {}",
+                crate::credentials::API_KEY_FIX_HINT
+            )
+        })?;
         let make_request = || {
             shared_http_client()
                 .get(format!(
@@ -1805,7 +1855,10 @@ impl Llm {
     /// completion call would send. Same retry policy as the rest of this API surface.
     pub async fn count_tokens(&self, req: &LlmRequest, model: &str) -> anyhow::Result<u64> {
         let key = self.api_key.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("count_tokens requires the `api` backend and ANTHROPIC_API_KEY")
+            anyhow::anyhow!(
+                "count_tokens requires the `api` backend and an Anthropic API key; {}",
+                crate::credentials::API_KEY_FIX_HINT
+            )
         })?;
         let body = count_tokens_body(req, model);
         let make_request = || {
@@ -2291,16 +2344,13 @@ pub fn build_completer(
 
     match provider.as_str() {
         "openrouter" => {
-            let key = creds
-                .get(crate::credentials::OPENROUTER_API_KEY)
-                .map_err(|e| anyhow::anyhow!("credential store error: {e}"))?
-                .filter(|k| !k.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "model `{model_id}` is an OpenRouter model but OPENROUTER_API_KEY is not \
-                         set — add it via Settings → Credentials before using this model"
-                    )
-                })?;
+            let key = crate::credentials::openrouter_api_key(creds).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "model `{model_id}` is an OpenRouter model but no OpenRouter API key is \
+                     configured; add it in the app (Settings, Credentials) or set \
+                     OPENROUTER_API_KEY before using this model"
+                )
+            })?;
             Ok(std::sync::Arc::new(OpenRouterCompleter {
                 api_key: key,
                 limiter,
@@ -2523,11 +2573,28 @@ mod tests {
 
     #[test]
     #[serial_test::serial(process_env)]
-    fn from_env_with_backend_never_reads_camerata_llm_backend() {
+    fn for_backend_carries_the_explicit_key_and_never_reads_env() {
+        let _env =
+            camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env-must-not-leak");
+        let with_key = Llm::for_backend(Backend::Api, Some("sk-ant-explicit".to_string()));
+        assert_eq!(with_key.api_key(), Some("sk-ant-explicit"));
+        // No explicit key means no key: the constructor never falls back to env itself.
+        assert_eq!(Llm::for_backend(Backend::Api, None).api_key(), None);
+        // Blank is absent.
+        assert_eq!(
+            Llm::for_backend(Backend::Api, Some("  ".to_string())).api_key(),
+            None
+        );
+        assert_eq!(Llm::from_env().api_key(), None);
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn for_backend_never_reads_camerata_llm_backend() {
         // The old env-driven axis is gone: setting CAMERATA_LLM_BACKEND=api must NOT change
         // the explicitly-requested backend on the built `Llm`.
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_LLM_BACKEND", "api");
-        let llm = Llm::from_env_with_backend(Backend::Cli);
+        let llm = Llm::for_backend(Backend::Cli, None);
         assert_eq!(
             llm.backend,
             Backend::Cli,
@@ -3978,6 +4045,21 @@ exit 1
         assert_eq!(args[at + 1], "11111111-2222-4333-8444-555555555555");
         // The prompt rides in the same command, so the id really does name its session.
         assert!(args.iter().any(|a| a == "hello"));
+    }
+
+    /// The Cli (subscription) backend must never inherit the Anthropic API key: a `.env` key in
+    /// the parent would otherwise silently make `claude -p` bill the API.
+    #[test]
+    fn cli_command_removes_the_inherited_anthropic_key_from_the_child_env() {
+        let cmd = build_cli_command(&LlmRequest::new("hi"), "claude-haiku-4-5", "sid");
+        let removed = cmd
+            .as_std()
+            .get_envs()
+            .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v.is_none());
+        assert!(
+            removed,
+            "the child env must explicitly remove ANTHROPIC_API_KEY"
+        );
     }
 
     /// The id the sink records is the id the child process actually received, the cwd is

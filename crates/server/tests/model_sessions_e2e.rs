@@ -65,6 +65,7 @@ async fn scan(dir: &Path, backend: BackendResolution) -> ScanReport {
         .unwrap();
     let sources = vec![("acme/shop".to_string(), dir.to_path_buf())];
     let (report, _manifest) = onboard::audit_repos(
+        &camerata_server::credentials::MemoryCredentialStore::new(),
         &sources,
         &selected(),
         Vec::new(),

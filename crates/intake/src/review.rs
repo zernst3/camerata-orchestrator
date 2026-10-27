@@ -480,6 +480,8 @@ impl RefinementReviewer for ClaudeRefinementReviewer {
         // real codebase while reviewing, not just the inlined digest. No write path is added
         // (no write/exec tool is offered).
         let mut cmd = tokio::process::Command::new("claude");
+        // The subscription CLI must never inherit an API key from the parent's `.env`.
+        camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
         cmd.arg("-p")
             .arg(&prompt)
             .arg("--model")

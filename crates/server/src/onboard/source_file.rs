@@ -56,7 +56,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use camerata_checks::extract::enclosing::{enclosing_block, EnclosingBlock};
 use camerata_checks::extract::highlight::{
-    highlight, highlight_lang_for_path, HighlightStatus, TokenClass,
+    highlight_lang_for_path, highlight_with_budget, HighlightStatus, TokenClass, DEFAULT_BUDGET,
 };
 
 use super::files::MAX_FILE_BYTES;
@@ -84,6 +84,11 @@ pub struct RenderLimits {
     pub prepare: Duration,
     /// Enclosing block and highlighting. Over this the lines are returned plain.
     pub decorate: Duration,
+    /// Test seam: how long each CPU stage sleeps before working, so a test can prove the
+    /// timeouts degrade the response without a genuinely slow input. It travels WITH the limits
+    /// of the one call that sets it (production is always zero), so it cannot slow any other
+    /// test, unlike the process-global it replaces.
+    pub stage_delay: Duration,
 }
 
 impl Default for RenderLimits {
@@ -91,6 +96,7 @@ impl Default for RenderLimits {
         Self {
             prepare: Duration::from_secs(5),
             decorate: Duration::from_secs(2),
+            stage_delay: Duration::ZERO,
         }
     }
 }
@@ -258,7 +264,10 @@ pub(crate) async fn read_rendered(
         let path = path.clone();
         tokio::time::timeout(
             limits.prepare,
-            tokio::task::spawn_blocking(move || prepare(bytes, &path, around)),
+            tokio::task::spawn_blocking(move || {
+                stage_sleep(limits.stage_delay);
+                prepare(bytes, &path, around)
+            }),
         )
         .await
     };
@@ -271,7 +280,10 @@ pub(crate) async fn read_rendered(
     let shared = Arc::new(prepared);
     let job = {
         let (shared, path) = (Arc::clone(&shared), path);
-        tokio::task::spawn_blocking(move || decorate(&shared, &path, around))
+        tokio::task::spawn_blocking(move || {
+            stage_sleep(limits.stage_delay);
+            decorate(&shared, &path, around, DEFAULT_BUDGET)
+        })
     };
     let decorated = match tokio::time::timeout(limits.decorate, job).await {
         Ok(Ok(decorated)) => decorated,
@@ -307,17 +319,10 @@ pub(crate) struct Decorated {
     lines: Vec<Vec<Segment>>,
 }
 
-/// Test seam: milliseconds each CPU stage sleeps before working, so a test can prove the
-/// timeouts degrade the response without needing a genuinely slow input.
-#[cfg(test)]
-pub(crate) static TEST_STAGE_DELAY_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-#[cfg(test)]
-fn test_stage_delay() {
-    let ms = TEST_STAGE_DELAY_MS.load(std::sync::atomic::Ordering::SeqCst);
-    if ms > 0 {
-        std::thread::sleep(Duration::from_millis(ms));
+/// Sleep `delay` on the blocking-pool thread before a CPU stage works (zero in production).
+fn stage_sleep(delay: Duration) {
+    if !delay.is_zero() {
+        std::thread::sleep(delay);
     }
 }
 
@@ -350,8 +355,6 @@ pub(crate) fn prepare(
     rel_path: &str,
     around: Option<usize>,
 ) -> Result<Prepared, Refused> {
-    #[cfg(test)]
-    test_stage_delay();
     let whole = bytes.len() <= MAX_FILE_BYTES;
     let lines = redacted_lines(bytes, MAX_VIEWER_BYTES)?;
 
@@ -371,9 +374,17 @@ pub(crate) fn prepare(
 
 /// The enclosing block of `around` and the highlighted segments of the window. Pure CPU; run on
 /// the blocking pool.
-pub(crate) fn decorate(prepared: &Prepared, rel_path: &str, around: Option<usize>) -> Decorated {
-    #[cfg(test)]
-    test_stage_delay();
+///
+/// `highlight_budget` is the highlighter's own wall-clock allowance (production passes
+/// [`DEFAULT_BUDGET`]); past it the highlight is abandoned and the lines come back plain
+/// (`Skipped`). It is a parameter, not a constant, so a test that asserts the highlighted
+/// outcome can pass a budget no loaded machine can exceed instead of racing a 250 ms clock.
+pub(crate) fn decorate(
+    prepared: &Prepared,
+    rel_path: &str,
+    around: Option<usize>,
+    highlight_budget: Duration,
+) -> Decorated {
     let Prepared {
         lines, from, to, ..
     } = prepared;
@@ -391,7 +402,11 @@ pub(crate) fn decorate(prepared: &Prepared, rel_path: &str, around: Option<usize
         .get(hl_from.saturating_sub(1)..to.min(lines.len()))
         .map(|slice| slice.join("\n"))
         .unwrap_or_default();
-    let highlighted = highlight(highlight_lang_for_path(rel_path), &hl_text);
+    let highlighted = highlight_with_budget(
+        highlight_lang_for_path(rel_path),
+        &hl_text,
+        highlight_budget,
+    );
 
     let mut out = Vec::with_capacity(to.saturating_sub(from) + 1);
     for n in from..=to {
@@ -639,6 +654,13 @@ pub async fn source_file_with(
 mod tests {
     use super::*;
 
+    /// The highlighter's budget in these tests: effectively unbounded. Production uses a
+    /// 250 ms wall-clock budget, which a debug build under a loaded parallel test run can
+    /// exceed (that is what made `a_file_between_the_two_caps_is_windowed_around_the_line`
+    /// flaky: the highlight came back `Skipped`), so a test that asserts the highlighted outcome
+    /// must not race the clock. The over-budget behaviour has its own deterministic tests.
+    const TEST_HIGHLIGHT_BUDGET: Duration = Duration::from_secs(600);
+
     /// `prepare` + `decorate` without the runtime, as one value.
     fn render(
         bytes: Vec<u8>,
@@ -646,7 +668,7 @@ mod tests {
         around: Option<usize>,
     ) -> Result<(Prepared, Decorated), Refused> {
         let prepared = prepare(bytes, path, around)?;
-        let decorated = decorate(&prepared, path, around);
+        let decorated = decorate(&prepared, path, around, TEST_HIGHLIGHT_BUDGET);
         Ok((prepared, decorated))
     }
 
@@ -731,6 +753,23 @@ mod tests {
         assert!(segments("", &[])
             .iter()
             .all(|(c, t)| c.is_none() && t.is_empty()));
+    }
+
+    /// The over-budget path, deterministically: a zero budget ALWAYS abandons the highlight, so
+    /// the lines come back plain and intact with the status `Skipped`, whatever the machine load.
+    #[test]
+    fn a_zero_highlight_budget_always_skips_and_keeps_the_text() {
+        let src = "fn f() {\n    let s = \"x\";\n}\n";
+        let prepared = prepare(src.as_bytes().to_vec(), "src/lib.rs", Some(2)).unwrap();
+        let d = decorate(&prepared, "src/lib.rs", Some(2), Duration::ZERO);
+        assert_eq!(d.highlight, HighlightStatus::Skipped);
+        for n in 0..3 {
+            assert_eq!(text(&d, n), src.lines().nth(n).unwrap());
+        }
+        assert!(d
+            .lines
+            .iter()
+            .all(|segs| segs.iter().all(|(class, _)| class.is_none())));
     }
 
     #[test]

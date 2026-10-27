@@ -26,7 +26,16 @@ fn env_required(key: &str) -> anyhow::Result<String> {
 pub async fn run_worktracker_live() -> anyhow::Result<()> {
     println!("== Camerata live work-tracker round-trip (GitHub) ==\n");
 
-    let token = env_required("CAMERATA_GITHUB_TOKEN")?;
+    // The token saved in the app (Keychain) first, `CAMERATA_GITHUB_TOKEN` only as the fallback.
+    let token = camerata_server::credentials::github_token(
+        &camerata_server::credentials::KeyringCredentialStore,
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "no GitHub token: add it in the app (Settings, Credentials) or set \
+             CAMERATA_GITHUB_TOKEN (see docs/GITHUB_SETUP.md)"
+        )
+    })?;
     let repo_spec = env_required("CAMERATA_GITHUB_REPO")?;
     let issue = env_required("CAMERATA_GITHUB_ISSUE")?;
     let (owner, repo) = repo_spec

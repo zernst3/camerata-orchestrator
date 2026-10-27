@@ -13,9 +13,11 @@
 //! - `openrouter_api_key` — OpenRouter model discovery + API driver.
 //! - `github_token`       — PAT for GitHub issues / PRs / push (replaces env-only
 //!   `CAMERATA_GITHUB_TOKEN`; env var remains as back-compat fallback).
-//! - `anthropic_api_key`  — Anthropic API key for the `api` Claude backend. Hydrated
-//!   into the `ANTHROPIC_API_KEY` env var at startup and on save; the env var remains
-//!   supported as a back-compat fallback.
+//! - `anthropic_api_key`  — Anthropic API key for the `api` Claude backend. Every model
+//!   client reads it through [`anthropic_api_key`] at the moment the client is built (never
+//!   cached, never copied into process env), so a key saved or replaced in the UI takes
+//!   effect on the next call with no restart. The `ANTHROPIC_API_KEY` env var is only the
+//!   fallback (CI and existing `.env` setups).
 //!
 //! # Extension
 //!
@@ -48,6 +50,11 @@ pub trait CredentialStore: Send + Sync {
     /// Retrieve a credential. Returns `None` when not set.
     fn get(&self, name: &str) -> Result<Option<String>, CredentialError>;
 
+    /// Remove a credential. Removing one that is not set is not an error. A credential saved in
+    /// the app takes precedence over its env var ([`resolve_credential`]), so this is the only
+    /// way to hand a credential back to the env fallback.
+    fn delete(&self, name: &str) -> Result<(), CredentialError>;
+
     /// Whether the credential is set (non-empty).
     fn is_set(&self, name: &str) -> Result<bool, CredentialError> {
         Ok(self.get(name)?.is_some())
@@ -77,25 +84,136 @@ pub fn mask_value(v: &str) -> String {
 /// Stores credentials in the OS keychain via the `keyring` crate.
 /// Service name is fixed at `"camerata"` so all credentials live under the same
 /// keychain entry group.
+///
+/// The real platform backend is selected by `keyring` Cargo features, enabled per target in
+/// `crates/llm/Cargo.toml` (`apple-native`, `windows-native`, Secret Service on Linux). With
+/// no backend feature keyring 3 silently uses a non-persistent MOCK store, so the tests below
+/// (`production_keyring_store_is_not_the_mock*`) fail loudly if that ever regresses.
+///
+/// # Process cache (one Keychain prompt per launch)
+///
+/// macOS asks "wants to use your confidential information" on the first Keychain read of every
+/// freshly built, unsigned binary, and reads happen per call on handler threads (a request would
+/// hang on the dialog each time). So reads go through a PROCESS-WIDE cache
+/// ([`CachedCredentialStore`]): the Keychain is read once per credential on first use, `set` and
+/// `delete` write through to the Keychain and update the cache, and every later read is served
+/// from memory. A key saved or replaced in the app still takes effect on the very next call (the
+/// write updates the cache), so no restart is needed. A change made OUTSIDE the app (Keychain
+/// Access, `security`) is not seen until the next launch.
 pub struct KeyringCredentialStore;
 
 const KEYRING_SERVICE: &str = "camerata";
 
+impl KeyringCredentialStore {
+    /// The one process-wide cached view of the `"camerata"` keychain service.
+    fn shared() -> &'static CachedCredentialStore<ServiceKeyringStore> {
+        static SHARED: std::sync::OnceLock<CachedCredentialStore<ServiceKeyringStore>> =
+            std::sync::OnceLock::new();
+        SHARED.get_or_init(|| CachedCredentialStore::new(ServiceKeyringStore::new(KEYRING_SERVICE)))
+    }
+}
+
 impl CredentialStore for KeyringCredentialStore {
     fn set(&self, name: &str, value: &str) -> Result<(), CredentialError> {
-        keyring::Entry::new(KEYRING_SERVICE, name)
+        Self::shared().set(name, value)
+    }
+
+    fn get(&self, name: &str) -> Result<Option<String>, CredentialError> {
+        Self::shared().get(name)
+    }
+
+    fn delete(&self, name: &str) -> Result<(), CredentialError> {
+        Self::shared().delete(name)
+    }
+}
+
+/// A read-through, write-through cache over another store: the inner store is read at most once
+/// per credential (until a read errors, which is never cached), `set` / `delete` write to the
+/// inner store first and update the cache only when that succeeded.
+pub struct CachedCredentialStore<S> {
+    inner: S,
+    cache: Mutex<HashMap<String, Option<String>>>,
+}
+
+impl<S: CredentialStore> CachedCredentialStore<S> {
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<S: CredentialStore> CredentialStore for CachedCredentialStore<S> {
+    fn set(&self, name: &str, value: &str) -> Result<(), CredentialError> {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        self.inner.set(name, value)?;
+        cache.insert(
+            name.to_string(),
+            Some(value.to_string()).filter(|v| !v.is_empty()),
+        );
+        Ok(())
+    }
+
+    fn get(&self, name: &str) -> Result<Option<String>, CredentialError> {
+        // The lock is held across the first inner read on purpose: concurrent first readers
+        // wait for ONE read (one OS prompt) instead of each raising their own.
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = cache.get(name) {
+            return Ok(hit.clone());
+        }
+        let value = self.inner.get(name)?;
+        cache.insert(name.to_string(), value.clone());
+        Ok(value)
+    }
+
+    fn delete(&self, name: &str) -> Result<(), CredentialError> {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        self.inner.delete(name)?;
+        cache.insert(name.to_string(), None);
+        Ok(())
+    }
+}
+
+/// The keychain-backed store for an arbitrary keychain SERVICE name. [`KeyringCredentialStore`]
+/// is this with the fixed `"camerata"` service (every production read and write goes through
+/// this one implementation); it exists separately so a test can exercise the exact same code
+/// against a throwaway service without ever touching the user's real `"camerata"` entries.
+pub struct ServiceKeyringStore {
+    service: &'static str,
+}
+
+impl ServiceKeyringStore {
+    pub const fn new(service: &'static str) -> Self {
+        Self { service }
+    }
+}
+
+impl CredentialStore for ServiceKeyringStore {
+    fn set(&self, name: &str, value: &str) -> Result<(), CredentialError> {
+        keyring::Entry::new(self.service, name)
             .map_err(|e| CredentialError::Keychain(e.to_string()))?
             .set_password(value)
             .map_err(|e| CredentialError::Keychain(e.to_string()))
     }
 
     fn get(&self, name: &str) -> Result<Option<String>, CredentialError> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, name)
+        let entry = keyring::Entry::new(self.service, name)
             .map_err(|e| CredentialError::Keychain(e.to_string()))?;
         match entry.get_password() {
             Ok(v) if !v.is_empty() => Ok(Some(v)),
             Ok(_) => Ok(None),
             Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(CredentialError::Keychain(e.to_string())),
+        }
+    }
+
+    fn delete(&self, name: &str) -> Result<(), CredentialError> {
+        match keyring::Entry::new(self.service, name)
+            .map_err(|e| CredentialError::Keychain(e.to_string()))?
+            .delete_credential()
+        {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(CredentialError::Keychain(e.to_string())),
         }
     }
@@ -127,6 +245,14 @@ impl CredentialStore for MemoryCredentialStore {
     fn get(&self, name: &str) -> Result<Option<String>, CredentialError> {
         let guard = self.map.lock().unwrap_or_else(|e| e.into_inner());
         Ok(guard.get(name).filter(|v| !v.is_empty()).cloned())
+    }
+
+    fn delete(&self, name: &str) -> Result<(), CredentialError> {
+        self.map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+        Ok(())
     }
 }
 
@@ -161,19 +287,99 @@ pub fn validate_name(name: &str) -> Result<(), CredentialError> {
 ///
 /// Used by `AppState::github_token()` (and any future similar helpers) to give
 /// the keychain priority while keeping the env var working for back-compat.
-pub fn resolve(store: &dyn CredentialStore, cred_name: &str, env_var: &str) -> Option<String> {
+///
+/// Private on purpose: only [`resolve_credential`] (and its wrappers) may name an env var, so
+/// the compiler, not a convention, keeps every other module from reading one directly.
+fn resolve(store: &dyn CredentialStore, cred_name: &str, env_var: &str) -> Option<String> {
     // Keychain wins.
     match store.get(cred_name) {
-        Ok(Some(v)) => return Some(v),
-        Ok(None) => {}
-        // A read error (locked keychain, backend failure) must not silently degrade to the
-        // env fallback with no trace — that is undiagnosable. Warn, then fall back.
-        Err(e) => eprintln!(
-            "[camerata-llm] keychain read of `{cred_name}` failed ({e}); falling back to {env_var}"
-        ),
+        Ok(Some(v)) if !v.trim().is_empty() => return Some(v),
+        Ok(_) => {}
+        // A read error (locked keychain, no Secret Service daemon, backend failure) must not
+        // silently degrade to the env fallback with no trace, that is undiagnosable. Warn,
+        // then fall back. Once per credential per process: a missing daemon fails every call.
+        Err(e) => warn_keychain_unavailable_once(cred_name, env_var, &e),
     }
     // Fall back to env var (back-compat: existing CI/dotenv setups keep working).
-    std::env::var(env_var).ok().filter(|v| !v.is_empty())
+    std::env::var(env_var).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// Log "the keychain is unavailable, using the env fallback" the FIRST time per credential per
+/// process, never on every call (a Linux box with no Secret Service daemon fails each read).
+fn warn_keychain_unavailable_once(cred_name: &str, env_var: &str, e: &CredentialError) {
+    static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|p| p.into_inner());
+    if seen.iter().any(|n| n == cred_name) {
+        return;
+    }
+    seen.push(cred_name.to_string());
+    eprintln!(
+        "[camerata-llm] keychain read of `{cred_name}` failed ({e}); falling back to {env_var} \
+         (this is logged once per process)"
+    );
+}
+
+// The env vars that back each credential when the store holds none. PRIVATE: nothing outside
+// this file can name them, so nothing outside this file can read them.
+const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+const OPENROUTER_API_KEY_ENV: &str = "OPENROUTER_API_KEY";
+const GITHUB_TOKEN_ENV: &str = "CAMERATA_GITHUB_TOKEN";
+
+/// The env-var fallback for a known credential name, `None` for an unknown one.
+fn env_var_for(cred_name: &str) -> Option<&'static str> {
+    match cred_name {
+        ANTHROPIC_API_KEY => Some(ANTHROPIC_API_KEY_ENV),
+        OPENROUTER_API_KEY => Some(OPENROUTER_API_KEY_ENV),
+        GITHUB_TOKEN => Some(GITHUB_TOKEN_ENV),
+        _ => None,
+    }
+}
+
+/// THE one rule for every credential (Anthropic key, OpenRouter key, GitHub token): the value
+/// saved in the credential store (the OS keychain, set from the app's Settings) first, the
+/// credential's env var ([`env_var_for`]) only as a fallback (CI, existing `.env` setups).
+/// Blank / whitespace-only values count as absent at both layers. Read it at the moment a
+/// client is built and never cache it, so a credential saved or replaced in the UI takes
+/// effect on the next call with no restart. A name with no env var resolves from the store
+/// alone. The result is the secret itself: never log or print it (use [`mask_value`]).
+pub fn resolve_credential(store: &dyn CredentialStore, cred_name: &str) -> Option<String> {
+    match env_var_for(cred_name) {
+        Some(env_var) => resolve(store, cred_name, env_var),
+        None => store
+            .get(cred_name)
+            .ok()
+            .flatten()
+            .filter(|v| !v.trim().is_empty()),
+    }
+}
+
+/// The OpenRouter API key: [`resolve_credential`] for `openrouter_api_key`.
+pub fn openrouter_api_key(store: &dyn CredentialStore) -> Option<String> {
+    resolve_credential(store, OPENROUTER_API_KEY)
+}
+
+/// The GitHub token: [`resolve_credential`] for `github_token`.
+pub fn github_token(store: &dyn CredentialStore) -> Option<String> {
+    resolve_credential(store, GITHUB_TOKEN)
+}
+
+/// The user-facing fix for a missing Anthropic API key, shared by every error and help text
+/// so the wording cannot drift (no em-dashes in user-facing text).
+pub const API_KEY_FIX_HINT: &str = "add the key in the app (Settings, Chat backend, API) or set \
+     ANTHROPIC_API_KEY (a key saved in the app takes precedence over ANTHROPIC_API_KEY)";
+
+/// THE one rule for which Anthropic API key every model call uses, in the app and the CLI:
+/// the key saved in the credential store (the macOS Keychain, set from the app's Settings)
+/// first; the `ANTHROPIC_API_KEY` env var only as a fallback (CI, existing `.env` setups).
+/// Blank / whitespace-only values count as absent at both layers.
+///
+/// Call this at the moment a client is built and never cache the result: a key saved or
+/// replaced in the UI is then picked up by the next call with no restart. Every non-test read
+/// of `ANTHROPIC_API_KEY` must go through here (a source-scan test enforces it).
+///
+/// The returned value is the secret itself: never log or print it (use [`mask_value`]).
+pub fn anthropic_api_key(store: &dyn CredentialStore) -> Option<String> {
+    resolve_credential(store, ANTHROPIC_API_KEY)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -344,5 +550,370 @@ mod tests {
         let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let token = resolve(s.as_ref(), GITHUB_TOKEN, "CAMERATA_GITHUB_TOKEN");
         assert_eq!(token, None);
+    }
+
+    // ── resolve_credential (all three credentials, one rule) ──────────────────
+
+    /// (credential name, env var) for every credential the app knows.
+    const ALL_THREE: [(&str, &str); 3] = [
+        (ANTHROPIC_API_KEY, "ANTHROPIC_API_KEY"),
+        (OPENROUTER_API_KEY, "OPENROUTER_API_KEY"),
+        (GITHUB_TOKEN, "CAMERATA_GITHUB_TOKEN"),
+    ];
+
+    #[test]
+    fn every_known_credential_has_an_env_fallback() {
+        for name in ALL_CREDENTIALS {
+            assert!(env_var_for(name).is_some(), "{name} has no env fallback");
+        }
+        for (name, env_var) in ALL_THREE {
+            assert_eq!(env_var_for(name), Some(env_var));
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn all_three_credentials_follow_store_then_env_with_blank_as_absent() {
+        for (name, env_var) in ALL_THREE {
+            let s = store();
+            let _unset = camerata_test_env::EnvGuard::remove(env_var);
+            assert_eq!(resolve_credential(s.as_ref(), name), None, "{name}: empty");
+            // Saved after "startup": the next read sees it; replaced: the next read sees that.
+            s.set(name, "store-1").unwrap();
+            assert_eq!(
+                resolve_credential(s.as_ref(), name).as_deref(),
+                Some("store-1")
+            );
+            s.set(name, "store-2").unwrap();
+            assert_eq!(
+                resolve_credential(s.as_ref(), name).as_deref(),
+                Some("store-2")
+            );
+            // Store wins over env.
+            let _env = camerata_test_env::EnvGuard::set(env_var, "env-value");
+            assert_eq!(
+                resolve_credential(s.as_ref(), name).as_deref(),
+                Some("store-2")
+            );
+            // Blank store value falls through to env; blank env is absent.
+            s.set(name, "  ").unwrap();
+            assert_eq!(
+                resolve_credential(s.as_ref(), name).as_deref(),
+                Some("env-value")
+            );
+            let _blank = camerata_test_env::EnvGuard::set(env_var, "  ");
+            assert_eq!(resolve_credential(s.as_ref(), name), None, "{name}: blank");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn thin_wrappers_agree_with_resolve_credential() {
+        let s = store();
+        let _a = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let _o = camerata_test_env::EnvGuard::remove("OPENROUTER_API_KEY");
+        let _g = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
+        s.set(OPENROUTER_API_KEY, "or").unwrap();
+        s.set(GITHUB_TOKEN, "gh").unwrap();
+        assert_eq!(openrouter_api_key(s.as_ref()).as_deref(), Some("or"));
+        assert_eq!(github_token(s.as_ref()).as_deref(), Some("gh"));
+        assert_eq!(anthropic_api_key(s.as_ref()), None);
+    }
+
+    // ── anthropic_api_key (the one resolver) ──────────────────────────────────
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn anthropic_key_comes_from_the_store_with_no_env() {
+        let s = store();
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        assert_eq!(anthropic_api_key(s.as_ref()), None);
+        // Saved AFTER the (hypothetical) startup: the very next read sees it.
+        s.set(ANTHROPIC_API_KEY, "sk-ant-saved").unwrap();
+        assert_eq!(
+            anthropic_api_key(s.as_ref()).as_deref(),
+            Some("sk-ant-saved")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn anthropic_key_replacement_takes_effect_on_the_next_read() {
+        let s = store();
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        s.set(ANTHROPIC_API_KEY, "sk-ant-old").unwrap();
+        assert_eq!(anthropic_api_key(s.as_ref()).as_deref(), Some("sk-ant-old"));
+        s.set(ANTHROPIC_API_KEY, "sk-ant-new").unwrap();
+        assert_eq!(anthropic_api_key(s.as_ref()).as_deref(), Some("sk-ant-new"));
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn anthropic_key_falls_back_to_env_when_store_empty() {
+        let s = store();
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env");
+        assert_eq!(anthropic_api_key(s.as_ref()).as_deref(), Some("sk-ant-env"));
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn anthropic_key_store_wins_over_env() {
+        let s = store();
+        s.set(ANTHROPIC_API_KEY, "sk-ant-store").unwrap();
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env");
+        assert_eq!(
+            anthropic_api_key(s.as_ref()).as_deref(),
+            Some("sk-ant-store")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn anthropic_key_blank_values_count_as_absent() {
+        let s = store();
+        s.set(ANTHROPIC_API_KEY, "   ").unwrap();
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        assert_eq!(anthropic_api_key(s.as_ref()), None);
+        // A blank store value does not shadow a real env key.
+        let _env2 = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env");
+        assert_eq!(anthropic_api_key(s.as_ref()).as_deref(), Some("sk-ant-env"));
+        // And a blank env value is absent too.
+        let _env3 = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "  ");
+        assert_eq!(anthropic_api_key(s.as_ref()), None);
+    }
+
+    // ── the production store must be a REAL keychain, never keyring's mock ────
+
+    /// Compile-time proof that the current platform's real backend is compiled in: these
+    /// modules only exist when the matching keyring feature is enabled. With no backend
+    /// feature keyring 3 falls back to a non-persistent mock and this fails to build.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_keychain_backend_is_compiled_in() {
+        let _: Option<keyring::macos::MacCredential> = None;
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_credential_manager_backend_is_compiled_in() {
+        let _: Option<keyring::windows::WinCredential> = None;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_secret_service_backend_is_compiled_in() {
+        let _: Option<keyring::secret_service::SsCredential> = None;
+    }
+
+    /// Always-on, cross-platform: the workspace lockfile resolves keyring WITH every platform's
+    /// real backend crate. A mock-only keyring depends on `log` and `zeroize` alone.
+    #[test]
+    fn cargo_lock_resolves_keyring_with_real_platform_backends() {
+        let lock =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"))
+                .expect("workspace Cargo.lock must be readable");
+        let block = lock
+            .split("[[package]]")
+            .find(|b| b.contains("name = \"keyring\""))
+            .expect("keyring must be in Cargo.lock");
+        for backend in ["security-framework", "windows-sys", "dbus-secret-service"] {
+            assert!(
+                block.contains(&format!("\"{backend}")),
+                "keyring resolves without `{backend}`: it is running on the non-persistent MOCK store \
+                 on that platform. Enable the platform backend features in crates/llm/Cargo.toml.\n{block}"
+            );
+        }
+    }
+
+    /// A value written through the production keychain implementation must be readable back
+    /// (keyring's mock hands every `Entry` its own empty credential, so a `get` after a `set`
+    /// returns nothing). Uses a THROWAWAY service name, never the user's real `"camerata"`
+    /// entries, and deletes what it wrote. Runs by default on macOS; elsewhere it needs a live
+    /// Secret Service / Credential Manager session, so run it with `cargo test -- --ignored`.
+    #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "needs a real OS keychain session; run with --ignored"
+    )]
+    fn production_keyring_store_is_not_the_mock_round_trip() {
+        const SERVICE: &str = "camerata-keychain-selftest-DELETE-ME";
+        let name = format!("probe-{}", std::process::id());
+        let store = ServiceKeyringStore::new(SERVICE);
+        // A previous crashed run may have left the item behind: start clean.
+        store.delete(&name).unwrap();
+        store.set(&name, "selftest-value").unwrap();
+        let read_back = store.get(&name);
+        // Clean up first so a failed assertion cannot leave the item behind.
+        let _ = store.delete(&name);
+        assert_eq!(
+            read_back.unwrap().as_deref(),
+            Some("selftest-value"),
+            "a value saved to the keychain could not be read back: keyring is on its MOCK store"
+        );
+        assert_eq!(
+            store.get(&name).unwrap(),
+            None,
+            "the throwaway entry must be deleted"
+        );
+    }
+
+    // ── delete + the process cache ────────────────────────────────────────────
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn deleting_a_saved_credential_hands_it_back_to_the_env_fallback() {
+        let s = store();
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env");
+        s.set(ANTHROPIC_API_KEY, "sk-ant-saved").unwrap();
+        assert_eq!(
+            anthropic_api_key(s.as_ref()).as_deref(),
+            Some("sk-ant-saved")
+        );
+        s.delete(ANTHROPIC_API_KEY).unwrap();
+        assert_eq!(anthropic_api_key(s.as_ref()).as_deref(), Some("sk-ant-env"));
+        assert!(!s.is_set(ANTHROPIC_API_KEY).unwrap());
+        // Deleting what is not set is not an error.
+        s.delete(ANTHROPIC_API_KEY).unwrap();
+    }
+
+    /// An inner store that counts how often it is actually read.
+    struct CountingStore {
+        inner: MemoryCredentialStore,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CredentialStore for CountingStore {
+        fn set(&self, name: &str, value: &str) -> Result<(), CredentialError> {
+            self.inner.set(name, value)
+        }
+        fn get(&self, name: &str) -> Result<Option<String>, CredentialError> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.get(name)
+        }
+        fn delete(&self, name: &str) -> Result<(), CredentialError> {
+            self.inner.delete(name)
+        }
+    }
+
+    fn counting() -> (
+        CachedCredentialStore<Arc<CountingStore>>,
+        Arc<CountingStore>,
+    ) {
+        let inner = Arc::new(CountingStore {
+            inner: MemoryCredentialStore::new(),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        (CachedCredentialStore::new(inner.clone()), inner)
+    }
+
+    impl<T: CredentialStore> CredentialStore for Arc<T> {
+        fn set(&self, name: &str, value: &str) -> Result<(), CredentialError> {
+            (**self).set(name, value)
+        }
+        fn get(&self, name: &str) -> Result<Option<String>, CredentialError> {
+            (**self).get(name)
+        }
+        fn delete(&self, name: &str) -> Result<(), CredentialError> {
+            (**self).delete(name)
+        }
+    }
+
+    fn reads(inner: &CountingStore) -> usize {
+        inner.reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[test]
+    fn the_cache_reads_the_backing_store_once_per_credential() {
+        let (cached, inner) = counting();
+        inner.inner.set(ANTHROPIC_API_KEY, "sk-ant-1").unwrap();
+        for _ in 0..5 {
+            assert_eq!(
+                cached.get(ANTHROPIC_API_KEY).unwrap().as_deref(),
+                Some("sk-ant-1")
+            );
+        }
+        assert_eq!(reads(&inner), 1, "later reads must be served from memory");
+        // An absent credential is cached as absent too.
+        for _ in 0..3 {
+            assert_eq!(cached.get(GITHUB_TOKEN).unwrap(), None);
+        }
+        assert_eq!(reads(&inner), 2);
+    }
+
+    #[test]
+    fn set_and_delete_write_through_and_update_the_cache_without_a_restart() {
+        let (cached, inner) = counting();
+        assert_eq!(cached.get(ANTHROPIC_API_KEY).unwrap(), None);
+        cached.set(ANTHROPIC_API_KEY, "sk-ant-new").unwrap();
+        assert_eq!(
+            cached.get(ANTHROPIC_API_KEY).unwrap().as_deref(),
+            Some("sk-ant-new")
+        );
+        assert_eq!(
+            inner.inner.get(ANTHROPIC_API_KEY).unwrap().as_deref(),
+            Some("sk-ant-new"),
+            "the write must reach the backing store"
+        );
+        cached.set(ANTHROPIC_API_KEY, "sk-ant-newer").unwrap();
+        assert_eq!(
+            cached.get(ANTHROPIC_API_KEY).unwrap().as_deref(),
+            Some("sk-ant-newer")
+        );
+        cached.delete(ANTHROPIC_API_KEY).unwrap();
+        assert_eq!(cached.get(ANTHROPIC_API_KEY).unwrap(), None);
+        assert_eq!(inner.inner.get(ANTHROPIC_API_KEY).unwrap(), None);
+        assert_eq!(reads(&inner), 1, "set/delete never trigger a backing read");
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_cache_untouched() {
+        struct FailingWrites;
+        impl CredentialStore for FailingWrites {
+            fn set(&self, _: &str, _: &str) -> Result<(), CredentialError> {
+                Err(CredentialError::Keychain("denied".into()))
+            }
+            fn get(&self, _: &str) -> Result<Option<String>, CredentialError> {
+                Ok(Some("old".into()))
+            }
+            fn delete(&self, _: &str) -> Result<(), CredentialError> {
+                Err(CredentialError::Keychain("denied".into()))
+            }
+        }
+        let cached = CachedCredentialStore::new(FailingWrites);
+        assert!(cached.set(GITHUB_TOKEN, "new").is_err());
+        assert!(cached.delete(GITHUB_TOKEN).is_err());
+        assert_eq!(cached.get(GITHUB_TOKEN).unwrap().as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn a_read_error_is_not_cached() {
+        struct FlakyOnce(std::sync::atomic::AtomicBool);
+        impl CredentialStore for FlakyOnce {
+            fn set(&self, _: &str, _: &str) -> Result<(), CredentialError> {
+                Ok(())
+            }
+            fn get(&self, _: &str) -> Result<Option<String>, CredentialError> {
+                if self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    Err(CredentialError::Keychain("locked".into()))
+                } else {
+                    Ok(Some("v".into()))
+                }
+            }
+            fn delete(&self, _: &str) -> Result<(), CredentialError> {
+                Ok(())
+            }
+        }
+        let cached =
+            CachedCredentialStore::new(FlakyOnce(std::sync::atomic::AtomicBool::new(true)));
+        assert!(cached.get(GITHUB_TOKEN).is_err());
+        assert_eq!(cached.get(GITHUB_TOKEN).unwrap().as_deref(), Some("v"));
+    }
+
+    #[test]
+    fn the_fix_hint_names_both_sources_and_the_precedence() {
+        assert!(API_KEY_FIX_HINT.contains("in the app"));
+        assert!(API_KEY_FIX_HINT.contains("ANTHROPIC_API_KEY"));
+        assert!(API_KEY_FIX_HINT.contains("takes precedence"));
+        assert!(!API_KEY_FIX_HINT.contains('\u{2014}'));
     }
 }

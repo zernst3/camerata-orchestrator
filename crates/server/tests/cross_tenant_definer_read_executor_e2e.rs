@@ -124,6 +124,7 @@ async fn run_fixture_scan(repo_dir: &Path, repo_spec: &str) -> onboard::ScanRepo
     let sources = vec![(repo_spec.to_string(), repo_dir.to_path_buf())];
     let selected = selected_cross_tenant_definer_read_rule();
     let (report, _manifest) = onboard::audit_repos(
+        &camerata_server::credentials::MemoryCredentialStore::new(),
         &sources,
         &selected,
         Vec::new(), // extra_notes

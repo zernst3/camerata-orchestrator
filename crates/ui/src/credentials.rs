@@ -125,6 +125,27 @@ async fn post_credential(name: &str, value: &str) -> Result<String, String> {
     }
 }
 
+/// `DELETE /api/credentials/{name}` — remove a saved credential. A credential saved in the app
+/// takes precedence over its environment variable, so removing it is how a user hands the
+/// credential back to the environment (or clears it altogether).
+async fn delete_credential(name: &str) -> Result<(), String> {
+    let resp = reqwest::Client::new()
+        .delete(format!("{}/api/credentials/{name}", crate::bff_base()))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let json: serde_json::Value = resp.json().await.unwrap_or_default();
+    Err(json["message"]
+        .as_str()
+        .or_else(|| json["error"].as_str())
+        .unwrap_or("unknown error")
+        .to_string())
+}
+
 // ── OpenRouter model-registry refresh (manual UI trigger, 3 of 3) ─────────────
 //
 // The other two triggers (server startup, and right after `POST /api/credentials/
@@ -729,6 +750,7 @@ fn CredentialRow(
 ) -> Element {
     let mut input_val = use_signal(String::new);
     let mut saving = use_signal(|| false);
+    let mut removing = use_signal(|| false);
 
     let badge = if is_set {
         let masked_display = current_masked.as_deref().unwrap_or("(set)").to_string();
@@ -799,6 +821,41 @@ fn CredentialRow(
                         }
                     },
                     if saving() { "Saving…" } else { "Save" }
+                }
+                if is_set {
+                    button {
+                        class: "credentials-remove-btn",
+                        disabled: removing(),
+                        title: "Remove the saved value. A value saved here takes precedence over the environment variable.",
+                        onclick: {
+                            let name = name.clone();
+                            move |_| {
+                                let name = name.clone();
+                                removing.set(true);
+                                spawn(async move {
+                                    match delete_credential(&name).await {
+                                        Ok(()) => {
+                                            push_toast(
+                                                toasts,
+                                                ToastKind::Info,
+                                                "Removed".to_string(),
+                                            );
+                                            on_saved.call(());
+                                        }
+                                        Err(e) => {
+                                            push_toast(
+                                                toasts,
+                                                ToastKind::Error,
+                                                format!("Failed to remove: {e}"),
+                                            );
+                                        }
+                                    }
+                                    removing.set(false);
+                                });
+                            }
+                        },
+                        if removing() { "Removing…" } else { "Remove" }
+                    }
                 }
             }
         }
@@ -873,6 +930,41 @@ mod tests {
         let result = super::post_credential("openrouter_api_key", "sk-secret-123").await;
 
         assert_eq!(result, Ok("sk-s••••".to_string()));
+    }
+
+    // DELETE /api/credentials/{name} — one DELETE to the named path; Ok on 200, the server's
+    // `message` on a failure status.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn delete_credential_sends_delete_and_reports_failures() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/credentials/anthropic_api_key"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/credentials/github_token"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_json(serde_json::json!({ "message": "keychain locked" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        assert_eq!(super::delete_credential("anthropic_api_key").await, Ok(()));
+        assert_eq!(
+            super::delete_credential("github_token").await,
+            Err("keychain locked".to_string())
+        );
     }
 
     // POST with a non-success status — returns Err carrying the server's `message` field.
@@ -1201,6 +1293,10 @@ mod tests {
             html.contains("Enter new value to update"),
             "the is_set placeholder renders; html=\n{html}"
         );
+        assert!(
+            html.contains("Remove"),
+            "a saved credential offers a Remove button; html=\n{html}"
+        );
     }
 
     fn credential_row_unset_harness() -> Element {
@@ -1233,6 +1329,10 @@ mod tests {
         assert!(
             html.contains("Paste value here"),
             "the unset placeholder renders; html=\n{html}"
+        );
+        assert!(
+            !html.contains("Remove"),
+            "nothing is saved, so there is nothing to remove; html=\n{html}"
         );
     }
 

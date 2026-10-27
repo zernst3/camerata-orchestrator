@@ -173,7 +173,8 @@ impl From<String> for InspectError {
 /// `has_api_key` is passed in (rather than this function reading the environment itself) so
 /// callers — including tests — can exercise the api+key / api+no-key / batch branches
 /// deterministically without mutating real process env state. [`run_inspect`] is the only
-/// production caller, and it passes the REAL `ANTHROPIC_API_KEY` presence.
+/// production caller, and it passes the presence the shared resolver finds (the key saved in
+/// the app first, `ANTHROPIC_API_KEY` as the fallback; see [`api_key_present`]).
 pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String> {
     if !args.repo.is_dir() {
         return Err(format!(
@@ -200,7 +201,8 @@ pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String
     }
     if args.batch && !has_api_key {
         return Err(
-            "--batch requires an ANTHROPIC_API_KEY (Message Batches needs the API backend WITH \
+            "--batch requires an Anthropic API key, either the one saved in the app (Settings, \
+             Chat backend, API) or ANTHROPIC_API_KEY (Message Batches needs the API backend WITH \
              a configured key)"
                 .to_string(),
         );
@@ -470,11 +472,31 @@ pub fn format_usage_report(usage: Option<&ActualUsage>, batch: bool) -> String {
 
 /// The real pipeline, parameterized by API-key presence so tests never depend on (or mutate)
 /// process env state — see [`validate_args`]'s doc comment for the same rationale.
-/// [`run_inspect`] is the thin, production-only wrapper that reads `ANTHROPIC_API_KEY` for
-/// real and delegates here.
+/// [`run_inspect`] is the thin, production-only wrapper that resolves the key from the real
+/// Keychain (env fallback) and delegates to the same pipeline.
+///
+/// This entry point builds NO credential store of its own: it hands the pipeline an EMPTY
+/// in-memory one, so a test that injects `has_api_key` never touches the real Keychain. (The
+/// shared resolver still falls back to `ANTHROPIC_API_KEY`, exactly as it does everywhere.)
 pub async fn run_inspect_with_key_presence(
     args: InspectArgs,
     has_api_key: bool,
+) -> Result<InspectOutcome, InspectError> {
+    run_inspect_pipeline(
+        args,
+        has_api_key,
+        &camerata_server::credentials::MemoryCredentialStore::new(),
+    )
+    .await
+}
+
+/// The pipeline body shared by [`run_inspect`] and [`run_inspect_with_key_presence`]. `creds`
+/// is the store the audit's `Llm` reads its Anthropic key from when it is built
+/// (`credentials::anthropic_api_key`), so the key the app saved is the key this run uses.
+async fn run_inspect_pipeline(
+    args: InspectArgs,
+    has_api_key: bool,
+    creds: &dyn camerata_server::credentials::CredentialStore,
 ) -> Result<InspectOutcome, InspectError> {
     validate_args(&args, has_api_key)?;
 
@@ -544,6 +566,7 @@ pub async fn run_inspect_with_key_presence(
     // project-level override exists headlessly, so the model recommends fully automatically —
     // the curation-default state. ──
     let (mut report, manifest) = camerata_server::onboard::audit_repos(
+        creds,
         &sources,
         &selected,
         Vec::new(),
@@ -859,25 +882,43 @@ pub fn require_api_key_for_client_inspection(
     ) {
         return Err(InspectError::Failed(
             "client inspections run on the Anthropic API, but no API key is configured. Add an \
-             Anthropic API key (set ANTHROPIC_API_KEY) and re-run. For an internal benchmark run \
-             only, choose the Claude Code subscription explicitly with `--backend cli`."
+             Anthropic API key in the app (Settings, Chat backend, API) or set ANTHROPIC_API_KEY, \
+             and re-run. For an internal benchmark run only, choose the Claude Code subscription \
+             explicitly with `--backend cli`."
                 .to_string(),
         ));
     }
     Ok(())
 }
 
-/// Production entry point: reads the real `ANTHROPIC_API_KEY` presence from the environment,
-/// requires it for the `api` backend ([`require_api_key_for_client_inspection`]) and delegates
-/// to [`run_inspect_with_key_presence`]. See that function's doc comment, and [`validate_args`]'s,
-/// for why the key check is a separate, injectable parameter.
+/// Whether an Anthropic API key is available to this run: exactly whether the shared resolver
+/// ([`camerata_server::credentials::anthropic_api_key`], the one the app and every model call
+/// use) finds one in `store`, with `ANTHROPIC_API_KEY` as the fallback. The single place the
+/// inspect path decides key presence, so `camerata inspect` uses the key saved in the app.
+pub fn api_key_present(store: &dyn camerata_server::credentials::CredentialStore) -> bool {
+    camerata_server::credentials::anthropic_api_key(store).is_some()
+}
+
+/// Production entry point: resolves the Anthropic key from the REAL Keychain (the one the app's
+/// Settings writes), with `ANTHROPIC_API_KEY` as the fallback, then runs
+/// [`run_inspect_with_store`].
 pub async fn run_inspect(args: InspectArgs) -> Result<InspectOutcome, InspectError> {
-    let has_api_key = std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
-        .is_some();
+    run_inspect_with_store(args, &camerata_server::credentials::KeyringCredentialStore).await
+}
+
+/// [`run_inspect`] with the credential store injected (tests pass an in-memory one so nothing
+/// touches the real Keychain). Requires a key for the `api` backend
+/// ([`require_api_key_for_client_inspection`]) and runs the pipeline with this same store, so
+/// the audit's `Llm` is built with the key the check just found. See
+/// [`run_inspect_with_key_presence`], and [`validate_args`]'s doc comment, for why the key
+/// check is a separate, injectable parameter.
+pub async fn run_inspect_with_store(
+    args: InspectArgs,
+    store: &dyn camerata_server::credentials::CredentialStore,
+) -> Result<InspectOutcome, InspectError> {
+    let has_api_key = api_key_present(store);
     require_api_key_for_client_inspection(args.backend, has_api_key)?;
-    run_inspect_with_key_presence(args, has_api_key).await
+    run_inspect_pipeline(args, has_api_key, store).await
 }
 
 /// Format the final report block `main.rs` prints after a successful run.
@@ -998,6 +1039,85 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let args = base_args(dir.path().to_path_buf(), dir.path().to_path_buf());
         assert!(validate_args(&args, false).is_ok());
+    }
+
+    // ── the shared key resolver (the app-saved key is the key the CLI uses) ───────────
+
+    fn memory_store_with(key: Option<&str>) -> camerata_server::credentials::MemoryCredentialStore {
+        use camerata_server::credentials::CredentialStore;
+        let store = camerata_server::credentials::MemoryCredentialStore::new();
+        if let Some(k) = key {
+            store
+                .set(camerata_server::credentials::ANTHROPIC_API_KEY, k)
+                .unwrap();
+        }
+        store
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn a_key_saved_in_the_app_store_satisfies_the_inspect_gate_with_no_env() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let store = memory_store_with(Some("sk-ant-saved-in-app"));
+        assert!(api_key_present(&store));
+        require_api_key_for_client_inspection(ProjectBackend::Api, api_key_present(&store))
+            .expect("a key in the store must pass the client-inspection gate with env unset");
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn an_empty_or_blank_store_and_no_env_fails_the_inspect_gate_naming_both_fixes() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        for store in [memory_store_with(None), memory_store_with(Some("  "))] {
+            assert!(!api_key_present(&store));
+            let err =
+                require_api_key_for_client_inspection(ProjectBackend::Api, api_key_present(&store))
+                    .expect_err("no key anywhere must fail");
+            let text = err.to_string();
+            assert!(text.contains("in the app"), "{text}");
+            assert!(text.contains("ANTHROPIC_API_KEY"), "{text}");
+            assert!(
+                !text.contains('\u{2014}'),
+                "no em-dash in user-facing text: {text}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn the_env_var_is_only_the_fallback_for_the_inspect_gate() {
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env-only");
+        assert!(api_key_present(&memory_store_with(None)));
+    }
+
+    /// `run_inspect_with_store` is the production path with the store injected: it must gate on
+    /// the STORE's key (no env), failing with the key message when absent and getting past the
+    /// key check (to argument validation) when a key was saved in the app.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn run_inspect_with_store_uses_the_store_key_not_env() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let dir = tempfile::tempdir().unwrap();
+        // A --repo that does not exist: validation fails AFTER the key check passes.
+        let mut args = base_args(dir.path().join("nope"), dir.path().to_path_buf());
+        args.backend = ProjectBackend::Api;
+
+        let err = run_inspect_with_store(args.clone(), &memory_store_with(None))
+            .await
+            .expect_err("no key must fail");
+        assert!(
+            err.to_string().contains("no API key is configured"),
+            "{err}"
+        );
+
+        let err = run_inspect_with_store(args, &memory_store_with(Some("sk-ant-saved")))
+            .await
+            .expect_err("the bogus --repo must still fail");
+        let text = err.to_string();
+        assert!(
+            text.contains("--repo"),
+            "a store key must get past the key gate to argument validation: {text}"
+        );
     }
 
     // ── require_api_key_for_client_inspection ────────────────────────────────────────

@@ -64,6 +64,7 @@ async fn scan(dir: &Path, spec: &str) -> onboard::ScanReport {
     assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
     let sources = vec![(spec.to_string(), dir.to_path_buf())];
     let (report, _manifest) = onboard::audit_repos(
+        &camerata_server::credentials::MemoryCredentialStore::new(),
         &sources,
         &selected(),
         Vec::new(),
