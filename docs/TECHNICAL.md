@@ -878,18 +878,39 @@ Key design points:
   Haiku tier (`long_prompt`) are data on the entry; `rates_for(model, prompt_tokens)`
   returns the per-token rates for a request.
 
-  **Request shape.** Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1 answer HTTP 400
-  to `thinking` (disabled or `budget_tokens`), non-default `temperature` / `top_p` /
-  `top_k`, assistant prefill, and (Fable 5.1, Opus 5.5, Sonnet 5.5) a forced
-  `tool_choice`. Opus 5.5 and Haiku 5.5 default to `medium` effort, so a call that
-  relies on the old `high` default sets `output_config.effort`. All of that is data on
-  the registry entry (`shape`), applied by ONE function,
-  `conform_messages_body(model, &mut body)`, which every Messages request passes
-  through (`Llm::complete_api`, the batch `params`, and the agentic driver in
-  `api_agent_driver.rs`). An id absent from the catalog gets the stripping but no
-  effort. A response with `stop_reason: "refusal"` (HTTP 200, no content) is an error
-  (`refusal_error`), so the pass lands in FAILED PASSES instead of reading as
-  "no findings".
+  **Request shape.** All of the 5.x models answer HTTP 400 to `thinking` with
+  `budget_tokens`, non-default `temperature` / `top_p` / `top_k`, and assistant
+  prefill. They differ on the rest:
+
+  | model | `thinking: disabled` | forced `tool_choice` | effort default |
+  |---|---|---|---|
+  | Fable 5.1, Sonnet 5.5 | rejected (omit it) | rejected | high |
+  | Haiku 5.5 | only at effort high or below | accepted | medium (set to `high`) |
+  | Opus 5.5 | rejected (omit it) | rejected | medium (set to `high`) |
+  | Fable 5 | rejected (omit it) | not documented, so `auto` only | high |
+  | Opus 5 | only at effort high or below | accepted | high |
+  | Sonnet 5 | accepted | accepted | high |
+  | Haiku 4.5 and older | accepted | accepted | n/a (nothing is stripped) |
+
+  All of that is data on the registry entry (`shape`), applied by ONE function,
+  `conform_messages_body(model, &mut body)`, which every Messages body passes
+  through (`Llm::complete_api`, the batch `params`, `count_tokens`, and the agentic
+  driver in `api_agent_driver.rs`; `count_tokens` drops the `output_config` the
+  function adds, since effort cannot change a token count). An effort the caller set
+  is kept. An id absent from the catalog gets the stripping but no effort. The first
+  time the function removes something a caller sent, it logs one `tracing` warning
+  per model and field set.
+
+  **Refusals.** A response with `stop_reason: "refusal"` (HTTP 200, no content) is an
+  error (`ModelRefusal`, via `refusal_error`), so the pass lands in FAILED PASSES
+  instead of reading as "no findings". Batch items keep their per-item reason, the
+  refused call's usage is recorded in the ledger, a refusal mid-way through an agent
+  run ends it with an `INCOMPLETE:` outcome that keeps the cost and the assistant
+  text so far, and the CLI backend treats a `result` event with
+  `stop_reason: "refusal"` the same way (not yet confirmed against a live refusal; see
+  the master sequence ledger). Every pass runner returns each failed pass by name;
+  the scan rounds and the resolution round both disclose them as one FAILED PASSES row
+  per failed pass, with how many passes in the round answered.
 - **Prompt caching + geological layering**: every agent prompt is assembled in a
   strict, prefix-cache-optimal order (static at the top, volatile at the bottom) so
   the cacheable prefix stays byte-identical across calls that differ only in the tail.

@@ -32,8 +32,8 @@ use crate::provider_policy::SafeProviders;
 // fetch types below. Re-exported so every existing `crate::model_registry::X` call site
 // keeps resolving unchanged.
 pub use camerata_api_types::model_registry::{
-    AnthropicRefreshResp, EffortPolicy, LongPromptTier, RefreshResp, RegistryEntry,
-    RegistryEntryStatic, RegistryResp, RequestShapeSpec,
+    AnthropicRefreshResp, DisabledThinking, EffortPolicy, LongPromptTier, RefreshResp,
+    RegistryEntry, RegistryEntryStatic, RegistryResp, RequestShapeSpec,
 };
 
 // ── Static Claude catalog ────────────────────────────────────────────────────
@@ -68,6 +68,7 @@ pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
         // default is already the high we want.
         shape: RequestShapeSpec {
             strict_params: true,
+            disabled_thinking: DisabledThinking::Rejected,
             no_forced_tool_choice: true,
             effort: EffortPolicy::Omit,
         },
@@ -85,7 +86,14 @@ pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
         price_out: 50.0,
         cache_read_price: None,
         long_prompt: None,
-        shape: RequestShapeSpec::LEGACY,
+        // Rejects budget thinking, sampling params, prefill and `thinking: disabled`. Forced
+        // tool_choice is not documented as accepted, so only `auto` is sent.
+        shape: RequestShapeSpec {
+            strict_params: true,
+            disabled_thinking: DisabledThinking::Rejected,
+            no_forced_tool_choice: true,
+            effort: EffortPolicy::Omit,
+        },
     },
     RegistryEntryStatic {
         display: "Opus 5.5",
@@ -101,6 +109,7 @@ pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
         // Defaults to `medium` effort, so every call must ask for `high` explicitly.
         shape: RequestShapeSpec {
             strict_params: true,
+            disabled_thinking: DisabledThinking::Rejected,
             no_forced_tool_choice: true,
             effort: EffortPolicy::SetHigh,
         },
@@ -116,7 +125,14 @@ pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
         price_out: 25.0,
         cache_read_price: None,
         long_prompt: None,
-        shape: RequestShapeSpec::LEGACY,
+        // Rejects budget thinking, sampling params and prefill; accepts `thinking: disabled`
+        // only at effort high or below; accepts forced tool_choice.
+        shape: RequestShapeSpec {
+            strict_params: true,
+            disabled_thinking: DisabledThinking::RejectedAboveHigh,
+            no_forced_tool_choice: false,
+            effort: EffortPolicy::Omit,
+        },
     },
     RegistryEntryStatic {
         display: "Sonnet 5.5",
@@ -131,6 +147,7 @@ pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
         long_prompt: None,
         shape: RequestShapeSpec {
             strict_params: true,
+            disabled_thinking: DisabledThinking::Rejected,
             no_forced_tool_choice: true,
             effort: EffortPolicy::Omit,
         },
@@ -146,7 +163,14 @@ pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
         price_out: 10.0,
         cache_read_price: None,
         long_prompt: None,
-        shape: RequestShapeSpec::LEGACY,
+        // Rejects budget thinking, sampling params and prefill; accepts `thinking: disabled`
+        // and forced tool_choice.
+        shape: RequestShapeSpec {
+            strict_params: true,
+            disabled_thinking: DisabledThinking::Accepted,
+            no_forced_tool_choice: false,
+            effort: EffortPolicy::Omit,
+        },
     },
     RegistryEntryStatic {
         display: "Haiku 5.5",
@@ -166,6 +190,7 @@ pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
         // Defaults to `medium` effort; forced tool_choice is still accepted.
         shape: RequestShapeSpec {
             strict_params: true,
+            disabled_thinking: DisabledThinking::RejectedAboveHigh,
             no_forced_tool_choice: false,
             effort: EffortPolicy::SetHigh,
         },
@@ -188,17 +213,24 @@ pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
 // ── Per-model rates and request shape (pure functions over the catalog) ──────────
 
 /// Find a model's catalog entry. Exact id first; otherwise a dated alias
-/// (`<id>-YYYYMMDD`) resolves to its undated base id, so a pinned snapshot is priced and
-/// shaped like the model it snapshots. `None` for an id the catalog does not know.
+/// (`<id>-YYYYMMDD`) resolves to its undated base id, and an undated id resolves to the one
+/// dated catalog entry that extends it (`claude-haiku-4-5` -> `claude-haiku-4-5-20251001`),
+/// so a pinned snapshot or an alias (as `/v1/models` reports them) is priced and shaped like
+/// the model it names. `None` for an id the catalog does not know.
 pub fn registry_entry_for(model_id: &str) -> Option<&'static RegistryEntryStatic> {
+    fn dated(id: &str) -> Option<&str> {
+        let (base, suffix) = id.rsplit_once('-')?;
+        (suffix.len() == 8 && suffix.bytes().all(|b| b.is_ascii_digit())).then_some(base)
+    }
     if let Some(e) = CLAUDE_REGISTRY_MODELS.iter().find(|m| m.id == model_id) {
         return Some(e);
     }
-    let (base, suffix) = model_id.rsplit_once('-')?;
-    if suffix.len() == 8 && suffix.bytes().all(|b| b.is_ascii_digit()) {
+    if let Some(base) = dated(model_id) {
         return CLAUDE_REGISTRY_MODELS.iter().find(|m| m.id == base);
     }
-    None
+    CLAUDE_REGISTRY_MODELS
+        .iter()
+        .find(|m| dated(m.id) == Some(model_id))
 }
 
 /// Per-token USD rates for one request, resolved for a model and the request's prompt size.
@@ -238,57 +270,43 @@ pub fn rates_for(model_id: &str, prompt_tokens: u64) -> Option<ModelRates> {
     })
 }
 
+/// The shape assumed for a model id the catalog does not know: a model newer than this table
+/// is presumed to be at least as strict as the newest ones, so strip what could 400 and add
+/// nothing (no effort: we cannot know its default).
+const UNKNOWN_MODEL_SHAPE: RequestShapeSpec = RequestShapeSpec {
+    strict_params: true,
+    disabled_thinking: DisabledThinking::Rejected,
+    no_forced_tool_choice: false,
+    effort: EffortPolicy::Omit,
+};
+
 /// THE one place a Messages-API request body is made valid for its model. Every Anthropic
-/// `/v1/messages` (and batch `params`) body is passed through this just before it is sent;
-/// no call site tests a model id itself.
+/// `/v1/messages`, batch `params` and `count_tokens` body is passed through this just before
+/// it is sent; no call site tests a model id itself.
 ///
-/// For a model whose catalog shape is strict (and for any id the catalog does not know, since
-/// the safe assumption about a model newer than this table is that it is strict too), removes
-/// what the API answers with HTTP 400:
-/// - `thinking` (both `{type:"disabled"}` and `{type:"enabled", budget_tokens}`),
-/// - `temperature`, `top_p`, `top_k`,
-/// - a trailing assistant message (prefill).
+/// Driven by the model's catalog [`RequestShapeSpec`] (an unknown id gets
+/// [`UNKNOWN_MODEL_SHAPE`]). Removes what the API answers with HTTP 400:
+/// - `thinking: {type:"enabled", budget_tokens}`, `temperature`, `top_p`, `top_k` and a
+///   trailing assistant message (prefill), where `strict_params`;
+/// - `thinking: {type:"disabled"}`, where the model rejects it (at any effort, or only above
+///   `high`, per [`DisabledThinking`]);
+/// - a forced `tool_choice` (`any` / `tool`), replaced by `{type:"auto"}`, where
+///   `no_forced_tool_choice`.
 ///
-/// For a model that rejects forced tool use, a `tool_choice` of `any` / `tool` is replaced by
-/// `{type:"auto"}`. Where the model's default effort is `medium`, sets
-/// `output_config.effort = "high"` (merging into any existing `output_config`), so a call
-/// keeps the depth it was tuned for. Idempotent.
+/// Where the model's default effort is `medium`, sets `output_config.effort = "high"` unless
+/// the caller already chose one (merging into any existing `output_config`). Idempotent.
+/// Logs one `tracing` warning per (model, what was stripped) per process when it removes
+/// something a caller sent, since that means a call site is building a shape this model
+/// cannot take.
 pub fn conform_messages_body(model_id: &str, body: &mut serde_json::Value) {
-    let (strict, no_forced_tool, effort) = match registry_entry_for(model_id) {
-        Some(e) => (
-            e.shape.strict_params,
-            e.shape.no_forced_tool_choice,
-            e.shape.effort,
-        ),
-        // Unknown id: strip what could 400, add nothing.
-        None => (true, false, EffortPolicy::Omit),
-    };
+    let shape = registry_entry_for(model_id).map_or(UNKNOWN_MODEL_SHAPE, |e| e.shape);
     let Some(obj) = body.as_object_mut() else {
         return;
     };
-    if strict {
-        for key in ["thinking", "temperature", "top_p", "top_k"] {
-            obj.remove(key);
-        }
-        if let Some(msgs) = obj.get_mut("messages").and_then(|m| m.as_array_mut()) {
-            if msgs.last().and_then(|m| m["role"].as_str()) == Some("assistant") {
-                msgs.pop();
-            }
-        }
-    }
-    if no_forced_tool {
-        let forced = match obj.get("tool_choice") {
-            Some(tc) => matches!(
-                tc.get("type").and_then(|t| t.as_str()),
-                Some("any" | "tool")
-            ),
-            None => false,
-        };
-        if forced {
-            obj.insert("tool_choice".into(), serde_json::json!({"type": "auto"}));
-        }
-    }
-    if effort == EffortPolicy::SetHigh {
+    let mut stripped: Vec<&'static str> = Vec::new();
+
+    // Effort first: the disabled-thinking rule below depends on it.
+    if shape.effort == EffortPolicy::SetHigh {
         let cfg = obj
             .entry("output_config")
             .or_insert_with(|| serde_json::json!({}));
@@ -298,6 +316,83 @@ pub fn conform_messages_body(model_id: &str, body: &mut serde_json::Value) {
                 .or_insert_with(|| serde_json::json!("high"));
         }
     }
+
+    if let Some(ty) = obj
+        .get("thinking")
+        .map(|t| t.get("type").and_then(|t| t.as_str()).map(str::to_owned))
+    {
+        let remove = match ty.as_deref() {
+            Some("disabled") => match shape.disabled_thinking {
+                DisabledThinking::Accepted => false,
+                DisabledThinking::Rejected => true,
+                DisabledThinking::RejectedAboveHigh => {
+                    let effort = obj
+                        .get("output_config")
+                        .and_then(|c| c.get("effort"))
+                        .and_then(|e| e.as_str());
+                    !matches!(effort, None | Some("low" | "medium" | "high"))
+                }
+            },
+            Some("adaptive") => false,
+            // `enabled` + `budget_tokens`, or a type this table has never heard of.
+            _ => shape.strict_params,
+        };
+        if remove {
+            obj.remove("thinking");
+            stripped.push("thinking");
+        }
+    }
+    if shape.strict_params {
+        for key in ["temperature", "top_p", "top_k"] {
+            if obj.remove(key).is_some() {
+                stripped.push(key);
+            }
+        }
+        if let Some(msgs) = obj.get_mut("messages").and_then(|m| m.as_array_mut()) {
+            if msgs.last().and_then(|m| m["role"].as_str()) == Some("assistant") {
+                msgs.pop();
+                stripped.push("assistant prefill");
+            }
+        }
+    }
+    if shape.no_forced_tool_choice {
+        let forced = obj.get("tool_choice").is_some_and(|tc| {
+            matches!(
+                tc.get("type").and_then(|t| t.as_str()),
+                Some("any" | "tool")
+            )
+        });
+        if forced {
+            obj.insert("tool_choice".into(), serde_json::json!({"type": "auto"}));
+            stripped.push("forced tool_choice");
+        }
+    }
+
+    if !stripped.is_empty() {
+        let _ = warn_stripped_once(model_id, &stripped);
+    }
+}
+
+/// Emit the "a caller sent something this model rejects" warning once per (model, fields).
+/// Returns whether this call was the first for that key (and so emitted it).
+fn warn_stripped_once(model_id: &str, stripped: &[&'static str]) -> bool {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let key = format!("{model_id}/{}", stripped.join(","));
+    let first = SEEN
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|mut seen| seen.insert(key))
+        .unwrap_or(false);
+    if first {
+        tracing::warn!(
+            model = model_id,
+            stripped = ?stripped,
+            "request carried fields this model rejects; removed before sending"
+        );
+    }
+    first
 }
 
 /// Heuristic: does this model support prompt caching?
@@ -894,7 +989,7 @@ struct AnthropicModelRaw {
 /// account, ahead of Camerata's own hardcoded-list update) — the caller marks the price
 /// unknown rather than guessing or defaulting to `0.0`-as-if-free.
 fn price_join_for_claude_id(id: &str) -> Option<&'static RegistryEntryStatic> {
-    CLAUDE_REGISTRY_MODELS.iter().find(|m| m.id == id)
+    registry_entry_for(id)
 }
 
 impl AnthropicModelRaw {
@@ -2618,17 +2713,142 @@ mod tests {
         }
     }
 
+    fn with_thinking(ty: serde_json::Value, effort: Option<&str>) -> serde_json::Value {
+        let mut b = hostile_body();
+        b["thinking"] = ty;
+        if let Some(e) = effort {
+            b["output_config"] = serde_json::json!({ "effort": e });
+        }
+        b
+    }
+
+    fn disabled() -> serde_json::Value {
+        serde_json::json!({"type": "disabled"})
+    }
+
+    /// Fable 5: rejects budget thinking, sampling params, prefill AND `thinking: disabled`
+    /// (omit instead); only `auto` tool_choice is sent.
     #[test]
-    fn conform_leaves_legacy_models_untouched() {
-        for id in [
-            "claude-opus-5",
-            "claude-sonnet-5",
-            "claude-haiku-4-5-20251001",
-        ] {
+    fn fable_5_strips_exactly_what_it_rejects() {
+        let mut b = hostile_body();
+        conform_messages_body("claude-fable-5", &mut b);
+        for k in ["thinking", "temperature", "top_p", "top_k"] {
+            assert!(b.get(k).is_none(), "{k}");
+        }
+        assert_eq!(b["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(b["tool_choice"], serde_json::json!({"type": "auto"}));
+        let mut d = with_thinking(disabled(), None);
+        conform_messages_body("claude-fable-5", &mut d);
+        assert!(d.get("thinking").is_none(), "disabled is omitted, not sent");
+    }
+
+    /// Opus 5: rejects budget thinking, sampling params and prefill; ACCEPTS forced
+    /// tool_choice; accepts `thinking: disabled` only at effort high or below.
+    #[test]
+    fn opus_5_strips_exactly_what_it_rejects() {
+        let mut b = hostile_body();
+        conform_messages_body("claude-opus-5", &mut b);
+        for k in ["thinking", "temperature", "top_p", "top_k"] {
+            assert!(b.get(k).is_none(), "{k}");
+        }
+        assert_eq!(b["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            b["tool_choice"]["type"], "tool",
+            "forced tool_choice is accepted"
+        );
+        for effort in [None, Some("low"), Some("medium"), Some("high")] {
+            let mut d = with_thinking(disabled(), effort);
+            conform_messages_body("claude-opus-5", &mut d);
+            assert_eq!(
+                d["thinking"],
+                disabled(),
+                "disabled kept at effort {effort:?}"
+            );
+        }
+        for effort in ["xhigh", "max"] {
+            let mut d = with_thinking(disabled(), Some(effort));
+            conform_messages_body("claude-opus-5", &mut d);
+            assert!(d.get("thinking").is_none(), "disabled dropped at {effort}");
+        }
+    }
+
+    /// Sonnet 5: rejects budget thinking, sampling params and prefill; ACCEPTS
+    /// `thinking: disabled` and forced tool_choice.
+    #[test]
+    fn sonnet_5_strips_exactly_what_it_rejects() {
+        let mut b = hostile_body();
+        conform_messages_body("claude-sonnet-5", &mut b);
+        for k in ["thinking", "temperature", "top_p", "top_k"] {
+            assert!(b.get(k).is_none(), "{k}");
+        }
+        assert_eq!(b["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(b["tool_choice"]["type"], "tool");
+        let mut d = with_thinking(disabled(), Some("max"));
+        conform_messages_body("claude-sonnet-5", &mut d);
+        assert_eq!(d["thinking"], disabled());
+    }
+
+    /// Haiku 5.5 accepts `thinking: disabled` at effort high (the effort we set) but not above.
+    #[test]
+    fn haiku_5_5_keeps_disabled_thinking_only_up_to_high_effort() {
+        let mut d = with_thinking(disabled(), None);
+        d.as_object_mut().unwrap().remove("output_config");
+        conform_messages_body("claude-haiku-5-5", &mut d);
+        assert_eq!(d["output_config"]["effort"], "high");
+        assert_eq!(d["thinking"], disabled());
+        let mut hi = with_thinking(disabled(), Some("xhigh"));
+        conform_messages_body("claude-haiku-5-5", &mut hi);
+        assert!(hi.get("thinking").is_none());
+    }
+
+    /// The other three newest models reject disabled thinking at any effort.
+    #[test]
+    fn newest_models_reject_disabled_thinking_outright() {
+        for id in ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"] {
+            let mut d = with_thinking(disabled(), Some("low"));
+            conform_messages_body(id, &mut d);
+            assert!(d.get("thinking").is_none(), "{id}");
+        }
+    }
+
+    /// Models older than the 5.x line are not touched at all.
+    #[test]
+    fn conform_leaves_4x_models_untouched() {
+        for id in ["claude-haiku-4-5-20251001", "claude-haiku-4-5"] {
             let mut b = hostile_body();
             conform_messages_body(id, &mut b);
             assert_eq!(b, hostile_body(), "{id} must be passed through unchanged");
         }
+    }
+
+    #[test]
+    fn undated_and_dated_ids_resolve_to_the_same_entry_and_price() {
+        let dated = registry_entry_for("claude-haiku-4-5-20251001").unwrap();
+        let undated = registry_entry_for("claude-haiku-4-5").unwrap();
+        assert_eq!(dated.id, undated.id);
+        assert!(price_join_for_claude_id("claude-haiku-4-5").is_some());
+        assert!(rates_for("claude-haiku-4-5", 10).is_some());
+        // A dated snapshot of a model whose catalog id is undated also resolves.
+        assert_eq!(
+            registry_entry_for("claude-sonnet-5-20261001").unwrap().id,
+            "claude-sonnet-5"
+        );
+        // A near-miss id does not.
+        assert!(registry_entry_for("claude-haiku-4").is_none());
+    }
+
+    #[test]
+    fn stripping_warns_once_per_model_and_field_set() {
+        let model = "claude-warn-once-probe";
+        assert!(warn_stripped_once(model, &["thinking"]), "first time warns");
+        assert!(
+            !warn_stripped_once(model, &["thinking"]),
+            "repeat is silent"
+        );
+        assert!(
+            warn_stripped_once(model, &["thinking", "temperature"]),
+            "a different field set warns again"
+        );
     }
 
     #[test]

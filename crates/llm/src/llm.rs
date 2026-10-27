@@ -546,7 +546,7 @@ async fn read_cli_stream(
                                 // ABSENT `result` field is weaker evidence: when real
                                 // content already streamed, that content IS the answer, so
                                 // defer to the SALVAGE rule below rather than discard it.
-                                let fatal = v["is_error"].as_bool() == Some(true);
+                                let fatal = v["is_error"].as_bool() == Some(true) || is_refusal(&e);
                                 result_failure = Some((e, fatal));
                             }
                         }
@@ -916,11 +916,28 @@ fn messages_response(msg: &serde_json::Value, model: &str, backend: &str) -> Llm
 /// Returning an error instead makes the pass a FAILED PASS (disclosed, export incomplete).
 /// `None` for any other stop reason.
 pub fn refusal_error(msg: &serde_json::Value) -> Option<anyhow::Error> {
-    (msg["stop_reason"].as_str() == Some("refusal")).then(|| {
-        anyhow::anyhow!(
-            "model refused the request (stop_reason: refusal); this pass produced no answer"
+    (msg["stop_reason"].as_str() == Some("refusal")).then(|| anyhow::Error::new(ModelRefusal))
+}
+
+/// The typed error behind a refusal, so a caller that must react differently to "the model
+/// declined" than to "the call broke" (the agentic loop keeps its partial work on the first)
+/// can tell them apart with [`is_refusal`] instead of matching message text.
+#[derive(Debug)]
+pub struct ModelRefusal;
+
+impl std::fmt::Display for ModelRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "model refused the request (stop_reason: refusal); this pass produced no answer",
         )
-    })
+    }
+}
+
+impl std::error::Error for ModelRefusal {}
+
+/// Whether `e` (or anything it wraps) is a [`ModelRefusal`].
+pub fn is_refusal(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<ModelRefusal>())
 }
 
 fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>, u64, u64) {
@@ -937,6 +954,12 @@ fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>, u64, u6
 /// (execution error, max-turns abort, etc.) or omit `result` entirely; accepting that as a
 /// successful empty completion masks a backend failure as a low-quality result, so bail.
 fn cli_result_text(v: &serde_json::Value) -> anyhow::Result<&str> {
+    // The CLI's `result` event carries the final `stop_reason` of the run. A model REFUSAL
+    // can arrive with `is_error:false` and prose in `result`, which would parse as a clean
+    // "no findings" pass; the explicit stop reason is the signal (no text heuristic).
+    if v["stop_reason"].as_str() == Some("refusal") {
+        return Err(anyhow::Error::new(ModelRefusal));
+    }
     if v["is_error"].as_bool() == Some(true) {
         anyhow::bail!(
             "claude CLI returned is_error=true (subtype {}): {}",
@@ -956,10 +979,7 @@ fn cli_result_text(v: &serde_json::Value) -> anyhow::Result<&str> {
 /// [`crate::model_registry::CLAUDE_REGISTRY_MODELS`] (the live registry — see [`models`]'s
 /// doc comment for why this must not be a second, independently-maintained price list).
 fn price_for(model_id: &str) -> Option<(f64, f64)> {
-    crate::model_registry::CLAUDE_REGISTRY_MODELS
-        .iter()
-        .find(|m| m.id == model_id)
-        .map(|m| (m.price_in, m.price_out))
+    crate::model_registry::registry_entry_for(model_id).map(|m| (m.price_in, m.price_out))
 }
 
 /// Compute the dollar cost from token usage and list price. `input` folds in cache-read and
@@ -1534,10 +1554,23 @@ impl Llm {
         }
         let v: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse API JSON: {e}"))?;
-        if let Some(refusal) = refusal_error(&v) {
+        self.api_response_or_refusal(&v, model)
+    }
+
+    /// Turn a parsed Messages response into the call's result. A refusal is an `Err`, but a
+    /// refused call is still BILLED, so its usage is folded into the ledger first
+    /// (`complete` only records successes).
+    fn api_response_or_refusal(
+        &self,
+        v: &serde_json::Value,
+        model: &str,
+    ) -> anyhow::Result<LlmResponse> {
+        let resp = messages_response(v, model, "api");
+        if let Some(refusal) = refusal_error(v) {
+            self.ledger_record(&resp);
             return Err(refusal);
         }
-        Ok(messages_response(&v, model, "api"))
+        Ok(resp)
     }
 }
 
@@ -1649,6 +1682,13 @@ fn count_tokens_body(req: &LlmRequest, model: &str) -> serde_json::Value {
     });
     if let Some(system) = &req.system {
         body["system"] = serde_json::json!(system);
+    }
+    // Same conformer as every other body (one path), then drop the one thing it adds that
+    // cannot change a token count: `output_config.effort` is a generation setting, and this
+    // endpoint only needs the token-bearing content.
+    crate::model_registry::conform_messages_body(model, &mut body);
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("output_config");
     }
     body
 }
@@ -1989,20 +2029,38 @@ pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultR
     Ok(rows)
 }
 
-/// Build a `custom_id -> LlmResponse` map from a flat list of `BatchResultRow`s (the
-/// unordered JSONL stream from [`Llm::fetch_batch_results`]). Items whose result was an
-/// error (no `response`) are absent from the map, so the caller's reassembler can detect
-/// which (chunk, batch) pairs failed and handle them (log, skip, surface as partial).
+/// The batch results keyed by `custom_id`: the answers, and the per-item reason for every
+/// item that has none (errored, expired, canceled, or REFUSED).
+#[derive(Debug, Default)]
+pub struct BatchResults {
+    pub responses: std::collections::HashMap<String, LlmResponse>,
+    /// `custom_id -> reason` for each row without a response. A caller that finds an item in
+    /// neither map reports it as missing from the results; one that finds it here reports the
+    /// real reason (a refusal reads as a refusal).
+    pub errors: std::collections::HashMap<String, String>,
+}
+
+/// Build the `custom_id -> LlmResponse` map (and the `custom_id -> reason` map for failed
+/// items) from a flat list of `BatchResultRow`s (the unordered JSONL stream from
+/// [`Llm::fetch_batch_results`]).
 ///
 /// This is the KEY STEP that undoes the unordered delivery: the caller assigned
 /// deterministic `custom_id`s of the form `c{ci}-b{bi}` when building the batch, and this
-/// map lets it look up each (ci, bi) pair's response in O(1).
-pub fn reassemble_batch_results(
-    rows: Vec<BatchResultRow>,
-) -> std::collections::HashMap<String, LlmResponse> {
-    rows.into_iter()
-        .filter_map(|r| r.response.map(|resp| (r.custom_id, resp)))
-        .collect()
+/// lets it look up each (ci, bi) pair's outcome in O(1).
+pub fn reassemble_batch_results(rows: Vec<BatchResultRow>) -> BatchResults {
+    let mut out = BatchResults::default();
+    for r in rows {
+        match (r.response, r.error) {
+            (Some(resp), _) => {
+                out.responses.insert(r.custom_id, resp);
+            }
+            (None, Some(err)) => {
+                out.errors.insert(r.custom_id, err);
+            }
+            (None, None) => {}
+        }
+    }
+    out
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -3147,7 +3205,13 @@ malformed line, not json
                 error: None,
             },
         ];
-        let map = reassemble_batch_results(rows);
+        let results = reassemble_batch_results(rows);
+        assert_eq!(
+            results.errors.get("c1-b0").map(String::as_str),
+            Some("limit exceeded"),
+            "the error row's reason is kept"
+        );
+        let map = results.responses;
         assert_eq!(map.len(), 2, "two succeeded rows in map");
         assert!(map.contains_key("c0-b0"));
         assert!(map.contains_key("c0-b1"));
@@ -3855,6 +3919,86 @@ exit 1
         assert_eq!(resp.text, "half an answer");
     }
 
+    /// A refused call is billed: its usage reaches the ledger even though the call is an `Err`.
+    #[test]
+    fn a_refused_api_call_is_recorded_in_the_ledger_before_it_fails() {
+        let ledger = std::sync::Arc::new(crate::usage_ledger::UsageLedger::new());
+        let llm = Llm {
+            vendor: Vendor::Anthropic,
+            backend: Backend::Api,
+            default_model: "claude-opus-5-5".to_string(),
+            api_key: Some("k".to_string()),
+            ledger: Some(ledger.clone()),
+            sessions: None,
+        };
+        let refused = serde_json::json!({
+            "model": "claude-opus-5-5", "content": [], "stop_reason": "refusal",
+            "usage": {"input_tokens": 1000, "output_tokens": 7}
+        });
+        let err = llm
+            .api_response_or_refusal(&refused, "claude-opus-5-5")
+            .expect_err("a refusal is an error");
+        assert!(is_refusal(&err));
+        let snap = ledger.snapshot();
+        assert_eq!(snap.calls, 1, "the refused call is counted");
+        assert_eq!(snap.input_tokens, 1000);
+        assert_eq!(snap.output_tokens, 7);
+        // A normal response is returned (and left for `complete` to record).
+        let fine = serde_json::json!({
+            "model": "claude-opus-5-5", "content": [{"type": "text", "text": "x"}],
+            "stop_reason": "end_turn", "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        assert_eq!(
+            llm.api_response_or_refusal(&fine, "claude-opus-5-5")
+                .unwrap()
+                .text,
+            "x"
+        );
+        assert_eq!(ledger.snapshot().calls, 1);
+    }
+
+    /// `count_tokens` goes through the same conformer as every other body, minus the
+    /// generation-only `output_config`.
+    #[test]
+    fn count_tokens_body_is_conformed_and_carries_no_output_config() {
+        let body = count_tokens_body(&shape_request(), "claude-opus-5-5");
+        assert!(body.get("output_config").is_none());
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["model"], "claude-opus-5-5");
+    }
+
+    /// A CLI `result` event whose `stop_reason` is `refusal` is a failed call even though
+    /// `is_error` is false and the prose in `result` (or already-streamed text) looks like an
+    /// answer: it must never parse as a clean pass.
+    #[tokio::test]
+    async fn a_cli_result_with_refusal_stop_reason_is_a_refusal_error() {
+        let child = spawn_scripted_cli(
+            r#"printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"I cannot help with that."}}}'
+printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result":"I cannot help with that."}'
+"#,
+        );
+        let err = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .expect_err("a refusal stop_reason is a failure");
+        assert!(is_refusal(&err), "{err}");
+    }
+
+    #[test]
+    fn cli_result_text_accepts_other_stop_reasons() {
+        for sr in ["end_turn", "max_tokens", "tool_use"] {
+            let v = serde_json::json!({"is_error": false, "stop_reason": sr, "result": "ok"});
+            assert_eq!(cli_result_text(&v).unwrap(), "ok", "{sr}");
+        }
+        let v = serde_json::json!({"is_error": false, "stop_reason": null, "result": "ok"});
+        assert_eq!(cli_result_text(&v).unwrap(), "ok");
+    }
+
     /// ...but a non-zero exit with NOTHING streamed is still a hard failure.
     #[tokio::test]
     async fn read_cli_stream_fails_when_a_non_zero_exit_left_nothing_to_salvage() {
@@ -4420,11 +4564,15 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
         let r0 = rows.iter().find(|r| r.custom_id == "c0-b0").unwrap();
         assert!(r0.response.is_none(), "a refusal carries no response");
         assert!(r0.error.as_deref().unwrap().contains("refus"));
-        let map = reassemble_batch_results(rows);
+        let results = reassemble_batch_results(rows);
         assert!(
-            !map.contains_key("c0-b0"),
-            "the refused item reads as missing"
+            !results.responses.contains_key("c0-b0"),
+            "the refused item has no response"
         );
-        assert!(map.contains_key("c0-b1"));
+        assert!(
+            results.errors["c0-b0"].contains("refus"),
+            "its reason is kept and names the refusal"
+        );
+        assert!(results.responses.contains_key("c0-b1"));
     }
 }

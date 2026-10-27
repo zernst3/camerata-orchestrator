@@ -106,14 +106,27 @@ pub enum EffortPolicy {
     SetHigh,
 }
 
+/// How a model treats `thinking: {type: "disabled"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisabledThinking {
+    /// Accepted as sent.
+    Accepted,
+    /// Rejected (HTTP 400) at any effort: omit `thinking` instead.
+    Rejected,
+    /// Accepted only at effort `high` or below; rejected above it.
+    RejectedAboveHigh,
+}
+
 /// Which Messages-API request fields a model REJECTS (HTTP 400). Pure data on the registry
 /// entry; `camerata_llm::model_registry::conform_messages_body` is the one function that
 /// turns it into a valid body, so no call site string-matches model ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestShapeSpec {
-    /// Rejects `thinking` (disabled, or enabled with `budget_tokens`), non-default
-    /// `temperature` / `top_p` / `top_k`, and assistant prefill.
+    /// Rejects `thinking: {type: "enabled", budget_tokens}`, non-default `temperature` /
+    /// `top_p` / `top_k`, and assistant prefill.
     pub strict_params: bool,
+    /// How `thinking: {type: "disabled"}` is treated.
+    pub disabled_thinking: DisabledThinking,
     /// Rejects a forced `tool_choice` (`any` / `tool`); only `auto` is valid.
     pub no_forced_tool_choice: bool,
     /// What to put in `output_config.effort`.
@@ -121,9 +134,10 @@ pub struct RequestShapeSpec {
 }
 
 impl RequestShapeSpec {
-    /// The shape of models that predate the strict rules: nothing is stripped, nothing added.
+    /// The shape of models older than the 5.x line: nothing is stripped, nothing added.
     pub const LEGACY: RequestShapeSpec = RequestShapeSpec {
         strict_params: false,
+        disabled_thinking: DisabledThinking::Accepted,
         no_forced_tool_choice: false,
         effort: EffortPolicy::Omit,
     };
