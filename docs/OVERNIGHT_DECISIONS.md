@@ -1,7 +1,16 @@
 # Overnight autonomous run — decisions needed + progress log
 
 > ## ▶ RESUME HERE (paused 2026-10-26 at Zach's request, after code viewer step 4)
-> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Opus): viewer 7d
+> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Opus): 22f Part A
+> BUILT (`camerata corpus check-sources`, new crate `camerata-source-check`, sidecar
+> `crates/rules/CORPUS_SOURCE_HASHES.json`). Decisions: hash only cited anchors (whole pages are
+> noise); a changed section stays flagged until accepted explicitly (`--accept`), never silently
+> re-baselined; confidence lowered for dead sources and unaccepted changes, and for 100 days after
+> an accepted change. Live smoke run: 619 URLs, 10 dead (docs.rs sqlx, ruff, FastAPI among them),
+> 15 cited anchors not found; source URL repairs queued with the corpus text work (22g), not done
+> ad hoc. Wave 1 (ranks 2, 4, 7, 10) moves to cloud sessions on `wip/rank9-base` so the Mac keeps
+> four local builders; the spike docs now live in `docs/plans/2026-10-25_spike-token-efficiency*`.
+> 2026-10-27 (Opus): viewer 7d
 > (command palette) BUILT, in Fable review. Decisions: bulk and selection-based writes stay out of
 > the palette (a mistyped filter must never be one Enter from a bulk write); Ctrl/Cmd+K must work
 > anywhere on the results screen, done by extending the timer's existing document bridge (no second
