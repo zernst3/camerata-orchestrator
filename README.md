@@ -1,12 +1,22 @@
 # Camerata Orchestrator
 
-> **New here? Read [`docs/OVERVIEW.md`](docs/OVERVIEW.md) first** — the high-level human map of
+## What Camerata does for an inspection
+
+Camerata inspects a codebase. It reads the code against a library of written, versioned rules and produces a report of findings. Every finding names the rule it was raised under, and each rule points to the standard it rests on: a published style guide, a security reference or a vendor's own documentation. Any rule that can raise a high or critical finding must carry a citation and a fix, and a corpus test enforces that. A person reviews every finding in a triage queue (confirm, ignore, false positive or tech debt) before it goes into a deliverable.
+
+Two kinds of check run. A deterministic scan answers the questions that have a provable answer: hardcoded secrets, SQL built by string concatenation, file paths that escape their directory, plus the project's own linters. An AI pass handles the judgment calls, such as a write path with no authorization check or a service that bypasses the repository layer. No AI-raised candidate becomes a finding until it has passed severity calibration and de-duplication, and anything the engine is unsure of is held for a person to decide.
+
+The rules are plain TOML files in [`crates/rules/principles/`](crates/rules/principles/), so you can read exactly what an inspection checks. The library holds 437 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently. [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md) documents the format and [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md) the authoring workflow.
+
+> **New here? Read [`docs/OVERVIEW.md`](docs/OVERVIEW.md) first.** It is the high-level map of
 > the whole system (crates, the inspection pipeline, the core concepts) in one sitting. This
 > README is the product pitch; OVERVIEW is the architecture at a glance.
 
+## The platform around it
+
 I set out to build Camerata because managing multiple AI agents across multiple projects through conversational chat alone became unwieldy, and frankly cognitively tiring. The governance itself worked: my rules held and the agent's code quality stayed high. But routines would fail silently, and I often wouldn't know a run had failed until I went and asked the agent about it. The missing piece was never the governance, it is already baked into my process. What was missing was a structured place for it to live: status and state visible and managed in a real interface, instead of buried in chat. That is what Camerata is: a structured management layer for orchestrating AI agents across any number of projects, while enforcing rules and deterministic gates to maintain code quality.
 
-Camerata is an all-Rust, governed multi-agent engineering platform. This README leads with what runs and is defensible today, and is explicit about what is built but staged. The intended reader is the person who will clone the repo and check, so the line between "proven" and "built but not yet validated live" is drawn deliberately, not blurred.
+Camerata is an all-Rust, governed multi-agent engineering platform. The inspection above is the most hardened part. Governed development (agents working through a deny-before-execute gate), the consumer app-builder and the architect surface are earlier: built and unit-tested, but not yet run live end to end. This README separates what you can reproduce today from what is staged, and the [Status](#status) section draws that line. The intended reader is the person who will clone the repo and check.
 
 ### By the numbers
 
@@ -14,18 +24,17 @@ I architected Camerata and orchestrated its build: supervised AI agents wrote th
 
 | | |
 |---|---|
-| Rust | about 410,000 lines across 28 crates (about 305,000 lines of code once comments and blank lines are set aside) |
+| Rust | about 460,000 lines across 28 crates, including tests |
 | Tests | 7,600+ automated tests; test code is roughly 45% of all code |
 | Test quality | mutation testing on the deterministic checkers: the suite catches 97.9% of deliberately injected faults |
-| Rule library | 424 rules across 21 domains, each one versioned and locked by content hash so no rule can change silently |
+| Rule library | 437 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently |
 | Commits | 1,800+, every merge gated on formatting, zero-warning lints and the full test suite |
 
 What I am proudest of is the discipline behind those numbers, not the numbers themselves:
 
-- **False negative, never false positive.** A finding a client cannot verify is worse than a missed one. Every deterministic detector ships with a positive test and a "safe twin" test that proves it stays quiet on the look-alike case, and before any detector merges, a second model is set loose to try to break it.
+- **False negative, never false positive.** A finding a client cannot verify is worse than a missed one. Every deterministic detector ships with a positive test and a "safe twin" test that proves it stays quiet on the look-alike case.
 - **Deterministic first, AI second.** Wherever a question has a provable answer, code answers it. AI review covers the judgment calls, and no AI-raised candidate becomes a finding without passing through calibration, deduplication and per-rule severity bounds; anything the engine is unsure of is held for human review rather than shipped.
 - **Nothing sensitive leaves the building.** Client secrets are redacted the moment a finding is created and before any code reaches a model, and a release gate scans every string of every file in a deliverable before it exists. If one secret survives, the export fails.
-- **Benchmarked, not vibed.** The engine is measured against answer keys on real-world repositories, and its cost is tracked per stage so efficiency work never trades away recall.
 
 The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a Dioxus desktop app), then walk **Onboard repos → Governed Development**.
 
@@ -57,8 +66,8 @@ The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a
     ▸ CONSOLIDATED SETTINGS: one Settings nav item covering cross-project
       credentials (keychain-backed, masked) + Bombe animation controls, and
       per-project model configuration. The Rules page is rules-only.
-    ▸ 27-crate Rust workspace (26 app crates + one maintainer-only tool) ·
-      ~5,500 tests · governs its OWN source in CI.
+    ▸ 29-member Rust workspace (28 app crates + one maintainer-only tool) ·
+      7,600+ tests · governs its OWN source in CI.
     ▸ ADAPTER LADDER: a typed `camerata-client`, a first `camerata-mcp` server (stdio),
       and `camerata-cli` as a real HTTP adapter all drive the same BFF surface the
       cockpit does. `camerata-ui` now spawns `camerata-server` as a subprocess instead
@@ -81,13 +90,13 @@ The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a
 
 Point Camerata at one or more existing GitHub repositories and it runs the full onboarding flow, in-app, front to back:
 
-- **Per-repo stack detection** (languages and frameworks) and a **per-repo proposed ruleset** drawn from a corpus of **417 rules across many language and framework stacks** (Rust/Axum/SeaORM/Dioxus/sqlx/Tokio, Python/Django/Flask/FastAPI, Go/GORM/gRPC, JS/TS/React/Vue/Angular/Next/Nest, Java/Spring, C#/ASP.NET/EF Core, Ruby/Rails, SQL, Supabase, fullstack, plus the always-on security floor, the process rules and the agentic governance rules). Each repo is scanned against its own selected rules plus an always-on deterministic security floor. The domain-to-stack mapping is declarative data with a computable union, and a build gate (`req_h1_every_corpus_domain_is_emittable_by_some_stack`) fails the build if a corpus folder exists that no stack could ever select from, so a rule cannot sit in the corpus permanently unreachable.
+- **Per-repo stack detection** (languages and frameworks) and a **per-repo proposed ruleset** drawn from a corpus of **437 rules across 22 domains** covering many language and framework stacks (Rust/Axum/SeaORM/Dioxus/sqlx/Tokio, Python/Django/Flask/FastAPI, Go/GORM/gRPC, JS/TS/React/Vue/Angular/Next/Nest, Java/Spring, C#/ASP.NET/EF Core, Ruby/Rails, SQL, Supabase, fullstack, plus the always-on security floor, the process rules and the agentic governance rules). Each repo is scanned against its own selected rules plus an always-on deterministic security floor. The domain-to-stack mapping is declarative data with a computable union, and a build gate (`req_h1_every_corpus_domain_is_emittable_by_some_stack`) fails the build if a corpus folder exists that no stack could ever select from, so a rule cannot sit in the corpus permanently unreachable.
 - **A two-tier audit:** a deterministic mechanical scan (hardcoded secrets, raw-SQL concatenation, path escapes, plus clippy/ruff/eslint/semgrep/osv preview) and an AI architectural audit (missing auth on a write path, a service bypassing the repository layer, N+1, cross-boundary imports, and the like), with severity/authority calibration, cross-rule dedup, and snippet-to-line resolution.
 - **Alternative recommendation, built into that same audit:** for every rule that carries more than one adopted alternative, the audit also picks the option it judges best fitting for this codebase (with reasoning you can inspect) and assesses the codebase against that option, not against every option at once. There is one hard exception, and it is load-bearing: if the option the repo actually follows is the one the rule itself names as its own degenerate or absent form (`violates = true` on that option), the rule's directive is **not** rewritten to match, and a finding is emitted instead. Without that guard, a codebase that is consistently incorrect reads as compliant, which is the single worst failure this engine has had. A rule with no default no longer blocks you from proceeding, it is just a hint that the audit will pick for you. Disagree with any recommendation and you can override it and rescan just the rules you changed, then accept the final selections into the ruleset.
 - **Three triage tables** (Unresolved / Ignored / Tech debt) with free re-bucketing, then a **Process** step that turns each disposition into a durable artifact: ignores become reasoned baseline waivers, and every tech-debt item is filed as a real **GitHub issue** (the story).
 - **Apply:** the chosen governance files (`AGENTS.md`, `CONVENTIONS.md`, a CI workflow for the mechanical rules, and `.camerata/baseline.json`) are written to a governance branch and pushed, with the PR opened as a separate, deliberate step.
 
-The honest boundary: this has been run on **small fixture repositories, not yet on a large real-world codebase**, so the AI audit's precision and recall at scale are not yet proven. Onboarding's design principle is that it **emits stories and never does the development work itself** — a "resolve now" finding and up to two CI-wiring tasks (mechanical rules → off-the-shelf linters; architectural rules → custom checkers) each become a GitHub issue the development layer picks up. Walked screen by screen in [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md); mechanics in [`docs/TECHNICAL.md`](docs/TECHNICAL.md).
+The honest boundary: what this repository can show you is the engine's behavior on fixture repositories and the test suite that pins it. It does not claim, and the repo holds no published measurement of, how precise or complete the AI pass is on a large real-world codebase, so treat results at that scale as unproven until you have run it on your own code and reviewed the findings yourself. Onboarding's design principle is that it **emits stories and never does the development work itself**: a "resolve now" finding and up to two CI-wiring tasks (mechanical rules to off-the-shelf linters; architectural rules to custom checkers) each become a GitHub issue the development layer picks up. Walked screen by screen in [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md); mechanics in [`docs/TECHNICAL.md`](docs/TECHNICAL.md).
 
 ### What a finding IS: five kinds, not a yes/no
 
@@ -169,7 +178,7 @@ A compiling, tested, all-Rust workspace, not a design folder.
 
 **Verified at runtime (you can reproduce it):**
 
-- A **27-crate workspace** (26 app crates plus the maintainer-only `tools/corpus-verifier`) with **~5,500 passing tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)). A named **self-measurement gate** (`./scripts/self-measurement.sh`) runs ahead of the full suite; see [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6b.
+- A **29-member workspace** (28 app crates plus the maintainer-only `tools/corpus-verifier`) with **7,600+ automated tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)). A named **self-measurement gate** (`./scripts/self-measurement.sh`) runs ahead of the full suite; see [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6b.
 - **Brownfield onboarding, end to end** on fixture repos: per-repo detection and rule proposal, the two-tier audit with calibration and dedup, the triage tables, Process emitting baseline waivers and GitHub issues, and Apply writing the governance branch.
 - **The gate denies a real agent (standalone)** via `camerata -- live-demo`, with the gateway's verdict + jail tests covered by `cargo test`.
 - **The governed development console** — issue pull + Epic/sub-issue tree, UoW creation and the full lifecycle UI, the project-aware chat assistant, and the deterministic gate self-check — wired and unit-tested in-app.
@@ -355,7 +364,7 @@ The orchestrator makes zero model calls; it prepares a session and spawns an age
 
 ## Family
 
-- [camerata-ai](../camerata-ai): the conventions engine the corpus format originates from. The corpus is vendored into this repo at `crates/rules/principles/` (417 TOML rules as of 2026-10-11), so the workspace is self-contained; override with `CAMERATA_CORPUS_PATH`. Field-by-field reference for the rule schema: [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md); the authoring workflow is [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md).
+- [camerata-ai](../camerata-ai): the conventions engine the corpus format originates from. The corpus is vendored into this repo at `crates/rules/principles/` (437 TOML rules as of 2026-10-27), so the workspace is self-contained; override with `CAMERATA_CORPUS_PATH`. Field-by-field reference for the rule schema: [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md); the authoring workflow is [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md).
 - [rust-chorale](../rust-chorale): the headless, virtualized Dioxus / Leptos table library used for tabular surfaces.
 - this repo: the conductor that leads the ensemble.
 
