@@ -10,19 +10,17 @@
 //!
 //! - [`rows_of_group`] and [`is_stackable`]: the group's rows in the table's order.
 //! - [`StackState`]: the snapshot of the group, the page, the card cursor and the checkboxes.
-//!   Whether a card is checked is derived, never stored: an explicit choice of the curator, else
-//!   "checked while undecided". A card that is decided (here, in the viewer, or by an undo) is
-//!   therefore unchecked or checked again by the disposition map alone, with nothing to keep in
-//!   step.
+//!   Whether a card is checked is derived, never stored: an explicit choice of the curator made
+//!   under the state the row is in now, else "checked while undecided". A card that is decided
+//!   (here, in the viewer, or by an undo) is therefore unchecked or checked again by the
+//!   disposition map alone, with nothing to keep in step.
 //! - [`stack_command`]: the stack's key map, a whitelist like `pane_command` and `viewer_command`.
 //!   It asks `pane_command` for the disposition keys and maps the answer, so `C T I F` and the
 //!   arrows mean what they mean everywhere else by construction.
 //!
 //! The decisions themselves are NOT here. They go through `TriageModel::dispose_with_undo`, the
-//! entry point the pane's keys and the viewer already use (and which writes through the same
-//! `confirm`, `mark_false_positive`, `ignore` and `move_to` that `bulk_confirm` and
-//! `bulk_false_positive` wrap), so the required-reason invariant and the undo are not
-//! re-implemented for this door.
+//! entry point the pane's keys, the viewer and the Queue's bulk buttons all use, so the
+//! required-reason invariant and the undo are not re-implemented for this door.
 
 use std::collections::HashMap;
 
@@ -144,6 +142,18 @@ pub fn stack_command(focus: StackFocus, key: &str, mods: KeyMods) -> Option<Stac
     }
 }
 
+/// The stack's focus, from the one fact the host knows: whether a reason prompt is open. THE
+/// derivation: the key handler, the view's keystroke claim and every mouse door's gate
+/// ([`stack_keys_armed`] of this) read it, so a click cannot do what the same press would be
+/// refused.
+pub fn stack_focus(prompt_open: bool) -> StackFocus {
+    if prompt_open {
+        StackFocus::ReasonPrompt
+    } else {
+        StackFocus::Cards
+    }
+}
+
 /// Whether the stack answers keys under this focus: defined as "would `Esc` produce a command",
 /// so what the strip tells the curator and what the handler does cannot drift apart.
 pub fn stack_keys_armed(focus: StackFocus) -> bool {
@@ -217,8 +227,10 @@ pub struct StackState {
     page: usize,
     /// Index of the focused card within the page.
     cursor: usize,
-    /// Explicit checkbox choices by finding key. A key not here follows the default.
-    overrides: HashMap<String, bool>,
+    /// Explicit checkbox choices by finding key, each with the state the row was in when the
+    /// curator made it. A key not here follows the default, and so does a key whose row has been
+    /// decided somewhere else since: the choice was about a different decision.
+    overrides: HashMap<String, (bool, TriageState)>,
 }
 
 impl StackState {
@@ -343,11 +355,17 @@ impl StackState {
     /// Whether `f`'s card is checked: the curator's explicit choice, else checked while the row
     /// is undecided. A decided row defaults to unchecked, so the default never sweeps a decision
     /// the curator already made back into the next bulk action.
+    ///
+    /// An explicit choice counts only while the row is in the state it was made under. Decide the
+    /// card somewhere else (the viewer, the pane, an undo) and the choice is discarded, so a
+    /// "checked" made on an Unresolved card cannot carry over to the same card once Confirmed and
+    /// sweep it into the next action. No bookkeeping call keeps this in step: it is derived.
     pub fn is_checked(&self, f: &FindingView, dispositions: &HashMap<String, Disposition>) -> bool {
-        self.overrides
-            .get(&finding_key(f))
-            .copied()
-            .unwrap_or_else(|| finding_state(dispositions, f) == TriageState::Unresolved)
+        let now = finding_state(dispositions, f);
+        match self.overrides.get(&finding_key(f)) {
+            Some((checked, made_under)) if *made_under == now => *checked,
+            _ => now == TriageState::Unresolved,
+        }
     }
 
     /// Check or uncheck the focused card. `false` when there is no card.
@@ -356,7 +374,8 @@ impl StackState {
             return false;
         };
         let now = self.is_checked(&f, dispositions);
-        self.overrides.insert(finding_key(&f), !now);
+        let under = finding_state(dispositions, &f);
+        self.overrides.insert(finding_key(&f), (!now, under));
         true
     }
 
@@ -369,15 +388,6 @@ impl StackState {
             .filter(|f| self.is_checked(f, dispositions))
             .cloned()
             .collect()
-    }
-
-    /// Forget the explicit choices for `rows`, which have just been decided: they fall back to
-    /// the default, so they read unchecked now and checked again if an undo returns them to
-    /// Unresolved.
-    pub fn forget_choices(&mut self, rows: &[FindingView]) {
-        for f in rows {
-            self.overrides.remove(&finding_key(f));
-        }
     }
 
     /// The summary line under the header: how many cards, how many checked.
@@ -520,36 +530,68 @@ mod tests {
     }
 
     #[test]
-    fn a_decided_card_can_be_checked_on_purpose_and_forgets_the_choice_once_acted_on() {
+    fn a_decided_card_can_be_checked_on_purpose() {
         let rows = defects(2);
         let mut stack = StackState::new("R-1", rows.clone(), None);
         let mut m = map();
         decide(&mut m, &rows[0], TriageState::Confirmed);
-        assert!(stack.toggle_cursor(&m));
-        assert!(stack.is_checked(&rows[0], &m), "an explicit choice wins");
-        stack.forget_choices(&rows[..1]);
         assert!(
             !stack.is_checked(&rows[0], &m),
-            "back to the default: decided"
+            "decided: unchecked by default"
         );
-        // An undo returns it to Unresolved: checked again, with nothing to keep in step.
-        m.remove(&finding_key(&rows[0]));
+        assert!(stack.toggle_cursor(&m));
+        assert!(stack.is_checked(&rows[0], &m), "an explicit choice wins");
+    }
+
+    /// A choice is about the decision the card was in when it was made. Decide the card
+    /// somewhere else and the choice is gone, with no call to keep it in step.
+    #[test]
+    fn an_explicit_choice_does_not_survive_a_decision_made_elsewhere() {
+        let rows = defects(2);
+        let mut stack = StackState::new("R-1", rows.clone(), None);
+        let mut m = map();
+        // Checked on purpose while Unresolved is the default; an explicit CHECK is the case at
+        // risk, so first uncheck then check again (two explicit choices under Unresolved).
+        assert!(stack.toggle_cursor(&m));
+        assert!(stack.toggle_cursor(&m));
         assert!(stack.is_checked(&rows[0], &m));
+        // The viewer confirms it.
+        decide(&mut m, &rows[0], TriageState::Confirmed);
+        assert!(
+            !stack.is_checked(&rows[0], &m),
+            "the old choice no longer applies: decided, unchecked"
+        );
+        assert!(!keys(&stack.checked_rows(&m)).contains(&finding_key(&rows[0])));
+        // An explicit UNcheck survives while the state is the same, and is dropped when it moves.
+        let mut other = StackState::new("R-1", rows.clone(), None);
+        let mut m2 = map();
+        assert!(other.toggle_cursor(&m2));
+        assert!(!other.is_checked(&rows[0], &m2));
+        decide(&mut m2, &rows[0], TriageState::TechDebt);
+        m2.remove(&finding_key(&rows[0])); // an undo
+        assert!(
+            !other.is_checked(&rows[0], &m2),
+            "back under the state the choice was made in: it applies again"
+        );
+        decide(&mut m2, &rows[0], TriageState::Ignored);
+        assert!(!other.is_checked(&rows[0], &m2), "decided: the default");
     }
 
     // ── the decisions ──
 
-    /// The stack decides through `dispose_with_undo`, the entry point the pane's keys use. For a
-    /// deviation group it must leave exactly the state `bulk_confirm` and `bulk_false_positive`
-    /// leave for the same rows, and the required-reason invariant must hold at this door.
+    /// The stack decides through `dispose_with_undo`, the entry point every door uses. For a
+    /// group it must leave exactly the state deciding each row on its own leaves, and the
+    /// required-reason invariant must hold at this door.
     #[test]
-    fn deciding_checked_cards_equals_the_bulk_paths_and_keeps_the_reason_invariant() {
+    fn deciding_checked_cards_equals_deciding_each_row_and_keeps_the_reason_invariant() {
         use crate::triage::TriageModel;
         let rows: Vec<FindingView> = (1..=4).map(|i| deviation("src/a.rs", i)).collect();
         let group = deviation_groups(&rows).remove(0);
 
         let mut bulk = TriageModel::new();
-        assert_eq!(bulk.bulk_confirm(&group), Some(4));
+        for f in &group.rows {
+            bulk.confirm(std::slice::from_ref(f));
+        }
         let mut stacked = TriageModel::new();
         let entry = stacked
             .dispose_with_undo(&group.rows, TriageState::Confirmed, "", 0)
@@ -562,7 +604,9 @@ mod tests {
         );
 
         let mut bulk = TriageModel::new();
-        assert_eq!(bulk.bulk_false_positive(&group, "parser bug"), Some(4));
+        for f in &group.rows {
+            bulk.mark_false_positive(std::slice::from_ref(f), "parser bug");
+        }
         let mut stacked = TriageModel::new();
         for blank in ["", "   "] {
             assert!(
@@ -592,7 +636,6 @@ mod tests {
             .dispose_with_undo(&checked, TriageState::Confirmed, "", 0)
             .unwrap();
         assert_eq!(entry.message(), "Confirmed 4 findings.");
-        stack.forget_choices(&checked);
         assert_eq!(model.state_of(&rows[0]), TriageState::Unresolved);
         for f in &rows[1..] {
             assert_eq!(model.state_of(f), TriageState::Confirmed);
@@ -762,6 +805,8 @@ mod tests {
         }
         assert!(!stack_keys_armed(StackFocus::ReasonPrompt));
         assert!(stack_keys_armed(StackFocus::Cards));
+        assert_eq!(stack_focus(true), StackFocus::ReasonPrompt);
+        assert_eq!(stack_focus(false), StackFocus::Cards);
     }
 
     #[test]

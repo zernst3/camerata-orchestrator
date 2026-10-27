@@ -2566,7 +2566,7 @@ pub(super) fn DeviationBulkBar(
                         // used to read. It now RAISES the on-demand prompt, which names this
                         // group's own count — a thing a shared textarea beside the table could
                         // never do. The reason is still required and still enforced in the same
-                        // place, `TriageModel::bulk_false_positive`.
+                        // place, `TriageModel::dispose_with_undo`.
                         title: "Mark every one of this rule's {g.row_count} row(s) in this table as a false positive, in one act. Identical to selecting them and marking each. Asks for the required reason first.",
                         onclick: move |_| on_false_positive_all.call(i),
                         "False positive all {g.row_count}"
@@ -2604,40 +2604,25 @@ pub(super) fn reason_required_message(state: TriageState, count: usize) -> Strin
 pub(super) struct ToolbarReasonPrompt {
     /// The disposition the reason is for. Only the two that require one ever appear here.
     pub state: TriageState,
-    pub target: ReasonTarget,
-}
-
-/// Which rows a raised prompt will move. SELF-CONTAINED on purpose: each variant carries the
-/// findings themselves, not a handle that has to be re-resolved at commit time.
-///
-/// The alternative — a `Vec<RowId>` resolved against `id_map`, or a group INDEX resolved
-/// against `bulk_groups` — looks lighter and is the version that can lie. Both of those lists
-/// are rebuilt every render from the current visible row set, so between raising the prompt
-/// and committing it (which is as long as the curator takes to type a sentence) a re-sort, a
-/// column filter or a group collapse can change what the handle points at. The heading has
-/// already promised a number by then. Carrying the rows makes "the count the curator read"
-/// and "the rows the commit moves" the same list by construction rather than by timing.
-#[derive(Clone, PartialEq)]
-pub(super) enum ReasonTarget {
-    /// The rows that were selected when the toolbar button was pressed, with the chorale row
-    /// ids to drop from the table afterwards.
-    Selection {
-        ids: Vec<RowId>,
-        rows: Vec<FindingView>,
-    },
-    /// One whole deviation group, as the bulk bar's button advertised it.
-    Group(DeviationGroup),
+    /// The findings the commit will move, carried by value on purpose.
+    ///
+    /// SELF-CONTAINED: not a `Vec<RowId>` resolved against `id_map`, nor a group INDEX resolved
+    /// against `bulk_groups`. Both of those lists are rebuilt every render from the current
+    /// visible row set, so between raising the prompt and committing it (as long as the curator
+    /// takes to type a sentence) a re-sort, a column filter or a group collapse can change what
+    /// the handle points at, after the heading has already promised a number. Carrying the rows
+    /// makes "the count the curator read" and "the rows the commit moves" the same list by
+    /// construction rather than by timing. Every raiser (the toolbar's selection buttons, the
+    /// bar's "False positive all N", the stacked view's checked cards) passes its rows here.
+    pub rows: Vec<FindingView>,
 }
 
 impl ToolbarReasonPrompt {
     /// How many findings this prompt's commit will move. Drives the heading, so the number the
-    /// curator reads is the number the commit uses — the same `Vec`, counted once here and
+    /// curator reads is the number the commit uses: the same `Vec`, counted once here and
     /// disposed once there.
     pub(super) fn count(&self) -> usize {
-        match &self.target {
-            ReasonTarget::Selection { rows, .. } => rows.len(),
-            ReasonTarget::Group(g) => g.rows.len(),
-        }
+        self.rows.len()
     }
 }
 
@@ -2679,7 +2664,7 @@ pub(super) fn QueueReasonPrompt(
                 class: "addressee-input queue-reason-input",
                 rows: "2",
                 autofocus: true,
-                placeholder: "why \u{2014} the export reads this",
+                placeholder: "why (the export reads this)",
                 value: "{reason}",
                 // Pre-focused for the same reason the pane's prompt is: a prompt that appears
                 // on a re-render and takes no focus is a surface the curator has to go find
@@ -3548,7 +3533,7 @@ pub(super) fn FindingDetailPane(
                             class: "addressee-input pane-reason-input",
                             rows: "2",
                             autofocus: true,
-                            placeholder: "why — the export reads this",
+                            placeholder: "why (the export reads this)",
                             value: "{prompt_reason}",
                             // Pre-focused, as design §3 specifies. `autofocus` alone is not
                             // reliable in a webview for an element appearing on a re-render,
@@ -3833,95 +3818,6 @@ pub(super) fn FindingsTable(
         .map(|(rid, f)| (finding_key(f), *rid))
         .collect();
 
-    // ── COMMITTING A RAISED TOOLBAR REASON (design §3, §9.2) ───────────────────────────
-    //
-    // ONE commit path for BOTH sources — the toolbar's per-selection buttons and the bulk
-    // bar's `False positive all N`. The two textareas §9.2 removed had two separate commit
-    // closures with two copies of the require-reason check; collapsing them is most of the
-    // reason the removal is a simplification and not just a relocation.
-    //
-    // The REQUIRE-REASON INVARIANT does not live here. It lives where it always did, inside
-    // `TriageModel::{ignore, mark_false_positive, bulk_false_positive}` — this closure asks
-    // the model and reports the refusal. A `None` from `bulk_false_positive` and an empty
-    // `reason` for the selection path are the same refusal, and both leave the prompt OPEN
-    // with what the curator typed still in it: closing it would throw away a half-written
-    // justification to punish a trailing space.
-    let commit_toolbar_reason = Callback::new({
-        let key_to_row_id = key_to_row_id.clone();
-        move |()| {
-            let Some(p) = toolbar_prompt.peek().clone() else {
-                return;
-            };
-            let reason = toolbar_reason.peek().clone();
-            let mut model = TriageModel {
-                dispositions: dispositions.peek().clone(),
-                triage_view,
-            };
-            let (ids, message) = match &p.target {
-                ReasonTarget::Selection { ids, rows } => {
-                    // THE REQUIRE-REASON INVARIANT for the per-selection path, enforced at
-                    // the same point it always was: `TriageModel::{ignore,
-                    // mark_false_positive}` record the reason but do not police it (unlike
-                    // `bulk_false_positive`, which refuses), so the caller checks. §9.2 moved
-                    // the BOX, not the check, and the check is deliberately still here rather
-                    // than quietly pushed into core as a side effect of a UI removal.
-                    //
-                    // A refusal leaves the prompt OPEN with what the curator typed still in
-                    // it. Closing it would throw away a half-written justification to punish
-                    // a trailing space.
-                    if reason.trim().is_empty() {
-                        crate::toast::push_toast(
-                            toasts,
-                            crate::toast::ToastKind::Warning,
-                            reason_required_message(p.state, rows.len()),
-                        );
-                        return;
-                    }
-                    match p.state {
-                        TriageState::Ignored => model.ignore(rows, &reason),
-                        _ => model.mark_false_positive(rows, &reason),
-                    }
-                    let moved = rows.len();
-                    (
-                        ids.clone(),
-                        format!("Moved {moved} to {}.", p.state.label()),
-                    )
-                }
-                ReasonTarget::Group(group) => {
-                    // The SAME `bulk_false_positive` the bar called directly before §9.2 —
-                    // a thin wrapper over the per-row `mark_false_positive`, so one click is
-                    // still provably identical to N individual gestures. `None` is its
-                    // refusal, which is the require-reason invariant speaking.
-                    let Some(moved) = model.bulk_false_positive(group, &reason) else {
-                        crate::toast::push_toast(
-                            toasts,
-                            crate::toast::ToastKind::Warning,
-                            reason_required_message(TriageState::FalsePositive, group.rows.len()),
-                        );
-                        return;
-                    };
-                    let ids: Vec<RowId> = group
-                        .rows
-                        .iter()
-                        .filter_map(|f| key_to_row_id.get(&finding_key(f)).copied())
-                        .collect();
-                    (
-                        ids,
-                        format!(
-                            "Marked all {moved} {} row(s) as false positive.",
-                            group.rule_id
-                        ),
-                    )
-                }
-            };
-            dispositions.set(model.dispositions);
-            handle.remove_rows(&ids);
-            toolbar_prompt.set(None);
-            toolbar_reason.set(String::new());
-            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, message);
-        }
-    });
-
     // ── THE DOCKED DETAIL PANE (design §2; the owner's Q5 ruling, §13) ──────────────────
     //
     // Everything below is wiring: the pure cursor, scoped key handler and undo all live in
@@ -4080,6 +3976,14 @@ pub(super) fn FindingsTable(
     // in the map.
     let apply_rows = use_callback(
         move |(rows, state, reason): (Vec<FindingView>, TriageState, String)| -> bool {
+            // Every caller checks for an empty set first and says something suitable ("nothing
+            // is checked", "no row is focused"), because only the caller knows what happened.
+            // An empty set arriving here is therefore a bug in a new caller. In release it is
+            // still refused (below, as a count-of-zero warning) rather than silently ignored.
+            debug_assert!(
+                !rows.is_empty(),
+                "apply_rows needs rows; the caller says why not"
+            );
             let now = epoch.elapsed().as_millis() as u64;
             now_ms.set(now);
             let mut model = TriageModel {
@@ -4198,7 +4102,7 @@ pub(super) fn FindingsTable(
                 crate::toast::push_toast(
                     toasts,
                     crate::toast::ToastKind::Info,
-                    format!("Undone \u{2014} {n} finding(s) put back."),
+                    format!("Undone: {n} finding(s) put back."),
                 );
             }
             // Both refusals are REPORTED. A visible Undo that silently does nothing
@@ -4216,6 +4120,29 @@ pub(super) fn FindingsTable(
         }
         undo_entry.set(None);
         undo_restore.set(None);
+    });
+
+    // ── COMMITTING A RAISED TOOLBAR REASON (design §3, §9.2) ───────────────────────────
+    //
+    // ONE commit path for every raiser: the toolbar's per-selection buttons, the bulk bar's
+    // `False positive all N`, and (by its own prompt) the stacked view. It is `apply_rows`, the
+    // same function behind the pane's keys, so a prompted decision gets the same five-second
+    // undo and the same single refusal wording as every other, and the rows leave the table by
+    // the same code.
+    //
+    // The REQUIRE-REASON INVARIANT lives where it always did, inside
+    // `TriageModel::dispose_with_undo`: a blank reason is refused there, `apply_rows` reports it,
+    // and a refusal leaves the prompt OPEN with what the curator typed still in it. Closing it
+    // would throw away a half-written justification to punish a trailing space.
+    let commit_toolbar_reason = Callback::new(move |()| {
+        let Some(p) = toolbar_prompt.peek().clone() else {
+            return;
+        };
+        let reason = toolbar_reason.peek().clone();
+        if apply_rows.call((p.rows, p.state, reason)) {
+            toolbar_prompt.set(None);
+            toolbar_reason.set(String::new());
+        }
     });
 
     // A request from another surface (the finding modal's "Open in viewer"): aim the cursor at
@@ -4363,11 +4290,7 @@ pub(super) fn FindingsTable(
                 true
             }
             Err(why) => {
-                crate::toast::push_toast(
-                    toasts,
-                    crate::toast::ToastKind::Info,
-                    format!("{why}. Undo its decision to open it in the viewer."),
-                );
+                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, why);
                 false
             }
         }
@@ -4562,7 +4485,7 @@ pub(super) fn FindingsTable(
                             toolbar_reason.set(String::new());
                             toolbar_prompt.set(Some(ToolbarReasonPrompt {
                                 state: TriageState::Ignored,
-                                target: ReasonTarget::Selection { ids: sel, rows },
+                                rows,
                             }));
                         },
                         "Ignore with reason \u{2192}"
@@ -4594,7 +4517,7 @@ pub(super) fn FindingsTable(
                             toolbar_reason.set(String::new());
                             toolbar_prompt.set(Some(ToolbarReasonPrompt {
                                 state: TriageState::FalsePositive,
-                                target: ReasonTarget::Selection { ids: sel, rows },
+                                rows,
                             }));
                         },
                         "Mark false positive \u{2192}"
@@ -4760,26 +4683,15 @@ pub(super) fn FindingsTable(
         // view holds no deviations.
         DeviationBulkBar {
             groups: bulk_rows,
+            // The same write path as every other door (`apply_rows`): the group's rows, Confirmed,
+            // with the five-second undo that names the count.
             on_confirm_all: Callback::new({
                 let bulk_groups = std::rc::Rc::clone(&bulk_groups);
-                let key_to_row_id = key_to_row_id.clone();
                 move |i: usize| {
                     let Some(group) = bulk_groups.get(i) else { return };
-                    let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
-                    // Same shape as the false-positive path below and for the same reason:
-                    // core's `bulk_confirm` is a thin wrapper over the per-row `confirm`, so
-                    // one click here is provably identical to N individual gestures rather
-                    // than a second write path. `None` means an empty group — nothing moved.
-                    let Some(moved) = model.bulk_confirm(group) else { return };
-                    dispositions.set(model.dispositions);
-                    let ids: Vec<RowId> = group.rows.iter().filter_map(|f| key_to_row_id.get(&finding_key(f)).copied()).collect();
-                    handle.remove_rows(&ids);
-                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Confirmed all {moved} {} row(s).", group.rule_id));
+                    apply_rows.call((group.rows.clone(), TriageState::Confirmed, String::new()));
                 }
             }),
-            // The rule id on a bulk row opens the hub. The repo comes off the group's own
-            // first row rather than from a table-level guess: `rule_hub` is scoped per
-            // (repo, rule) and a wrong repo would silently describe a different assessment.
             on_review_stacked: Callback::new({
                 let bulk_groups = std::rc::Rc::clone(&bulk_groups);
                 move |i: usize| {
@@ -4787,6 +4699,9 @@ pub(super) fn FindingsTable(
                     open_stack.call((group.label.clone(), StackOrigin::BulkBar(i), None));
                 }
             }),
+            // The rule id on a bulk row opens the hub. The repo comes off the group's own
+            // first row rather than from a table-level guess: `rule_hub` is scoped per
+            // (repo, rule) and a wrong repo would silently describe a different assessment.
             on_open_hub: Callback::new({
                 let bulk_groups = std::rc::Rc::clone(&bulk_groups);
                 move |i: usize| {
@@ -4804,7 +4719,7 @@ pub(super) fn FindingsTable(
             // statement anywhere of how many rows it was about to move. It now raises the
             // SAME on-demand prompt the per-selection button raises, carrying this group's
             // index and its advertised count. The require-reason invariant does not move: it
-            // is still `TriageModel::bulk_false_positive`'s refusal, enforced at commit.
+            // is still `TriageModel::dispose_with_undo`'s refusal, enforced at commit.
             on_false_positive_all: Callback::new({
                 let bulk_groups = std::rc::Rc::clone(&bulk_groups);
                 move |i: usize| {
@@ -4812,7 +4727,7 @@ pub(super) fn FindingsTable(
                     toolbar_reason.set(String::new());
                     toolbar_prompt.set(Some(ToolbarReasonPrompt {
                         state: TriageState::FalsePositive,
-                        target: ReasonTarget::Group(group.clone()),
+                        rows: group.rows.clone(),
                     }));
                 }
             }),
@@ -14300,10 +14215,7 @@ mod render_tests {
         // The per-selection shape: three rows picked in the table, raised by "Ignore".
         let html = render(ToolbarReasonPrompt {
             state: TriageState::Ignored,
-            target: ReasonTarget::Selection {
-                ids: vec![RowId::new(), RowId::new(), RowId::new()],
-                rows: deviation_queue_rows().into_iter().take(3).collect(),
-            },
+            rows: deviation_queue_rows().into_iter().take(3).collect(),
         });
         assert!(
             html.contains(&bulk_reason_heading(TriageState::Ignored, 3)),
@@ -14335,7 +14247,7 @@ mod render_tests {
         // was about to read it.
         let html = render(ToolbarReasonPrompt {
             state: TriageState::FalsePositive,
-            target: ReasonTarget::Group(twelve_row_group()),
+            rows: twelve_row_group().rows,
         });
         assert!(
             html.contains("12 findings"),
@@ -14350,34 +14262,25 @@ mod render_tests {
         // as a template nobody checked.
         let html = render(ToolbarReasonPrompt {
             state: TriageState::FalsePositive,
-            target: ReasonTarget::Selection {
-                ids: vec![RowId::new()],
-                rows: deviation_queue_rows().into_iter().take(1).collect(),
-            },
+            rows: deviation_queue_rows().into_iter().take(1).collect(),
         });
-        assert!(
-            html.contains("1 finding \u{2014}") || html.contains("1 finding ("),
-            "html=\n{html}"
-        );
+        assert!(html.contains("1 finding ("), "html=\n{html}");
         assert!(!html.contains("1 findings"), "html=\n{html}");
 
         // AND THE COUNT IS THE ROW LIST, not a number travelling beside it. This is the
-        // property that makes the heading trustworthy: `ReasonTarget` carries the findings,
+        // property that makes the heading trustworthy: the prompt carries the findings,
         // so there is no second list for the commit to disagree with after a re-sort or a
         // filter lands between raising the prompt and committing it.
         let rows = deviation_queue_rows();
         let sel = ToolbarReasonPrompt {
             state: TriageState::Ignored,
-            target: ReasonTarget::Selection {
-                ids: rows.iter().map(|_| RowId::new()).collect(),
-                rows: rows.clone(),
-            },
+            rows: rows.clone(),
         };
         assert_eq!(sel.count(), rows.len());
         let group = twelve_row_group();
         let bulk = ToolbarReasonPrompt {
             state: TriageState::FalsePositive,
-            target: ReasonTarget::Group(group.clone()),
+            rows: group.rows.clone(),
         };
         assert_eq!(bulk.count(), group.rows.len());
         assert_eq!(
@@ -14436,7 +14339,7 @@ mod render_tests {
     /// false-positive box — which could be blank, or could be a reason typed minutes earlier
     /// for a different rule, and the bar never said how many rows it was about to move.
     /// After: it raises the prompt carrying its own group's count, and the require-reason
-    /// invariant stays exactly where it was, in `TriageModel::bulk_false_positive`.
+    /// invariant stays exactly where it was, in `TriageModel::dispose_with_undo`.
     #[test]
     fn req_pass2_13_the_bulk_false_positive_bar_raises_a_prompt_instead_of_reading_a_textarea() {
         fn harness() -> Element {
@@ -14469,23 +14372,33 @@ mod render_tests {
             "and there is no textarea for it to have read; html=\n{html}"
         );
 
-        // The invariant it defers to is unchanged and still refuses: core's own wrapper, the
-        // same one the bar called directly before. Asserted here rather than taken on trust,
+        // The invariant it defers to is unchanged and still refuses: core's own entry point,
+        // the one every bulk door now shares. Asserted here rather than taken on trust,
         // because "the reason source moved" is exactly the change that could drop it.
         let groups = deviation_groups(&deviation_queue_rows());
         let group = groups.first().expect("a deviation group");
         let mut model = TriageModel::new();
         assert!(
-            model.bulk_false_positive(group, "   ").is_none(),
+            model
+                .dispose_with_undo(&group.rows, TriageState::FalsePositive, "   ", 0)
+                .is_none(),
             "a blank reason must still be refused, wherever the box now lives"
         );
         assert!(
             model.dispositions.is_empty(),
             "and must write nothing when it refuses"
         );
+        let entry = model
+            .dispose_with_undo(
+                &group.rows,
+                TriageState::FalsePositive,
+                "the parser mis-read all of these",
+                0,
+            )
+            .expect("a real reason is accepted");
         assert_eq!(
-            model.bulk_false_positive(group, "the parser mis-read all of these"),
-            Some(group.rows.len()),
+            entry.row_count(),
+            group.rows.len(),
             "and a real reason must still move the whole group"
         );
     }
@@ -15035,6 +14948,10 @@ mod pane_render_tests {
             None,
         );
         assert!(ignoring.contains("pane-reason-prompt"), "html=\n{ignoring}");
+        assert!(
+            !ignoring.contains('\u{2014}'),
+            "no em-dash in the prompt's text or placeholder; html=\n{ignoring}"
+        );
         assert!(
             ignoring.contains("Ignored"),
             "names the disposition; html=\n{ignoring}"

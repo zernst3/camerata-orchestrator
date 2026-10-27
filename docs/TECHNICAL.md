@@ -3234,11 +3234,15 @@ callback with the group's header line (`rule_group_label`, the value the table g
 bar). The rows are a SNAPSHOT taken at open, held by `StackState` with the page, the card cursor
 and the curator's explicit checkbox choices; a card's status and checked state are derived from the
 disposition map every render (`is_checked`: the explicit choice, else checked while undecided), so
-a decision made in the stack, in the viewer or by an undo needs nothing else kept in step.
-`forget_choices` drops the choices of rows just decided so they fall back to the default.
+a decision made in the stack, in the viewer or by an undo needs nothing else kept in step. An
+explicit choice is stored WITH the state the row was in when it was made and counts only while the
+row is still in that state, so checking an Unresolved card and then confirming it in the viewer
+leaves it decided and unchecked, and an undo that returns it to Unresolved revives the choice.
+There is no bookkeeping call to forget choices.
 
 *Hosting.* Like the viewer it is mounted at the results root (`StackRoot`, beside `ViewerRoot`,
-with z-index 1085 against the viewer's 1090) and registered through `StackSlot`/`StackLink` by
+with z-index 1085 against the viewer's 1090 and the rule modal's 1100, set by selector
+specificity and not by source order) and registered through `StackSlot`/`StackLink` by
 `FindingsTable`; opening is writing `link.open`. `StackView` is props-only and SSR-tested;
 `StackHost` owns the signals and I/O. *Code:* one `fetch_batch` per page (`pane_context.rs`,
 which `fetch_context` now calls for a batch of one), up to `STACK_PAGE` (200, the endpoint's cap)
@@ -3247,23 +3251,40 @@ also cuts a window from a whole file the viewer holds), sends only the missing t
 request, and judges each answer with the pane's own `accept` (ok, from `git`, echoing the finding,
 `matches_snippet`, a sound window). Accepted windows go back into the context lane. A card
 without a window renders the stored snippet (the degradation floor) and a note counts those
-(`context_note`); the lines are drawn by the same `context_rows` the pane uses. A page is marked
-asked only after its request finishes, so leaving a page before the answer re-asks on return, and
-a page already answered is not asked again. No endpoint was added: the batch endpoint already
-takes the tuples.
+(`context_note`); the lines are drawn by the same `context_rows` the pane uses. `load_windows`
+returns `Windows { found, answered }`: `answered` is false only when a request was needed and the
+server gave no usable answer, in which case the page is NOT marked asked (it is asked again on
+return, as is a page left before its answer arrived) and the note is the distinct "the server did
+not answer" sentence (`CodeLoad::Failed`), never "could not be read at the inspected commit". A
+page already answered is not asked again. No endpoint was added: the batch endpoint already takes
+the tuples.
 
-*Decisions.* There is no new disposition path. The Queue's `apply_disposition` is now a thin
-wrapper over `apply_rows(rows, state, reason)`, which is `TriageModel::dispose_with_undo` plus the
-removal of the rows from the table and ONE undo entry for the whole set (`undo_restore` is a list
-re-inserted in ascending position order); the stack calls `apply_rows` with its checked cards, so
-the required-reason refusal (`reason_required_message`, which names the count), the five-second
-undo (`Confirmed 29 findings.`) and the table removal are the pane's. `C` and `F` go through
-`dispose_with_undo` rather than `bulk_confirm` / `bulk_false_positive` because those take a
-`DeviationGroup` (a defect group has no headline) and return no `UndoEntry`; both wrap the same
-`confirm` / `mark_false_positive`, and a core test pins that the stack's writes equal the bulk
-functions' for the same rows and that a blank reason writes nothing. The reason prompt is the
-Queue's own `QueueReasonPrompt` (target `ReasonTarget::Selection` with the rows snapshotted when
-the prompt opens). Keys act on the checked cards of the page on screen.
+*Decisions.* There is no new disposition path. The Queue's `apply_disposition` is a thin wrapper
+over `apply_rows(rows, state, reason)`, which is `TriageModel::dispose_with_undo` plus the removal
+of the rows from the table and ONE undo entry for the whole set (`undo_restore` is a list
+re-inserted in ascending position order). `apply_rows` is the only write+remove+undo path in the
+Queue's decision doors: the pane's keys and buttons, the viewer, the stack, the toolbar reason
+prompt (`commit_toolbar_reason`) and the rule-level bar's "Confirm all N" all call it, so every one
+gets the required-reason refusal (`reason_required_message`, which names the count), the
+five-second undo (`Confirmed 29 findings.`) and the table removal. `TriageModel::bulk_confirm` and
+`bulk_false_positive` were removed: they took a `DeviationGroup` (a defect group has no headline),
+returned no `UndoEntry`, and had no callers left; their equivalence and required-reason tests now
+run against `dispose_with_undo`. The reason prompt is the Queue's own `QueueReasonPrompt`, whose
+`ToolbarReasonPrompt` carries the rows by value (snapshotted when the prompt opens). Keys act on
+the checked cards of the page on screen.
+
+*One gate for keys and mouse.* While the reason prompt is open the stack's focus is
+`StackFocus::ReasonPrompt` (`stack_focus(prompt_open)`, the one derivation). The key handler reads
+it through `stack_command`; every mouse door (`toggle_cursor`, `open_cursor`, `turn_page`,
+`decide`, `begin_prompt`, the checkbox and card clicks) returns early unless
+`stack_keys_armed(stack_focus(..))`, and `StackView` renders the decision, page and Code buttons
+`disabled` from the same value (a browser's `disabled` is only a hint, so the handlers refuse
+too). Close and Undo stay live. The prompt's rows are a snapshot, so a click that turned the page
+and then Enter would otherwise decide rows that were never on screen. Mounted tests pin the
+disabled markup and that clicks on Next page, the four decision buttons and the cards change
+nothing under the prompt. The pane and the viewer were checked for the same hole and do not have
+it: each decides a single row and the viewer has no decision buttons (a mouse navigation there
+re-keys the host and drops its prompt).
 
 *Keys.* `stack_command(focus, key, mods)` is a whitelist like `pane_command` and `viewer_command`:
 nothing is answered under `StackFocus::ReasonPrompt`, any Ctrl/Alt/Meta press is refused, and the

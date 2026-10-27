@@ -6736,9 +6736,14 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 }
 .cv-refs-keys { padding: 5px 10px; color: var(--ink-faint); border-top: 1px solid var(--line); }
 
-/* The stacked group view (cockpit/stack.rs; WORK_ORDER_REVIEW_SPEED.md B.2). A layer UNDER the
-   code viewer (1085 against its 1090), because the viewer opens above it from a card. */
-.sk-overlay { z-index: 1085; }
+/* The stacked group view (cockpit/stack.rs; WORK_ORDER_REVIEW_SPEED.md B.2). The overlay layers,
+   lowest to highest, by explicit z-index and not by source order:
+     1085  .sk-overlay          this view
+     1090  .cv-overlay          the code viewer, which a card opens ABOVE the stack (Esc comes back)
+     1100  .rule-modal-overlay  the rule hub and the finding modal, which open above both
+   The stack carries `rule-modal-overlay` for its backdrop, so the selector is doubled to beat
+   that rule's 1100 whatever order the stylesheet is concatenated in. */
+.rule-modal-overlay.sk-overlay { z-index: 1085; }
 .sk-head { gap: 10px; }
 .sk-label { font-weight: 700; overflow-wrap: anywhere; }
 .sk-summary { margin-left: auto; }

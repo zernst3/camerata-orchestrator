@@ -1231,12 +1231,17 @@ pub(super) enum Reach {
     Unresolvable,
 }
 
+/// What a finding that has left the table (it was decided) is told. THE wording: the viewer's
+/// status line and the stacked view's toast both show it, and only this case offers the way back.
+pub(super) const GONE_PROBLEM: &str =
+    "That finding has left the table. Undo its decision to bring it back.";
+
 impl Reach {
     /// The status line for a finding the cursor cannot be aimed at. `None` when it can.
     pub(super) fn problem(&self) -> Option<&'static str> {
         match self {
             Reach::Visible | Reach::NeedsExpand(_) => None,
-            Reach::Gone => Some("That finding has left the table"),
+            Reach::Gone => Some(GONE_PROBLEM),
             Reach::Filtered => Some("That finding is hidden by a filter"),
             Reach::Unresolvable => Some("Could not open the group that holds that finding"),
         }
@@ -1387,6 +1392,10 @@ pub(super) fn ViewerUndoBar(
     undo_entry: Signal<Option<UndoEntry>>,
     now_ms: Signal<u64>,
     on_undo: Callback<()>,
+    /// A DOM id for the Undo button, so a surface that shows this bar beside the pane's own
+    /// (which has an Undo too) can be told apart from it.
+    #[props(default)]
+    button_id: Option<String>,
 ) -> Element {
     let Some(u) = undo_banner_of(&undo_entry.read(), *now_ms.read()) else {
         return rsx! {};
@@ -1396,6 +1405,7 @@ pub(super) fn ViewerUndoBar(
             span { class: "pane-undo-msg", "{u.message}" }
             button {
                 class: "btn-edit-sm pane-undo-btn",
+                id: button_id,
                 onclick: move |_| on_undo.call(()),
                 "Undo"
             }
@@ -4078,7 +4088,7 @@ mod navigation_tests {
         let gone = remove_rows(&state, &[gone_id]);
         let plan = plan_reach(&gone, &key_a);
         assert_eq!(plan, Reach::Gone);
-        assert_eq!(plan.problem(), Some("That finding has left the table"));
+        assert_eq!(plan.problem(), Some(GONE_PROBLEM));
         // Filtered by a column filter: still a row, not on screen.
         let filtered = set_filter(
             &state,
@@ -4149,10 +4159,7 @@ mod navigation_tests {
             panic!()
         };
         assert_eq!(back_to, a);
-        assert_eq!(
-            plan_reach(&state, &back_to).problem(),
-            Some("That finding has left the table")
-        );
+        assert_eq!(plan_reach(&state, &back_to).problem(), Some(GONE_PROBLEM));
     }
 }
 

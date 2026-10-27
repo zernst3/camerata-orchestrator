@@ -35,7 +35,8 @@ use std::sync::Arc;
 
 use camerata_ui_core::pane_context::{ContextTarget, PaneContext};
 use camerata_ui_core::stack::{
-    stack_command, StackFocus, StackOrigin, StackState, NONE_CHECKED_NOTE, STACK_KEY_ROWS,
+    stack_command, stack_focus, stack_keys_armed, StackFocus, StackOrigin, StackState,
+    NONE_CHECKED_NOTE, STACK_KEY_ROWS,
 };
 use camerata_ui_core::triage::{
     finding_key, finding_state, Disposition, FindingView, FocusMove, KeyMods, TriageState,
@@ -44,12 +45,21 @@ use camerata_ui_core::triage::{
 use camerata_ui_core::viewer::{severity_class, ViewerCache};
 use dioxus::prelude::*;
 
-use super::scan::{context_rows, QueueReasonPrompt, ReasonTarget, ToolbarReasonPrompt};
+use super::scan::{context_rows, QueueReasonPrompt, ToolbarReasonPrompt};
 use super::viewer::{dom_key, focus_element, follow_selected, ViewerUndoBar};
 
 /// The DOM id of the stack's focusable root. The keydown handler lives here, and the viewer's
 /// close hands the keyboard back to it.
 pub(super) const STACK_ID: &str = "camerata-stack";
+
+/// DOM ids of the controls a mounted test needs to find (and a screen reader to name).
+pub(super) const STACK_UNDO_ID: &str = "camerata-stack-undo";
+pub(super) const STACK_CONFIRM_ID: &str = "camerata-stack-act-confirm";
+pub(super) const STACK_DEBT_ID: &str = "camerata-stack-act-debt";
+pub(super) const STACK_IGNORE_ID: &str = "camerata-stack-act-ignore";
+pub(super) const STACK_FP_ID: &str = "camerata-stack-act-fp";
+pub(super) const STACK_PREV_ID: &str = "camerata-stack-page-prev";
+pub(super) const STACK_NEXT_ID: &str = "camerata-stack-page-next";
 
 /// The selector of the focused card, for the follow-scroll.
 const SELECTED_CARD: &str = ".sk-card-sel";
@@ -188,26 +198,41 @@ pub(super) fn card_views(
         .collect()
 }
 
+/// Where the code for the page on screen stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CodeLoad {
+    /// The request has not finished (the cards show their stored lines meanwhile).
+    Pending,
+    /// The server did not answer: the code was never read, so nothing is known about it.
+    Failed,
+    /// The server answered. `shown` of `total` cards have the code around them.
+    Done { shown: usize, total: usize },
+}
+
 /// The sentence under the header about the code on the cards, or `None` while there is nothing to
-/// say. `shown` of `total` cards have the code around them; the others show the stored line only,
-/// and the curator is told rather than left to wonder whether the code was missing or merely slow.
-pub(super) fn context_note(loaded: Option<(usize, usize)>) -> Option<String> {
-    let (shown, total) = loaded?;
-    if shown >= total {
-        return None;
-    }
-    let lacking = total - shown;
-    Some(if shown == 0 {
-        format!(
+/// say. Cards without the code show the stored line only, and the curator is told why, rather
+/// than left to wonder whether the code was missing, refused or merely slow. A server that did
+/// not answer is a different sentence from a server that answered "not at that commit": the
+/// first says nothing about the code.
+pub(super) fn context_note(load: CodeLoad) -> Option<String> {
+    match load {
+        CodeLoad::Pending => None,
+        CodeLoad::Failed => Some(
+            "The server did not answer the request for the code around these findings, so cards \
+             without it show the stored line only. Reopen the stack to ask again."
+                .to_string(),
+        ),
+        CodeLoad::Done { shown, total } if shown >= total => None,
+        CodeLoad::Done { shown: 0, total } => Some(format!(
             "The code around these {total} findings could not be read at the inspected commit. \
              Each card shows its stored line only."
-        )
-    } else {
-        format!(
-            "{lacking} of {total} cards show the stored line only: the code around them could \
-             not be read at the inspected commit."
-        )
-    })
+        )),
+        CodeLoad::Done { shown, total } => Some(format!(
+            "{} of {total} cards show the stored line only: the code around them could \
+             not be read at the inspected commit.",
+            total - shown
+        )),
+    }
 }
 
 /// The key strip, from the key list the tests hold to the map.
@@ -266,7 +291,10 @@ pub(super) fn StackView(
     on_cancel: Callback<()>,
 ) -> Element {
     let strip = key_strip();
-    let armed = camerata_ui_core::stack::stack_keys_armed(focus);
+    // One derivation for the keys, the claim test above and every mouse door: while a reason
+    // prompt owns the keyboard, the controls that act on cards are disabled (and the host's
+    // handlers refuse too, since a disabled button is only a hint to the browser).
+    let armed = stack_keys_armed(focus);
     rsx! {
         div { class: "rule-modal-overlay cv-overlay sk-overlay",
             div {
@@ -298,12 +326,16 @@ pub(super) fn StackView(
                     if paged {
                         button {
                             class: "btn-edit-sm sk-page-prev",
+                            id: STACK_PREV_ID,
+                            disabled: !armed,
                             title: "Previous page of cards (<).",
                             onclick: move |_| on_page.call(FocusMove::Up),
                             "Previous page"
                         }
                         button {
                             class: "btn-edit-sm sk-page-next",
+                            id: STACK_NEXT_ID,
+                            disabled: !armed,
                             title: "Next page of cards (>).",
                             onclick: move |_| on_page.call(FocusMove::Down),
                             "Next page"
@@ -325,24 +357,32 @@ pub(super) fn StackView(
                 div { class: "sk-actions",
                     button {
                         class: "btn-run sk-act-confirm",
+                        id: STACK_CONFIRM_ID,
+                        disabled: !armed,
                         title: "Confirm every checked card (C). No reason required.",
                         onclick: move |_| on_dispose.call(TriageState::Confirmed),
                         "Confirm checked"
                     }
                     button {
                         class: "btn-run sk-act-debt",
+                        id: STACK_DEBT_ID,
+                        disabled: !armed,
                         title: "Save every checked card as tech debt (T).",
                         onclick: move |_| on_dispose.call(TriageState::TechDebt),
                         "Tech debt"
                     }
                     button {
                         class: "btn-restart sk-act-ignore",
+                        id: STACK_IGNORE_ID,
+                        disabled: !armed,
                         title: "Ignore every checked card, with one reason for all of them (I).",
                         onclick: move |_| on_dispose.call(TriageState::Ignored),
                         "Ignore with reason"
                     }
                     button {
                         class: "btn-restart sk-act-fp",
+                        id: STACK_FP_ID,
+                        disabled: !armed,
                         title: "Mark every checked card a false positive, with one reason for all of them (F).",
                         onclick: move |_| on_dispose.call(TriageState::FalsePositive),
                         "False positive with reason"
@@ -359,6 +399,7 @@ pub(super) fn StackView(
                             div { class: "sk-card-head",
                                 span {
                                     class: if c.checked { "sk-check sk-check-on" } else { "sk-check" },
+                                    "data-disabled": "{!armed}",
                                     role: "checkbox",
                                     "aria-checked": "{c.checked}",
                                     title: "Check or uncheck this card (Space when it is focused).",
@@ -380,6 +421,7 @@ pub(super) fn StackView(
                                 }
                                 button {
                                     class: "btn-edit-sm sk-open",
+                                    disabled: !armed,
                                     title: "Open this finding in the code viewer (Enter on the focused card).",
                                     onclick: move |e| {
                                         e.stop_propagation();
@@ -402,7 +444,7 @@ pub(super) fn StackView(
                 if let Some(p) = prompt {
                     QueueReasonPrompt { prompt: p, reason, on_reason, on_commit, on_cancel }
                 }
-                ViewerUndoBar { undo_entry, now_ms, on_undo }
+                ViewerUndoBar { undo_entry, now_ms, on_undo, button_id: STACK_UNDO_ID.to_string() }
                 div { class: if armed { "cv-keys armed" } else { "cv-keys" }, "{strip}" }
             }
         }
@@ -451,8 +493,12 @@ fn StackHost(link: StackLink, open: StackOpen) -> Element {
     let mut windows = use_signal(HashMap::<String, PaneContext>::new);
     // The pages whose code has been asked for, so a page visited twice is asked once.
     let mut asked = use_signal(HashSet::<usize>::new);
-    // `(cards with code, cards)` for the page on screen, once its request has finished.
-    let mut loaded = use_signal(|| Option::<(usize, usize)>::None);
+    // Where the code for the page on screen stands.
+    let mut loaded = use_signal(|| CodeLoad::Pending);
+    // THE GATE for every mouse door: the same focus the key handler reads. While the reason
+    // prompt is open its row set is a snapshot the heading has promised; a click that moved the
+    // cursor, turned the page or decided other rows would make it a lie.
+    let armed = move || stack_keys_armed(stack_focus(prompt.peek().is_some()));
 
     // The keyboard starts in the stack, and the anchor card is brought into view.
     use_effect(move || {
@@ -481,13 +527,19 @@ fn StackHost(link: StackLink, open: StackOpen) -> Element {
                 })
                 .collect();
             let total = state.peek().page_rows().len();
-            // Marked AFTER the request, so a page left before its answer came (which cancels
-            // this resource) is asked for again when the curator returns to it.
+            // Marked AFTER the request, and only when the server answered: a page left before
+            // its answer came (which cancels this resource), or one the server never answered,
+            // is asked for again when the curator returns to it.
+            let mut unanswered = false;
             if !asked.peek().contains(&page) {
                 let got =
                     super::pane_context::load_windows(cache, &targets, project.as_deref()).await;
-                windows.write().extend(got);
-                asked.write().insert(page);
+                windows.write().extend(got.found);
+                if got.answered {
+                    asked.write().insert(page);
+                } else {
+                    unanswered = true;
+                }
             }
             let have = {
                 let w = windows.peek();
@@ -498,23 +550,29 @@ fn StackHost(link: StackLink, open: StackOpen) -> Element {
                     .filter(|f| w.contains_key(&finding_key(f)))
                     .count()
             };
-            loaded.set(Some((have, total)));
+            loaded.set(if unanswered {
+                CodeLoad::Failed
+            } else {
+                CodeLoad::Done { shown: have, total }
+            });
         }
     });
 
-    let mut decide = move |decided: TriageState, why: String| -> bool {
+    let decide = move |decided: TriageState, why: String| -> bool {
+        if !armed() {
+            return false;
+        }
         let rows = state.peek().checked_rows(&dispositions_sig.peek());
         if rows.is_empty() {
             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, NONE_CHECKED_NOTE);
             return false;
         }
-        let landed = on_dispose_cb.call((rows.clone(), decided, why));
-        if landed {
-            state.write().forget_choices(&rows);
-        }
-        landed
+        on_dispose_cb.call((rows, decided, why))
     };
     let mut begin_prompt = move |decided: TriageState| {
+        if !armed() {
+            return;
+        }
         let rows = state.peek().checked_rows(&dispositions_sig.peek());
         if rows.is_empty() {
             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, NONE_CHECKED_NOTE);
@@ -525,35 +583,37 @@ fn StackHost(link: StackLink, open: StackOpen) -> Element {
         reason.set(String::new());
         prompt.set(Some(ToolbarReasonPrompt {
             state: decided,
-            target: ReasonTarget::Selection {
-                ids: Vec::new(),
-                rows,
-            },
+            rows,
         }));
     };
     let mut toggle_cursor = move || {
+        if !armed() {
+            return;
+        }
         let d = dispositions_sig.peek().clone();
         state.write().toggle_cursor(&d);
     };
     let open_cursor = move || {
+        if !armed() {
+            return;
+        }
         if let Some(key) = state.peek().cursor_key() {
             on_open_viewer.call(key);
         }
     };
     let mut turn_page = move |dir: FocusMove| {
+        if !armed() {
+            return;
+        }
         if state.write().turn_page(dir) {
-            loaded.set(None);
+            loaded.set(CodeLoad::Pending);
             dioxus::document::eval("var l=document.querySelector('.sk-list');if(l)l.scrollTop=0;");
         }
     };
     let close = move || on_close_cb.call(state.peek().cursor_key());
 
     let on_key = Callback::new(move |(key, mods): (String, KeyMods)| {
-        let focus = if prompt.peek().is_some() {
-            StackFocus::ReasonPrompt
-        } else {
-            StackFocus::Cards
-        };
+        let focus = stack_focus(prompt.peek().is_some());
         use camerata_ui_core::stack::StackCommand as C;
         match stack_command(focus, &key, mods) {
             Some(C::Close) => close(),
@@ -575,16 +635,10 @@ fn StackHost(link: StackLink, open: StackOpen) -> Element {
         let Some(p) = prompt.peek().clone() else {
             return;
         };
-        let ReasonTarget::Selection { rows, .. } = &p.target else {
-            return;
-        };
-        let landed = link
-            .on_dispose
-            .call((rows.clone(), p.state, reason.peek().clone()));
+        let landed = on_dispose_cb.call((p.rows, p.state, reason.peek().clone()));
         // A refusal (a blank reason) leaves the prompt OPEN with what was typed, and the Queue's
         // own refusal toast has said why.
         if landed {
-            state.write().forget_choices(rows);
             prompt.set(None);
             reason.set(String::new());
             focus_element(STACK_ID);
@@ -607,11 +661,7 @@ fn StackHost(link: StackLink, open: StackOpen) -> Element {
             s.is_paged(),
         )
     };
-    let focus = if prompt.read().is_some() {
-        StackFocus::ReasonPrompt
-    } else {
-        StackFocus::Cards
-    };
+    let focus = stack_focus(prompt.read().is_some());
     rsx! {
         StackView {
             label,
@@ -627,6 +677,9 @@ fn StackHost(link: StackLink, open: StackOpen) -> Element {
             now_ms: link.now_ms,
             on_key,
             on_toggle: Callback::new(move |i: usize| {
+                if !armed() {
+                    return;
+                }
                 let key = state.peek().page_rows().get(i).map(finding_key);
                 if let Some(key) = key {
                     state.write().focus_key(&key);
@@ -634,6 +687,10 @@ fn StackHost(link: StackLink, open: StackOpen) -> Element {
                 }
             }),
             on_focus_card: Callback::new(move |i: usize| {
+                // Also keeps the reason field's focus: this call would take it.
+                if !armed() {
+                    return;
+                }
                 let key = state.peek().page_rows().get(i).map(finding_key);
                 if let Some(key) = key {
                     state.write().focus_key(&key);
@@ -830,16 +887,13 @@ mod tests {
     fn the_prompt_names_the_count_and_the_page_and_code_notes_show_when_given() {
         let prompt = ToolbarReasonPrompt {
             state: TriageState::FalsePositive,
-            target: ReasonTarget::Selection {
-                ids: Vec::new(),
-                rows: deviations(2),
-            },
+            rows: deviations(2),
         };
         let html = render_view(
             vec![card(10, true, None)],
             Some(prompt),
             Some("Showing cards 1 to 200 of 312.".into()),
-            context_note(Some((0, 5))),
+            context_note(CodeLoad::Done { shown: 0, total: 5 }),
             true,
         );
         assert!(html.contains("2 findings (required)"), "{html}");
@@ -857,13 +911,43 @@ mod tests {
 
     #[test]
     fn the_notes_are_honest_and_carry_no_em_dash() {
-        assert_eq!(context_note(None), None, "nothing to say while loading");
-        assert_eq!(context_note(Some((30, 30))), None, "all have code");
-        let some = context_note(Some((25, 30))).unwrap();
+        assert_eq!(
+            context_note(CodeLoad::Pending),
+            None,
+            "nothing to say while loading"
+        );
+        assert_eq!(
+            context_note(CodeLoad::Done {
+                shown: 30,
+                total: 30
+            }),
+            None,
+            "all have code"
+        );
+        let some = context_note(CodeLoad::Done {
+            shown: 25,
+            total: 30,
+        })
+        .unwrap();
         assert!(some.starts_with("5 of 30 cards"), "{some}");
-        let none = context_note(Some((0, 30))).unwrap();
+        let none = context_note(CodeLoad::Done {
+            shown: 0,
+            total: 30,
+        })
+        .unwrap();
         assert!(none.contains("these 30 findings"), "{none}");
-        for text in [some, none, key_strip(), NONE_CHECKED_NOTE.to_string()] {
+        // A server that never answered is not "could not be read at the inspected commit".
+        let failed = context_note(CodeLoad::Failed).unwrap();
+        assert!(failed.contains("did not answer"), "{failed}");
+        assert!(!failed.contains("inspected commit"), "{failed}");
+        for text in [
+            some,
+            none,
+            failed,
+            key_strip(),
+            NONE_CHECKED_NOTE.to_string(),
+            super::super::viewer::GONE_PROBLEM.to_string(),
+        ] {
             assert!(!text.contains('\u{2014}'), "{text}");
         }
     }
@@ -961,6 +1045,10 @@ mod tests {
 
     impl Respond for Answerer {
         fn respond(&self, req: &Request) -> ResponseTemplate {
+            if self.status == "garbage" {
+                // The server answers, but not with anything the client can read: no answer.
+                return ResponseTemplate::new(200).set_body_string("not json");
+            }
             let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
             let items: Vec<serde_json::Value> = body["items"]
                 .as_array()
@@ -1273,15 +1361,14 @@ mod tests {
         let (mut vdom, mut seen, _server, _env) =
             mount(deviations(6), OrderPreset::Curated, "ok").await;
         let panel = open_from_bar(&mut vdom, &mut seen).await;
-        let mark = seen.mark();
         key(&vdom, panel, "c");
         settle(&mut vdom, &mut seen).await;
         assert_eq!(state_count(TriageState::Confirmed), 6);
         assert!(html(&vdom).contains("Confirmed 6 findings."));
         assert_eq!(checked_cards(&html(&vdom)), 0);
 
-        // The Undo button is the one new click listener the decision created.
-        click(&vdom, seen.first_after(mark, "click"));
+        // The stack's own Undo button (the pane has one too, so it is found by id).
+        click(&vdom, seen.element(STACK_UNDO_ID));
         settle(&mut vdom, &mut seen).await;
         assert!(
             probe().dispositions.peek().is_empty(),
@@ -1290,11 +1377,17 @@ mod tests {
         let page = html(&vdom);
         assert_eq!(page.matches(">Unresolved<").count(), 6, "{page}");
         assert_eq!(checked_cards(&page), 6, "and they read checked again");
-        assert!(probe()
+        let undone = probe()
             .toasts
             .peek()
             .iter()
-            .any(|t| t.message.contains("6 finding(s) put back")));
+            .find(|t| t.message.contains("6 finding(s) put back"))
+            .map(|t| t.message.clone())
+            .expect("the undo is said");
+        assert!(
+            !undone.contains('\u{2014}'),
+            "no em-dash in user text: {undone}"
+        );
     }
 
     /// B.2 check 3: F with two cards checked opens ONE prompt naming the count; a blank reason is
@@ -1473,9 +1566,12 @@ mod tests {
         key(&vdom, panel, "Enter");
         settle(&mut vdom, &mut seen).await;
         assert!(!html(&vdom).contains("file line"));
-        assert!(probe().toasts.peek().iter().any(|t| t
-            .message
-            .contains("Undo its decision to open it in the viewer")));
+        // One wording table: only a finding that has left the table is told how to get it back.
+        assert!(probe()
+            .toasts
+            .peek()
+            .iter()
+            .any(|t| t.message == super::super::viewer::GONE_PROBLEM));
     }
 
     /// A group whose batch answer is a refusal shows the stored snippets only, and says so.
@@ -1649,7 +1745,6 @@ mod tests {
         settle(&mut vdom, &mut seen).await;
         let panel = seen.first_after(before, "keydown");
         key(&vdom, panel, " "); // leave the first card alone
-        let mark = seen.mark();
         key(&vdom, panel, "c");
         settle(&mut vdom, &mut seen).await;
         assert_eq!(state_count(TriageState::Confirmed), 3);
@@ -1659,7 +1754,7 @@ mod tests {
             "three rows left the table, one stayed"
         );
 
-        click(&vdom, seen.first_after(mark, "click"));
+        click(&vdom, seen.element(STACK_UNDO_ID));
         settle(&mut vdom, &mut seen).await;
         assert!(probe().dispositions.peek().is_empty());
         assert_eq!(
@@ -1667,5 +1762,318 @@ mod tests {
             4,
             "one undo put all three back on screen"
         );
+    }
+
+    // ── H1: the mouse doors obey the same gate as the keys ──────────────────────────────
+
+    /// With the reason prompt open the heading has promised a number of cards. A click that turns
+    /// the page, then Enter, must not decide rows the curator is no longer looking at, and a
+    /// click on "Confirm checked" must not flip the very rows the prompt is about to decide.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_click_on_next_page_under_the_prompt_changes_nothing_and_enter_decides_what_it_named()
+    {
+        let (mut vdom, mut seen, server, _env) =
+            mount(deviations(212), OrderPreset::Curated, "ok").await;
+        let panel = open_from_bar(&mut vdom, &mut seen).await;
+        let mark = seen.mark();
+        key(&vdom, panel, "f");
+        settle(&mut vdom, &mut seen).await;
+        assert!(html(&vdom).contains("200 findings (required)"));
+
+        // The page buttons are disabled in the markup...
+        let page = html(&vdom);
+        assert!(
+            page.contains("disabled"),
+            "the controls say they are off: {page}"
+        );
+        // ...and, since a browser's `disabled` is only a hint, the handler refuses too.
+        click(&vdom, seen.element(STACK_NEXT_ID));
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(
+            page.contains("Showing cards 1 to 200 of 212"),
+            "the page did not turn: {page}"
+        );
+        assert_eq!(batches(&server).await.len(), 1, "and nothing was asked for");
+        // The panel's Enter (open the viewer) is refused under the prompt as well.
+        key(&vdom, panel, "Enter");
+        settle(&mut vdom, &mut seen).await;
+        assert!(!html(&vdom).contains("file line"));
+
+        // The prompt still decides exactly the 200 it named, and none of the other 12.
+        typed(
+            &vdom,
+            seen.first_after(mark, "input"),
+            "the parser misread these",
+        );
+        settle(&mut vdom, &mut seen).await;
+        key(&vdom, seen.first_after(mark, "keydown"), "Enter");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(state_count(TriageState::FalsePositive), 200);
+        assert_eq!(
+            probe()
+                .dispositions
+                .peek()
+                .get(&finding_key(&deviation(201))),
+            None,
+            "a row of the page that was never on screen is untouched"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_click_on_confirm_checked_under_the_prompt_does_nothing() {
+        let (mut vdom, mut seen, _server, _env) =
+            mount(deviations(3), OrderPreset::Curated, "ok").await;
+        let panel = open_from_bar(&mut vdom, &mut seen).await;
+        key(&vdom, panel, "f");
+        settle(&mut vdom, &mut seen).await;
+        for id in [
+            STACK_CONFIRM_ID,
+            STACK_DEBT_ID,
+            STACK_IGNORE_ID,
+            STACK_FP_ID,
+        ] {
+            click(&vdom, seen.element(id));
+        }
+        settle(&mut vdom, &mut seen).await;
+        assert!(
+            probe().dispositions.peek().is_empty(),
+            "no button decided anything under the prompt"
+        );
+        let page = html(&vdom);
+        assert_eq!(
+            page.matches("queue-reason-prompt").count(),
+            1,
+            "and the prompt is still the one it was: {page}"
+        );
+        assert!(
+            page.contains("False positive"),
+            "still the False positive prompt"
+        );
+    }
+
+    /// The card-level mouse doors are shut under the prompt too: a checkbox click does not flip
+    /// a card the prompt has already counted, and a click on a card does not take the keyboard
+    /// out of the reason field.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn checkbox_and_card_clicks_under_the_prompt_change_nothing() {
+        let (mut vdom, mut seen, _server, _env) =
+            mount(deviations(3), OrderPreset::Curated, "ok").await;
+        let opened = seen.mark();
+        let panel = open_from_bar(&mut vdom, &mut seen).await;
+        let after_open = seen.mark();
+        key(&vdom, panel, "f");
+        settle(&mut vdom, &mut seen).await;
+        // The stack's own click listeners (the page, decision, checkbox, card and Code
+        // controls), in the order they were created. The first is Close, which is allowed
+        // under the prompt and is left alone.
+        let cards: Vec<ElementId> = seen.listeners[opened..after_open]
+            .iter()
+            .filter(|(n, _)| n == "click")
+            .skip(1)
+            .map(|(_, id)| *id)
+            .collect();
+        assert!(cards.len() >= 9, "the controls were found: {}", cards.len());
+        let focus_before = FOCUS_LOG.with(|l| l.borrow().len());
+        for id in cards {
+            click(&vdom, id);
+        }
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert_eq!(checked_cards(&page), 3, "no checkbox flipped: {page}");
+        assert_eq!(
+            FOCUS_LOG.with(|l| l.borrow().len()),
+            focus_before,
+            "and nothing took the focus out of the reason field"
+        );
+        assert!(!page.contains("file line"), "no viewer opened");
+    }
+
+    // ── L5: the mouse buttons raise the prompt, they do not decide ──────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_mouse_buttons_that_need_a_reason_raise_the_prompt_and_confirm_decides() {
+        let (mut vdom, mut seen, _server, _env) =
+            mount(deviations(3), OrderPreset::Curated, "ok").await;
+        open_from_bar(&mut vdom, &mut seen).await;
+        for (id, label) in [
+            (STACK_FP_ID, "False positive"),
+            (STACK_IGNORE_ID, "Ignored"),
+        ] {
+            click(&vdom, seen.element(id));
+            settle(&mut vdom, &mut seen).await;
+            let page = html(&vdom);
+            assert_eq!(
+                page.matches("queue-reason-prompt").count(),
+                1,
+                "{id}: {page}"
+            );
+            assert!(page.contains(label) && page.contains("3 findings (required)"));
+            assert!(
+                probe().dispositions.peek().is_empty(),
+                "{id}: raising the prompt decided nothing"
+            );
+            // Leave the prompt for the next button: Esc in the field cancels it.
+            let field = seen
+                .listeners
+                .iter()
+                .rev()
+                .find(|(n, _)| n == "keydown")
+                .unwrap()
+                .1;
+            key(&vdom, field, "Escape");
+            settle(&mut vdom, &mut seen).await;
+            assert!(!html(&vdom).contains("queue-reason-prompt"));
+        }
+        click(&vdom, seen.element(STACK_CONFIRM_ID));
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(
+            state_count(TriageState::Confirmed),
+            3,
+            "Confirm needs no reason"
+        );
+    }
+
+    // ── M1: a decision made elsewhere ───────────────────────────────────────────────────
+
+    /// Check a card on purpose, decide it in the viewer, come back: it is decided and unchecked,
+    /// and Confirm checked does not touch it again.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_card_decided_in_the_viewer_comes_back_decided_and_unchecked() {
+        let (mut vdom, mut seen, _server, _env) =
+            mount(deviations(3), OrderPreset::Curated, "ok").await;
+        let panel = open_from_bar(&mut vdom, &mut seen).await;
+        // Uncheck then check the first card: two explicit choices made while it is Unresolved.
+        key(&vdom, panel, " ");
+        key(&vdom, panel, " ");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(checked_cards(&html(&vdom)), 3);
+
+        key(&vdom, panel, "Enter");
+        settle(&mut vdom, &mut seen).await;
+        assert!(html(&vdom).contains("file line"), "the viewer opened");
+        // Confirm the finding in the viewer.
+        key(&vdom, seen.element(VIEWER_ID), "c");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(state_count(TriageState::Confirmed), 1);
+        key(&vdom, seen.element(VIEWER_ID), "Escape");
+        settle(&mut vdom, &mut seen).await;
+
+        let page = html(&vdom);
+        assert!(page.contains("sk-panel") && !page.contains("file line"));
+        assert_eq!(
+            page.matches("sk-status\" title=\"\">Confirmed<").count(),
+            1,
+            "{page}"
+        );
+        assert_eq!(
+            checked_cards(&page),
+            2,
+            "the decided card is unchecked: its old choice was about the Unresolved card"
+        );
+        // And Confirm checked acts on the two that are checked, not on the decided one.
+        key(&vdom, panel, "c");
+        settle(&mut vdom, &mut seen).await;
+        assert!(html(&vdom).contains("Confirmed 2 findings."));
+        assert_eq!(state_count(TriageState::Confirmed), 3);
+    }
+
+    // ── L3: a server that never answered ────────────────────────────────────────────────
+
+    /// A request nobody answered is not "could not be read at the inspected commit", and the
+    /// page is not counted as asked: coming back to it asks again.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn an_unanswered_request_says_so_and_the_page_is_asked_again_on_return() {
+        let (mut vdom, mut seen, server, _env) =
+            mount(deviations(212), OrderPreset::Curated, "garbage").await;
+        let panel = open_from_bar(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("did not answer"), "{page}");
+        assert!(
+            !page.contains("could not be read at the inspected commit"),
+            "{page}"
+        );
+        assert!(page.contains("sk-snippet"), "the stored lines are there");
+        assert_eq!(batches(&server).await.len(), 1);
+
+        key(&vdom, panel, ">");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(batches(&server).await.len(), 2, "page two is asked for");
+        key(&vdom, panel, "<");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(
+            batches(&server).await.len(),
+            3,
+            "page one was never answered, so it is asked again"
+        );
+    }
+
+    // ── L5: the whole chain ─────────────────────────────────────────────────────────────
+
+    /// pane `B` -> stack -> `Enter` -> viewer -> `Esc` -> stack -> `Esc` -> pane, in one run, with
+    /// the keyboard going where each step says.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_whole_chain_pane_stack_viewer_stack_pane_returns_the_keyboard_each_step() {
+        let rows = vec![defect(7), defect(8)];
+        let (mut vdom, mut seen, _server, _env) =
+            mount(rows, OrderPreset::CriticalFirst, "ok").await;
+        let pane = seen.element(super::super::scan::DETAIL_PANE_ID);
+        send(
+            &vdom,
+            "focusin",
+            pane,
+            Box::new(SerializedFocusData::default()),
+        );
+        settle(&mut vdom, &mut seen).await;
+
+        let before = seen.mark();
+        key(&vdom, pane, "b");
+        settle(&mut vdom, &mut seen).await;
+        let panel = seen.first_after(before, "keydown");
+        assert!(html(&vdom).contains("sk-panel"));
+        key(&vdom, panel, "j");
+
+        key(&vdom, panel, "Enter");
+        settle(&mut vdom, &mut seen).await;
+        assert!(
+            html(&vdom).contains("file line 8"),
+            "the viewer is on the second card"
+        );
+        key(&vdom, seen.element(VIEWER_ID), "Escape");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(last_focus(), Some(STACK_ID.to_string()), "viewer to stack");
+        assert!(html(&vdom).contains("sk-panel"));
+
+        key(&vdom, panel, "Escape");
+        settle(&mut vdom, &mut seen).await;
+        assert!(!html(&vdom).contains("sk-panel"));
+        assert_eq!(
+            last_focus(),
+            Some(super::super::scan::DETAIL_PANE_ID.to_string()),
+            "stack to pane"
+        );
+    }
+
+    // ── The view, props only: the disabled state ────────────────────────────────────────
+
+    #[test]
+    fn under_the_prompt_the_acting_controls_render_disabled_and_otherwise_do_not() {
+        let rows = deviations(2);
+        let prompt = ToolbarReasonPrompt {
+            state: TriageState::FalsePositive,
+            rows,
+        };
+        let under = render_view(vec![card(10, true, None)], Some(prompt), None, None, true);
+        // Four decision buttons, two page buttons and the card's Code button.
+        assert_eq!(under.matches("disabled=true").count(), 7, "{under}");
+        let idle = render_view(vec![card(10, true, None)], None, None, None, true);
+        assert!(!idle.contains("disabled=true"), "{idle}");
     }
 }

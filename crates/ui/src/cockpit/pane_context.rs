@@ -59,11 +59,17 @@ pub(super) async fn fetch_context(
 /// own gate, so a card shows code only when the pane would; a refusal, a failed request or a
 /// stale answer leaves that card without a window and it shows its stored snippet. Accepted
 /// answers are kept in the cache's context lane, where the pane finds them too.
+///
+/// `answered` is `false` only when a request was needed and the server did not answer it. The
+/// caller must not count such a page as asked (it is asked again when the curator returns to
+/// it) and must not tell the curator the code "could not be read at the inspected commit": the
+/// server was never asked a question it could answer. Windows the cache already held are returned
+/// either way.
 pub(super) async fn load_windows(
     cache: Option<Signal<ViewerCache>>,
     targets: &[ContextTarget],
     project: Option<&str>,
-) -> Vec<(String, PaneContext)> {
+) -> Windows {
     let mut windows: Vec<(String, PaneContext)> = Vec::new();
     let mut missing: Vec<&ContextTarget> = Vec::new();
     for t in targets {
@@ -73,11 +79,17 @@ pub(super) async fn load_windows(
         }
     }
     if missing.is_empty() {
-        return windows;
+        return Windows {
+            found: windows,
+            answered: true,
+        };
     }
     let items: Vec<BatchItem> = missing.iter().map(|t| t.item.clone()).collect();
     let Some(response) = fetch_batch(&items, project).await else {
-        return windows;
+        return Windows {
+            found: windows,
+            answered: false,
+        };
     };
     for t in missing {
         let Some(window) = accept(t, &response) else {
@@ -90,7 +102,18 @@ pub(super) async fn load_windows(
         }
         windows.push((t.finding_key.clone(), window));
     }
-    windows
+    Windows {
+        found: windows,
+        answered: true,
+    }
+}
+
+/// What [`load_windows`] found.
+pub(super) struct Windows {
+    /// `(finding key, window)` for every target that has code to show.
+    pub found: Vec<(String, PaneContext)>,
+    /// Whether every request that was needed got an answer (a refusal is an answer).
+    pub answered: bool,
 }
 
 #[cfg(test)]

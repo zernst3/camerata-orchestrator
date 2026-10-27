@@ -485,7 +485,9 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    starts unchecked. All the code comes from the inspected commit in one request when the stack
    opens and has been through the secret redactor. A card whose code cannot be read at that commit
    (it is not in this clone, the file is gone, the line no longer matches the stored snippet)
-   shows the stored line only, and a note under the header says how many cards are like that.
+   shows the stored line only, and a note under the header says how many cards are like that. If
+   the server does not answer the request at all, the note says that instead (it says nothing about
+   the code), and the page is asked again when you come back to it or reopen the stack.
 
    | Key | What it does |
    |---|---|
@@ -501,12 +503,19 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    The buttons above the cards do the same as `C`, `T`, `I` and `F`. A decision acts on exactly
    the cards that are checked, and the Undo that appears at the bottom (five seconds, the same one
    the pane uses) names the count, for example `Confirmed 29 findings.`; one click puts all of them
-   back, also in the Queue's table. The cards you decided update in place and the stack stays open,
+   back, also in the Queue's table. The same Undo now follows the rule-level bar's **Confirm all N**
+   and the toolbar's reason prompts (**Ignore with reason**, **Mark false positive**), and a blank
+   reason is refused in the same words everywhere. The cards you decided update in place and the stack stays open,
    so you can leave a few unchecked, confirm the rest, and then deal with the exceptions one by
    one. A card you left unchecked stays Unresolved. If nothing is checked, a decision key says so
    instead of doing nothing. Decided rows leave the Queue's table, so **Enter** on a decided card
-   cannot open the viewer and says so; undo the decision first. Keys that hold Ctrl, Alt or Cmd are
-   left alone, and while the reason prompt is open every key is text.
+   cannot open the viewer and says so ("That finding has left the table. Undo its decision to bring
+   it back."). Keys that hold Ctrl, Alt or Cmd are left alone. While the reason prompt is open every
+   key is text and the buttons that act on cards (the four decisions, the page buttons, each card's
+   **Code** button, the checkboxes) do nothing and are greyed out, so a stray click cannot change
+   which cards the prompt's count and reason apply to; finish or cancel the prompt first. If you
+   decide a card somewhere else while the stack is open (in the viewer, for example), it comes back
+   decided and unchecked, whatever you had clicked on it before.
 
    A group of more than 200 rows is shown 200 cards at a time. A line under the header says which
    cards are on screen (`Showing cards 1 to 200 of 312`), `>` and `<` (or the **Next page** and
