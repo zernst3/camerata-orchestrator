@@ -1,7 +1,14 @@
 # Overnight autonomous run — decisions needed + progress log
 
 > ## ▶ RESUME HERE (paused 2026-10-26 at Zach's request, after code viewer step 4)
-> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Opus): three more
+> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Opus): viewer 7d
+> (command palette) BUILT, in Fable review. Decisions: bulk and selection-based writes stay out of
+> the palette (a mistyped filter must never be one Enter from a bulk write); Ctrl/Cmd+K must work
+> anywhere on the results screen, done by extending the timer's existing document bridge (no second
+> bridge). 7c (advisory findings grouped by corpus rule) is BLOCKED on a server field: calibration
+> sets `mapped_rule_id` (closest adopted rule) for every advisory finding, keeps the model's own
+> id as `model_rule_id`, falls back to `category`; built after ranks 4 and 7 merge (same
+> calibration code), then the small UI change. 2026-10-27 (Opus): three more
 > cloud builders on branches `cloud/w27-pdf` (W27 PDF + confidentiality + 22c + 22d + export
 > gates 2/6/7; owns export code), `cloud/w29-wave-d` (Wave D + 22e; Fable reviews locally before
 > merge since cloud sessions cannot run Fable), `cloud/item21` (2b follow-ups). Decision:
