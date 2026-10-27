@@ -1,7 +1,14 @@
 # Overnight autonomous run — decisions needed + progress log
 
 > ## ▶ RESUME HERE (paused 2026-10-26 at Zach's request, after code viewer step 4)
-> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Zach): **PRIORITY
+> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Opus, wave plan):
+> Zach re-saved the Anthropic key (Keychain entry verified, app reports it set) and set the $100
+> Console limit; he is moving to the 20x plan, so the remaining ranks build in parallel. After
+> rank 9 merges (it adds `EfficiencyConfig`), wave 1 = ranks 2, 4, 7, 10 at once; rank 8 after
+> rank 7 merges (same `Rule` struct, `run_routed_passes`, corpus lock). Routing inside batch mode
+> moves from rank 2 to rank 7 (same dispatch block). Rank 2 and rank 10 defaults ship ON before
+> grading because the API sweep grades them before any client run; any recall loss there flips
+> the switch off. Then: **PRIORITY
 > CHANGE: finish ALL token-efficiency work first, then test it on the API** with the $100 credit
 > (expires 2026-11-02). Zach's GO on the protected ranks 4 (terse scan output; calibration and
 > merge inputs), 7 (routing on `applies_to`; corpus field), 8 (deterministic `candidates`
