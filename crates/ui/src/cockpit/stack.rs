@@ -301,7 +301,10 @@ pub(super) fn StackView(
     // handlers refuse too, since a disabled button is only a hint to the browser).
     let armed = stack_keys_armed(focus);
     rsx! {
-        div { class: "rule-modal-overlay cv-overlay sk-overlay",
+        div {
+            class: "rule-modal-overlay cv-overlay sk-overlay",
+            // A review surface: keys and clicks here are the reviewer's, and count for the timer.
+            "data-review-surface": "true",
             div {
                 id: "{STACK_ID}",
                 class: "cv-panel sk-panel",
@@ -345,6 +348,12 @@ pub(super) fn StackView(
                             onclick: move |_| on_page.call(FocusMove::Down),
                             "Next page"
                         }
+                    }
+                    // The review timer's control (internal), the same component the strip draws.
+                    super::review::OverlayTimerControl {
+                        id: "camerata-review-timer-toggle-stack",
+                        return_focus: STACK_ID,
+                        focus_back: prompt.is_none(),
                     }
                     button {
                         class: "btn-edit-sm cv-close",
@@ -1037,6 +1046,7 @@ mod tests {
     fn app() -> Element {
         let review = super::super::review::use_review_handle();
         REVIEW.with(|r| *r.borrow_mut() = Some(review.clone()));
+        use_context_provider(|| review.clone());
         let toasts = use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
         use_context_provider(|| Signal::new(None::<FindingView>));
         use_context_provider(|| Signal::new(ViewerCache::new()));
@@ -1969,12 +1979,12 @@ mod tests {
         key(&vdom, panel, "f");
         settle(&mut vdom, &mut seen).await;
         // The stack's own click listeners (the page, decision, checkbox, card and Code
-        // controls), in the order they were created. The first is Close, which is allowed
-        // under the prompt and is left alone.
+        // controls), in the order they were created. The first two are the review timer's
+        // control and Close, both allowed under the prompt and left alone.
         let cards: Vec<ElementId> = seen.listeners[opened..after_open]
             .iter()
             .filter(|(n, _)| n == "click")
-            .skip(1)
+            .skip(2)
             .map(|(_, id)| *id)
             .collect();
         assert!(cards.len() >= 9, "the controls were found: {}", cards.len());
@@ -3073,6 +3083,125 @@ mod tests {
         click(&vdom, button);
         settle(&mut vdom, &mut seen).await;
         assert!(html(&vdom).contains("Review timer running"));
+    }
+
+    /// The timer's control is always on screen: the stacked view and the code viewer cover the
+    /// strip, so each draws the same control. Pressing any of them toggles the ONE timer (the
+    /// strip's text moves with it), hands the keyboard back to the overlay it was pressed in, and
+    /// takes only the Enter and Space that activate it: Esc still reaches the overlay.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_timer_control_is_in_the_stack_and_the_viewer_and_toggles_the_one_timer() {
+        let (mut vdom, mut seen, _server, _env) =
+            mount(deviations(5), OrderPreset::Curated, "ok").await;
+        let page = html(&vdom);
+        assert!(!page.contains("camerata-review-timer-toggle-stack"));
+        let panel = open_from_bar(&mut vdom, &mut seen).await;
+
+        // The stack draws it, as the one shared component (same label, same button).
+        let page = html(&vdom);
+        assert!(
+            page.contains("id=\"camerata-review-timer-toggle-stack\""),
+            "{page}"
+        );
+        assert_eq!(
+            page.matches("data-review-no-activity").count(),
+            2,
+            "strip and stack"
+        );
+        assert_eq!(page.matches("Review timer running").count(), 2, "{page}");
+        let stack_button = seen.element("camerata-review-timer-toggle-stack");
+        click(&vdom, stack_button);
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert_eq!(
+            page.matches("Review timer paused").count(),
+            2,
+            "one timer: the strip behind it moved too: {page}"
+        );
+        assert_eq!(page.matches(">Resume<").count(), 2);
+        assert_eq!(
+            last_focus(),
+            Some(STACK_ID.to_string()),
+            "back to the stack"
+        );
+        click(&vdom, stack_button);
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(html(&vdom).matches("Review timer running").count(), 2);
+
+        // Enter on the focused button does not reach the stack (where Enter opens the viewer);
+        // Escape on it does (and closes the stack).
+        key(&vdom, stack_button, "Enter");
+        settle(&mut vdom, &mut seen).await;
+        assert!(
+            !html(&vdom).contains("camerata-code-viewer"),
+            "Enter on the button must not open the viewer under it"
+        );
+
+        // The viewer, opened on a card, draws it too.
+        key(&vdom, panel, "Enter");
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(
+            page.contains("id=\"camerata-review-timer-toggle-viewer\""),
+            "{page}"
+        );
+        assert_eq!(
+            page.matches("data-review-no-activity").count(),
+            3,
+            "strip, stack, viewer"
+        );
+        let viewer_button = seen.element("camerata-review-timer-toggle-viewer");
+        click(&vdom, viewer_button);
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert_eq!(page.matches("Review timer paused").count(), 3, "{page}");
+        assert_eq!(
+            last_focus(),
+            Some(VIEWER_ID.to_string()),
+            "back to the viewer"
+        );
+        // Esc on the focused button still closes the viewer.
+        key(&vdom, viewer_button, "Escape");
+        settle(&mut vdom, &mut seen).await;
+        assert!(!html(&vdom).contains("camerata-code-viewer"));
+        assert!(html(&vdom).contains("sk-panel"), "back on the stack");
+    }
+
+    /// Key and click activity counts for the timer only inside a review surface: the Queue table
+    /// with its strip and pane, the viewer and the stack each carry the marker the bridge looks
+    /// for, and the panels outside the Queue do not.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_review_surfaces_carry_the_marker_the_bridge_counts() {
+        let rows: Vec<FindingView> = (1..=2).map(deviation).collect();
+        let (mut vdom, mut seen, _server, _env) = mount(rows, OrderPreset::Curated, "ok").await;
+        let page = html(&vdom);
+        assert_eq!(
+            page.matches("data-review-surface").count(),
+            1,
+            "the Queue: {page}"
+        );
+        let queue_at = page.find("data-review-surface").unwrap();
+        assert!(
+            page.find("progress-strip").unwrap() > queue_at
+                && page.find("camerata-finding-pane").unwrap() > queue_at,
+            "the strip and the pane are inside it"
+        );
+        open_from_bar(&mut vdom, &mut seen).await;
+        assert_eq!(
+            html(&vdom).matches("data-review-surface").count(),
+            2,
+            "plus the stack"
+        );
+        let panel = seen.element(STACK_ID);
+        key(&vdom, panel, "Enter");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(
+            html(&vdom).matches("data-review-surface").count(),
+            3,
+            "plus the viewer"
+        );
     }
 
     /// B.7: the strip is above the table, equals `TriageCounts` for every table, and moves with a

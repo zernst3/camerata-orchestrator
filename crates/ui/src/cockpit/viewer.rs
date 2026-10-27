@@ -882,6 +882,8 @@ pub(super) fn CodeViewer(
     rsx! {
         div {
             class: "rule-modal-overlay cv-overlay",
+            // A review surface: keys and clicks here are the reviewer's, and count for the timer.
+            "data-review-surface": "true",
             onclick: move |_| on_close.call(()),
             div {
                 class: "cv-panel",
@@ -928,6 +930,12 @@ pub(super) fn CodeViewer(
                         span { class: "cv-pos", "finding {position.0} of {position.1} in this file" }
                     }
                     span { class: "cv-rule {severity_class(&finding.severity)}", "{finding.rule_id}" }
+                    // The review timer's control (internal), the same component the strip draws.
+                    super::review::OverlayTimerControl {
+                        id: "camerata-review-timer-toggle-viewer",
+                        return_focus: VIEWER_ID,
+                        focus_back: prompt.is_none(),
+                    }
                     button {
                         class: "rule-modal-close cv-close",
                         title: "Close (Esc)",

@@ -2777,17 +2777,9 @@ pub(super) fn ProgressStrip(
                 span { class: "progress-eta", " \u{b7} {eta}" }
             }
             if let Some(timer) = timer {
-                span { class: "progress-timer",
-                    span { class: "progress-timer-state", " \u{b7} {timer.label}" }
-                    button {
-                        class: "btn-edit-sm progress-timer-btn",
-                        id: "{super::review::REVIEW_TIMER_BUTTON_ID}",
-                        "data-review-no-activity": "true",
-                        title: "Pause or resume the review timer. It also pauses by itself after 3 minutes with no key or click, and while this window is not focused.",
-                        onclick: move |_| on_toggle_timer.call(()),
-                        "{timer.button}"
-                    }
-                }
+                span { " \u{b7} " }
+                // The one timer control, the same component the viewer and the stack draw.
+                super::review::TimerControl { timer, on_toggle: on_toggle_timer }
             }
             if let Some(open) = on_open_stats {
                 button {
@@ -4686,6 +4678,10 @@ pub(super) fn FindingsTable(
     };
 
     rsx! {
+        // Everything the reviewer works in (strip, toolbar, table, pane) is one review surface:
+        // key and click activity inside it is what the review timer counts (the bridge in
+        // `review.rs` checks for this attribute). `display: contents` keeps it out of the layout.
+        div { style: "display: contents", "data-review-surface": "true",
         // REMOVED, design §9.5: the two-swatch findings key ("Security findings
         // (deterministic, stop-the-line)" / "Architectural findings (everything else)").
         //
@@ -5077,6 +5073,7 @@ pub(super) fn FindingsTable(
             on_open_stack: open_stack_from_pane,
             context: pane_context,
             previously: focused_prior.as_ref().map(PriorDecision::chip_text),
+        }
         }
         }
     }
@@ -7459,6 +7456,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // this view unmounts.
     let review = super::review::use_review_handle();
     super::review::use_review_clock(&review);
+    // The viewer and the stacked view draw the timer's Pause / Resume control too (they cover the
+    // strip), and find the one timer here.
+    use_context_provider(|| review.clone());
     let mut stats_open = use_signal(|| false);
     // Which kind surface is on screen (Pass 2 step 1). Session state, deliberately NOT
     // persisted in the draft: it is a lens, not a decision, and the curator always wants to
@@ -12587,6 +12587,9 @@ mod render_tests {
             3,
             "every panel states its own empty case; html=\n{html}"
         );
+        // Key and click activity here is not review activity for the timer: only the Queue
+        // table (with its strip and pane), the viewer and the stack are review surfaces.
+        assert!(!html.contains("data-review-surface"), "{html}");
     }
 
     // ── Pass 2 step 2: MANUAL column sorting over the curated default ────────

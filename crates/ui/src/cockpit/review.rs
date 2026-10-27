@@ -211,14 +211,19 @@ pub(super) const REVIEW_BRIDGE_JS: &str = r#"
     };
     if (!window.__camerataReviewBridgeInstalled) {
         window.__camerataReviewBridgeInstalled = true;
-        var lastActivity = 0;
+        // At most one message a second FOR EACH of the two kinds, so a click outside the review
+        // surfaces can never use up the second of a key inside one.
+        var lastActivity = { "true": 0, "false": 0 };
         var activity = function (e) {
             var t = e.target;
             if (t && t.closest && t.closest("[data-review-no-activity]")) return;
+            // Only key and click activity inside a review surface (the Queue table, the pane,
+            // the viewer, the stack) is the reviewer's; the Rust side drops the rest.
+            var surface = !!(t && t.closest && t.closest("[data-review-surface]"));
             var now = Date.now();
-            if (now - lastActivity < 1000) return;
-            lastActivity = now;
-            window.__camerataReviewSend({ k: "activity" });
+            if (now - lastActivity[surface] < 1000) return;
+            lastActivity[surface] = now;
+            window.__camerataReviewSend({ k: "activity", s: surface });
         };
         document.addEventListener("keydown", activity, true);
         document.addEventListener("pointerdown", activity, true);
@@ -234,10 +239,12 @@ pub(super) const REVIEW_BRIDGE_JS: &str = r#"
     await new Promise(function () {});
 "#;
 
-/// A bridge message as a timer event; `None` for anything else.
+/// A bridge message as a timer event; `None` for anything else. A key or click outside the
+/// review surfaces (`s` is not `true`: say, on the Conventions panel) is `None`: it neither
+/// credits time nor resumes an idle timer. Window focus is global and always counts.
 pub(super) fn parse_clock_message(msg: &serde_json::Value) -> Option<ClockEvent> {
     match msg.get("k")?.as_str()? {
-        "activity" => Some(ClockEvent::Activity),
+        "activity" => msg.get("s")?.as_bool()?.then_some(ClockEvent::Activity),
         "focus" => msg.get("v")?.as_bool().map(ClockEvent::Focus),
         _ => None,
     }
@@ -315,6 +322,76 @@ pub(super) fn LiveProgressStrip(
             on_open_stats: Some(on_open_stats),
         }
     }
+}
+
+// ── The timer control: ONE component, drawn in the strip and in both overlays ────────────────
+
+/// The timer's state text and its Pause / Resume button. Props-only, and the only place either is
+/// drawn: the progress strip, the code viewer and the stacked view all render this component, so
+/// the three can never differ.
+///
+/// A native `<button>` (Tab reaches it) with no access key. Its press is not counted as activity
+/// (`data-review-no-activity`: a press must not first resume an idle timer and then have its own
+/// action undo that). Enter and Space on it stop at the button, because the overlays claim those
+/// keys for themselves (Enter opens a card, Space checks one) and would otherwise swallow the
+/// press that is meant to activate the button; every other key still bubbles to the overlay, so
+/// Esc and the arrows keep working with the button focused.
+#[component]
+pub(super) fn TimerControl(
+    timer: TimerStripView,
+    on_toggle: Callback<()>,
+    /// The button's DOM id (each place it is drawn has its own, so ids stay unique).
+    #[props(default = REVIEW_TIMER_BUTTON_ID.to_string())]
+    id: String,
+) -> Element {
+    rsx! {
+        span { class: "progress-timer",
+            span { class: "progress-timer-state", "{timer.label}" }
+            button {
+                class: "btn-edit-sm progress-timer-btn",
+                id: "{id}",
+                "data-review-no-activity": "true",
+                title: "Pause or resume the review timer. It also pauses by itself after 3 minutes with no key or click, and while this window is not focused.",
+                onkeydown: move |e: KeyboardEvent| {
+                    if matches!(e.key(), Key::Enter) || e.key() == Key::Character(" ".to_string()) {
+                        e.stop_propagation();
+                    }
+                },
+                onclick: move |e| {
+                    // A click on the button is not a click on the card or backdrop under it.
+                    e.stop_propagation();
+                    on_toggle.call(());
+                },
+                "{timer.button}"
+            }
+        }
+    }
+}
+
+/// [`TimerControl`] wired to the live timer, for an overlay. Draws nothing when the surface has
+/// no timer (a view mounted on its own, as the props-only tests do). After a press the overlay
+/// it was pressed in gets the keyboard back (`return_focus`, a DOM id, through `focus_element`).
+#[component]
+pub(super) fn OverlayTimerControl(
+    id: String,
+    return_focus: String,
+    /// False while the overlay's reason prompt is open: the prompt owns the keyboard (its state
+    /// is the prompt's, not the DOM's), and pulling DOM focus to the panel would only take the
+    /// caret out of the reason field.
+    #[props(default = true)]
+    focus_back: bool,
+) -> Element {
+    let Some(review) = try_use_context::<ReviewHandle>() else {
+        return rsx! {};
+    };
+    let timer = review.strip.read().clone();
+    let on_toggle = Callback::new(move |()| {
+        review.toggle();
+        if focus_back {
+            super::viewer::focus_element(&return_focus);
+        }
+    });
+    rsx! { TimerControl { timer, on_toggle, id } }
 }
 
 // ── The internal stats view ──────────────────────────────────────────────────────────────────
@@ -427,7 +504,10 @@ mod tests {
     #[test]
     fn bridge_messages_map_to_timer_events_and_nothing_else_does() {
         let p = |s: &str| parse_clock_message(&serde_json::from_str(s).expect("json"));
-        assert_eq!(p(r#"{"k":"activity"}"#), Some(ClockEvent::Activity));
+        assert_eq!(
+            p(r#"{"k":"activity","s":true}"#),
+            Some(ClockEvent::Activity)
+        );
         assert_eq!(
             p(r#"{"k":"focus","v":true}"#),
             Some(ClockEvent::Focus(true))
@@ -438,6 +518,8 @@ mod tests {
         );
         for bad in [
             r#"{"k":"focus"}"#,
+            r#"{"k":"activity"}"#,
+            r#"{"k":"activity","s":"yes"}"#,
             r#"{"k":"focus","v":"yes"}"#,
             r#"{"k":"other"}"#,
             r#"{"op":"paste"}"#,
@@ -446,6 +528,48 @@ mod tests {
         ] {
             assert_eq!(p(bad), None, "{bad}");
         }
+    }
+
+    /// Activity outside the review surfaces (a key on the Conventions panel, a click on the kind
+    /// switcher) is dropped before it reaches the timer: it credits no time to the last open
+    /// group and does not resume an idle timer. Driven through the real parse and the real timer.
+    #[test]
+    fn activity_outside_the_review_surfaces_neither_credits_nor_resumes() {
+        use camerata_ui_core::review_timer::{group_key, PauseReason, TimerState};
+        let feed = |timer: &mut ReviewTimer, msg: &str, at: u64| {
+            let value: serde_json::Value = serde_json::from_str(msg).expect("json");
+            if let Some(event) = parse_clock_message(&value) {
+                timer.apply(event, Moment::new(at, at));
+            }
+        };
+        let group = group_key("me/api", "R-1");
+        let active = |t: &ReviewTimer| t.log().review_groups[&group].active_ms;
+        let outside = r#"{"k":"activity","s":false}"#;
+        let inside = r#"{"k":"activity","s":true}"#;
+
+        // Running: keys elsewhere credit nothing at the moment they happen.
+        let mut t = ReviewTimer::default();
+        t.open_group(&group, Moment::new(0, 0));
+        feed(&mut t, inside, 10_000);
+        assert_eq!(active(&t), 10_000);
+        feed(&mut t, outside, 20_000);
+        feed(&mut t, outside, 30_000);
+        assert_eq!(active(&t), 10_000, "nothing credited by activity elsewhere");
+
+        // Idle: a key elsewhere does not resume it; a key inside does.
+        let mut t = ReviewTimer::default();
+        t.open_group(&group, Moment::new(0, 0));
+        t.tick(Moment::new(180_000, 180_000));
+        assert_eq!(t.state(), TimerState::Paused(PauseReason::Idle));
+        feed(&mut t, outside, 200_000);
+        assert_eq!(t.state(), TimerState::Paused(PauseReason::Idle));
+        assert_eq!(active(&t), 0);
+        feed(&mut t, inside, 210_000);
+        assert_eq!(t.state(), TimerState::Running);
+
+        // Window focus is global and still counts.
+        feed(&mut t, r#"{"k":"focus","v":false}"#, 220_000);
+        assert_eq!(t.state(), TimerState::Paused(PauseReason::Unfocused));
     }
 
     /// The bridge only observes: it never stops, prevents or consumes an event, so it cannot take
@@ -474,6 +598,9 @@ mod tests {
             );
         }
         assert!(REVIEW_BRIDGE_JS.contains("data-review-no-activity"));
+        // It reports whether the target is inside a review surface; the Rust side drops the rest.
+        assert!(REVIEW_BRIDGE_JS.contains("[data-review-surface]"));
+        assert!(REVIEW_BRIDGE_JS.contains("s: surface"));
         assert!(REVIEW_BRIDGE_JS.contains("document.hasFocus()"));
     }
 
