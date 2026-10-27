@@ -1,7 +1,13 @@
 # Overnight autonomous run — decisions needed + progress log
 
 > ## ▶ RESUME HERE (paused 2026-10-26 at Zach's request, after code viewer step 4)
-> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Opus, wave plan):
+> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Zach): W27 PDF brand
+> assets supplied: the Cantus Works website draft is the style guide (not final, but the final
+> site will closely match). Extracted to `docs/design/2026-10-27_pdf-brand-guide.md` with the logo
+> marks in `docs/design/brand/`. W27 is no longer blocked on assets; open choice for Zach: the
+> embeddable font (default Inter + JetBrains Mono, since SF fonts cannot be embedded). Cloud
+> builders now run alongside local ones (first: KEV/EPSS on branch `cloud/kev-epss`).
+> 2026-10-27 (Opus, wave plan):
 > Zach re-saved the Anthropic key (Keychain entry verified, app reports it set) and set the $100
 > Console limit; he is moving to the 20x plan, so the remaining ranks build in parallel. After
 > rank 9 merges (it adds `EfficiencyConfig`), wave 1 = ranks 2, 4, 7, 10 at once; rank 8 after
