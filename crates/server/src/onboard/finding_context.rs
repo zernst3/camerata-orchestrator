@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use camerata_checks::extract::enclosing::{enclosing_block, slice_lines};
 
 use super::files::MAX_FILE_BYTES;
+use super::source_file::{decode, read_bytes, Origin, Refused};
 use crate::workspace::{git_command, GitEnv, GIT_READS};
 
 /// The result of one finding-context lookup. Serializes straight to the endpoint's JSON body
@@ -74,24 +75,6 @@ pub enum FindingContextOutcome {
     SearchTooSlow,
     /// Too many reads of client code were already running; try again in a moment.
     Busy,
-}
-
-/// Where a lookup reads the file from.
-#[derive(Debug, Clone, Copy)]
-pub enum FileSource<'a> {
-    /// The file as it is in the working tree now (the scan ran on a folder with no git history).
-    WorkingTree(&'a Path),
-    /// The file as it was at commit `sha`, through git's object store, so a finding keeps
-    /// showing the code the inspection saw even after the checkout moved on.
-    Git { dir: &'a Path, sha: &'a str },
-}
-
-impl FileSource<'_> {
-    fn dir(&self) -> &Path {
-        match self {
-            FileSource::WorkingTree(dir) | FileSource::Git { dir, .. } => dir,
-        }
-    }
 }
 
 impl FindingContextOutcome {
@@ -181,53 +164,40 @@ impl FindingContextOutcome {
 /// `expect` (trimmed containment either direction) for a staleness signal. Never panics; every
 /// failure mode maps to a non-`Ok` [`FindingContextOutcome`] variant (see module docs).
 ///
-/// This is the ONLY side-effecting piece here (reads exactly one file — never the whole-tree
-/// `read_local_repo_files` walker). Path containment ([`resolve_contained_path`]) runs BEFORE
-/// any filesystem read.
+/// This is the ONLY side-effecting piece here (reads exactly one file, never the whole-tree
+/// `read_local_repo_files` walker). Path containment runs BEFORE any filesystem read.
 pub async fn lookup(
     repo_dir: &Path,
     rel_path: &str,
     line: usize,
     expect: Option<&str>,
 ) -> FindingContextOutcome {
-    lookup_at(FileSource::WorkingTree(repo_dir), rel_path, line, expect).await
+    lookup_at(Origin::WorkingTree(repo_dir), rel_path, line, expect).await
 }
 
-/// [`lookup`] over an explicit [`FileSource`]: the working tree, or a commit read through git
-/// objects. Path containment runs BEFORE either read; the git form additionally refuses a path
-/// that is absolute, has a `..` segment or contains a NUL (git would resolve `sha:../x` against
-/// the tree, but a request for one is a traversal attempt, not a typo).
+/// [`lookup`] over an explicit [`Origin`]: the working tree, or a commit read through git
+/// objects. The read is `source_file::read_bytes`, the one place a `(origin, path)` becomes bytes
+/// (path jail first, a git path additionally refused when absolute, with a `..` segment or a
+/// NUL), at this endpoint's own cap ([`MAX_FILE_BYTES`]).
 pub async fn lookup_at(
-    source: FileSource<'_>,
+    origin: Origin<'_>,
     rel_path: &str,
     line: usize,
     expect: Option<&str>,
 ) -> FindingContextOutcome {
-    let Some(abs_path) = resolve_contained_path(source.dir(), rel_path) else {
-        return FindingContextOutcome::PathTraversal;
-    };
+    match read_bytes(origin, rel_path, MAX_FILE_BYTES).await {
+        Ok(bytes) => describe(bytes, rel_path, line, expect),
+        Err(refused) => outcome_of(refused),
+    }
+}
 
-    let bytes = match source {
-        FileSource::WorkingTree(_) => match read_working_tree_file(&abs_path).await {
-            Ok(b) => b,
-            Err(_) => return FindingContextOutcome::FileMissing,
-        },
-        FileSource::Git { dir, sha } => {
-            if !is_plain_relative_path(rel_path) {
-                return FindingContextOutcome::PathTraversal;
-            }
-            match read_git_blob(dir, sha, rel_path, MAX_FILE_BYTES).await {
-                Ok(b) => b,
-                Err(GitReadError::CommitUnavailable) => {
-                    return FindingContextOutcome::CommitUnavailable
-                }
-                Err(GitReadError::NotFound) => return FindingContextOutcome::FileMissing,
-                Err(GitReadError::TooLarge) => return FindingContextOutcome::TooLarge,
-                Err(GitReadError::Busy) => return FindingContextOutcome::Busy,
-            }
-        }
-    };
-    describe(bytes, rel_path, line, expect)
+/// A refusal in the shared vocabulary at THIS endpoint's cap: `finding-context` and the batch
+/// answer an oversized file with the 400 KB `too_large` reason, not the viewer's.
+pub(crate) fn outcome_of(refused: Refused) -> FindingContextOutcome {
+    match refused {
+        Refused::TooLarge => FindingContextOutcome::TooLarge,
+        other => other.into(),
+    }
 }
 
 thread_local! {
@@ -299,24 +269,51 @@ async fn is_regular_file_at(dir: &Path, sha: &str, rel_path: &str) -> bool {
     })
 }
 
-/// `git cat-file blob <sha>:<path>`: the file as it was at `sha`, never the working tree. The
-/// output is read only up to `cap_bytes + 1` bytes, so an oversized blob is detected (and
-/// the process killed) without buffering it.
-pub(crate) async fn read_git_blob(
-    dir: &Path,
-    sha: &str,
+/// A commit that has been checked to exist in a clone. Checking is one process, and a batch asks
+/// for many files of one commit, so the check is its own step: [`VerifiedCommit::verify`] once,
+/// then [`read_git_blob_at`] per file. A single-file read is that same pair
+/// (`source_file::read_bytes`, `Origin::Git`); the batch holds the commit and uses
+/// `Origin::Verified`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCommit {
+    pub(crate) dir: PathBuf,
+    pub(crate) sha: String,
+}
+
+impl VerifiedCommit {
+    /// `Ok` when `sha` names a commit in the clone at `dir`.
+    pub(crate) async fn verify(dir: &Path, sha: &str) -> Result<Self, GitReadError> {
+        #[cfg(test)]
+        trace::VERIFIES.with(|c| c.set(c.get() + 1));
+        if !crate::client_source::git::commit_exists(dir, sha).await {
+            return Err(GitReadError::CommitUnavailable);
+        }
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            sha: sha.to_string(),
+        })
+    }
+}
+
+/// `git cat-file blob <sha>:<path>` at a verified commit: the file as it was at the commit, never
+/// the working tree. The output is read only up to `cap_bytes + 1` bytes, so an oversized blob is
+/// detected (and the process killed) without buffering it.
+///
+/// The gate slot ([`GIT_READS`]) is taken here, per file, and released when the blob is read.
+pub(crate) async fn read_git_blob_at(
+    commit: &VerifiedCommit,
     rel_path: &str,
     cap_bytes: usize,
 ) -> Result<Vec<u8>, GitReadError> {
     use tokio::io::AsyncReadExt;
 
-    if !crate::client_source::git::commit_exists(dir, sha).await {
-        return Err(GitReadError::CommitUnavailable);
-    }
+    let (dir, sha) = (commit.dir.as_path(), commit.sha.as_str());
     // From here a process runs: one of a bounded number at once.
     let Some(_slot) = GIT_READS.enter().await else {
         return Err(GitReadError::Busy);
     };
+    #[cfg(test)]
+    let _trace = trace::SlotTrace::enter();
     // Only a regular file is shown. A symlink's blob is its target path and a submodule is a
     // commit, neither of which is the code a reader expects; a directory is not a file either.
     if !is_regular_file_at(dir, sha, rel_path).await {
@@ -349,19 +346,66 @@ pub(crate) async fn read_git_blob(
     }
 }
 
-/// The shared tail of a lookup: size cap, UTF-8, enclosing block, redaction.
+/// Test seams of the git object read, thread-local so parallel tests cannot see each other.
+#[cfg(test)]
+pub(crate) mod trace {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Commit checks started on this thread.
+        pub(crate) static VERIFIES: Cell<usize> = const { Cell::new(0) };
+        /// `(held now, most held at once, taken in all)` read-gate slots on this thread.
+        static SLOTS: Cell<(usize, usize, usize)> = const { Cell::new((0, 0, 0)) };
+    }
+
+    /// Held for as long as a read holds a gate slot.
+    pub(crate) struct SlotTrace;
+
+    impl SlotTrace {
+        pub(crate) fn enter() -> Self {
+            SLOTS.with(|c| {
+                let (now, max, all) = c.get();
+                c.set((now + 1, max.max(now + 1), all + 1));
+            });
+            SlotTrace
+        }
+    }
+
+    impl Drop for SlotTrace {
+        fn drop(&mut self) {
+            SLOTS.with(|c| {
+                let (now, max, all) = c.get();
+                c.set((now - 1, max, all));
+            });
+        }
+    }
+
+    /// Zero this thread's counters before a measurement.
+    pub(crate) fn reset() {
+        VERIFIES.with(|c| c.set(0));
+        SLOTS.with(|c| c.set((0, 0, 0)));
+    }
+
+    /// The most gate slots one read pass held at once, and how many were taken in all.
+    pub(crate) fn slots() -> (usize, usize) {
+        SLOTS.with(|c| {
+            let (_, max, all) = c.get();
+            (max, all)
+        })
+    }
+}
+
+/// The shared tail of a lookup: size cap and UTF-8 (`source_file::decode`), enclosing block,
+/// redaction.
 fn describe(
     bytes: Vec<u8>,
     rel_path: &str,
     line: usize,
     expect: Option<&str>,
 ) -> FindingContextOutcome {
-    if bytes.len() > MAX_FILE_BYTES {
-        return FindingContextOutcome::TooLarge;
-    }
-    let source = match String::from_utf8(bytes) {
-        Ok(s) => s,
-        Err(_) => return FindingContextOutcome::NotUtf8,
+    let source = match decode(bytes, MAX_FILE_BYTES) {
+        Ok(source) => source,
+        Err(refused) => return outcome_of(refused),
     };
 
     let Some(block) = enclosing_block(rel_path, &source, line) else {
@@ -373,20 +417,13 @@ fn describe(
     // only recognisable as a block), then re-split. The `\n` count is preserved, so line
     // numbers hold.
     let lines = redact_block(&slice_lines(&source, block.start_line, block.end_line));
-    let matches_snippet = match expect.map(str::trim).filter(|e| !e.is_empty()) {
-        None => true, // nothing to compare against — don't flag stale
-        Some(exp) => source
-            .lines()
-            .nth(line.saturating_sub(1))
-            .map(|actual| {
-                // `expect` is the STORED snippet, which was redacted at construction, so the
-                // current line is compared in its redacted form.
-                let actual = camerata_secrets::redact_str(actual.trim());
-                let actual = actual.as_ref();
-                actual.contains(exp) || exp.contains(actual)
-            })
-            .unwrap_or(false),
-    };
+    // The staleness check compares the line AS DISPLAYED (redacted with its block): a caller's
+    // `expect` must not be able to probe text the display hides.
+    let displayed = line
+        .checked_sub(block.start_line)
+        .and_then(|i| lines.get(i))
+        .map(String::as_str);
+    let matches_snippet = snippet_matches(displayed, expect);
 
     FindingContextOutcome::Ok {
         lines,
@@ -396,6 +433,19 @@ fn describe(
         kind: block.kind.label(),
         language: language_label(rel_path),
         matches_snippet,
+    }
+}
+
+/// Whether the violation line, as DISPLAYED (already redacted in the context of its file), still
+/// matches the caller-supplied `expect` snippet text. `true` when there is nothing to compare
+/// (no `expect`), so nothing is flagged stale; `false` when the line is gone. The predicate is
+/// `camerata_api_types::snippet::line_matches_snippet`, the one the detail pane applies too;
+/// finding-context and the batch endpoint both call this.
+pub(crate) fn snippet_matches(displayed_line: Option<&str>, expect: Option<&str>) -> bool {
+    match expect.map(str::trim).filter(|e| !e.is_empty()) {
+        None => true, // nothing to compare against: don't flag stale
+        Some(exp) => displayed_line
+            .is_some_and(|line| camerata_api_types::snippet::line_matches_snippet(line, exp)),
     }
 }
 

@@ -463,6 +463,33 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      confirms. The link names a place; it contains no code. When the code on screen is the working
      tree (the amber banner), there is no commit to link to and `Y` says so instead of copying.
 
+   **Code under the evidence.** In the detail pane, the stored snippet under **Evidence** shows at
+   once. When the cursor has rested on a finding for about a sixth of a second, the code around it
+   fills in beneath the snippet: the finding's line and three lines either side, with the finding's
+   line highlighted and the file's own line numbers. Moving quickly down the list asks for nothing
+   until you stop. The lines come from the inspected commit and have been through the secret
+   redactor. If anything is not as expected (the commit is not in this clone, the source was
+   deleted, the file is missing or binary or too large, or the line no longer matches the stored
+   snippet) the pane shows exactly what it showed before and nothing is added. Context is never
+   taken from the working tree. It is kept for the session, and a file the code viewer has already
+   opened supplies it without asking again.
+
+   **Order of the Queue.** The **Order** select above the table cuts the Queue four ways.
+   **Curated** (the default) is severity, then kind, then the cheapest deviations first, grouped by
+   rule then file. **By file** groups by file (in path order) then rule, with the rows in line order,
+   so you can read one file's findings together. **By rule** groups by rule (in rule id order) then
+   file, worst severity first within a rule, so you can decide one rule at a time. **Critical first**
+   is one flat list with no groups, worst severity first. Picking a cut re-orders the table where it
+   stands: the finding the cursor is on stays the finding the cursor is on (also right after you
+   have decided a finding, when the cursor is on the next one), its group is opened if the new
+   grouping had closed it, and the table scrolls to bring its row into view. The keyboard goes back
+   to the detail pane, so the decision keys work without a click. Your row selection is kept; a column sort you had applied is
+   dropped, because it would hide the order you just chose (**Default order**, beside the sentence
+   that names the order on screen, still removes any later column sort). The choice is saved with
+   the rest of your in-progress review, so it is still there after a restart. If a newer version of
+   the app saved a view setting this version does not know (an order, or which table was open), it
+   falls back to the default; your decisions are never lost to it.
+
    **Scan-time deterministic preview.** For each **mechanical** rule you selected that maps to a tool
    Camerata can drive (clippy, ruff, eslint, semgrep), the deterministic scan **runs that tool itself**
    with a Camerata-supplied config and folds the results into triage as **preview findings** — even if

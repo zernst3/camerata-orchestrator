@@ -1299,6 +1299,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
         .route("/api/onboard/finding-context", get(onboard_finding_context))
+        .route(
+            "/api/onboard/finding-context/batch",
+            post(onboard_finding_context_batch),
+        )
         .route("/api/onboard/source-file", get(onboard_source_file))
         .route("/api/onboard/symbol-refs", get(onboard_symbol_refs))
         .route("/api/onboard/finding-fix", get(onboard_finding_fix))
@@ -7279,6 +7283,19 @@ async fn onboard_finding_context(
     axum::extract::Query(q): axum::extract::Query<crate::client_source::read::FindingContextParams>,
 ) -> Response {
     crate::client_source::read::finding_context(&state, q).await
+}
+
+/// `POST /api/onboard/finding-context/batch` — the stored line plus three lines either side for up
+/// to 200 `(repo, path, line, sha)` tuples (`WORK_ORDER_REVIEW_SPEED.md` B.2 "Data" and B.3).
+/// A POST only because the tuples do not fit a query string: it reads and writes nothing else.
+/// Shares the single-finding resolver (`client_source::read::source_for_read`), path jail, git
+/// read gate, redactor and status vocabulary; a deleted source answers `source_deleted` per item
+/// and reads nothing. Never cached by the webview. Shape: `onboard::finding_context_batch`.
+async fn onboard_finding_context_batch(
+    State(state): State<AppState>,
+    Json(body): Json<crate::onboard::finding_context_batch::BatchParams>,
+) -> Response {
+    crate::onboard::finding_context_batch::finding_context_batch(&state, body).await
 }
 
 /// `GET /api/onboard/source-file` — the whole file (or an 800-line window) behind the in-app code

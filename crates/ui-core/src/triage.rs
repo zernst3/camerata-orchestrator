@@ -70,7 +70,25 @@ pub enum TriageState {
     FalsePositive,
 }
 
+/// The names serde writes for the variants (unit variants are written by NAME), for reading a
+/// draft leniently ([`crate::lenient`]). A test pins this to what serde actually writes.
+impl crate::lenient::WireEnum for TriageState {
+    fn from_wire(name: &str) -> Option<Self> {
+        Self::all().into_iter().find(|s| s.wire_name() == name)
+    }
+}
+
 impl TriageState {
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Unresolved => "Unresolved",
+            Self::Confirmed => "Confirmed",
+            Self::Ignored => "Ignored",
+            Self::TechDebt => "TechDebt",
+            Self::FalsePositive => "FalsePositive",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Unresolved => "Unresolved",
@@ -1335,6 +1353,14 @@ pub struct RowCursor {
     index: usize,
 }
 
+/// The key of the finding the cursor is ON right now: the stored cursor resolved against the rows
+/// currently on screen, so it is never a key that has left the table (a decided row) and never
+/// `None` while any row is visible. Every reader of "the focused finding" (the pane, the context
+/// request, a re-cut of the table) asks this one function, not the stored key.
+pub fn focused_key(cursor: &RowCursor, visible: &[String]) -> Option<String> {
+    cursor.resolve(visible).key().map(str::to_string)
+}
+
 impl RowCursor {
     /// A cursor focused on nothing. The first [`RowCursor::resolve`] against a non-empty list
     /// lands it on the first row.
@@ -1756,6 +1782,42 @@ impl TriageModel {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_lenient_wire_names_are_exactly_what_serde_writes() {
+        use crate::lenient::WireEnum;
+        for state in TriageState::all() {
+            let written = serde_json::to_string(&state).unwrap();
+            assert_eq!(written, format!("\"{}\"", state.wire_name()));
+            assert_eq!(TriageState::from_wire(state.wire_name()), Some(state));
+        }
+        assert_eq!(TriageState::from_wire("Archived"), None);
+    }
+
+    fn rows(keys: &[&str]) -> Vec<String> {
+        keys.iter().map(|k| (*k).to_string()).collect()
+    }
+
+    /// M1: the focused key is the RESOLVED one. A stored key that has left the table (the row was
+    /// decided) answers whatever now sits at its place, and a never-set cursor answers the first
+    /// row, not nothing.
+    #[test]
+    fn focused_key_resolves_a_gone_or_unset_cursor_against_the_rows_on_screen() {
+        let on_screen = rows(&["a", "b", "c"]);
+        assert_eq!(
+            focused_key(&RowCursor::focused_on("b"), &on_screen),
+            Some("b".into())
+        );
+        // "b" was decided and left; the cursor was last resolved at index 1.
+        let at_b = RowCursor::focused_on("b").resolve(&on_screen);
+        let after = rows(&["a", "c"]);
+        assert_eq!(focused_key(&at_b, &after), Some("c".into()));
+        assert_eq!(at_b.key(), Some("b"), "the STORED key is the stale one");
+        // Never set.
+        assert_eq!(focused_key(&RowCursor::new(), &on_screen), Some("a".into()));
+        // Nothing on screen (every group collapsed): nothing focused.
+        assert_eq!(focused_key(&RowCursor::focused_on("b"), &[]), None);
+    }
+
     use super::*;
 
     fn finding(json: serde_json::Value) -> FindingView {
