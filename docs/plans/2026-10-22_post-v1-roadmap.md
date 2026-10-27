@@ -135,6 +135,38 @@ title bars, Tahoma-style type, bevelled buttons, green accents).
   Scales to any resolution, a few KB. The palette continues through glossy title bars, rounded
   aqua-style highlights and green/blue accents so the wallpaper and the chrome read as one era.
 
+## 6. Pre-pen-test readiness (Zach, 2026-10-27)
+
+Many rules already predict what a pen tester would hit first (boundary validation, RLS, auth gaps,
+secrets), but the corpus does not say which: of 437 rules only 24 carry a CWE id, and `kind`
+(defect / decision / default_with_exceptions) describes the rule, not its attack value.
+
+- **No new finding kind or rule kind.** Security relevance is a second axis, not a third kind: a
+  missing authorization check is both a defect and a likely pen-test finding, and splitting kinds
+  would duplicate rules or force a false choice (one implementation per rule). Instead: a
+  security tag on rules (CWE, OWASP Top 10 / ASVS category, attack class) and a DERIVED exposure
+  rating on findings.
+- **The prediction is reachability, not the rule.** Exposure = security tag + a reachable entry
+  point + whether that route needs auth + how sensitive the data it touches is. "Unvalidated id
+  on an unauthenticated public route" ranks far above the same pattern in an admin-only batch
+  job. Builds on the endpoints the integration checker already extracts.
+- **Frame it as readiness, never prediction.** The report keeps its "not a pen test" notice. A
+  "predicted pen-test finding" the real pen test does not reproduce reads as a false positive.
+  "Fix these before your pen test, ranked by what is reachable" is honest, maps to SOC 2 / PCI
+  language buyers already use, and is a sellable offering (pen tests cost $15-40k per round).
+- **Expand detection where code can show it:** IDOR (an id-taking route with no ownership
+  check), mass assignment, SSRF sinks, missing rate limits on login and password reset, CORS,
+  JWT verification settings, debug endpoints left on. State plainly what static analysis cannot
+  see (TLS, live headers, business-logic abuse).
+- **Ground truth before the report section.** The graded run measures detection, not
+  exploitability. Benchmark on intentionally vulnerable apps with published exploit lists
+  (OWASP Juice Shop and its challenge list): inspect, then score how many known exploits the
+  readiness ranking puts near the top. Later, a real pen-test report on an inspected repo.
+
+Order: (1) security-tag backfill across the corpus (data work, mostly Haiku, Fable spot-check);
+(2) ASVS gap analysis and the missing rules; (3) exposure ranking from route reachability;
+(4) Juice Shop benchmark; (5) only then the report section.
+
 ## Keep V1 forward-compatible (no extra V1 work)
 
 When V1 work touches the project data model (the deletion record, re-fetch, provenance), store
