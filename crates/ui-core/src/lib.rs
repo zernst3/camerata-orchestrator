@@ -12,6 +12,7 @@ pub mod backend;
 pub mod designs;
 pub mod git;
 pub mod govdev;
+pub mod lenient;
 pub mod models;
 pub mod order_preset;
 pub mod pane_context;

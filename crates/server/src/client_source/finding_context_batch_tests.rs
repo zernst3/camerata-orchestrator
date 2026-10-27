@@ -373,12 +373,8 @@ async fn more_than_200_tuples_and_a_malformed_sha_are_400s() {
     assert_eq!(json["items"], serde_json::json!([]));
 }
 
-/// 200 tuples over many distinct files complete with every one answered: the batch reads
-/// `READ_CONCURRENCY` files at a time and never holds a git read slot between files, so the
-/// gate's 4 slots and 3 second wait are never the reason an item is `unavailable`.
-#[tokio::test]
-async fn a_200_item_batch_over_many_files_never_starves_the_read_gate() {
-    let fx = fixture();
+/// Forty one-line files in one commit, recorded as the inspection; 200 tuples over them.
+fn many_files(fx: &Fx) -> Vec<serde_json::Value> {
     for n in 0..40 {
         write_file(
             &fx.checkout,
@@ -388,16 +384,52 @@ async fn a_200_item_batch_over_many_files_never_starves_the_read_gate() {
     }
     let sha = commit_all(&fx.checkout, "many files");
     fx.inspect_at(&sha);
-    let items: Vec<_> = (0..200)
+    (0..200)
         .map(|i| item(&format!("src/f{}.rs", i % 40), 1 + i % 2))
-        .collect();
+        .collect()
+}
 
-    // A second request races it, as the viewer would.
+/// M2: the gate seam. A 200-tuple batch holds at most `READ_CONCURRENCY` read slots at once
+/// (raising the concurrency, or reading every file at once, would show 3 or 4 here), takes
+/// exactly one slot per distinct file (the git path reads each file once, however many tuples
+/// cite it), and checks the commit once, not once per file.
+#[tokio::test]
+async fn a_200_item_batch_holds_few_slots_reads_each_file_once_and_checks_the_commit_once() {
+    use crate::onboard::finding_context::trace;
+    use crate::onboard::finding_context_batch::READ_CONCURRENCY;
+
+    let fx = fixture();
+    let items = many_files(&fx);
+    trace::reset();
+
+    let (status, _, json) = post(&fx, serde_json::json!({ "items": items })).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let answered = json["items"].as_array().unwrap();
+    assert_eq!(answered.len(), 200);
+    assert!(answered.iter().all(|i| i["status"] == "ok"), "{json}");
+    let (most_at_once, taken) = trace::slots();
+    assert!(
+        (1..=READ_CONCURRENCY).contains(&most_at_once),
+        "held {most_at_once} slots at once; the batch may hold at most {READ_CONCURRENCY}"
+    );
+    assert_eq!(taken, 40, "one slot per distinct file, not per tuple");
+    assert_eq!(
+        trace::VERIFIES.with(std::cell::Cell::get),
+        1,
+        "one commit check for the whole batch"
+    );
+}
+
+/// The same batch with a second request racing it, as the viewer would: neither starves.
+#[tokio::test]
+async fn a_200_item_batch_racing_another_request_starves_neither() {
+    let fx = fixture();
+    let items = many_files(&fx);
     let (a, b) = tokio::join!(
         post(&fx, serde_json::json!({ "items": items })),
         post(&fx, serde_json::json!({ "items": [item("src/f3.rs", 1)] })),
     );
-
     let statuses: Vec<String> = a.2["items"]
         .as_array()
         .unwrap()
@@ -407,6 +439,126 @@ async fn a_200_item_batch_over_many_files_never_starves_the_read_gate() {
     assert_eq!(statuses.len(), 200);
     assert!(statuses.iter().all(|s| s == "ok"), "{statuses:?}");
     assert_eq!(b.2["items"][0]["status"], "ok");
+}
+
+/// L5: one check per distinct (repo, sha), whatever the number of files.
+#[tokio::test]
+async fn the_commit_is_checked_once_per_repo_and_sha() {
+    use crate::onboard::finding_context::trace;
+
+    let fx = fixture();
+    let other = fx.add_repo("acme/other");
+    let other_head = crate::client_source::git::head_sha(&other).await.unwrap();
+    let sha = commit_numbered(&fx, "src/rows.txt");
+    trace::reset();
+    let (_, _, json) = post(
+        &fx,
+        serde_json::json!({ "items": [
+            { "repo": REPO, "path": "src/rows.txt", "line": 5, "sha": sha },
+            { "repo": REPO, "path": "src/main.rs", "line": 1, "sha": sha },
+            { "repo": REPO, "path": "src/gone.rs", "line": 1, "sha": sha },
+            { "repo": "acme/other", "path": "lib.rs", "line": 1, "sha": other_head },
+        ]}),
+    )
+    .await;
+    assert_eq!(json["items"][0]["status"], "ok", "{json}");
+    assert_eq!(json["items"][3]["status"], "ok", "{json}");
+    assert_eq!(
+        trace::VERIFIES.with(std::cell::Cell::get),
+        2,
+        "two (repo, sha) pairs, two checks"
+    );
+}
+
+/// L6: every sha is validated before anything is resolved, so a malformed one starts no process
+/// at all, even when valid items come first.
+#[tokio::test]
+async fn a_malformed_sha_is_refused_before_any_git_process_starts() {
+    use crate::onboard::finding_context::trace;
+    use crate::workspace::test_seams::commands_built;
+
+    let fx = fixture();
+    fx.inspect_at(&fx.head);
+    trace::reset();
+    let before = commands_built();
+
+    let (status, cache, json) = post(
+        &fx,
+        serde_json::json!({ "items": [
+            item("src/main.rs", 1),
+            { "repo": REPO, "path": "src/main.rs", "line": 2, "sha": "nope" },
+        ]}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(cache.as_deref(), Some("no-store"));
+    assert_eq!(json["code"], "invalid_sha");
+    assert_eq!(commands_built(), before, "no git command was even built");
+    assert_eq!(trace::VERIFIES.with(std::cell::Cell::get), 0);
+}
+
+/// L12: the staleness check compares the line AS DISPLAYED. A line inside a key body is shown
+/// redacted, so a caller's `expect` holding the real text must not match it, on either endpoint.
+#[tokio::test]
+async fn expect_cannot_probe_a_line_the_display_redacts() {
+    use camerata_secrets::fixtures::pem_block;
+
+    let fx = fixture();
+    let pem = pem_block("RSA ", 6);
+    let pem_lines: Vec<String> = pem.lines().map(str::to_string).collect();
+    let mut body = String::from("# keys\n");
+    body.push_str(&pem);
+    body.push_str("\nplain line\n");
+    write_file(&fx.checkout, "conf/key.txt", &body);
+    let sha = commit_all(&fx.checkout, "key file");
+    fx.inspect_at(&sha);
+    // Line 1 is the comment, line 2 the BEGIN line, line 4 the second body line.
+    let secret = pem_lines[2].clone();
+
+    let (_, _, batch) = post(
+        &fx,
+        serde_json::json!({ "items": [
+            { "repo": REPO, "path": "conf/key.txt", "line": 4, "expect": secret },
+            { "repo": REPO, "path": "conf/key.txt", "line": 1, "expect": "# keys" },
+        ]}),
+    )
+    .await;
+    assert_eq!(batch["items"][0]["status"], "ok", "{batch}");
+    assert_eq!(
+        batch["items"][0]["matches_snippet"], false,
+        "the real key text must not match the redacted line it hides"
+    );
+    assert!(!batch.to_string().contains(&secret), "and it never leaves");
+    assert_eq!(batch["items"][1]["matches_snippet"], true, "the control");
+
+    let ctx = |line: usize, expect: &str| {
+        let query = format!(
+            "/api/onboard/finding-context?repo=acme%2Fapp&path=conf%2Fkey.txt&line={line}&expect={}",
+            expect.replace(' ', "%20").replace('+', "%2B").replace('/', "%2F")
+        );
+        let router = crate::router(fx.state.clone());
+        async move {
+            let resp = router
+                .oneshot(Request::builder().uri(query).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        }
+    };
+    let single = ctx(4, &secret).await;
+    assert_eq!(single["status"], "ok", "{single}");
+    assert_eq!(
+        single["matches_snippet"], false,
+        "finding-context compares the displayed line too"
+    );
+    assert!(!single.to_string().contains(&secret));
+    assert_eq!(
+        ctx(1, "# keys").await["matches_snippet"],
+        true,
+        "the control"
+    );
 }
 
 #[tokio::test]

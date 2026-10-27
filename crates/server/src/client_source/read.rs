@@ -19,7 +19,8 @@ use axum::Json;
 use super::git::{head_sha, is_full_sha};
 use super::status::{deleted_record, inspected_entry, resolve_dir};
 use super::Refusal;
-use crate::onboard::finding_context::{lookup_at, FileSource, FindingContextOutcome};
+use crate::onboard::finding_context::{lookup_at, FindingContextOutcome};
+use crate::onboard::source_file::Origin;
 use crate::AppState;
 
 /// Mark a response that carries client code lines as never to be cached. The desktop webview's
@@ -108,13 +109,8 @@ pub async fn finding_context(state: &AppState, params: FindingContextParams) -> 
             (StatusCode::OK, FindingContextOutcome::FileMissing.to_json())
         }
         SourceRead::WorkingTree { dir } => {
-            let outcome = lookup_at(
-                FileSource::WorkingTree(&dir),
-                &params.path,
-                params.line,
-                expect,
-            )
-            .await;
+            let outcome =
+                lookup_at(Origin::WorkingTree(&dir), &params.path, params.line, expect).await;
             (
                 status_of(&outcome),
                 labelled(&outcome, "working_tree", None),
@@ -126,7 +122,7 @@ pub async fn finding_context(state: &AppState, params: FindingContextParams) -> 
             head_differs,
         } => {
             let outcome = lookup_at(
-                FileSource::Git {
+                Origin::Git {
                     dir: &dir,
                     sha: &sha,
                 },
@@ -138,13 +134,8 @@ pub async fn finding_context(state: &AppState, params: FindingContextParams) -> 
             if outcome == FindingContextOutcome::CommitUnavailable {
                 // The one labelled fallback, and only while the folder exists (it does: the
                 // resolver checked): show the working tree, loudly.
-                let fallback = lookup_at(
-                    FileSource::WorkingTree(&dir),
-                    &params.path,
-                    params.line,
-                    expect,
-                )
-                .await;
+                let fallback =
+                    lookup_at(Origin::WorkingTree(&dir), &params.path, params.line, expect).await;
                 let mut body = labelled(&outcome, "working_tree", None);
                 if matches!(fallback, FindingContextOutcome::Ok { .. }) {
                     let shown = labelled(&fallback, "working_tree", None);
@@ -230,6 +221,20 @@ pub fn is_owner_name(repo: &str) -> bool {
     segment_ok(owner) && segment_ok(name)
 }
 
+/// A caller's explicit commit must be 40 hex characters, else a 400 `invalid_sha`. Checked before
+/// anything is resolved, so a malformed one starts no process; a request that carries many
+/// (the batch) checks them all up front with this.
+pub fn check_sha(sha: Option<&str>) -> Result<(), Refusal> {
+    match sha {
+        Some(sha) if !is_full_sha(sha) => Err(Refusal {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_sha",
+            message: "sha must be a full 40-character commit id.".to_string(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// Decide where `repo`'s code is read from. `sha` is the caller's explicit commit (validated as
 /// 40 hex characters, else a 400), defaulting to the commit the project's latest inspection that
 /// covered the repo recorded.
@@ -239,15 +244,7 @@ pub async fn source_for_read(
     repo: &str,
     sha: Option<&str>,
 ) -> Result<SourceRead, Refusal> {
-    if let Some(sha) = sha {
-        if !is_full_sha(sha) {
-            return Err(Refusal {
-                status: StatusCode::BAD_REQUEST,
-                code: "invalid_sha",
-                message: "sha must be a full 40-character commit id.".to_string(),
-            });
-        }
-    }
+    check_sha(sha)?;
     // The repo name becomes a path under the workspace root, so it must be a plain `owner/name`
     // that a project owns. A traversal ("../../etc"), an absolute path or a repo no project has
     // is refused here, before any directory is built or any file is read: the path jail of the

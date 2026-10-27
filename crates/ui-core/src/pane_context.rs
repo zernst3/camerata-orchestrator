@@ -26,8 +26,9 @@ use crate::viewer_find::segments_text;
 /// How long the cursor must rest on a finding before its context is requested.
 pub const SETTLE_MS: u64 = 150;
 
-/// Lines of context either side of the stored line. The server cuts the same window.
-pub const CONTEXT_RADIUS: usize = 3;
+/// Lines of context either side of the stored line. The server cuts the same window: the radius
+/// and the snippet comparison are `camerata_api_types::snippet`, shared by both ends of the wire.
+pub use camerata_api_types::snippet::{line_matches_snippet, CONTEXT_RADIUS};
 
 /// The most lines a context window may have: the stored line and the radius either side.
 pub const MAX_CONTEXT_LINES: usize = 2 * CONTEXT_RADIUS + 1;
@@ -222,10 +223,29 @@ pub struct PaneContext {
 impl PaneContext {
     /// `(file line number, text, is the violation line)` for each line, in order.
     pub fn rows(&self) -> impl Iterator<Item = (usize, &str, bool)> {
-        self.lines.iter().enumerate().map(move |(i, text)| {
-            let n = self.start_line + i;
-            (n, text.as_str(), n == self.violation_line)
+        self.lines.iter().enumerate().filter_map(move |(i, text)| {
+            // A start line so large that numbering overflows has no rows to draw.
+            let n = self.start_line.checked_add(i)?;
+            Some((n, text.as_str(), n == self.violation_line))
         })
+    }
+
+    /// The text of the window's line `line`, if the window holds it.
+    pub fn line(&self, line: usize) -> Option<&str> {
+        let at = line.checked_sub(self.start_line)?;
+        self.lines.get(at).map(String::as_str)
+    }
+
+    /// Whether the window still matches the first line of a stored snippet: the line it holds at
+    /// `self.violation_line` against `expect`. A window is shared by every finding on its line,
+    /// so each requester applies its own snippet.
+    pub fn matches_snippet(&self, expect: Option<&str>) -> bool {
+        match expect.map(str::trim).filter(|e| !e.is_empty()) {
+            None => true,
+            Some(expect) => self
+                .line(self.violation_line)
+                .is_some_and(|line| line_matches_snippet(line, expect)),
+        }
     }
 
     /// Whether the window is well formed for a finding on `line`: numbered from 1, no longer
@@ -235,7 +255,11 @@ impl PaneContext {
             && !self.lines.is_empty()
             && self.lines.len() <= MAX_CONTEXT_LINES
             && self.violation_line == line
-            && (self.start_line..self.start_line + self.lines.len()).contains(&line)
+            // No unchecked addition: `start_line` is the server's number and may be anything.
+            // Every line of the window must be numberable, and the finding's line must be one.
+            && self.start_line.checked_add(self.lines.len() - 1).is_some()
+            && line >= self.start_line
+            && line - self.start_line < self.lines.len()
     }
 }
 
@@ -268,13 +292,6 @@ pub fn accept(target: &ContextTarget, response: &BatchResponse) -> Option<PaneCo
     context.is_sound_for(item.line).then_some(context)
 }
 
-/// Whether a line's current text still contains, or is contained by, the first line of the
-/// stored snippet (both trimmed). An empty snippet matches nothing to compare against.
-pub fn line_matches_snippet(actual: &str, expect: &str) -> bool {
-    let (actual, expect) = (actual.trim(), expect.trim());
-    expect.is_empty() || actual.contains(expect) || expect.contains(actual)
-}
-
 /// The same window, cut from a file the viewer already holds, so no request is needed. Only a
 /// read of the inspected commit that carries every line of the window, and only while the
 /// finding's line still matches `expect`; a working-tree read or a partial window is `None`.
@@ -291,17 +308,12 @@ pub fn context_from_file(
     let lines: Vec<String> = (start..=end)
         .map(|n| view.line(n).map(|segments| segments_text(segments)))
         .collect::<Option<_>>()?;
-    let violation = lines.get(line - start)?;
-    if let Some(expect) = expect {
-        if !line_matches_snippet(violation, expect) {
-            return None;
-        }
-    }
-    Some(PaneContext {
+    let window = PaneContext {
         start_line: start,
         violation_line: line,
         lines,
-    })
+    };
+    window.matches_snippet(expect).then_some(window)
 }
 
 #[cfg(test)]
@@ -604,14 +616,66 @@ mod tests {
         assert!(context_from_file(&windowed, 12, None).is_some());
     }
 
+    /// L1: the server's `start_line` is untrusted. One that would overflow when added to a
+    /// length is refused, never wrapped around into a window that looks sound.
     #[test]
-    fn snippet_matching_is_containment_either_way_on_trimmed_text() {
-        assert!(line_matches_snippet("  let x = 1;  ", "let x = 1;"));
+    fn a_start_line_at_the_top_of_the_range_overflows_nothing() {
+        let t = target(usize::MAX);
+        let mut a = answer_for(&t);
+        a.start_line = usize::MAX;
+        a.lines = vec!["only".into()];
+        // The window is sound only if it holds the line, and `usize::MAX` is both.
+        let held = accept(&t, &response(a.clone())).expect("a one-line window at the maximum");
+        assert_eq!(held.rows().count(), 1);
+        // Two lines starting at the maximum would number past it: refused, not wrapped.
+        a.lines = vec!["a".into(), "b".into()];
+        assert_eq!(accept(&t, &response(a)), None);
+        // Rows of such a window cannot be numbered past the maximum either.
+        let window = PaneContext {
+            start_line: usize::MAX,
+            violation_line: usize::MAX,
+            lines: vec!["a".into(), "b".into(), "c".into()],
+        };
+        assert_eq!(window.rows().count(), 1, "only the line that has a number");
+        // And a start line past the finding's line holds nothing of it.
+        let t = target(10);
+        let mut late = answer_for(&t);
+        late.start_line = usize::MAX - 1;
+        assert_eq!(accept(&t, &response(late)), None);
+    }
+
+    /// L11: a window cached for a line is shared by every finding on that line; each applies its
+    /// own snippet.
+    #[test]
+    fn a_window_is_checked_against_each_requesters_own_snippet() {
+        let window = PaneContext {
+            start_line: 9,
+            violation_line: 10,
+            lines: vec!["a".into(), "let x = 1;".into(), "c".into()],
+        };
+        assert!(window.matches_snippet(Some("let x = 1;")));
         assert!(
-            line_matches_snippet("let x", "let x = 1;"),
-            "a truncated line"
+            window.matches_snippet(Some("  let x  ")),
+            "trimmed containment"
         );
-        assert!(line_matches_snippet("anything", "  "), "nothing to compare");
-        assert!(!line_matches_snippet("let y = 2;", "let x = 1;"));
+        assert!(window.matches_snippet(None));
+        assert!(window.matches_snippet(Some("  ")));
+        assert!(!window.matches_snippet(Some("something else")));
+        // A window that does not hold its own line matches no snippet.
+        let broken = PaneContext {
+            start_line: 1,
+            violation_line: 10,
+            lines: vec!["a".into()],
+        };
+        assert!(!broken.matches_snippet(Some("a")));
+        assert!(broken.matches_snippet(None), "nothing to compare");
+    }
+
+    #[test]
+    fn the_context_window_derives_from_the_shared_radius() {
+        assert_eq!(
+            MAX_CONTEXT_LINES,
+            2 * camerata_api_types::snippet::CONTEXT_RADIUS + 1
+        );
     }
 }

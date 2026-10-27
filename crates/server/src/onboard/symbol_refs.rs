@@ -430,7 +430,7 @@ pub async fn symbol_refs_with(
             sha,
             head_differs,
         } => {
-            // Same test `read_git_blob` makes before it reads.
+            // Same test `read_git_blob_at` makes before it reads.
             if !crate::client_source::git::commit_exists(&dir, &sha).await {
                 // The one labelled fallback, and only while the folder exists (the resolver
                 // checked) and the search ran: the working tree, loudly. The status stays

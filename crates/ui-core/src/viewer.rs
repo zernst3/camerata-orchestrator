@@ -348,8 +348,10 @@ impl ViewerCache {
     /// The pane's window for one finding, if one is held: first a window fetched for exactly
     /// that finding (same repo, commit, path AND line), else the same window cut from a whole
     /// file this cache holds, so an open viewer and the pane share what has been read. `expect`
-    /// is the first line of the stored snippet; a held file whose line no longer matches it
-    /// yields nothing. A key with no commit is never answered (the server's default can change).
+    /// is the first line of the stored snippet, and EVERY answer is checked against it (a window
+    /// is shared by each finding on its line, and each finding has its own snippet); one whose
+    /// line does not match yields nothing. A key with no commit is never answered (the server's
+    /// default can change).
     ///
     /// Only the lines of a file are used, never its `block`: that is for another line.
     pub fn context(&self, key: &ContextKey, expect: Option<&str>) -> Option<Arc<PaneContext>> {
@@ -357,7 +359,9 @@ impl ViewerCache {
             return None;
         }
         if let Some((_, held)) = self.contexts.iter().find(|(k, _)| k == key) {
-            return Some(Arc::clone(held));
+            // The window was fetched for the first finding on this line; another finding on the
+            // same line has its own snippet, and the window must still match THAT one.
+            return held.matches_snippet(expect).then(|| Arc::clone(held));
         }
         let file = FileKey {
             repo: key.repo.clone(),
@@ -1591,6 +1595,21 @@ mod tests {
         assert!(c.lookup(&key("f"), 1).is_some());
         // A window kept for one line does not answer for another.
         assert_eq!(c.context(&ctx_key("f", 6), None), None);
+    }
+
+    /// L11: a window kept for one finding does not answer for another finding on the same line
+    /// whose snippet it does not match.
+    #[test]
+    fn a_kept_window_is_checked_against_the_requesters_own_snippet() {
+        let mut c = ViewerCache::new();
+        assert!(c.put_context(ctx_key("f", 5), window(4)));
+        // `window(4)` holds `b` on line 5.
+        assert_eq!(c.context(&ctx_key("f", 5), Some("b")), Some(window(4)));
+        assert_eq!(c.context(&ctx_key("f", 5), None), Some(window(4)));
+        assert_eq!(
+            c.context(&ctx_key("f", 5), Some("another finding's line")),
+            None
+        );
     }
 
     #[test]

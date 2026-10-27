@@ -480,11 +480,15 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    so you can read one file's findings together. **By rule** groups by rule (in rule id order) then
    file, worst severity first within a rule, so you can decide one rule at a time. **Critical first**
    is one flat list with no groups, worst severity first. Picking a cut re-orders the table where it
-   stands: the finding the cursor is on stays the finding the cursor is on, and its group is opened
-   if the new grouping had closed it. Your row selection is kept; a column sort you had applied is
+   stands: the finding the cursor is on stays the finding the cursor is on (also right after you
+   have decided a finding, when the cursor is on the next one), its group is opened if the new
+   grouping had closed it, and the table scrolls to bring its row into view. The keyboard goes back
+   to the detail pane, so the decision keys work without a click. Your row selection is kept; a column sort you had applied is
    dropped, because it would hide the order you just chose (**Default order**, beside the sentence
    that names the order on screen, still removes any later column sort). The choice is saved with
-   the rest of your in-progress review, so it is still there after a restart.
+   the rest of your in-progress review, so it is still there after a restart. If a newer version of
+   the app saved a view setting this version does not know (an order, or which table was open), it
+   falls back to the default; your decisions are never lost to it.
 
    **Scan-time deterministic preview.** For each **mechanical** rule you selected that maps to a tool
    Camerata can drive (clippy, ruff, eslint, semgrep), the deterministic scan **runs that tool itself**

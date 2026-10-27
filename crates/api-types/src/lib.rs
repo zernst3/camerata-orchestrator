@@ -53,6 +53,7 @@ pub mod llm;
 pub mod model_registry;
 pub mod project;
 pub mod run;
+pub mod snippet;
 pub mod stories;
 pub mod symbol;
 pub mod uow;

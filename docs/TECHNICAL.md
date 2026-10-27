@@ -3093,16 +3093,22 @@ tuple in request order, each echoing `index`, `key`, `repo`, `path`, `line` and 
 when none) so a client can match it to a finding. An `ok` entry carries `source` (`git` or
 `working_tree`), `commit`, `head_differs`, `start_line`, `end_line`, `violation_line`, `lines`
 (the stored line and 3 either side, clipped to the file, redacted), `language`, `kind: "window"` and
-`matches_snippet` (the one comparison `finding_context::snippet_matches`, fed the optional
-`expect`). Every other entry is the shared `FindingContextOutcome` vocabulary (`commit_unavailable`,
+`matches_snippet` (the one comparison, `camerata_api_types::snippet::line_matches_snippet`, fed
+the optional `expect` through `finding_context::snippet_matches`; the detail pane applies the same
+function, and the window radius `CONTEXT_RADIUS` lives in the same module). The line compared is
+the line AS DISPLAYED, redacted with its file (batch) or block (finding-context): comparing the raw
+line would make `expect` a substring oracle on a line the display hides, and a blank displayed
+line matches no non-empty snippet, so a blanked line cannot be probed through "contained by". Every other entry is the shared `FindingContextOutcome` vocabulary (`commit_unavailable`,
 `source_deleted`, `file_missing`, `not_utf8`, `too_large` at the 400 KB cap, `line_gone`,
 `path_traversal`, `unavailable` for `Busy`).
 
 Nothing is re-implemented. Where code may be read from is `source_for_read` (called once per
 distinct `(repo, sha)`); the path jail and the read are `source_file::read_bytes` (which is
-`resolve_contained_path`, `is_plain_relative_path` and `read_git_blob`, and which `read_rendered`
-now calls too); redaction is `source_file::redacted_lines` (which is `redact_block`, and which
-`prepare` now calls too). The WHOLE file is redacted as one text before any slice is cut, so a key
+`resolve_contained_path`, `is_plain_relative_path` and the git object read, and which
+`read_rendered` AND finding-context's `lookup_at` call too, at their own caps; `Origin` is the one
+"where from" type, `FileSource` is gone); decoding is `source_file::decode` (size cap and UTF-8,
+used by `redacted_lines` and by finding-context's `describe`); redaction is
+`source_file::redacted_lines` (which is `redact_block`, and which `prepare` now calls too). The WHOLE file is redacted as one text before any slice is cut, so a key
 block that begins above a window is caught inside it. Differences from finding-context, on
 purpose: there is no working-tree fallback (a missing commit answers `commit_unavailable` with no
 lines, because code from another commit under a stored snippet is a false positive); the window
@@ -3111,25 +3117,40 @@ not blank the other 199), with no file read for it. A deleted source answers `so
 item and reads nothing. Responses are `no-store`; the endpoint is a POST only because the tuples
 do not fit a query string, and writes nothing.
 
+*Order of work.* Every `sha` in the request is validated first (`read::check_sha`, the same check
+`source_for_read` makes), so a malformed one is a 400 before any process is built (a test counts
+the commands `git_command` built). Then each distinct `(repo, sha)` is resolved and its commit
+checked to exist ONCE (`VerifiedCommit::verify`, one process), and the verified commit is handed
+to every read as `Origin::Verified`; a single-file read is the same two steps
+(`Origin::Git` = verify, then `read_git_blob_at`).
+
 *The read gate.* Items are grouped by `(repo, sha, path)` so a file is read, decoded and redacted
 once however many tuples cite it, and files are read `READ_CONCURRENCY` (2) at a time. The gate
-slot is taken per file read, inside `read_git_blob`, and released when that blob is read, so a
+slot is taken per file read, inside `read_git_blob_at`, and released when that blob is read, so a
 batch never holds a slot between files: holding one for the whole batch would starve the symbol
 search and the viewer, and reading all files at once would queue most of a 200-item batch past the
 gate's 3 second wait and answer them `unavailable`. A read takes one slot, runs and releases (no
 hold-and-wait), so two batches cannot deadlock; the worst a loaded gate does is answer one item
 `unavailable`. Decode and redaction run on the blocking pool under the viewer's prepare limit.
+A test seam (`finding_context::trace`, thread-local) records the most slots one thread held at once,
+the slots taken in all and the commit checks, so the tests assert a 200-tuple, 40-file batch holds
+at most `READ_CONCURRENCY` slots, takes exactly 40 and checks the commit once.
 
 **Starting git for code reads** (`workspace::git_command`, `GitEnv`, `GitReadGate`): the one
-builder for every `git` this crate starts (`workspace::git`, `read_git_blob`, `ls-tree`, the symbol
+builder for every `git` this crate starts (`workspace::git`, `read_git_blob_at`, `ls-tree`, the symbol
 search). It removes `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
 `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR`, `GIT_NAMESPACE` and `GIT_CEILING_DIRECTORIES`
 from the environment and sets `GIT_OPTIONAL_LOCKS=0`; reads of client code (`GitEnv::Isolated`)
 also remove every `GIT_CONFIG*`, while network steps (`GitEnv::Network`) keep the indexed
-`GIT_CONFIG_COUNT` / `_KEY_n` / `_VALUE_n` pairs the tests use to rewrite the authenticated remote.
+`GIT_CONFIG_COUNT` / `_KEY_n` / `_VALUE_n` pairs that an operator or an integration test sets.
+The in-crate tests that must reach a local bare repository instead of GitHub do NOT set them on
+the process (every git any parallel test starts inherits the process environment, which once made
+an unrelated test fail with "missing config key GIT_CONFIG_KEY_0"): `workspace::test_seams`
+(`#[cfg(test)]`, thread-local) puts `url.<local>.insteadOf` on the network commands built by that
+test's own thread, so the race cannot exist.
 `GIT_READS` bounds object reads and symbol searches to 4 at once with a 3 second wait for a slot,
 then the shared `Busy` outcome (`unavailable`). It is a process-wide static rather than a field
-of `AppState` so `read_git_blob`, which has no state, shares it. `tests/git_env_isolation.rs`
+of `AppState` so `read_git_blob_at`, which has no state, shares it. `tests/git_env_isolation.rs`
 sets `GIT_DIR` and `GIT_CONFIG_*` in a process of its own and checks the builder ignores them.
 
 **The code viewer UI** (`crates/ui/src/cockpit/viewer.rs`; every judgment in
@@ -3194,8 +3215,14 @@ not), capacity 64, never evicts a file and is never evicted by one, and nothing 
 commit. `ViewerCache::context` also cuts the same window from a whole `git` file the viewer holds
 (`context_from_file`, lines only, never the file's `block`, which belongs to another line, and
 only while the line still matches the stored snippet), so an open viewer answers the pane with no
-request. Both paths read the cache with `peek`, so the pane does not re-render on the viewer's
-writes.
+request. A window kept for one finding is shared by every finding on its line, so EVERY hit (the
+context lane or a held file) is checked against the requesting finding's own snippet
+(`PaneContext::matches_snippet`). The pane redraws when the SET of files the viewer holds changes
+(a memo over the cache's file keys) and not on its own writes. A table also remembers its own
+answers by finding key (16), because the cache keeps nothing without a recorded commit: going A, B,
+A shows A at once, and a late answer for B never replaces A's. The settle clock is `tokio::time`,
+so the debounce test runs on a paused clock and cannot flake. The server's `start_line` is
+untrusted: soundness uses no unchecked addition (`usize::MAX` is tested).
 
 **Order presets** (work order B.4; `camerata_ui_core::order_preset`, `recut_table` and
 `group_columns` in `scan.rs`, `table::apply_grouping`). `OrderPreset` is `Curated` (default),
@@ -3214,8 +3241,23 @@ put back, since `set_rows` clears it), `clear_sort` (a column sort would hide th
 `apply_grouping` (the sequence `CamerataTable` runs on mount: group, load all, collapse), then
 `reach_finding` on the cursor's key, which opens only the groups that hold it. The cursor holds a
 finding key and is resolved against the visible rows, so the pane's existing rule keeps it on the
-same finding. `order_indicator_text` names the preset's order (and, under a column sort, what lies
-underneath).
+same finding. That key is `triage::focused_key(cursor, visible)`, the RESOLVED focus, used by
+every reader of "the focused finding" (the pane row, the rule, the context request and the
+re-cut): the stored key goes stale when a disposition removes its row, and a re-cut aimed at it
+would leave every group shut and the pane blank (a mounted test decides a row, re-cuts and checks
+the neighbour is shown). After the re-cut the table is scrolled so the cursor's row sits in the
+upper third (`cursor_scroll_top`, the viewer's `scroll_top_for_line` over the table's own row
+height and viewport, applied to the container with `scroll_table_js` since `set_rows` zeroes the
+scroll); the select returns keyboard focus to the pane through `focus_detail_pane`. The saved
+`order_preset` and `triage_view` are read through `camerata_ui_core::lenient::deserialize`: a
+value a newer build wrote that this one does not know is the default instead of a draft that fails
+to load (the dispositions would look lost). `order_indicator_text` names the preset's order (and,
+under a column sort, what lies underneath); no order text contains an em-dash (tested).
+
+*The flat cut at scale.* Critical first mounts every row in one view (page size 5000), but chorale
+renders only the rows in the scroll window: measured on 3,000 findings, mounting takes about 70 ms
+in a debug build and the HTML holds 16 row elements (94 KB), not 3,000. No virtualisation work is
+needed.
 
 Every parser that recurses over a client file (syn, the tree-sitter walkers, the clone tokenizer,
 the enclosing-block resolver) sits behind one bracket-depth guard, `camerata_checks::extract::nesting`:

@@ -140,7 +140,67 @@ pub fn git_command(cwd: Option<&Path>, mode: GitEnv) -> Command {
     }
     cmd.env("GIT_OPTIONAL_LOCKS", "0");
     cmd.kill_on_drop(true);
+    #[cfg(test)]
+    test_seams::on_command(&mut cmd, mode);
     cmd
+}
+
+/// Test seams of [`git_command`], all THREAD-LOCAL: a `#[tokio::test]` runs every future of its
+/// test on its own thread, so a seam set by one test is invisible to every other test running in
+/// parallel, and nothing here touches the process environment (which every spawned `git`, in
+/// every test, inherits).
+#[cfg(test)]
+pub(crate) mod test_seams {
+    use std::cell::{Cell, RefCell};
+
+    use super::{Command, GitEnv};
+
+    thread_local! {
+        /// How many commands [`super::git_command`] has built on this thread.
+        static BUILT: Cell<usize> = const { Cell::new(0) };
+        /// `(from, to)` pairs rewritten for this thread's network git steps.
+        static INSTEAD_OF: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Commands built on this thread so far.
+    pub(crate) fn commands_built() -> usize {
+        BUILT.with(Cell::get)
+    }
+
+    /// Rewrite every URL starting with `from` to start with `to` in THIS thread's network steps
+    /// (the `url.<to>.insteadOf = <from>` setting, put on the command and not on the process), so
+    /// a route that clones a GitHub URL reaches a local bare repository instead, offline. Undone
+    /// when the guard drops.
+    pub(crate) fn rewrite_remote(from: &str, to: &str) -> RewriteGuard {
+        INSTEAD_OF.with(|r| r.borrow_mut().push((from.to_string(), to.to_string())));
+        RewriteGuard
+    }
+
+    pub(crate) struct RewriteGuard;
+
+    impl Drop for RewriteGuard {
+        fn drop(&mut self) {
+            INSTEAD_OF.with(|r| r.borrow_mut().clear());
+        }
+    }
+
+    pub(super) fn on_command(cmd: &mut Command, mode: GitEnv) {
+        BUILT.with(|c| c.set(c.get() + 1));
+        if mode != GitEnv::Network {
+            return;
+        }
+        INSTEAD_OF.with(|r| {
+            let pairs = r.borrow();
+            if pairs.is_empty() {
+                return;
+            }
+            cmd.env("GIT_CONFIG_COUNT", pairs.len().to_string());
+            for (i, (from, to)) in pairs.iter().enumerate() {
+                cmd.env(format!("GIT_CONFIG_KEY_{i}"), format!("url.{to}.insteadOf"));
+                cmd.env(format!("GIT_CONFIG_VALUE_{i}"), from);
+            }
+        });
+    }
 }
 
 /// Bounds how many `git` processes read client code at once (the symbol search and the object

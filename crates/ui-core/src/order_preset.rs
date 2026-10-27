@@ -47,6 +47,14 @@ pub enum OrderPreset {
     CriticalFirst,
 }
 
+/// Read from the draft leniently ([`crate::lenient`]): a preset a newer build wrote, which this
+/// one does not know, is the curated order, not a draft that fails to load.
+impl crate::lenient::WireEnum for OrderPreset {
+    fn from_wire(name: &str) -> Option<Self> {
+        Self::from_key(name)
+    }
+}
+
 /// What the table is grouped by, outermost first. The Dioxus layer maps each name to its
 /// column; the one place a preset's grouping is decided is [`OrderPreset::grouping`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

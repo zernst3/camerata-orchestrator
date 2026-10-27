@@ -14,7 +14,7 @@
 //!   40-hex sha, the inspected commit through git objects, the working tree only when no commit
 //!   was recorded): [`source_for_read`];
 //! - **the path jail** and the read itself: `source_file::read_bytes`, which is
-//!   `resolve_contained_path`, `is_plain_relative_path` and `read_git_blob` (so `GIT_READS` gates
+//!   `resolve_contained_path`, `is_plain_relative_path` and `read_git_blob_at` (so `GIT_READS` gates
 //!   every git process);
 //! - **redaction**: `source_file::redacted_lines`, which is [`redact_block`]. The WHOLE file is
 //!   redacted as one text BEFORE any slicing, so a multi-line key block that starts above a
@@ -36,7 +36,7 @@
 //!
 //! # The git read gate
 //!
-//! `read_git_blob` takes a `GIT_READS` slot per file and releases it when that file's blob is
+//! `read_git_blob_at` takes a `GIT_READS` slot per file and releases it when that file's blob is
 //! read, so a batch never holds a slot between files. Files are read [`READ_CONCURRENCY`] at a
 //! time (of the gate's 4), never all at once: 200 simultaneous reads would queue 196 of them past
 //! the gate's 3 second wait and answer them `unavailable`, and a batch holding every slot would
@@ -44,11 +44,14 @@
 //! slot, runs, releases), so two batches cannot deadlock; at worst a read waits its turn and, past
 //! 3 seconds, that item alone answers `unavailable`.
 //!
-//! Each distinct `(repo, sha, path)` is read, decoded and redacted once, however many tuples cite
-//! it. Read-only by construction: no write, and the only subprocesses are the read-only git
-//! calls inside `read_git_blob`.
+//! Each distinct `(repo, sha)` is resolved and its commit checked to exist once
+//! (`VerifiedCommit`, passed to every read as `Origin::Verified`), and each distinct
+//! `(repo, sha, path)` is read, decoded and redacted once, however many tuples cite it. Every sha
+//! is validated before anything is resolved, so a malformed one starts no process. Read-only by construction: no write, and the only subprocesses are the read-only git
+//! calls inside `read_git_blob_at`.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -56,17 +59,20 @@ use axum::Json;
 use futures::stream::{self, StreamExt};
 
 use super::files::MAX_FILE_BYTES;
-use super::finding_context::{language_label, snippet_matches, FindingContextOutcome};
-use super::source_file::{read_bytes, redacted_lines, Origin, Refused, RenderLimits};
-use crate::client_source::read::{labelled, no_store, source_for_read, SourceRead};
+use super::finding_context::{
+    language_label, outcome_of, snippet_matches, FindingContextOutcome, VerifiedCommit,
+};
+use super::source_file::{read_bytes, redacted_lines, Origin, RenderLimits};
+use crate::client_source::read::{check_sha, labelled, no_store, source_for_read, SourceRead};
 use crate::client_source::Refusal;
 use crate::AppState;
 
 /// The most tuples one request may carry. More is a 400 (`too_many_items`).
 pub const MAX_BATCH_ITEMS: usize = 200;
 
-/// Lines of context either side of the stored line.
-pub const CONTEXT_RADIUS: usize = 3;
+/// Lines of context either side of the stored line (shared with the pane, which cuts the same
+/// window from a file it holds).
+pub use camerata_api_types::snippet::CONTEXT_RADIUS;
 
 /// Files read at once (see the module docs on the gate).
 pub const READ_CONCURRENCY: usize = 2;
@@ -102,8 +108,46 @@ pub struct BatchItem {
     pub key: Option<String>,
 }
 
-/// Where the code of one `(repo, sha)` comes from, resolved once per request.
-type Resolved = Result<SourceRead, Refusal>;
+/// Where the code of one `(repo, sha)` comes from, resolved once per request, and for a commit
+/// checked to exist once per request too (one process, however many files cite it).
+enum Source {
+    /// Nothing is read: the source was deleted, or the repo is not linked here.
+    Closed(FindingContextOutcome),
+    /// No commit was recorded: the working tree, labelled.
+    WorkingTree { dir: PathBuf },
+    /// The inspected commit through git objects, or why it cannot be read.
+    Git {
+        commit: Result<VerifiedCommit, FindingContextOutcome>,
+        head_differs: bool,
+    },
+}
+
+impl Source {
+    async fn from_read(read: SourceRead) -> Self {
+        match read {
+            SourceRead::Deleted {
+                deleted_at,
+                record_id,
+            } => Source::Closed(FindingContextOutcome::SourceDeleted {
+                deleted_at,
+                record_id,
+            }),
+            // Not linked / not on disk: indistinguishable from "file missing" to the UI.
+            SourceRead::Unresolved { .. } => Source::Closed(FindingContextOutcome::FileMissing),
+            SourceRead::WorkingTree { dir } => Source::WorkingTree { dir },
+            SourceRead::Git {
+                dir,
+                sha,
+                head_differs,
+            } => Source::Git {
+                commit: VerifiedCommit::verify(&dir, &sha)
+                    .await
+                    .map_err(|_| FindingContextOutcome::CommitUnavailable),
+                head_differs,
+            },
+        }
+    }
+}
 
 /// What the shared tail of a read produced for one file: the redacted lines, or why not.
 type FileLines = Result<Vec<String>, FindingContextOutcome>;
@@ -129,26 +173,35 @@ pub async fn finding_context_batch(state: &AppState, params: BatchParams) -> Res
         );
     }
 
+    // A malformed sha is the caller's bug, not a property of one file: refuse the request before
+    // anything is resolved, so no process is started for it.
+    for item in &params.items {
+        if let Err(refusal) = check_sha(item.sha.as_deref()) {
+            return no_store(refusal.into_response());
+        }
+    }
+
     // Resolve each distinct (repo, sha) once: the resolver spawns a git process for the head
     // commit, and a group of findings shares a repo.
-    let mut resolved: HashMap<(String, Option<String>), Resolved> = HashMap::new();
+    let mut sources: HashMap<(String, Option<String>), Source> = HashMap::new();
     for item in &params.items {
         let key = (item.repo.clone(), item.sha.clone());
-        if resolved.contains_key(&key) {
+        if sources.contains_key(&key) {
             continue;
         }
-        let read = source_for_read(
+        match source_for_read(
             state,
             params.project.as_deref(),
             &item.repo,
             item.sha.as_deref(),
         )
-        .await;
-        resolved.insert(key, read);
-    }
-    // A malformed sha is the caller's bug, not a property of one file: refuse the request.
-    if let Some(refusal) = resolved.values().find_map(|r| r.as_ref().err()) {
-        return no_store(refusal.clone().into_response());
+        .await
+        {
+            Ok(read) => {
+                sources.insert(key, Source::from_read(read).await);
+            }
+            Err(refusal) => return no_store(refusal.into_response()),
+        }
     }
 
     // Group the tuples by file, in first-seen order, so each file is read and redacted once.
@@ -170,24 +223,22 @@ pub async fn finding_context_batch(state: &AppState, params: BatchParams) -> Res
     }
 
     let items = &params.items;
-    let resolved = &resolved;
+    let sources = &sources;
     let answered: Vec<Vec<(usize, serde_json::Value)>> = stream::iter(order)
         .map(|file| {
             let indexes = by_file.get(&file).cloned().unwrap_or_default();
             async move {
-                let Some(Ok(read)) = resolved.get(&(file.repo.clone(), file.sha.clone())) else {
-                    // Unreachable: a refusal returned above. Answered closed all the same.
-                    return indexes
+                match sources.get(&(file.repo.clone(), file.sha.clone())) {
+                    Some(source) => answer_file(source, &file.path, &indexes, items).await,
+                    // Unreachable: every tuple's source was resolved above. Closed all the same.
+                    None => indexes
                         .into_iter()
                         .map(|i| {
-                            (
-                                i,
-                                answer(&items[i], i, &FindingContextOutcome::FileMissing, None),
-                            )
+                            let outcome = FindingContextOutcome::FileMissing;
+                            (i, answer(&items[i], i, &outcome, None))
                         })
-                        .collect::<Vec<_>>();
-                };
-                answer_file(read, &file.path, &indexes, items).await
+                        .collect(),
+                }
             }
         })
         .buffered(READ_CONCURRENCY)
@@ -217,7 +268,7 @@ enum Label<'a> {
 
 /// Answer every tuple that cites one file: read it once, redact the whole of it, slice per tuple.
 async fn answer_file(
-    read: &SourceRead,
+    source: &Source,
     path: &str,
     indexes: &[usize],
     items: &[BatchItem],
@@ -228,30 +279,21 @@ async fn answer_file(
             .map(|&i| (i, answer(&items[i], i, &outcome, label.as_ref())))
             .collect::<Vec<_>>()
     };
-    let (origin, label) = match read {
-        SourceRead::Deleted {
-            deleted_at,
-            record_id,
-        } => {
-            return whole(
-                FindingContextOutcome::SourceDeleted {
-                    deleted_at: deleted_at.clone(),
-                    record_id: record_id.clone(),
-                },
-                None,
-            )
-        }
-        // Not linked / not on disk: indistinguishable from "file missing" to the UI.
-        SourceRead::Unresolved { .. } => return whole(FindingContextOutcome::FileMissing, None),
-        SourceRead::WorkingTree { dir } => (Origin::WorkingTree(dir), Label::WorkingTree),
-        SourceRead::Git {
-            dir,
-            sha,
+    let (origin, label) = match source {
+        Source::Closed(outcome) => return whole(outcome.clone(), None),
+        Source::WorkingTree { dir } => (Origin::WorkingTree(dir), Label::WorkingTree),
+        // The commit is missing: no working-tree fallback here (module docs).
+        Source::Git {
+            commit: Err(outcome),
+            ..
+        } => return whole(outcome.clone(), None),
+        Source::Git {
+            commit: Ok(commit),
             head_differs,
         } => (
-            Origin::Git { dir, sha },
+            Origin::Verified(commit),
             Label::Git {
-                sha,
+                sha: &commit.sha,
                 head_differs: *head_differs,
             },
         ),
@@ -259,8 +301,6 @@ async fn answer_file(
 
     let lines = match file_lines(origin, path).await {
         Ok(lines) => lines,
-        // The commit is missing: no working-tree fallback here (module docs).
-        Err(outcome @ FindingContextOutcome::CommitUnavailable) => return whole(outcome, None),
         Err(outcome) => return whole(outcome, Some(label)),
     };
     let language = language_label(path);
@@ -286,15 +326,6 @@ async fn file_lines(origin: Origin<'_>, path: &str) -> FileLines {
         Ok(Ok(result)) => result.map_err(outcome_of),
         // Too slow, or the worker panicked: nothing to show.
         Ok(Err(_)) | Err(_) => Err(FindingContextOutcome::TooLarge),
-    }
-}
-
-/// A refusal in the shared vocabulary. The cap here is `finding-context`'s (400 KB), so the
-/// oversize reason is its `TooLarge`, not the viewer's.
-fn outcome_of(refused: Refused) -> FindingContextOutcome {
-    match refused {
-        Refused::TooLarge => FindingContextOutcome::TooLarge,
-        other => other.into(),
     }
 }
 

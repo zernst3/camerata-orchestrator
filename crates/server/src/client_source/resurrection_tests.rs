@@ -4,13 +4,12 @@
 //! that can write into a repo folder (emit-local, apply, generate-ci-workflow, the scan gate)
 //! and proves it neither recreates the folder nor flips the status away from `deleted`.
 //!
-//! Git's network steps never leave the machine: `GIT_CONFIG_*` env vars rewrite the authed
-//! GitHub URL to the fixture's local bare remote (`url.<file>.insteadOf`), so a route that DOES
-//! resurrect the folder is observable offline, and a route that does not is simply not asked.
+//! Git's network steps never leave the machine: a per-thread `url.<file>.insteadOf` rewrite of
+//! the authed GitHub URL to the fixture's local bare remote, so a route that DOES resurrect the
+//! folder is observable offline, and a route that does not is simply not asked.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use camerata_test_env::EnvGuard;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -23,19 +22,20 @@ const RULE: &str = "ARCH-CURRENCY-CONSISTENCY-1";
 const TOKEN: &str = "test-token-never-sent-anywhere";
 
 /// Redirect `git clone https://x-access-token:<token>@github.com/acme/app.git` to the
-/// fixture's local bare remote. Hold the guards for the whole test.
-fn redirect_github_clone(fx: &Fx) -> Vec<EnvGuard> {
-    vec![
-        EnvGuard::set("GIT_CONFIG_COUNT", "1"),
-        EnvGuard::set(
-            "GIT_CONFIG_KEY_0",
-            format!("url.{}.insteadOf", fx.remote_url),
-        ),
-        EnvGuard::set(
-            "GIT_CONFIG_VALUE_0",
-            format!("https://x-access-token:{TOKEN}@github.com/{REPO}.git"),
-        ),
-    ]
+/// fixture's local bare remote. Hold the guard for the whole test. The rewrite is set on this
+/// test thread's network commands (`workspace::test_seams`), not on the process environment, so
+/// no other test's git can ever see it.
+fn redirect_github_clone(fx: &Fx) -> crate::workspace::test_seams::RewriteGuard {
+    // Q1: this must never reach the process environment, which every git in every parallel
+    // test inherits.
+    assert!(
+        std::env::var_os("GIT_CONFIG_COUNT").is_none(),
+        "a test set GIT_CONFIG_COUNT on the process"
+    );
+    crate::workspace::test_seams::rewrite_remote(
+        &format!("https://x-access-token:{TOKEN}@github.com/{REPO}.git"),
+        &fx.remote_url,
+    )
 }
 
 async fn call(

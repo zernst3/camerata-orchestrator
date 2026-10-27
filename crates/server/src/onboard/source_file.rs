@@ -10,7 +10,7 @@
 //!   [`crate::client_source::read::source_for_read`], the one resolver (it also refuses a repo
 //!   name that is not a plain `owner/name` a project owns);
 //! - **path jail** and the git object read: [`super::finding_context`]'s
-//!   `resolve_contained_path`, `is_plain_relative_path` and `read_git_blob` (which shows regular
+//!   `resolve_contained_path`, `is_plain_relative_path` and `read_git_blob_at` (which shows regular
 //!   files only: a symlink or submodule at the commit is `file_missing`);
 //! - **statuses and their reasons**: [`FindingContextOutcome`], the one vocabulary, with the
 //!   same source labels (`read::labelled`) and the same semantics. Only the content body is
@@ -61,8 +61,8 @@ use camerata_checks::extract::highlight::{
 
 use super::files::MAX_FILE_BYTES;
 use super::finding_context::{
-    is_plain_relative_path, language_label, read_git_blob, read_working_tree_file, redact_block,
-    resolve_contained_path, FindingContextOutcome, GitReadError,
+    is_plain_relative_path, language_label, read_git_blob_at, read_working_tree_file, redact_block,
+    resolve_contained_path, FindingContextOutcome, GitReadError, VerifiedCommit,
 };
 use crate::client_source::read::{labelled, no_store, source_for_read, SourceRead};
 use crate::AppState;
@@ -159,15 +159,23 @@ pub(crate) struct Rendered {
 
 /// Where one read comes from.
 #[derive(Clone, Copy)]
-pub(crate) enum Origin<'a> {
+pub enum Origin<'a> {
+    /// The file as it is in the working tree now (the scan ran on a folder with no git history).
     WorkingTree(&'a Path),
+    /// The file as it was at commit `sha`, through git's object store, so a finding keeps showing
+    /// the code the inspection saw even after the checkout moved on. The commit is checked to
+    /// exist on every read.
     Git { dir: &'a Path, sha: &'a str },
+    /// The same, for a commit already checked ([`VerifiedCommit::verify`]), so a caller reading
+    /// many files of one commit checks it once.
+    Verified(&'a VerifiedCommit),
 }
 
 impl Origin<'_> {
     fn dir(&self) -> &Path {
         match self {
             Origin::WorkingTree(dir) | Origin::Git { dir, .. } => dir,
+            Origin::Verified(commit) => &commit.dir,
         }
     }
 }
@@ -199,18 +207,39 @@ pub(crate) async fn read_bytes(
                 .map_err(|_| Refused::FileMissing)
         }
         Origin::Git { dir, sha } => {
-            if !is_plain_relative_path(rel_path) {
-                return Err(Refused::PathTraversal);
-            }
-            read_git_blob(dir, sha, rel_path, cap)
+            // No process runs for a path that is refused.
+            ensure_plain(rel_path)?;
+            let commit = VerifiedCommit::verify(dir, sha).await.map_err(refused_of)?;
+            read_git_blob_at(&commit, rel_path, cap)
                 .await
-                .map_err(|e| match e {
-                    GitReadError::CommitUnavailable => Refused::CommitUnavailable,
-                    GitReadError::NotFound => Refused::FileMissing,
-                    GitReadError::TooLarge => Refused::TooLarge,
-                    GitReadError::Busy => Refused::Busy,
-                })
+                .map_err(refused_of)
         }
+        Origin::Verified(commit) => {
+            ensure_plain(rel_path)?;
+            read_git_blob_at(commit, rel_path, cap)
+                .await
+                .map_err(refused_of)
+        }
+    }
+}
+
+/// A path that is safe to put after `<sha>:` (see `is_plain_relative_path`), else the traversal
+/// refusal.
+fn ensure_plain(rel_path: &str) -> Result<(), Refused> {
+    if is_plain_relative_path(rel_path) {
+        Ok(())
+    } else {
+        Err(Refused::PathTraversal)
+    }
+}
+
+/// A failed git object read as the refusal the viewer and the context endpoints share.
+fn refused_of(error: GitReadError) -> Refused {
+    match error {
+        GitReadError::CommitUnavailable => Refused::CommitUnavailable,
+        GitReadError::NotFound => Refused::FileMissing,
+        GitReadError::TooLarge => Refused::TooLarge,
+        GitReadError::Busy => Refused::Busy,
     }
 }
 
@@ -292,6 +321,15 @@ fn test_stage_delay() {
     }
 }
 
+/// The text of a file: refused above `cap` bytes, and when it is not UTF-8. The ONE place bytes
+/// become text for display ([`redacted_lines`] and finding-context's `describe` both call it).
+pub(crate) fn decode(bytes: Vec<u8>, cap: usize) -> Result<String, Refused> {
+    if bytes.len() > cap {
+        return Err(Refused::TooLarge);
+    }
+    String::from_utf8(bytes).map_err(|_| Refused::NotUtf8)
+}
+
 /// Size cap, UTF-8, and redaction of a whole file: every line of it, redacted. Pure CPU; run on
 /// the blocking pool. The ONE place a file's text is redacted for display ([`prepare`] and the
 /// batch context endpoint both call it), so a multi-line key body is caught wherever a caller
@@ -300,10 +338,7 @@ fn test_stage_delay() {
 /// The file is redacted as one text (a multi-line key body is only recognisable as a block),
 /// then re-split. The `\n` count is preserved, so line numbers hold.
 pub(crate) fn redacted_lines(bytes: Vec<u8>, cap: usize) -> Result<Vec<String>, Refused> {
-    if bytes.len() > cap {
-        return Err(Refused::TooLarge);
-    }
-    let source = String::from_utf8(bytes).map_err(|_| Refused::NotUtf8)?;
+    let source = decode(bytes, cap)?;
     let raw_lines: Vec<String> = source.lines().map(str::to_string).collect();
     drop(source);
     Ok(redact_block(&raw_lines))
@@ -748,6 +783,10 @@ mod tests {
         .collect();
         for (name, text) in [
             ("source_file.rs", include_str!("source_file.rs")),
+            (
+                "finding_context_batch.rs",
+                include_str!("finding_context_batch.rs"),
+            ),
             (
                 "highlight.rs",
                 include_str!("../../../checks/src/extract/highlight.rs"),
