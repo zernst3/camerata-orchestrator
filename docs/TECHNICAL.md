@@ -3224,6 +3224,76 @@ A shows A at once, and a late answer for B never replaces A's. The settle clock 
 so the debounce test runs on a paused clock and cannot flake. The server's `start_line` is
 untrusted: soundness uses no unchecked addition (`usize::MAX` is tested).
 
+**Stacked group view** (work order B.2; pure logic in `camerata_ui_core::stack`, the Dioxus side in
+`crates/ui/src/cockpit/stack.rs`). The door is `PaneCommand::OpenStack` (`B`, scoped exactly like
+`O`; the viewer's map maps it to nothing) plus a "Stack" button in the pane and a "Review all N
+stacked" button per group in `DeviationBulkBar`, both calling the Queue's one `open_stack`
+callback with the group's header line (`rule_group_label`, the value the table groups by), where
+`rows_of_group` selects the rows of that group among the table's rows in the current order preset
+(`is_stackable`: deviation or defect; a column filter does not narrow it, the same as the bulk
+bar). The rows are a SNAPSHOT taken at open, held by `StackState` with the page, the card cursor
+and the curator's explicit checkbox choices; a card's status and checked state are derived from the
+disposition map every render (`is_checked`: the explicit choice, else checked while undecided), so
+a decision made in the stack, in the viewer or by an undo needs nothing else kept in step.
+`forget_choices` drops the choices of rows just decided so they fall back to the default.
+
+*Hosting.* Like the viewer it is mounted at the results root (`StackRoot`, beside `ViewerRoot`,
+with z-index 1085 against the viewer's 1090) and registered through `StackSlot`/`StackLink` by
+`FindingsTable`; opening is writing `link.open`. `StackView` is props-only and SSR-tested;
+`StackHost` owns the signals and I/O. *Code:* one `fetch_batch` per page (`pane_context.rs`,
+which `fetch_context` now calls for a batch of one), up to `STACK_PAGE` (200, the endpoint's cap)
+items; `load_windows` first asks the viewer cache's context lane (`ViewerCache::context`, which
+also cuts a window from a whole file the viewer holds), sends only the missing targets in that one
+request, and judges each answer with the pane's own `accept` (ok, from `git`, echoing the finding,
+`matches_snippet`, a sound window). Accepted windows go back into the context lane. A card
+without a window renders the stored snippet (the degradation floor) and a note counts those
+(`context_note`); the lines are drawn by the same `context_rows` the pane uses. A page is marked
+asked only after its request finishes, so leaving a page before the answer re-asks on return, and
+a page already answered is not asked again. No endpoint was added: the batch endpoint already
+takes the tuples.
+
+*Decisions.* There is no new disposition path. The Queue's `apply_disposition` is now a thin
+wrapper over `apply_rows(rows, state, reason)`, which is `TriageModel::dispose_with_undo` plus the
+removal of the rows from the table and ONE undo entry for the whole set (`undo_restore` is a list
+re-inserted in ascending position order); the stack calls `apply_rows` with its checked cards, so
+the required-reason refusal (`reason_required_message`, which names the count), the five-second
+undo (`Confirmed 29 findings.`) and the table removal are the pane's. `C` and `F` go through
+`dispose_with_undo` rather than `bulk_confirm` / `bulk_false_positive` because those take a
+`DeviationGroup` (a defect group has no headline) and return no `UndoEntry`; both wrap the same
+`confirm` / `mark_false_positive`, and a core test pins that the stack's writes equal the bulk
+functions' for the same rows and that a blank reason writes nothing. The reason prompt is the
+Queue's own `QueueReasonPrompt` (target `ReasonTarget::Selection` with the rows snapshotted when
+the prompt opens). Keys act on the checked cards of the page on screen.
+
+*Keys.* `stack_command(focus, key, mods)` is a whitelist like `pane_command` and `viewer_command`:
+nothing is answered under `StackFocus::ReasonPrompt`, any Ctrl/Alt/Meta press is refused, and the
+disposition keys and arrows are asked of `pane_command` (`O` and `B` map to nothing here). `J K`
+and the arrows move (clamped, no wrap), `Space` toggles, `Enter` opens the viewer, `C T F I`
+decide, `>` `<` turn the page, `Esc` closes. `STACK_KEY_ROWS` feeds the key strip and a test
+checks it equals what the map answers. The shared-key assertion is extended to three surfaces: the
+stack shares with the pane exactly `SHARED_KEYS`, and with the viewer those plus `J K`, `Space`
+and `Esc`; the surfaces are never armed together (the viewer is a layer above the stack).
+
+*Focus.* `Enter` calls `on_open_viewer`: `reach_finding` (opens the groups that hide the row),
+the Queue's cursor is aimed at the finding and the viewer opens. A row that has been decided has
+left the table (`Reach::Gone`), so the viewer cannot land on it: a toast says to undo the decision.
+The viewer's close (`viewer_close`) hands the keyboard to the stack with `focus_element(STACK_ID)`
+when a stack is open, else to the pane; the stack's own card cursor is untouched by the viewer, so
+`Esc` returns to the same card. Closing the stack (`stack_close`) aims the Queue's cursor at the
+card last focused when that row is still in the table, and calls `focus_element` on
+`origin_focus_id`: the pane, or the bar button that opened it (`bar_door_id(i)`), falling back to
+the pane when that group has left the bar. `follow_selected(".sk-card-sel")` scrolls the focused
+card into view with the same two-frame script as the references list (`scroll_selected_js`).
+
+*Tests.* `camerata_ui_core::stack` (rows, checkboxes, cursor, paging, the key map, the
+shared-key and key-list assertions, equality with the bulk paths); `cockpit::stack::tests` mounts
+the real `FindingsTable`, `StackRoot` and `ViewerRoot` against a fake server and dispatches real
+`keydown`, `input`, `click` and `focusin` events to the element ids the VirtualDom reports (30-row
+group: one batch request, 30 cards, all checked; Space/C with the count in the undo; F with a blank
+reason refused then Enter; Enter into the viewer and Esc back to the same card; paging past 200;
+a refused batch showing snippets only; `B` and focus return to the pane and to the bar button;
+rows leaving the table and one undo restoring them).
+
 **Order presets** (work order B.4; `camerata_ui_core::order_preset`, `recut_table` and
 `group_columns` in `scan.rs`, `table::apply_grouping`). `OrderPreset` is `Curated` (default),
 `ByFile`, `ByRule` or `CriticalFirst`; `order_findings` / `order_rows` are the orders and

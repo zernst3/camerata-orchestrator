@@ -1498,6 +1498,11 @@ pub enum PaneCommand {
     /// Open the in-app code viewer on the focused finding. Moves no row and writes nothing,
     /// so it needs no undo and no reason.
     OpenCode,
+    /// Open the stacked group view (`B`, "bulk") on the focused finding's rule group: every row
+    /// of the group as a card with its surrounding code, so one fix can be confirmed in many
+    /// places from one screen. Moves no row and writes nothing, so it needs no undo and no
+    /// reason; the decisions made inside it go through the same paths as every other.
+    OpenStack,
 }
 
 /// The single-key hotkey for a disposition, or `None` for a state that has none.
@@ -1569,6 +1574,11 @@ pub fn pane_command(focus: PaneFocus, key: &str, mods: KeyMods) -> Option<PaneCo
     // hotkey loop and can never collide with one (`state_hotkey` has no `o`).
     if pressed == "o" {
         return Some(PaneCommand::OpenCode);
+    }
+    // `B` ("bulk") opens the stacked group view. Not a disposition either (`state_hotkey` has
+    // no `b`), and a modifier chord was rejected for it: this map refuses modifier presses.
+    if pressed == "b" {
+        return Some(PaneCommand::OpenStack);
     }
     let state = TriageState::all()
         .into_iter()
@@ -3625,6 +3635,41 @@ mod tests {
         assert!(TriageState::all()
             .into_iter()
             .all(|s| state_hotkey(s) != Some("o")));
+    }
+
+    /// Code viewer B.2: `B` opens the stacked group view, scoped exactly like `O`: only while the
+    /// pane's cursor holds focus, never with a modifier, and never as a disposition.
+    #[test]
+    fn b_opens_the_stacked_view_under_the_same_scope_as_the_disposition_keys() {
+        let m = KeyMods::none();
+        for key in ["b", "B"] {
+            assert_eq!(
+                pane_command(PaneFocus::Cursor, key, m),
+                Some(PaneCommand::OpenStack)
+            );
+        }
+        for focus in [PaneFocus::ReasonPrompt, PaneFocus::Elsewhere] {
+            assert_eq!(pane_command(focus, "b", m), None, "{focus:?}");
+        }
+        for mods in [
+            KeyMods {
+                ctrl: true,
+                ..KeyMods::none()
+            },
+            KeyMods {
+                alt: true,
+                ..KeyMods::none()
+            },
+            KeyMods {
+                meta: true,
+                ..KeyMods::none()
+            },
+        ] {
+            assert_eq!(pane_command(PaneFocus::Cursor, "b", mods), None);
+        }
+        assert!(TriageState::all()
+            .into_iter()
+            .all(|s| state_hotkey(s) != Some("b")));
     }
 
     /// req_pass2_11: the keys the pane does not claim stay unclaimed, so Tab, Escape, Enter

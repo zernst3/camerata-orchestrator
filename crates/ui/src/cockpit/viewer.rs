@@ -1184,16 +1184,29 @@ pub(super) fn use_hub_focus_return(hub: Signal<Option<RuleHubRequest>>, slot: Op
     });
 }
 
-/// Script that brings the selected reference into view (the minimum scroll, so a selection already
-/// on screen does not jump). Two animation frames: the first lets Dioxus apply the new selection
-/// class, the second runs after the browser has laid it out.
-pub(super) const SCROLL_SELECTED_REF_JS: &str = "requestAnimationFrame(function(){\
-requestAnimationFrame(function(){var e=document.querySelector('.cv-ref-sel');\
-if(e){e.scrollIntoView({block:'nearest'});}});});";
+/// Script that brings the element matching `selector` (the selected row of a list) into view with
+/// the minimum scroll, so a selection already on screen does not jump. Two animation frames: the
+/// first lets Dioxus apply the new selection class, the second runs after the browser has laid it
+/// out. THE follow-scroll: the references list and the stacked view's cards both use it.
+pub(super) fn scroll_selected_js(selector: &str) -> String {
+    format!(
+        "requestAnimationFrame(function(){{requestAnimationFrame(function(){{\
+var e=document.querySelector('{selector}');\
+if(e){{e.scrollIntoView({{block:'nearest'}});}}}});}});"
+    )
+}
+
+/// Keep the element matching `selector` on screen after a key moved the selection.
+pub(super) fn follow_selected(selector: &str) {
+    dioxus::document::eval(&scroll_selected_js(selector));
+}
+
+/// The selector of the selected row in the references list.
+const SELECTED_REF: &str = ".cv-ref-sel";
 
 /// Keep the selected reference on screen after an arrow key moved it.
 fn follow_selected_ref() {
-    dioxus::document::eval(SCROLL_SELECTED_REF_JS);
+    follow_selected(SELECTED_REF);
 }
 
 /// Set the scroll container's `scrollTop`.
@@ -1370,7 +1383,7 @@ pub(super) struct ViewerSlot(pub Signal<Option<ViewerLink>>);
 /// The live undo bar. It owns the ticker's subscription: `now_ms` changes four times a second
 /// for five seconds after each decision, and only this small component re-renders for it.
 #[component]
-fn ViewerUndoBar(
+pub(super) fn ViewerUndoBar(
     undo_entry: Signal<Option<UndoEntry>>,
     now_ms: Signal<u64>,
     on_undo: Callback<()>,
@@ -4984,7 +4997,7 @@ mod host_tests {
 
     #[test]
     fn the_selected_reference_is_scrolled_into_view_with_the_minimum_scroll() {
-        let js = SCROLL_SELECTED_REF_JS;
+        let js = &scroll_selected_js(SELECTED_REF);
         assert!(js.contains(".cv-ref-sel"), "{js}");
         assert!(js.contains("scrollIntoView({block:'nearest'})"), "{js}");
         assert_eq!(js.matches("requestAnimationFrame").count(), 2);

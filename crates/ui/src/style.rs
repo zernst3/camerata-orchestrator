@@ -6736,6 +6736,38 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 }
 .cv-refs-keys { padding: 5px 10px; color: var(--ink-faint); border-top: 1px solid var(--line); }
 
+/* The stacked group view (cockpit/stack.rs; WORK_ORDER_REVIEW_SPEED.md B.2). A layer UNDER the
+   code viewer (1085 against its 1090), because the viewer opens above it from a card. */
+.sk-overlay { z-index: 1085; }
+.sk-head { gap: 10px; }
+.sk-label { font-weight: 700; overflow-wrap: anywhere; }
+.sk-summary { margin-left: auto; }
+.sk-actions {
+  display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line);
+}
+.sk-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 10px 12px; }
+.sk-card {
+  --cv-sev: var(--ink-faint);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px;
+  background: #1b1813; cursor: default;
+}
+.sk-card-sel { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.sk-card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.sk-check {
+  flex: 0 0 auto; width: 16px; height: 16px; border-radius: 4px; border: 2px solid var(--ink-faint);
+  box-sizing: border-box; cursor: pointer; position: relative;
+}
+.sk-check-on { border-color: var(--accent); background: var(--accent); }
+.sk-check-on::after {
+  content: ""; position: absolute; left: 3px; top: 0; width: 4px; height: 8px;
+  border: solid #16130f; border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.sk-dot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 50%; background: var(--cv-sev); }
+.sk-loc { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); font-size: 12px; }
+.sk-status { margin-left: auto; }
+.sk-ctx, .sk-snippet { margin: 0; }
+.sk-snippet { white-space: pre-wrap; overflow-wrap: anywhere; }
+
 /* The finding popover: at most eight short lines. */
 .cv-popover {
   position: absolute; left: 96px; bottom: 10px; z-index: 3; max-width: 520px;

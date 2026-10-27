@@ -2,6 +2,7 @@ use super::*;
 
 use camerata_ui_core::order_preset::{order_findings, order_rows, Grouping, OrderPreset};
 use camerata_ui_core::pane_context::{ContextTarget, PaneContext};
+use camerata_ui_core::stack::{is_stackable, rows_of_group, StackOrigin};
 use camerata_ui_core::triage::focused_key;
 
 /// One repo's local-path resolution status (issue #33), from `/api/projects/:id/repo-health`.
@@ -2518,6 +2519,11 @@ pub(super) fn DeviationBulkBar(
     /// bulk decisions and not about navigation, keep compiling and asserting unchanged.
     #[props(default)]
     on_open_hub: Callback<usize>,
+    /// Open the STACKED GROUP VIEW on this group (work order B.2): every row as a card with its
+    /// surrounding code, to confirm or reject the same fix in many places from one screen. The
+    /// decisions made there go through the same paths as the two buttons beside it.
+    #[props(default)]
+    on_review_stacked: Callback<usize>,
 ) -> Element {
     // No deviations in this view means no decisions of this shape to make. An empty bar with
     // a heading would be a standing reminder of nothing.
@@ -2541,6 +2547,13 @@ pub(super) fn DeviationBulkBar(
                         "{g.rule_id}"
                     }
                     span { class: "deviation-bulk-sentence", "{g.sentence}" }
+                    button {
+                        class: "btn-edit-sm deviation-bulk-stack",
+                        id: "{super::stack::bar_door_id(i)}",
+                        title: "Read all {g.row_count} row(s) of this rule stacked, each with the code around it, then confirm or reject the checked ones together.",
+                        onclick: move |_| on_review_stacked.call(i),
+                        "Review all {g.row_count} stacked"
+                    }
                     button {
                         class: "btn-run deviation-bulk-confirm",
                         title: "Confirm every one of this rule's {g.row_count} row(s) in this table in one act: the convention is real and these are genuine exceptions. Identical to selecting them and confirming each. No reason required.",
@@ -3135,6 +3148,9 @@ pub(super) struct DetailPaneRow {
     /// 1-based position of this row in the table, and the table's row count: "3 of 212".
     pub position: usize,
     pub total: usize,
+    /// Whether the row is in a group the stacked view can show (a deviation or a defect), so the
+    /// pane offers its "Stack" door only where `B` would do something.
+    pub stackable: bool,
 }
 
 impl DetailPaneRow {
@@ -3178,6 +3194,7 @@ impl DetailPaneRow {
             also_matches: f.also_matches.clone(),
             position: index + 1,
             total,
+            stackable: is_stackable(f),
         }
     }
 }
@@ -3196,6 +3213,22 @@ fn pane_site(primary: &FindingView, s: &MergedSiteView) -> PaneSiteRow {
         rule_id: s.rule_id.clone(),
         snippet: s.snippet.clone(),
         consequence: s.consequence,
+    }
+}
+
+/// The lines of a code-context window: line number, text, and the violation line marked. THE
+/// rendering of a window, shared by the detail pane and the stacked view's cards so the two
+/// cannot draw the same lines two ways.
+pub(super) fn context_rows(c: &PaneContext) -> Element {
+    rsx! {
+        for (n, text, hit) in c.rows() {
+            div {
+                key: "{n}",
+                class: if hit { "finding-ctx-line finding-ctx-line-hit" } else { "finding-ctx-line" },
+                span { class: "finding-ctx-gutter", "{n}" }
+                span { class: "finding-ctx-code", "{text}" }
+            }
+        }
     }
 }
 
@@ -3299,6 +3332,10 @@ pub(super) fn FindingDetailPane(
     /// are two of its doors (the `O` key and the modal's button are the others).
     #[props(default)]
     on_open_code: Callback<()>,
+    /// Open the STACKED GROUP VIEW on the focused finding's rule group (`B`): every row of the
+    /// group as a card, to decide the same fix in many places from one screen.
+    #[props(default)]
+    on_open_stack: Callback<()>,
     /// The stored line plus three lines either side, once the batch context endpoint has
     /// answered for this finding (work order B.3). `None` is the pane exactly as it was before
     /// this prop existed: the stored snippet alone. Anything but a good answer is `None`.
@@ -3358,6 +3395,14 @@ pub(super) fn FindingDetailPane(
                         onclick: move |_| on_open_code.call(()),
                         "Code"
                     }
+                    if r.stackable {
+                        button {
+                            class: "btn-edit-sm pane-stack",
+                            title: "Show every row of this rule group as a card with its code, to decide the same fix in many places at once (B).",
+                            onclick: move |_| on_open_stack.call(()),
+                            "Stack"
+                        }
+                    }
                     button {
                         class: "btn-edit-sm pane-full-detail",
                         title: "Open the full finding modal: the enclosing code block around this line, fetched on demand.",
@@ -3399,14 +3444,7 @@ pub(super) fn FindingDetailPane(
                 // The surrounding code fills in beneath the snippet once it arrives.
                 if let Some(c) = context.clone() {
                     pre { class: "finding-ctx-pre pane-ctx", "data-pane-context": "ok",
-                        for (n, text, hit) in c.rows() {
-                            div {
-                                key: "{n}",
-                                class: if hit { "finding-ctx-line finding-ctx-line-hit" } else { "finding-ctx-line" },
-                                span { class: "finding-ctx-gutter", "{n}" }
-                                span { class: "finding-ctx-code", "{text}" }
-                            }
-                        }
+                        {context_rows(&c)}
                     }
                 }
                 if !r.explanation.trim().is_empty() {
@@ -3564,7 +3602,7 @@ pub(super) fn FindingDetailPane(
                         // produce a command". A pane that said "armed" while the handler
                         // refused would be the ships-inert shape in miniature.
                         if armed {
-                            "Keys: C confirm \u{b7} I ignore \u{b7} T tech debt \u{b7} F false positive \u{b7} \u{2191}\u{2193} move \u{b7} O code"
+                            "Keys: C confirm \u{b7} I ignore \u{b7} T tech debt \u{b7} F false positive \u{b7} \u{2191}\u{2193} move \u{b7} O code \u{b7} B stack"
                         } else if prompt.is_some() {
                             "Keys are off while you type a reason. Enter commits, Esc cancels."
                         } else {
@@ -3923,7 +3961,7 @@ pub(super) fn FindingsTable(
     // The live undo, plus what it would take to put the row back ON SCREEN (the disposition
     // revert is the model's job; chorale's row set is this layer's).
     let mut undo_entry = use_signal(|| Option::<UndoEntry>::None);
-    let mut undo_restore = use_signal(|| Option::<(usize, RowId, FindingView)>::None);
+    let mut undo_restore = use_signal(|| Option::<Vec<(usize, RowId, FindingView)>>::None);
     // A MONOTONIC clock, not a wall clock: the five-second window is measured against time
     // elapsed since this table mounted, so a system-clock change (NTP step, timezone, the
     // laptop waking) can neither extend the window nor close it early.
@@ -4031,6 +4069,91 @@ pub(super) fn FindingsTable(
     // the finding the cursor is on now, not the one it was on when the viewer opened.
     let key_to_row_id_pane = key_to_row_id.clone();
     let focused_for_apply = focused_finding.clone();
+    // THE ONE WRITE PATH for a decision with an undo: these rows to this state. The pane's keys
+    // and buttons pass the focused row; the stacked view passes its checked cards. It answers
+    // `true` only when a disposition was written (see `apply_disposition`).
+    //
+    // `dispose_with_undo` owns the require-reason refusal and routes the write through the same
+    // per-row functions the toolbar buttons call. Every row that was in this table leaves it
+    // (which is what advances the cursor, and what makes a bulk decision shrink the table), and
+    // where each came from is remembered so ONE undo puts all of them back on screen, not merely
+    // in the map.
+    let apply_rows = use_callback(
+        move |(rows, state, reason): (Vec<FindingView>, TriageState, String)| -> bool {
+            let now = epoch.elapsed().as_millis() as u64;
+            now_ms.set(now);
+            let mut model = TriageModel {
+                dispositions: dispositions.peek().clone(),
+                triage_view,
+            };
+            let Some(entry) = model.dispose_with_undo(&rows, state, &reason, now) else {
+                // The required-reason invariant (or an empty row set). The same wording as
+                // every other refusal, and it names the count.
+                crate::toast::push_toast(
+                    toasts,
+                    crate::toast::ToastKind::Warning,
+                    reason_required_message(state, rows.len()),
+                );
+                return false;
+            };
+            dispositions.set(model.dispositions);
+            // Drop the rows from THIS triage table. Remember where each was (its position in the
+            // table's own row list BEFORE the removal, so re-inserting in ascending order puts
+            // each back where it was) so Undo can restore the screen too. A row that is not in
+            // the table (decided already, and checked again on purpose in the stacked view) has
+            // nothing to put back.
+            let mut ids: Vec<RowId> = Vec::new();
+            let mut restore: Vec<(usize, RowId, FindingView)> = Vec::new();
+            {
+                let table = sort_signal.peek();
+                for f in &rows {
+                    let Some(rid) = key_to_row_id_pane.get(&finding_key(f)).copied() else {
+                        continue;
+                    };
+                    let Some(at) = table.rows.iter().position(|(r, _)| *r == rid) else {
+                        continue;
+                    };
+                    if !ids.contains(&rid) {
+                        ids.push(rid);
+                        restore.push((at, rid, f.clone()));
+                    }
+                }
+            }
+            restore.sort_by_key(|(at, _, _)| *at);
+            handle.remove_rows(&ids);
+            undo_restore.set((!restore.is_empty()).then_some(restore));
+            let armed = entry.clone();
+            undo_entry.set(Some(entry));
+            // Tick the countdown while this undo is armed, and clear it when the window shuts.
+            // The loop exits the moment a NEWER undo replaces this one, so two dispositions
+            // inside five seconds cannot have the older ticker close the newer window.
+            spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    let t = epoch.elapsed().as_millis() as u64;
+                    now_ms.set(t);
+                    if undo_entry.peek().as_ref() != Some(&armed) {
+                        break;
+                    }
+                    if !armed.is_live(t) {
+                        undo_entry.set(None);
+                        undo_restore.set(None);
+                        break;
+                    }
+                }
+            });
+            true
+        },
+    );
+    // APPLY one disposition to the focused row. A single closure for every entry point of the
+    // pane and the viewer, over the one write path above.
+    //
+    // A `Callback` rather than a plain closure because several call sites share it and
+    // `Callback` is `Copy`. It is a `use_callback`: the handle is stable and it always runs the
+    // closure of the LATEST render, which is what lets the code viewer (hosted outside this
+    // table) hold it and still decide the finding the cursor is on now, not the one it was on
+    // when the viewer opened.
+    //
     // Answers `true` only when a disposition was written. A caller must branch on this and not
     // infer it from the disposition map: a blank reason for a row already in that state leaves
     // the map unchanged and is still a refusal.
@@ -4038,68 +4161,16 @@ pub(super) fn FindingsTable(
         let Some(f) = focused_for_apply.clone() else {
             return false;
         };
-        let now = epoch.elapsed().as_millis() as u64;
-        now_ms.set(now);
-        let mut model = TriageModel {
-            dispositions: dispositions.peek().clone(),
-            triage_view,
-        };
-        let Some(entry) = model.dispose_with_undo(std::slice::from_ref(&f), state, &reason, now)
-        else {
-            crate::toast::push_toast(
-                toasts,
-                crate::toast::ToastKind::Warning,
-                format!(
-                    "A reason is required to move a finding to {}. It is recorded in the draft \
-                     and read by the report export.",
-                    state.label()
-                ),
-            );
+        if !apply_rows.call((vec![f], state, reason)) {
             return false;
-        };
-        dispositions.set(model.dispositions);
+        }
         prompt.set(None);
         prompt_reason.set(String::new());
-        // Drop the row from THIS triage table, which is what advances the cursor: the key
-        // leaves `visible_keys`, so the next `resolve` clamps to whatever took its index.
-        // That is the burn-down gesture — decide, and the next row is already focused.
-        // Remember where it was so Undo can put it back on screen, not merely in the map.
-        if let Some(rid) = key_to_row_id_pane.get(&finding_key(&f)).copied() {
-            let raw_index = sort_signal
-                .peek()
-                .rows
-                .iter()
-                .position(|(r, _)| *r == rid)
-                .unwrap_or(0);
-            undo_restore.set(Some((raw_index, rid, f.clone())));
-            handle.remove_rows(&[rid]);
-        } else {
-            undo_restore.set(None);
-        }
-        let armed = entry.clone();
-        undo_entry.set(Some(entry));
-        // Tick the countdown while this undo is armed, and clear it when the window shuts.
-        // The loop exits the moment a NEWER undo replaces this one, so two dispositions
-        // inside five seconds cannot have the older ticker close the newer window.
-        spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                let t = epoch.elapsed().as_millis() as u64;
-                now_ms.set(t);
-                if undo_entry.peek().as_ref() != Some(&armed) {
-                    break;
-                }
-                if !armed.is_live(t) {
-                    undo_entry.set(None);
-                    undo_restore.set(None);
-                    break;
-                }
-            }
-        });
         true
     });
 
-    // THE UNDO, shared by the pane's button and the code viewer's: one action, two surfaces.
+    // THE UNDO, shared by the pane's button, the code viewer's and the stacked view's: one
+    // action, three surfaces.
     let undo_action = use_callback(move |()| {
         let Some(mut entry) = undo_entry.peek().clone() else {
             return;
@@ -4112,14 +4183,17 @@ pub(super) fn FindingsTable(
         match model.undo(&mut entry, now) {
             UndoOutcome::Reverted(n) => {
                 dispositions.set(model.dispositions);
-                // Put the row back ON SCREEN too. Reverting only the map would
-                // leave the toast truthfully claiming a revert while the row stayed
-                // gone from the table, which is the half-done undo this is for.
-                if let Some((at, rid, f)) = undo_restore.peek().clone() {
-                    handle.insert_row(at, rid, f);
-                    cursor.set(RowCursor::focused_on(finding_key(
-                        &undo_restore.peek().as_ref().expect("just read").2,
-                    )));
+                // Put the rows back ON SCREEN too. Reverting only the map would
+                // leave the toast truthfully claiming a revert while the rows stayed
+                // gone from the table, which is the half-done undo this is for. In
+                // ascending position order, so each lands where it was.
+                if let Some(restore) = undo_restore.peek().clone() {
+                    for (at, rid, f) in &restore {
+                        handle.insert_row(*at, *rid, f.clone());
+                    }
+                    if let Some((_, _, first)) = restore.first() {
+                        cursor.set(RowCursor::focused_on(finding_key(first)));
+                    }
                 }
                 crate::toast::push_toast(
                     toasts,
@@ -4179,9 +4253,20 @@ pub(super) fn FindingsTable(
     // desktop webview). This table hands it the handles it needs. They are all Copy signals and
     // stable callbacks, so the link is registered once and never goes stale.
     let viewer_slot = try_use_context::<super::viewer::ViewerSlot>();
+    //
+    // THE STACKED GROUP VIEW (work order B.2) is hosted the same way, and it is a layer under the
+    // viewer: the viewer's `Enter`-from-a-card door opens it above the stack, and closing it
+    // gives the keyboard back to the stack when one is open (the same `focus_element` the pane's
+    // return uses), else to the pane.
+    let mut stack_open = use_signal(|| Option::<super::stack::StackOpen>::None);
+    let mut stack_serial = use_signal(|| 0u64);
     let viewer_close = use_callback(move |()| {
         viewer_open.set(false);
-        focus_detail_pane();
+        if stack_open.peek().is_some() {
+            super::viewer::focus_element(super::stack::STACK_ID);
+        } else {
+            focus_detail_pane();
+        }
     });
     let viewer_open_modal = use_callback(move |()| {
         if let Some(f) = focused_for_viewer_modal.clone() {
@@ -4217,6 +4302,123 @@ pub(super) fn FindingsTable(
         });
         use_drop(move || {
             if let Some(mut slot) = viewer_slot {
+                slot.0.set(None);
+            }
+        });
+    }
+
+    // ── THE STACKED GROUP VIEW's doors and link (work order B.2) ───────────────────────────
+    //
+    // Two doors, one function: the pane's `B` and the bulk bar's "Review all N stacked" button
+    // both ask for a rule group by its header line. The rows are every row of that group in
+    // THIS table, in the table's current order preset; the stack takes them as a snapshot, so a
+    // card stays on screen after its row has been decided and has left the table.
+    let open_stack = use_callback({
+        let findings = findings.clone();
+        move |(label, origin, anchor): (String, StackOrigin, Option<String>)| {
+            let ordered = order_findings(*order_preset.peek(), &findings);
+            let rows = rows_of_group(&ordered, &label);
+            if rows.is_empty() {
+                crate::toast::push_toast(
+                    toasts,
+                    crate::toast::ToastKind::Info,
+                    "There are no rows of that group in this table to stack.",
+                );
+                return;
+            }
+            let id = *stack_serial.peek() + 1;
+            stack_serial.set(id);
+            stack_open.set(Some(super::stack::StackOpen {
+                id,
+                label,
+                rows,
+                origin,
+                anchor,
+            }));
+        }
+    });
+    let focused_for_stack = focused_finding.clone();
+    let open_stack_from_pane = use_callback(move |()| match focused_for_stack.clone() {
+        Some(f) if is_stackable(&f) => {
+            open_stack.call((
+                rule_group_label(&f),
+                StackOrigin::Pane,
+                Some(finding_key(&f)),
+            ));
+        }
+        _ => crate::toast::push_toast(
+            toasts,
+            crate::toast::ToastKind::Info,
+            "B stacks the rows of a deviation or defect group. Focus one of its rows first.",
+        ),
+    });
+    // The viewer, opened on a card: aim the Queue's one cursor at the finding, open the groups
+    // that hide it, and open the viewer. A card whose row was decided has left the table, so
+    // there is nothing for the viewer to land on, and the curator is told how to get it back.
+    let stack_open_viewer = use_callback(move |key: String| -> bool {
+        match super::viewer::reach_finding(handle, &key) {
+            Ok(()) => {
+                cursor.set(RowCursor::focused_on(key));
+                viewer_open.set(true);
+                true
+            }
+            Err(why) => {
+                crate::toast::push_toast(
+                    toasts,
+                    crate::toast::ToastKind::Info,
+                    format!("{why}. Undo its decision to open it in the viewer."),
+                );
+                false
+            }
+        }
+    });
+    // Closing: the Queue's cursor goes to the card the curator was on (when its row is still in
+    // the table) and the keyboard goes back to where the stack was opened from. A bulk-bar door
+    // that has left the bar (its whole group was decided) falls back to the pane.
+    let stack_close = use_callback({
+        let bulk_groups = std::rc::Rc::clone(&bulk_groups);
+        move |key: Option<String>| {
+            let Some(open) = stack_open.peek().clone() else {
+                return;
+            };
+            stack_open.set(None);
+            let origin = match open.origin {
+                StackOrigin::BulkBar(i)
+                    if bulk_groups.get(i).is_none_or(|g| g.label != open.label) =>
+                {
+                    StackOrigin::Pane
+                }
+                other => other,
+            };
+            if let Some(key) = key {
+                if super::viewer::reach_finding(handle, &key).is_ok() {
+                    cursor.set(RowCursor::focused_on(key));
+                }
+            }
+            super::viewer::focus_element(&super::stack::origin_focus_id(origin));
+        }
+    });
+    {
+        let stack_slot = try_use_context::<super::stack::StackSlot>();
+        let link = use_hook(|| super::stack::StackLink {
+            open: stack_open,
+            dispositions,
+            shas: std::sync::Arc::new(audited_shas.clone()),
+            project_id: project_id.clone(),
+            undo_entry,
+            now_ms,
+            on_undo: undo_action,
+            on_dispose: apply_rows,
+            on_open_viewer: stack_open_viewer,
+            on_close: stack_close,
+        });
+        use_effect(move || {
+            if let Some(mut slot) = stack_slot {
+                slot.0.set(Some(link.clone()));
+            }
+        });
+        use_drop(move || {
+            if let Some(mut slot) = stack_slot {
                 slot.0.set(None);
             }
         });
@@ -4578,6 +4780,13 @@ pub(super) fn FindingsTable(
             // The rule id on a bulk row opens the hub. The repo comes off the group's own
             // first row rather than from a table-level guess: `rule_hub` is scoped per
             // (repo, rule) and a wrong repo would silently describe a different assessment.
+            on_review_stacked: Callback::new({
+                let bulk_groups = std::rc::Rc::clone(&bulk_groups);
+                move |i: usize| {
+                    let Some(group) = bulk_groups.get(i) else { return };
+                    open_stack.call((group.label.clone(), StackOrigin::BulkBar(i), None));
+                }
+            }),
             on_open_hub: Callback::new({
                 let bulk_groups = std::rc::Rc::clone(&bulk_groups);
                 move |i: usize| {
@@ -4694,6 +4903,7 @@ pub(super) fn FindingsTable(
                         cursor.set(next);
                     }
                     Some(PaneCommand::OpenCode) => viewer_open.set(true),
+                    Some(PaneCommand::OpenStack) => open_stack_from_pane.call(()),
                     Some(PaneCommand::Dispose(state)) => {
                         apply_disposition.call((state, String::new()));
                     }
@@ -4767,6 +4977,7 @@ pub(super) fn FindingsTable(
                 }
             }),
             on_open_code: Callback::new(move |()| viewer_open.set(true)),
+            on_open_stack: open_stack_from_pane,
             context: pane_context,
         }
         }
@@ -7095,6 +7306,8 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     use_context_provider(|| viewer_request);
     // Where the Queue registers what the viewer needs (see `FindingsTable`).
     use_context_provider(|| super::viewer::ViewerSlot(Signal::new(None)));
+    // The same for the stacked group view (work order B.2).
+    use_context_provider(|| super::stack::StackSlot(Signal::new(None)));
 
     // rule id -> what it enforces (the chosen/default alternative's directive, else
     // the rule title), for the findings-table rule-id hover.
@@ -7330,6 +7543,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
         // Row-detail modal: hosted here, at the results-subtree root, so it is NOT a
         // sibling of the chorale table (see RuleDetailModal for why).
         RuleDetailModal {}
+        // THE STACKED GROUP VIEW (work order B.2), hosted here for the same reason. It is a
+        // layer UNDER the code viewer (lower z-index, and first in the DOM so order agrees).
+        super::stack::StackRoot {}
         // THE CODE VIEWER, hosted here for the same reason: it is a full-window overlay.
         super::viewer::ViewerRoot {}
         // THE RULE HUB (design §8). Hosted at the same root and for the same reason: it is an
