@@ -705,6 +705,27 @@ pub fn closes_hub(focus: ViewerFocus, key: &str, mods: KeyMods) -> bool {
     focus == ViewerFocus::RuleHub && key == "Escape" && !(mods.ctrl || mods.alt || mods.meta)
 }
 
+/// Where the keyboard goes back to when the Rule Hub closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusReturn {
+    /// The code viewer, which opened the hub with `H` (or its popover) and is still open.
+    Viewer,
+    /// The detail pane (or nowhere, when this surface has no pane): the hub was opened from the
+    /// Queue itself, with the viewer closed.
+    Pane,
+}
+
+/// Where focus returns when the Rule Hub closes. The hub is opened from the pane, the deviation
+/// bar or the viewer; the viewer is the only one of those that is a layer over the others, so
+/// it is the destination exactly when it is open.
+pub fn hub_close_focus(viewer_open: bool) -> FocusReturn {
+    if viewer_open {
+        FocusReturn::Viewer
+    } else {
+        FocusReturn::Pane
+    }
+}
+
 /// Whether the key strip should show the code's keys (as opposed to the list's).
 pub fn viewer_code_keys_armed(focus: ViewerFocus) -> bool {
     viewer_command(focus, "c", KeyMods::none()).is_some()
@@ -1924,6 +1945,12 @@ mod tests {
             }),
             ViewerFocus::SearchField
         );
+    }
+
+    #[test]
+    fn the_hub_hands_the_keyboard_back_to_whoever_opened_it() {
+        assert_eq!(hub_close_focus(true), FocusReturn::Viewer);
+        assert_eq!(hub_close_focus(false), FocusReturn::Pane);
     }
 
     #[test]

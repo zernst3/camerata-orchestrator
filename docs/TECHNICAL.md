@@ -3133,7 +3133,7 @@ announced), symbol references (`symbol_prefill`, `SymbolRefsView`) and the perma
 GitHub URL only when the scan's `audited_refs[].origin_url` is on github.com; copied through the
 desktop clipboard bridge's own channel). The focus is `viewer_focus(OpenSurfaces)`: only `Code`
 and `RefsList` arm commands, and `RuleHub` (the hub is open above the viewer, shared through the
-`ViewerHubOpen` context) arms none and relays only `Esc`. A symbol-reference hit is a place, not a
+`ViewerHubOpen` context) arms none and relays only `Esc`. When the hub closes the keyboard goes back to where it was opened from: the viewer's host refocuses itself, and `use_hub_focus_return` (beside the hub at the results root) focuses the detail pane when the viewer is not open (`hub_close_focus`), both through `focus_element`, the one focus call. A symbol-reference hit is a place, not a
 finding: the host keeps a `viewing` path beside the finding, fetches and draws that file with its
 own gutter, and never writes the Queue's cursor (`location_plan`); decision keys are refused while a
 file other than the finding's is on screen (`allowed_in_reference_view`). The back stack

@@ -2947,9 +2947,7 @@ pub(super) const DETAIL_PANE_ID: &str = "camerata-finding-pane";
 /// signal directly would let the pane report its keys armed while the keydown handler — which
 /// lives on the pane element — received nothing.
 fn focus_detail_pane() {
-    dioxus::document::eval(&format!(
-        "var el=document.getElementById('{DETAIL_PANE_ID}');if(el)el.focus();"
-    ));
+    super::viewer::focus_element(DETAIL_PANE_ID);
 }
 
 /// One ABSORBED evidence site as the detail pane lists it (design §6).
@@ -6964,6 +6962,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // The code viewer opens the hub with `H`, disarms its keys while it is up and takes the
     // keyboard back when it closes, so it needs to see this signal.
     use_context_provider(|| super::viewer::ViewerHubOpen(hub_open));
+    // Closing it gives the keyboard back to where it was opened from: the viewer (which does
+    // that itself) or the detail pane.
+    super::viewer::use_hub_focus_return(hub_open, try_use_context::<super::viewer::ViewerSlot>());
     let mut queue_rule_filter = use_signal(|| Option::<String>::None);
     let mut processing = use_signal(|| false);
     // ── THE GATED CONVENTION COMMIT (design §3; Q3 + Q4) ──────────────────────

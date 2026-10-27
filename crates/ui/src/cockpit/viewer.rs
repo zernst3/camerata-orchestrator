@@ -35,13 +35,13 @@ use camerata_ui_core::triage::{
 use camerata_ui_core::viewer::{
     advance_after_disposition, allowed_in_reference_view, back_step, block_for, block_from_context,
     clears_search, close_target, cut_line, file_findings, finding_position, finish_disposition,
-    gutter_marks, line_at_scroll, line_label, more_chars_label, page_request, parse_goto_line,
-    prefetch_target, push_history, scroll_top_for_line, scrolled, severity_class, spacers,
-    step_file_in_group, step_in_file, viewer_code_keys_armed, viewer_command, viewer_focus,
-    viewer_keys_armed, virtual_range, BackStep, BannerKind, BlockView, CloseTarget, FileKey,
-    FileStep, GutterMark, HistoryEntry, OpenSurfaces, SessionCopy, SourceFileView, SourceOutcome,
-    ViewerCache, ViewerCommand, ViewerFocus, CODE_LINE_H_PX, KEY_ROWS, MAX_LINE_CHARS,
-    OVERSCAN_LINES, SCROLL_QUANTUM_LINES, SHA_CONFLICT_NOTE,
+    gutter_marks, hub_close_focus, line_at_scroll, line_label, more_chars_label, page_request,
+    parse_goto_line, prefetch_target, push_history, scroll_top_for_line, scrolled, severity_class,
+    spacers, step_file_in_group, step_in_file, viewer_code_keys_armed, viewer_command,
+    viewer_focus, viewer_keys_armed, virtual_range, BackStep, BannerKind, BlockView, CloseTarget,
+    FileKey, FileStep, FocusReturn, GutterMark, HistoryEntry, OpenSurfaces, SessionCopy,
+    SourceFileView, SourceOutcome, ViewerCache, ViewerCommand, ViewerFocus, CODE_LINE_H_PX,
+    KEY_ROWS, MAX_LINE_CHARS, OVERSCAN_LINES, SCROLL_QUANTUM_LINES, SHA_CONFLICT_NOTE,
 };
 use camerata_ui_core::viewer_find::{
     cycle_match, first_match_from, location_plan, mark_matches, move_selection, permalink,
@@ -1142,11 +1142,46 @@ pub(super) fn CodeViewer(
 
 // ── The host ─────────────────────────────────────────────────────────────────────────────
 
+#[cfg(test)]
+thread_local! {
+    /// Test seam: the DOM ids focus was sent to, in order. SSR has no focus, but it can prove
+    /// which element the app asked to focus.
+    pub(super) static FOCUS_LOG: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Move real keyboard focus to the element with this DOM id (a no-op when there is none). THE
+/// focus call: the viewer, the pane and the hub's return all go through it.
+pub(super) fn focus_element(id: &str) {
+    #[cfg(test)]
+    FOCUS_LOG.with(|l| l.borrow_mut().push(id.to_string()));
+    dioxus::document::eval(&format!(
+        "var el=document.getElementById('{id}');if(el)el.focus();"
+    ));
+}
+
 /// Put the page's focus back on the viewer root (after a prompt closes).
 fn focus_viewer() {
-    dioxus::document::eval(&format!(
-        "var el=document.getElementById('{VIEWER_ID}');if(el)el.focus();"
-    ));
+    focus_element(VIEWER_ID);
+}
+
+/// When the Rule Hub closes, give the keyboard back to where it was opened from: the viewer
+/// (its own host does that, so this stays out of its way) or the detail pane, on the finding the
+/// cursor is still on, so the pane's keys work without a click. Called once, at the results root,
+/// beside the hub. `slot` is the viewer's registration, whose `open` says whether it is up.
+pub(super) fn use_hub_focus_return(hub: Signal<Option<RuleHubRequest>>, slot: Option<ViewerSlot>) {
+    let mut was_open = use_signal(|| false);
+    use_effect(move || {
+        let now = hub.read().is_some();
+        if *was_open.peek() && !now {
+            let viewer_open =
+                slot.is_some_and(|s| s.0.peek().as_ref().is_some_and(|l| *l.open.peek()));
+            if hub_close_focus(viewer_open) == FocusReturn::Pane {
+                focus_element(super::scan::DETAIL_PANE_ID);
+            }
+        }
+        was_open.set(now);
+    });
 }
 
 /// Script that brings the selected reference into view (the minimum scroll, so a selection already
@@ -4325,7 +4360,9 @@ mod host_tests {
                 move |r: RuleHubRequest| hub.set(Some(r))
             }),
         };
-        use_context_provider(|| ViewerSlot(Signal::new(Some(link))));
+        let slot = use_context_provider(|| ViewerSlot(Signal::new(Some(link))));
+        // What the results root does beside the hub.
+        use_hub_focus_return(hub, Some(slot));
         PROBE.with(|p| {
             *p.borrow_mut() = Some(Probe {
                 cursor,
@@ -4972,5 +5009,117 @@ mod host_tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert_eq!(html.matches("cv-ref-sel").count(), 1, "{html}");
+    }
+
+    fn focus_log() -> Vec<String> {
+        FOCUS_LOG.with(|l| l.borrow().clone())
+    }
+
+    /// Opened from the viewer with `H`: closing the hub puts the keyboard back on the viewer
+    /// (and not on the pane underneath it), whichever way the hub is closed.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_hub_opened_from_the_viewer_returns_focus_to_the_viewer() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let server = serve().await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let probe = PROBE.with(|p| p.borrow().expect("probe"));
+        let panel = seen.last("keydown");
+        let key_before = data_key(&html(&vdom));
+
+        for close in ["Escape", "outside"] {
+            keydown(&vdom, panel, "h", Modifiers::empty());
+            settle(&mut vdom, &mut seen).await;
+            assert!(probe.hub.peek().is_some(), "{close}: the hub opened");
+            FOCUS_LOG.with(|l| l.borrow_mut().clear());
+            if close == "Escape" {
+                keydown(&vdom, panel, "Escape", Modifiers::empty());
+            } else {
+                // The hub's own close button, backdrop or jump: the root clears the signal.
+                vdom.in_runtime(|| {
+                    let mut hub = probe.hub;
+                    hub.set(None);
+                });
+            }
+            settle(&mut vdom, &mut seen).await;
+            assert!(probe.hub.peek().is_none());
+            let log = focus_log();
+            assert!(log.contains(&VIEWER_ID.to_string()), "{close}: {log:?}");
+            assert!(
+                !log.contains(&super::super::scan::DETAIL_PANE_ID.to_string()),
+                "{close}: the pane must not take focus from the viewer: {log:?}"
+            );
+            assert_eq!(data_key(&html(&vdom)), key_before, "{close}: same finding");
+        }
+    }
+
+    thread_local! {
+        static PANE_HUB: RefCell<Option<Signal<Option<RuleHubRequest>>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// The results root with the viewer CLOSED: the hub and nothing else.
+    fn pane_origin_app() -> Element {
+        let hub = use_signal(|| Option::<RuleHubRequest>::None);
+        // The Queue has registered its link, but the viewer is not open.
+        let slot = use_context_provider(|| ViewerSlot(Signal::new(None)));
+        use_hub_focus_return(hub, Some(slot));
+        PANE_HUB.with(|h| *h.borrow_mut() = Some(hub));
+        rsx! {}
+    }
+
+    /// Opened from the pane (or the deviation bar), viewer closed: closing the hub puts the
+    /// keyboard back on the detail pane, where its keys work without a click.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_hub_opened_from_the_pane_returns_focus_to_the_pane() {
+        let mut vdom = VirtualDom::new(pane_origin_app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let hub = PANE_HUB.with(|h| h.borrow().expect("hub signal"));
+        let open = || {
+            Some(RuleHubRequest {
+                repo: "me/api".into(),
+                rule_id: "SQL-INJECTION-1".into(),
+            })
+        };
+
+        for round in 0..2 {
+            FOCUS_LOG.with(|l| l.borrow_mut().clear());
+            vdom.in_runtime(|| {
+                let mut hub = hub;
+                hub.set(open());
+            });
+            settle(&mut vdom, &mut seen).await;
+            assert!(
+                focus_log().is_empty(),
+                "round {round}: opening the hub moves nothing: {:?}",
+                focus_log()
+            );
+            vdom.in_runtime(|| {
+                let mut hub = hub;
+                hub.set(None);
+            });
+            settle(&mut vdom, &mut seen).await;
+            assert_eq!(
+                focus_log().last().map(String::as_str),
+                Some(super::super::scan::DETAIL_PANE_ID),
+                "round {round}: {:?}",
+                focus_log()
+            );
+            assert_eq!(focus_log().len(), 1, "one focus call per close");
+        }
+    }
+
+    /// With the viewer open the root leaves the keyboard to the viewer.
+    #[test]
+    fn the_hub_gives_focus_to_the_viewer_exactly_when_it_is_open() {
+        assert_eq!(hub_close_focus(true), FocusReturn::Viewer);
+        assert_eq!(hub_close_focus(false), FocusReturn::Pane);
     }
 }
