@@ -3263,15 +3263,29 @@ the tuples.
 over `apply_rows(rows, state, reason)`, which is `TriageModel::dispose_with_undo` plus the removal
 of the rows from the table and ONE undo entry for the whole set (`undo_restore` is a list
 re-inserted in ascending position order). `apply_rows` is the only write+remove+undo path in the
-Queue's decision doors: the pane's keys and buttons, the viewer, the stack, the toolbar reason
-prompt (`commit_toolbar_reason`) and the rule-level bar's "Confirm all N" all call it, so every one
+Queue's decision doors: the pane's keys and buttons, the viewer, the stack, every toolbar button
+(`toolbar_decide`: Confirm, Save as tech debt and each "Move to ..."), the toolbar reason prompt
+(`commit_toolbar_reason`) and the rule-level bar's "Confirm all N" all call it, so every one
 gets the required-reason refusal (`reason_required_message`, which names the count), the
 five-second undo (`Confirmed 29 findings.`) and the table removal. `TriageModel::bulk_confirm` and
 `bulk_false_positive` were removed: they took a `DeviationGroup` (a defect group has no headline),
 returned no `UndoEntry`, and had no callers left; their equivalence and required-reason tests now
-run against `dispose_with_undo`. The reason prompt is the Queue's own `QueueReasonPrompt`, whose
+run against `dispose_with_undo`. A toolbar target that needs a reason (Ignored, False positive) raises the prompt instead of
+writing; "Move to Ignored" from the Tech debt table used to write Ignored with no reason and now
+asks for one. The only toolbar write outside `apply_rows` is the tech-debt bucket flag
+(`toolbar_bucket`), which is not a decision (the row stays Tech debt, in that table). The reason
+prompt is the Queue's own `QueueReasonPrompt`, whose
 `ToolbarReasonPrompt` carries the rows by value (snapshotted when the prompt opens). Keys act on
 the checked cards of the page on screen.
+
+*The pane's prompt is bound to its row.* The pane's reason prompt commits to whichever row the
+cursor is on, so a table row click while it is open (which moves the cursor) would send the
+sentence typed for row A to row B. `on_row_click` therefore refuses while the pane's prompt is
+open, with a toast, and does not take the focus out of the reason field: the same refuse-not-cancel
+rule as the stack's mouse doors. (Fixing it exposed a latent borrow in the pane's
+`on_prompt_commit`: a `peek()` guard in an `if let` scrutinee lived across the write that closes
+the prompt, which panics under Dioxus' debug borrow checks; the value is now read into a local
+first.)
 
 *One gate for keys and mouse.* While the reason prompt is open the stack's focus is
 `StackFocus::ReasonPrompt` (`stack_focus(prompt_open)`, the one derivation). The key handler reads

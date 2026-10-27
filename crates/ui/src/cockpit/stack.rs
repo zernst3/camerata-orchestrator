@@ -1004,6 +1004,9 @@ mod tests {
         static ROWS: RefCell<Vec<FindingView>> = const { RefCell::new(Vec::new()) };
         static PRESET: std::cell::Cell<OrderPreset> =
             const { std::cell::Cell::new(OrderPreset::Curated) };
+        static VIEW: std::cell::Cell<TriageState> =
+            const { std::cell::Cell::new(TriageState::Unresolved) };
+        static INITIAL: RefCell<HashMap<String, Disposition>> = RefCell::new(HashMap::new());
     }
 
     fn app() -> Element {
@@ -1012,7 +1015,7 @@ mod tests {
         use_context_provider(|| Signal::new(ViewerCache::new()));
         use_context_provider(|| ViewerSlot(Signal::new(None)));
         use_context_provider(|| StackSlot(Signal::new(None)));
-        let dispositions = use_signal(HashMap::<String, Disposition>::new);
+        let dispositions = use_signal(|| INITIAL.with(|i| i.borrow().clone()));
         let order_preset = use_signal(|| PRESET.with(std::cell::Cell::get));
         PROBE.with(|p| {
             *p.borrow_mut() = Some(Probe {
@@ -1030,6 +1033,7 @@ mod tests {
                 descriptions: HashMap::new(),
                 dispositions,
                 order_preset,
+                triage_view: VIEW.with(std::cell::Cell::get),
                 audited_shas: shas,
             }
             StackRoot {}
@@ -1131,6 +1135,11 @@ mod tests {
     struct Seen {
         listeners: Vec<(String, ElementId)>,
         ids: HashMap<String, ElementId>,
+        /// Each row's selection checkbox: the first `checked` attribute after the row's index.
+        boxes: HashMap<usize, ElementId>,
+        /// The elements given a `style` after each row's `data-chorale-index`: the row's cells.
+        row_styles: HashMap<usize, Vec<ElementId>>,
+        current_row: Option<usize>,
     }
 
     impl Seen {
@@ -1139,6 +1148,29 @@ mod tests {
                 match e {
                     Mutation::NewEventListener { name, id } => {
                         self.listeners.push((name.clone(), *id));
+                    }
+                    Mutation::SetAttribute {
+                        name: "checked",
+                        id,
+                        ..
+                    } => {
+                        if let Some(row) = self.current_row {
+                            self.boxes.entry(row).or_insert(*id);
+                        }
+                    }
+                    Mutation::SetAttribute {
+                        name: "data-chorale-index",
+                        value: dioxus::dioxus_core::AttributeValue::Text(text),
+                        ..
+                    } => {
+                        self.current_row = text.parse().ok();
+                    }
+                    Mutation::SetAttribute {
+                        name: "style", id, ..
+                    } => {
+                        if let Some(row) = self.current_row {
+                            self.row_styles.entry(row).or_default().push(*id);
+                        }
                     }
                     Mutation::SetAttribute {
                         name: "id",
@@ -1154,6 +1186,20 @@ mod tests {
         }
         fn mark(&self) -> usize {
             self.listeners.len()
+        }
+        /// A cell of table row `row` that has a click listener (what chorale's row click is).
+        fn row_cell(&self, row: usize) -> ElementId {
+            self.row_styles
+                .get(&row)
+                .into_iter()
+                .flatten()
+                .copied()
+                .find(|id| self.listeners.iter().any(|(n, l)| n == "click" && l == id))
+                .unwrap_or_else(|| panic!("no clickable cell in row {row}"))
+        }
+        /// The selection checkbox of table row `row`.
+        fn row_box(&self, row: usize) -> ElementId {
+            self.boxes[&row]
         }
         /// The first listener `name` registered after `mark`.
         fn first_after(&self, mark: usize, name: &str) -> ElementId {
@@ -1221,6 +1267,26 @@ mod tests {
         preset: OrderPreset,
         status: &'static str,
     ) -> (VirtualDom, Seen, MockServer, camerata_test_env::EnvGuard) {
+        mount_in(
+            rows,
+            preset,
+            status,
+            TriageState::Unresolved,
+            HashMap::new(),
+        )
+        .await
+    }
+
+    /// `mount`, showing the triage table `view` over rows that already carry `initial`.
+    async fn mount_in(
+        rows: Vec<FindingView>,
+        preset: OrderPreset,
+        status: &'static str,
+        view: TriageState,
+        initial: HashMap<String, Disposition>,
+    ) -> (VirtualDom, Seen, MockServer, camerata_test_env::EnvGuard) {
+        VIEW.with(|v| v.set(view));
+        INITIAL.with(|i| *i.borrow_mut() = initial);
         dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
         let server = serve(status).await;
         let env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
@@ -2075,5 +2141,339 @@ mod tests {
         assert_eq!(under.matches("disabled=true").count(), 7, "{under}");
         let idle = render_view(vec![card(10, true, None)], None, None, None, true);
         assert!(!idle.contains("disabled=true"), "{idle}");
+    }
+
+    // ── Every Queue decision button is `apply_rows` ─────────────────────────────────────
+
+    fn change(vdom: &VirtualDom, id: ElementId) {
+        send(
+            vdom,
+            "change",
+            id,
+            Box::new(SerializedFormData::new("true".to_string(), Vec::new())),
+        );
+    }
+
+    /// Tick the selection checkbox of each of `rows` (of `total`), then press the toolbar button
+    /// that moves them to `target`.
+    async fn select_and_press(
+        vdom: &mut VirtualDom,
+        seen: &mut Seen,
+        rows: &[usize],
+        target: TriageState,
+    ) {
+        for r in rows {
+            change(vdom, seen.row_box(*r));
+        }
+        settle(vdom, seen).await;
+        click(
+            vdom,
+            seen.element(&super::super::scan::toolbar_button_id(target)),
+        );
+        settle(vdom, seen).await;
+    }
+
+    fn table_rows(vdom: &VirtualDom) -> usize {
+        html(vdom).matches("data-chorale-index=\"").count()
+    }
+
+    fn preloaded(rows: &[FindingView], state: TriageState) -> HashMap<String, Disposition> {
+        rows.iter()
+            .map(|f| {
+                (
+                    finding_key(f),
+                    Disposition {
+                        state,
+                        reason: if state.requires_reason() {
+                            "earlier".into()
+                        } else {
+                            String::new()
+                        },
+                        bucket: TechDebtBucket::Later,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// "Confirm" and "Save as tech debt" write through `apply_rows`: the pane's undo names the
+    /// count, one click on it puts the rows back in the map AND in the table.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn confirm_and_tech_debt_buttons_go_through_apply_rows_with_an_undo() {
+        for (target, expect, said) in [
+            (
+                TriageState::Confirmed,
+                TriageState::Confirmed,
+                "Confirmed 2 findings.",
+            ),
+            (
+                TriageState::TechDebt,
+                TriageState::TechDebt,
+                "Marked 2 findings as Tech debt.",
+            ),
+        ] {
+            let rows: Vec<FindingView> = (1..=3).map(defect).collect();
+            let (mut vdom, mut seen, _server, _env) =
+                mount(rows, OrderPreset::CriticalFirst, "ok").await;
+            assert_eq!(table_rows(&vdom), 3);
+            select_and_press(&mut vdom, &mut seen, &[0, 1], target).await;
+            assert_eq!(state_count(expect), 2, "{target:?}");
+            assert!(html(&vdom).contains(said), "{target:?}: {}", html(&vdom));
+            assert_eq!(table_rows(&vdom), 1, "the two rows left the table");
+
+            click(&vdom, seen.element(super::super::scan::PANE_UNDO_ID));
+            settle(&mut vdom, &mut seen).await;
+            assert!(probe().dispositions.peek().is_empty(), "{target:?}: undone");
+            assert_eq!(table_rows(&vdom), 3, "{target:?}: and back on screen");
+        }
+    }
+
+    /// "Ignore with reason" and "Mark false positive": the button raises the prompt (nothing is
+    /// written), a blank reason is refused in the one wording and the prompt stays, a reason
+    /// decides the selected rows with an undo.
+    async fn prompted_toolbar_case(target: TriageState, said: &str) {
+        let rows: Vec<FindingView> = (1..=3).map(defect).collect();
+        let (mut vdom, mut seen, _server, _env) =
+            mount(rows, OrderPreset::CriticalFirst, "ok").await;
+        let mark = seen.mark();
+        select_and_press(&mut vdom, &mut seen, &[0, 1], target).await;
+        let page = html(&vdom);
+        assert!(page.contains("2 findings (required)"), "{target:?}: {page}");
+        assert!(
+            probe().dispositions.peek().is_empty(),
+            "the button wrote nothing"
+        );
+
+        let field = seen.first_after(mark, "keydown");
+        key(&vdom, field, "Enter");
+        settle(&mut vdom, &mut seen).await;
+        assert!(
+            probe().dispositions.peek().is_empty(),
+            "a blank reason is refused"
+        );
+        assert!(
+            html(&vdom).contains("queue-reason-prompt"),
+            "and the prompt stays"
+        );
+        assert!(probe().toasts.peek().iter().any(|t| t
+            .message
+            .contains("A reason is required to move 2 findings")));
+
+        typed(&vdom, seen.first_after(mark, "input"), "a real reason");
+        settle(&mut vdom, &mut seen).await;
+        key(&vdom, field, "Enter");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(state_count(target), 2);
+        assert!(probe()
+            .dispositions
+            .peek()
+            .values()
+            .all(|d| d.reason == "a real reason"));
+        assert!(html(&vdom).contains(said), "{target:?}: {}", html(&vdom));
+        click(&vdom, seen.element(super::super::scan::PANE_UNDO_ID));
+        settle(&mut vdom, &mut seen).await;
+        assert!(probe().dispositions.peek().is_empty(), "{target:?}: undone");
+        assert_eq!(table_rows(&vdom), 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn ignore_with_reason_goes_through_apply_rows() {
+        prompted_toolbar_case(TriageState::Ignored, "Marked 2 findings as Ignored.").await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn mark_false_positive_goes_through_apply_rows() {
+        prompted_toolbar_case(
+            TriageState::FalsePositive,
+            "Marked 2 findings as False positive.",
+        )
+        .await;
+    }
+
+    /// The "Move to ..." buttons of the other four tables, each from a table that holds three
+    /// rows already in that state. A target that needs a reason (Ignored) raises the prompt.
+    async fn move_case(from: TriageState, to: TriageState, said: &str, reason: Option<&str>) {
+        let rows: Vec<FindingView> = (1..=3).map(defect).collect();
+        let initial = preloaded(&rows, from);
+        let (mut vdom, mut seen, _server, _env) =
+            mount_in(rows, OrderPreset::CriticalFirst, "ok", from, initial).await;
+        assert_eq!(table_rows(&vdom), 3, "{from:?}: the table holds its rows");
+        let mark = seen.mark();
+        select_and_press(&mut vdom, &mut seen, &[0, 1], to).await;
+        if let Some(reason) = reason {
+            assert_eq!(
+                state_count(from),
+                3,
+                "{from:?} -> {to:?}: the button only asked"
+            );
+            let field = seen.first_after(mark, "keydown");
+            key(&vdom, field, "Enter");
+            settle(&mut vdom, &mut seen).await;
+            assert_eq!(state_count(from), 3, "a blank reason is refused");
+            typed(&vdom, seen.first_after(mark, "input"), reason);
+            settle(&mut vdom, &mut seen).await;
+            key(&vdom, field, "Enter");
+            settle(&mut vdom, &mut seen).await;
+        }
+        assert_eq!(state_count(to), 2, "{from:?} -> {to:?}");
+        assert_eq!(state_count(from), 1);
+        assert!(
+            html(&vdom).contains(said),
+            "{from:?} -> {to:?}: {}",
+            html(&vdom)
+        );
+        assert_eq!(table_rows(&vdom), 1);
+        click(&vdom, seen.element(super::super::scan::PANE_UNDO_ID));
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(
+            state_count(from),
+            3,
+            "{from:?} -> {to:?}: undo restores the earlier state"
+        );
+        assert_eq!(table_rows(&vdom), 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_move_to_buttons_go_through_apply_rows() {
+        move_case(
+            TriageState::Confirmed,
+            TriageState::Unresolved,
+            "Moved 2 findings back to Unresolved.",
+            None,
+        )
+        .await;
+        move_case(
+            TriageState::Ignored,
+            TriageState::TechDebt,
+            "Marked 2 findings as Tech debt.",
+            None,
+        )
+        .await;
+        move_case(
+            TriageState::FalsePositive,
+            TriageState::Unresolved,
+            "Moved 2 findings back to Unresolved.",
+            None,
+        )
+        .await;
+        move_case(
+            TriageState::TechDebt,
+            TriageState::Unresolved,
+            "Moved 2 findings back to Unresolved.",
+            None,
+        )
+        .await;
+        // Tech debt -> Ignored needs a reason now; it used to move the rows with none.
+        move_case(
+            TriageState::TechDebt,
+            TriageState::Ignored,
+            "Marked 2 findings as Ignored.",
+            Some("accepted risk"),
+        )
+        .await;
+    }
+
+    // ── The pane's prompt is bound to the row it was opened for ─────────────────────────
+
+    /// Open the I prompt on row A, click row B, type a reason, Enter: only A is decided. The
+    /// click is refused (as the stack's mouse doors are under its prompt), so the reason typed
+    /// for A cannot land on B.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_row_click_under_the_panes_prompt_does_not_retarget_the_reason() {
+        let rows = vec![defect(7), defect(8)];
+        let (mut vdom, mut seen, _server, _env) =
+            mount(rows, OrderPreset::CriticalFirst, "ok").await;
+        let pane = seen.element(super::super::scan::DETAIL_PANE_ID);
+        send(
+            &vdom,
+            "focusin",
+            pane,
+            Box::new(SerializedFocusData::default()),
+        );
+        settle(&mut vdom, &mut seen).await;
+
+        let mark = seen.mark();
+        key(&vdom, pane, "i");
+        settle(&mut vdom, &mut seen).await;
+        assert!(
+            html(&vdom).contains("pane-reason-prompt"),
+            "the prompt is open"
+        );
+
+        // Row B (index 1) is clicked while the prompt is open.
+        click(&vdom, seen.row_cell(1));
+        settle(&mut vdom, &mut seen).await;
+        assert!(
+            probe()
+                .toasts
+                .peek()
+                .iter()
+                .any(|t| t.message.contains("Finish or cancel the reason first")),
+            "the click is refused out loud"
+        );
+        assert!(
+            html(&vdom).contains("pane-reason-prompt"),
+            "and the prompt is still open"
+        );
+
+        typed(
+            &vdom,
+            seen.first_after(mark, "input"),
+            "test fixture, not shipped",
+        );
+        settle(&mut vdom, &mut seen).await;
+        key(&vdom, seen.first_after(mark, "keydown"), "Enter");
+        settle(&mut vdom, &mut seen).await;
+
+        let decided = probe().dispositions.peek().clone();
+        assert_eq!(decided.len(), 1, "exactly one row was decided");
+        assert_eq!(
+            decided
+                .get(&finding_key(&defect(7)))
+                .map(|d| (d.state, d.reason.clone())),
+            Some((
+                TriageState::Ignored,
+                "test fixture, not shipped".to_string()
+            )),
+            "row A, with the reason typed for it"
+        );
+        assert!(
+            !decided.contains_key(&finding_key(&defect(8))),
+            "row B is untouched"
+        );
+    }
+
+    /// Once the prompt is gone a row click moves the cursor again.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn after_the_prompt_closes_a_row_click_moves_the_cursor() {
+        let rows = vec![defect(7), defect(8)];
+        let (mut vdom, mut seen, _server, _env) =
+            mount(rows, OrderPreset::CriticalFirst, "ok").await;
+        let pane = seen.element(super::super::scan::DETAIL_PANE_ID);
+        send(
+            &vdom,
+            "focusin",
+            pane,
+            Box::new(SerializedFocusData::default()),
+        );
+        let mark = seen.mark();
+        key(&vdom, pane, "i");
+        settle(&mut vdom, &mut seen).await;
+        key(&vdom, seen.first_after(mark, "keydown"), "Escape");
+        settle(&mut vdom, &mut seen).await;
+        assert!(!html(&vdom).contains("pane-reason-prompt"));
+        click(&vdom, seen.row_cell(1));
+        settle(&mut vdom, &mut seen).await;
+        assert!(
+            html(&vdom).contains("2 of 2"),
+            "the pane is on the second row: {}",
+            html(&vdom)
+        );
     }
 }

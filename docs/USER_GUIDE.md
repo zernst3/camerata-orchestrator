@@ -503,9 +503,11 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    The buttons above the cards do the same as `C`, `T`, `I` and `F`. A decision acts on exactly
    the cards that are checked, and the Undo that appears at the bottom (five seconds, the same one
    the pane uses) names the count, for example `Confirmed 29 findings.`; one click puts all of them
-   back, also in the Queue's table. The same Undo now follows the rule-level bar's **Confirm all N**
-   and the toolbar's reason prompts (**Ignore with reason**, **Mark false positive**), and a blank
-   reason is refused in the same words everywhere. The cards you decided update in place and the stack stays open,
+   back, also in the Queue's table. The same Undo now follows every way of deciding a finding in the Queue:
+   the rule-level bar's **Confirm all N**, all the toolbar buttons (**Confirm**, **Save as tech
+   debt**, the **Move to ...** buttons and their reason prompts), as well as the pane's keys. A
+   blank reason is refused in the same words everywhere, and **Move to Ignored** in the Tech debt
+   table now asks for the reason Ignored requires. The cards you decided update in place and the stack stays open,
    so you can leave a few unchecked, confirm the rest, and then deal with the exceptions one by
    one. A card you left unchecked stays Unresolved. If nothing is checked, a decision key says so
    instead of doing nothing. Decided rows leave the Queue's table, so **Enter** on a decided card
@@ -521,6 +523,11 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    cards are on screen (`Showing cards 1 to 200 of 312`), `>` and `<` (or the **Next page** and
    **Previous page** buttons) turn the page, and the keys act on the cards of the page on screen
    only. Each page makes one request for its code.
+
+   **A reason prompt belongs to its row.** When you press `I` or `F` (or click Ignore or False
+   positive) in the detail pane, the reason you type is for the row the prompt was opened on.
+   Clicking another row of the table while the prompt is open does nothing but say so; commit or
+   press Esc first, then pick the next row.
 
    **Order of the Queue.** The **Order** select above the table cuts the Queue four ways.
    **Curated** (the default) is severity, then kind, then the cheapest deviations first, grouped by

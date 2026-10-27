@@ -3217,6 +3217,18 @@ pub(super) fn context_rows(c: &PaneContext) -> Element {
     }
 }
 
+/// The DOM id of a Queue toolbar button that moves the selected rows to `target`. One per target
+/// per triage table, so a table never has two with the same id.
+pub(super) fn toolbar_button_id(target: TriageState) -> String {
+    format!(
+        "camerata-toolbar-to-{}",
+        target.label().to_ascii_lowercase().replace(' ', "-")
+    )
+}
+
+/// The DOM id of the detail pane's Undo button.
+pub(super) const PANE_UNDO_ID: &str = "camerata-pane-undo";
+
 /// The undo banner for an armed undo at time `now` (ms on the table's monotonic clock), or `None`
 /// when there is none or its window has shut. Shared by the pane and the code viewer.
 pub(super) fn undo_banner_of(entry: &Option<UndoEntry>, now: u64) -> Option<UndoBanner> {
@@ -3511,6 +3523,7 @@ pub(super) fn FindingDetailPane(
                     span { class: "pane-undo-msg", "{u.message}" }
                     button {
                         class: "btn-edit-sm pane-undo-btn",
+                        id: PANE_UNDO_ID,
                         onclick: move |_| on_undo.call(()),
                         "Undo"
                     }
@@ -3770,21 +3783,6 @@ pub(super) fn FindingsTable(
     // the Queue is in essentially all the time.
     let mut toolbar_prompt = use_signal(|| Option::<ToolbarReasonPrompt>::None);
     let mut toolbar_reason = use_signal(String::new);
-    // Two id_map clones: each triage table renders two move buttons, and the two closures in
-    // an arm each move a clone. Match arms are mutually exclusive, so the same two clones
-    // serve every arm.
-    let id_map_a = id_map.clone();
-    let id_map_b = id_map.clone();
-    // Two more clones for the tech-debt bucket buttons (resolve later / now).
-    let id_map_c = id_map.clone();
-    let id_map_d = id_map.clone();
-    // One more clone for the Unresolved view's "mark false positive" button + the
-    // FalsePositive view's "move back to Unresolved" button.
-    let id_map_e = id_map.clone();
-    // And one for the Unresolved view's Confirm button (Pass 2 step 3). Its own clone rather
-    // than sharing `id_map_a`/`id_map_b`: those two are already moved into the Ignore and
-    // Tech-debt closures in this same match arm.
-    let id_map_f = id_map.clone();
     // The (sorted) rows for CSV export.
     let csv_rows = findings.clone();
 
@@ -4145,6 +4143,64 @@ pub(super) fn FindingsTable(
         }
     });
 
+    // THE TOOLBAR'S DECISION BUTTONS (Confirm, Save as tech debt, Move to ...). Every one is
+    // `apply_rows` over the rows selected in the table, so it has the same write, the same
+    // five-second undo and the same refusal wording as every other door. A state that needs a
+    // reason (Ignored, False positive) raises the toolbar's reason prompt instead of writing,
+    // with the selection snapshotted into it; `commit_toolbar_reason` finishes it.
+    let toolbar_decide = use_callback({
+        let id_map = id_map.clone();
+        move |decided: TriageState| {
+            let rows: Vec<FindingView> = handle
+                .selected_ids()
+                .iter()
+                .filter_map(|id| id_map.get(id).cloned())
+                .collect();
+            if rows.is_empty() {
+                return;
+            }
+            if decided.requires_reason() {
+                toolbar_reason.set(String::new());
+                toolbar_prompt.set(Some(ToolbarReasonPrompt {
+                    state: decided,
+                    rows,
+                }));
+            } else {
+                apply_rows.call((rows, decided, String::new()));
+            }
+        }
+    });
+    // The tech-debt bucket flag. Not a decision (the row stays Tech debt and in this table), so
+    // it is the one toolbar write that does not go through `apply_rows`.
+    let toolbar_bucket = use_callback({
+        let id_map = id_map.clone();
+        move |bucket: TechDebtBucket| {
+            let picked: Vec<FindingView> = handle
+                .selected_ids()
+                .iter()
+                .filter_map(|id| id_map.get(id).cloned())
+                .collect();
+            if picked.is_empty() {
+                return;
+            }
+            let mut model = TriageModel {
+                dispositions: dispositions.peek().clone(),
+                triage_view,
+            };
+            model.set_bucket(&picked, bucket);
+            dispositions.set(model.dispositions);
+            let word = match bucket {
+                TechDebtBucket::Later => "resolve later",
+                TechDebtBucket::Now => "resolve now",
+            };
+            crate::toast::push_toast(
+                toasts,
+                crate::toast::ToastKind::Info,
+                format!("Marked {} as {word}.", picked.len()),
+            );
+        }
+    });
+
     // A request from another surface (the finding modal's "Open in viewer"): aim the cursor at
     // that finding and open the viewer. The request is consumed as it is read, so it fires once.
     {
@@ -4438,218 +4494,94 @@ pub(super) fn FindingsTable(
             // table on the next switch. Backend commit happens later, at Process.
             match triage_view {
                 TriageState::Unresolved => rsx! {
-                    // CONFIRM — the affirmative disposition, and the majority outcome of an
-                    // audit (design §3). First in the toolbar and styled as the primary
-                    // action because it is the most common gesture, and the ONLY one with no
-                    // reason input in front of it: confirming makes no claim beyond the
-                    // finding, which already states its own case. See `TriageModel::confirm`.
-                    //
-                    // ## No `C` keystroke yet — DEFERRED to the docked detail pane
-                    //
-                    // The owner's Q5 ruling (design §13, 2026-10-12) ships `C`/`I`/`T`/`F`
-                    // "scoped so the keys only fire while the detail pane holds focus, plus a
-                    // five-second undo toast". The docked detail pane is a later step and does
-                    // not exist; the Queue's detail surface is still the row-click modal. So
-                    // the scoping condition the ruling ATTACHES THE KEYS TO cannot be
-                    // satisfied today, and the only thing buildable now is a document-level
-                    // handler firing on any `c` press anywhere on the page — which at 400 rows
-                    // is precisely the fat-finger risk the scoping clause exists to prevent,
-                    // and would also swallow `c` typed into the reason textareas six inches
-                    // away. The keystroke belongs to the pane step, where its focus owner,
-                    // its row cursor and its undo toast all arrive together. Button only here.
-
+                    // CONFIRM: the affirmative disposition, and the majority outcome of an audit
+                    // (design §3). First and styled as the primary action, and the ONLY one with
+                    // no reason in front of it: confirming makes no claim beyond the finding.
                     button {
                         class: "btn-run triage-confirm",
-                        title: "I read these findings, they are real, and they ship in the report. No reason required. Local to this draft — the export reads it; Process commits nothing for it.",
-                        onclick: move |_| {
-                            let sel = handle.selected_ids();
-                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_f.get(id).cloned()).collect();
-                            if picked.is_empty() { return; }
-                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
-                            model.confirm(&picked);
-                            dispositions.set(model.dispositions);
-                            handle.remove_rows(&sel);
-                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Confirmed {}.", picked.len()));
-                        },
+                        title: "I read these findings, they are real, and they ship in the report. No reason required. Local to this draft; the export reads it and Process commits nothing for it.",
+                        id: "{toolbar_button_id(TriageState::Confirmed)}",
+                        onclick: move |_| toolbar_decide.call(TriageState::Confirmed),
                         "Confirm \u{2192}"
                     }
-                    // §9.2: the standing textarea is gone; the button RAISES the prompt. The
-                    // selection is snapshotted into the prompt right here, so the heading's
-                    // count and the commit's row set are the same list.
                     button {
                         class: "btn-restart triage-ignore",
-                        onclick: move |_| {
-                            let sel = handle.selected_ids();
-                            let rows: Vec<FindingView> = sel.iter().filter_map(|id| id_map_a.get(id).cloned()).collect();
-                            if rows.is_empty() { return; }
-                            toolbar_reason.set(String::new());
-                            toolbar_prompt.set(Some(ToolbarReasonPrompt {
-                                state: TriageState::Ignored,
-                                rows,
-                            }));
-                        },
+                        id: "{toolbar_button_id(TriageState::Ignored)}",
+                        onclick: move |_| toolbar_decide.call(TriageState::Ignored),
                         "Ignore with reason \u{2192}"
                     }
                     button {
                         class: "btn-run",
-                        onclick: move |_| {
-                            let sel = handle.selected_ids();
-                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_b.get(id).cloned()).collect();
-                            if picked.is_empty() { return; }
-                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
-                            model.move_to(&picked, TriageState::TechDebt);
-                            dispositions.set(model.dispositions);
-                            handle.remove_rows(&sel);
-                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Tech debt.", picked.len()));
-                        },
+                        id: "{toolbar_button_id(TriageState::TechDebt)}",
+                        onclick: move |_| toolbar_decide.call(TriageState::TechDebt),
                         "Save as tech debt"
                     }
-                    // False positive: "the tool was wrong" — distinct from Ignore ("real but
-                    // accepted risk"). Requires its own reason (the audit trail); at Process
-                    // this disposition is a server-side no-op (excluded from the report,
-                    // never baselined, never ticketed).
                     button {
                         class: "btn-restart triage-false-positive",
-                        onclick: move |_| {
-                            let sel = handle.selected_ids();
-                            let rows: Vec<FindingView> = sel.iter().filter_map(|id| id_map_e.get(id).cloned()).collect();
-                            if rows.is_empty() { return; }
-                            toolbar_reason.set(String::new());
-                            toolbar_prompt.set(Some(ToolbarReasonPrompt {
-                                state: TriageState::FalsePositive,
-                                rows,
-                            }));
-                        },
+                        id: "{toolbar_button_id(TriageState::FalsePositive)}",
+                        onclick: move |_| toolbar_decide.call(TriageState::FalsePositive),
                         "Mark false positive \u{2192}"
                     }
                 },
-                // Confirmed: one way back, and nothing else. Mirrors the FalsePositive table
-                // exactly, for the same reason — the decision was made in the Unresolved
-                // table with the inputs it has; the only thing left to offer here is undoing
-                // it. Offering Ignore/Tech debt without their reason textareas (which live
-                // only in the Unresolved toolbar) would be a button that cannot complete.
                 TriageState::Confirmed => rsx! {
                     button {
                         class: "btn-restart",
-                        onclick: move |_| {
-                            let sel = handle.selected_ids();
-                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_f.get(id).cloned()).collect();
-                            if picked.is_empty() { return; }
-                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
-                            model.move_to(&picked, TriageState::Unresolved);
-                            dispositions.set(model.dispositions);
-                            handle.remove_rows(&sel);
-                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} back to Unresolved.", picked.len()));
-                        },
+                        id: "{toolbar_button_id(TriageState::Unresolved)}",
+                        onclick: move |_| toolbar_decide.call(TriageState::Unresolved),
                         "Move to Unresolved"
                     }
                 },
                 TriageState::Ignored => rsx! {
                     button {
                         class: "btn-restart",
-                        onclick: move |_| {
-                            let sel = handle.selected_ids();
-                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_a.get(id).cloned()).collect();
-                            if picked.is_empty() { return; }
-                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
-                            model.move_to(&picked, TriageState::Unresolved);
-                            dispositions.set(model.dispositions);
-                            handle.remove_rows(&sel);
-                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} back to Unresolved.", picked.len()));
-                        },
+                        id: "{toolbar_button_id(TriageState::Unresolved)}",
+                        onclick: move |_| toolbar_decide.call(TriageState::Unresolved),
                         "Move to Unresolved"
                     }
                     button {
                         class: "btn-run",
-                        onclick: move |_| {
-                            let sel = handle.selected_ids();
-                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_b.get(id).cloned()).collect();
-                            if picked.is_empty() { return; }
-                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
-                            model.move_to(&picked, TriageState::TechDebt);
-                            dispositions.set(model.dispositions);
-                            handle.remove_rows(&sel);
-                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Tech debt.", picked.len()));
-                        },
+                        id: "{toolbar_button_id(TriageState::TechDebt)}",
+                        onclick: move |_| toolbar_decide.call(TriageState::TechDebt),
                         "Move to Tech debt"
                     }
                 },
                 TriageState::TechDebt => rsx! {
                     // Bucket the selected tech-debt findings. These stay in the table; only the
-                    // Bucket flag column changes. Default is Later (a tracked ticket); Now pulls
-                    // the finding into the dev engine as a fix story at Process.
+                    // Bucket flag column changes (it is not a decision, so it has no reason and
+                    // no undo). Default is Later (a tracked ticket); Now pulls the finding into
+                    // the dev engine as a fix story at Process.
                     button {
                         class: "btn-edit-sm",
-                        onclick: move |_| {
-                            let sel = handle.selected_ids();
-                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_c.get(id).cloned()).collect();
-                            if picked.is_empty() { return; }
-                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
-                            model.set_bucket(&picked, TechDebtBucket::Later);
-                            dispositions.set(model.dispositions);
-                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Marked {} as resolve later.", picked.len()));
-                        },
+                        id: "camerata-toolbar-bucket-later",
+                        onclick: move |_| toolbar_bucket.call(TechDebtBucket::Later),
                         "Mark: resolve later"
                     }
                     button {
                         class: "btn-edit-sm",
-                        onclick: move |_| {
-                            let sel = handle.selected_ids();
-                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_d.get(id).cloned()).collect();
-                            if picked.is_empty() { return; }
-                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
-                            model.set_bucket(&picked, TechDebtBucket::Now);
-                            dispositions.set(model.dispositions);
-                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Marked {} as resolve now.", picked.len()));
-                        },
+                        id: "camerata-toolbar-bucket-now",
+                        onclick: move |_| toolbar_bucket.call(TechDebtBucket::Now),
                         "Mark: resolve now"
                     }
                     button {
                         class: "btn-restart",
-                        onclick: move |_| {
-                            let sel = handle.selected_ids();
-                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_a.get(id).cloned()).collect();
-                            if picked.is_empty() { return; }
-                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
-                            model.move_to(&picked, TriageState::Unresolved);
-                            dispositions.set(model.dispositions);
-                            handle.remove_rows(&sel);
-                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} back to Unresolved.", picked.len()));
-                        },
+                        id: "{toolbar_button_id(TriageState::Unresolved)}",
+                        onclick: move |_| toolbar_decide.call(TriageState::Unresolved),
                         "Move to Unresolved"
                     }
+                    // Ignored requires a reason, so this raises the same prompt "Ignore with
+                    // reason" does. It used to move the rows to Ignored with none.
                     button {
                         class: "btn-restart",
-                        onclick: move |_| {
-                            let sel = handle.selected_ids();
-                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_b.get(id).cloned()).collect();
-                            if picked.is_empty() { return; }
-                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
-                            model.move_to(&picked, TriageState::Ignored);
-                            dispositions.set(model.dispositions);
-                            handle.remove_rows(&sel);
-                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Ignored.", picked.len()));
-                        },
-                        "Move to Ignored"
+                        id: "{toolbar_button_id(TriageState::Ignored)}",
+                        onclick: move |_| toolbar_decide.call(TriageState::Ignored),
+                        "Move to Ignored with reason \u{2192}"
                     }
                 },
                 TriageState::FalsePositive => rsx! {
-                    // No reason input here — the reason was already captured when the finding
-                    // was marked (Unresolved view). Moving back to Unresolved is the only
-                    // action; it clears no data (the reason stays on the disposition record
-                    // until a new one overwrites it).
                     button {
                         class: "btn-restart",
-                        onclick: move |_| {
-                            let sel = handle.selected_ids();
-                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_e.get(id).cloned()).collect();
-                            if picked.is_empty() { return; }
-                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
-                            model.move_to(&picked, TriageState::Unresolved);
-                            dispositions.set(model.dispositions);
-                            handle.remove_rows(&sel);
-                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} back to Unresolved.", picked.len()));
-                        },
+                        id: "{toolbar_button_id(TriageState::Unresolved)}",
+                        onclick: move |_| toolbar_decide.call(TriageState::Unresolved),
                         "Move to Unresolved"
                     }
                 },
@@ -4788,6 +4720,20 @@ pub(super) fn FindingsTable(
             // earns that: it carries the on-demand enclosing-code-block fetch, which is far
             // too expensive to re-run on every cursor-down.
             on_row_click: Callback::new(move |rid: RowId| {
+                // While the pane's reason prompt is open the reason being typed is FOR the
+                // focused row: the commit decides whatever row the cursor is on. A click that
+                // moved the cursor would send the sentence typed for row A to row B, so the
+                // click is refused (the same rule as the stacked view's mouse doors under its
+                // prompt) and, because the refusal also skips the focus call below, the
+                // keyboard stays in the reason field. Commit or Esc first.
+                if prompt.peek().is_some() {
+                    crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Info,
+                        "Finish or cancel the reason first, then pick another row.",
+                    );
+                    return;
+                }
                 if let Some(f) = id_map_click.get(&rid) {
                     cursor.set(RowCursor::focused_on(finding_key(f)));
                     // Move REAL keyboard focus into the pane, and let the pane's own
@@ -4847,7 +4793,10 @@ pub(super) fn FindingsTable(
             }),
             on_prompt_reason: Callback::new(move |r: String| prompt_reason.set(r)),
             on_prompt_commit: Callback::new(move |()| {
-                if let Some(state) = prompt.peek().to_owned() {
+                // Read into a local FIRST: a `peek()` guard in an `if let` scrutinee lives for
+                // the whole block, and `apply_disposition` writes `prompt` (a borrow panic).
+                let open = *prompt.peek();
+                if let Some(state) = open {
                     let reason = prompt_reason.peek().clone();
                     apply_disposition.call((state, reason));
                     // Only hand focus back if the disposition actually LANDED.
