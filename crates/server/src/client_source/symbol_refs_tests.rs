@@ -8,7 +8,7 @@ use tower::ServiceExt;
 
 use super::delete::{delete_source, DeleteOutcome, DeleteRequest};
 use super::test_support::{fixture, Fx, REPO};
-use crate::onboard::symbol_refs::{GREP_RUNS, MAX_HITS};
+use crate::onboard::symbol_refs::{SearchLimits, GREP_RUNS, MAX_HITS};
 use crate::test_git::{commit_all, git, write_file};
 
 fn uri(symbol: &str, extra: &str) -> String {
@@ -382,16 +382,226 @@ async fn no_recorded_commit_searches_the_working_tree_and_says_so() {
     assert_eq!(locations(&json).len(), 3);
 }
 
+/// Nothing was searched, so the answer is "unavailable" with its reason and no source: never an
+/// empty list, and never the working-tree fallback banner (that is for a search that ran).
 #[tokio::test]
-async fn a_folder_that_is_not_a_git_checkout_has_no_hits_and_is_commit_unavailable() {
+async fn a_folder_that_is_not_a_git_checkout_is_unavailable_not_an_empty_search() {
     let fx = fixture();
     commit_usages(&fx);
     std::fs::remove_dir_all(fx.checkout.join(".git")).unwrap();
     let (status, _, json) = get(&fx, &uri("needle_fn", "")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["status"], "commit_unavailable", "{json}");
-    assert_eq!(json["source"], "working_tree");
+    assert_eq!(json["status"], "unavailable", "{json}");
+    assert_eq!(json["reason"], "the search could not run");
+    assert!(json.get("source").is_none(), "{json}");
     assert_eq!(json["hits"].as_array().unwrap().len(), 0);
+    assert_eq!(json["more"], false);
+    assert_eq!(json["symbol"], "needle_fn");
+}
+
+/// The same when the recorded commit is missing AND the working tree cannot be searched: the
+/// fallback label is for a fallback that happened.
+#[tokio::test]
+async fn a_missing_commit_in_a_folder_that_cannot_be_searched_is_unavailable() {
+    let fx = fixture();
+    commit_usages(&fx);
+    fx.inspect_at(&"0".repeat(40));
+    // Break the checkout after the resolver would still see a folder: no `.git` at all makes the
+    // commit check fail and the working-tree search fail.
+    std::fs::remove_dir_all(fx.checkout.join(".git")).unwrap();
+    let (_, _, json) = get(&fx, &uri("needle_fn", "")).await;
+    assert_eq!(json["status"], "unavailable", "{json}");
+    assert!(json.get("source").is_none());
+    assert!(json["hits"].as_array().unwrap().is_empty());
+}
+
+async fn get_with_limits(fx: &Fx, symbol: &str, limits: SearchLimits) -> serde_json::Value {
+    let params: crate::onboard::symbol_refs::SymbolRefsParams =
+        serde_json::from_value(serde_json::json!({ "repo": REPO, "symbol": symbol })).unwrap();
+    let response = crate::onboard::symbol_refs::symbol_refs_with(&fx.state, params, limits).await;
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// The search is stopped at its time limit and answers the shared "took too long" outcome with
+/// the same fields as every other answer.
+#[tokio::test]
+async fn a_search_over_its_time_limit_is_stopped_and_says_so() {
+    let fx = fixture();
+    let sha = commit_usages(&fx);
+    fx.inspect_at(&sha);
+    let limits = SearchLimits {
+        timeout: std::time::Duration::from_millis(1),
+        ..SearchLimits::default()
+    };
+    let json = get_with_limits(&fx, "needle_fn", limits).await;
+    assert_eq!(json["status"], "too_large", "{json}");
+    assert_eq!(
+        json["reason"],
+        "the search took too long; try a more specific symbol"
+    );
+    assert!(json.get("source").is_none());
+    assert_eq!(json["symbol"], "needle_fn");
+    assert_eq!(json["hits"].as_array().unwrap().len(), 0);
+    assert_eq!(json["more"], false);
+    // And the same request without the squeeze finds the hits.
+    let json = get_with_limits(&fx, "needle_fn", SearchLimits::default()).await;
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["hits"].as_array().unwrap().len(), 3);
+}
+
+/// The output cap kills the search and keeps only whole records: whatever byte the cut lands on,
+/// every hit shown is a complete line.
+#[tokio::test]
+async fn an_output_over_the_cap_is_cut_at_a_whole_record() {
+    let fx = fixture();
+    let body: String = (0..3000)
+        .map(|n| format!("let v{n} = many_uses({n});\n"))
+        .collect();
+    write_file(&fx.checkout, "src/many.rs", &body);
+    let sha = commit_all(&fx.checkout, "many");
+    fx.inspect_at(&sha);
+    for cap in [997, 998, 999, 1000, 1001, 1002, 1003, 1500] {
+        let limits = SearchLimits {
+            max_output: cap,
+            ..SearchLimits::default()
+        };
+        let json = get_with_limits(&fx, "many_uses", limits).await;
+        assert_eq!(json["status"], "ok", "cap {cap}: {json}");
+        assert_eq!(json["more"], true, "cap {cap}");
+        let hits = json["hits"].as_array().unwrap();
+        assert!(
+            !hits.is_empty() && hits.len() < 100,
+            "cap {cap}: {}",
+            hits.len()
+        );
+        for hit in hits {
+            let line = hit["line"].as_u64().unwrap();
+            assert_eq!(hit["path"], "src/many.rs");
+            assert_eq!(
+                hit["text"].as_str().unwrap(),
+                format!("let v{} = many_uses({});", line - 1, line - 1),
+                "cap {cap}: a partial record was shown"
+            );
+        }
+    }
+    // A cap smaller than one record shows nothing, and says the list is not complete.
+    let limits = SearchLimits {
+        max_output: 5,
+        ..SearchLimits::default()
+    };
+    let json = get_with_limits(&fx, "many_uses", limits).await;
+    assert_eq!(json["hits"].as_array().unwrap().len(), 0);
+    assert_eq!(json["more"], true);
+}
+
+/// At most a bounded number of searches run at once; one more waits briefly, then is told the
+/// server is busy (the shared "unavailable" outcome), not queued without limit.
+#[tokio::test]
+async fn a_search_with_no_free_slot_is_busy_and_runs_nothing() {
+    use crate::workspace::GitReadGate;
+    let fx = fixture();
+    let sha = commit_usages(&fx);
+    fx.inspect_at(&sha);
+    let gate: &'static GitReadGate = Box::leak(Box::new(GitReadGate::new(
+        1,
+        std::time::Duration::from_millis(30),
+    )));
+    let limits = SearchLimits {
+        gate,
+        ..SearchLimits::default()
+    };
+    let held = gate.enter().await.expect("the one slot");
+    GREP_RUNS.with(|c| c.set(0));
+    let json = get_with_limits(&fx, "needle_fn", limits).await;
+    assert_eq!(json["status"], "unavailable", "{json}");
+    assert_eq!(
+        json["reason"],
+        "too many code reads are running; try again in a moment"
+    );
+    assert!(json.get("source").is_none());
+    assert_eq!(json["hits"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        GREP_RUNS.with(std::cell::Cell::get),
+        0,
+        "no process started"
+    );
+    // Freed, the same request is answered.
+    drop(held);
+    let json = get_with_limits(&fx, "needle_fn", limits).await;
+    assert_eq!(json["status"], "ok", "{json}");
+    assert_eq!(json["hits"].as_array().unwrap().len(), 3);
+}
+
+/// An operator's `grep.column=true` adds a column field that would break the `-z` parse.
+#[tokio::test]
+async fn a_grep_column_setting_does_not_change_the_hits() {
+    let fx = fixture();
+    let sha = commit_usages(&fx);
+    fx.inspect_at(&sha);
+    git(&fx.checkout, &["config", "grep.column", "true"]);
+    git(&fx.checkout, &["config", "grep.lineNumber", "false"]);
+    git(&fx.checkout, &["config", "color.grep", "always"]);
+    let (_, _, json) = get(&fx, &uri("needle_fn", "")).await;
+    assert_eq!(json["status"], "ok", "{json}");
+    assert_eq!(
+        locations(&json),
+        vec![
+            ("src/dir:colon.rs".to_string(), 1),
+            ("src/lib.rs".to_string(), 1),
+            ("src/lib.rs".to_string(), 2),
+        ]
+    );
+    assert_eq!(json["hits"][1]["text"], "pub fn needle_fn() {}");
+}
+
+/// Decorated key body lines (a YAML list item, a JSON array element) that hold the symbol are
+/// never shown, though the `-----BEGIN` line is not among the hits.
+#[tokio::test]
+async fn decorated_pem_body_lines_holding_the_symbol_are_not_shown() {
+    use camerata_secrets::fixtures::pem_block;
+    let fx = fixture();
+    let pem = pem_block("RSA ", 4);
+    let mut yaml = String::from("tls:\n  key:\n    - \"-----BEGIN RSA PRIVATE KEY-----\"\n");
+    let mut json_lines = String::from("{\"key\": [\n  \"-----BEGIN RSA PRIVATE KEY-----\",\n");
+    let mut planted = Vec::new();
+    for (i, body) in pem.lines().filter(|l| !l.starts_with("-----")).enumerate() {
+        // Put the symbol inside the run, bounded by non-word base64 characters.
+        let with = format!("{}+leakmarker+{}", &body[..20], &body[20..]);
+        planted.push(body[..20].to_string());
+        planted.push(body[20..].to_string());
+        if i % 2 == 0 {
+            yaml.push_str(&format!("    - \"{with}\"\n"));
+            json_lines.push_str(&format!("  \"{with}\",\n"));
+        } else {
+            yaml.push_str(&format!("    - {with}\n"));
+            json_lines.push_str(&format!("  '{with}',\n"));
+        }
+    }
+    yaml.push_str("    - \"-----END RSA PRIVATE KEY-----\"\n");
+    json_lines.push_str("  \"-----END RSA PRIVATE KEY-----\"\n]}\n");
+    write_file(&fx.checkout, "conf/tls.yaml", &yaml);
+    write_file(&fx.checkout, "conf/tls.json", &json_lines);
+    let sha = commit_all(&fx.checkout, "decorated keys");
+    fx.inspect_at(&sha);
+
+    let (_, _, json) = get(&fx, &uri("leakmarker", "")).await;
+
+    assert_eq!(json["status"], "ok", "{json}");
+    let hits = json["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 8, "{json}");
+    let all: String = hits
+        .iter()
+        .map(|h| h["text"].as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for part in &planted {
+        assert!(!all.contains(part.as_str()), "key material leaked: {all}");
+    }
+    assert!(!all.contains("leakmarker"), "{all}");
+    assert!(hits.iter().all(|h| h["text"] == "[redacted]"));
+    // The hits are still locations: path and line are there.
+    assert!(hits.iter().all(|h| h["line"].as_u64().unwrap() > 0));
 }
 
 #[tokio::test]

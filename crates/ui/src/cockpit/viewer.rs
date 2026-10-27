@@ -870,6 +870,9 @@ pub(super) fn CodeViewer(
     let shows_code = matches!(outcome, Some(SourceOutcome::Code));
     let here = line_cursor.unwrap_or(finding.line);
     let hit = own_file.then_some(finding.line);
+    // The stored evidence line and the way to the finding's enclosing block belong to the
+    // finding's own file; under a reference to another file they would describe the wrong code.
+    let floor = own_file.then_some(finding.snippet.as_str());
     let search_open = search.as_ref().filter(|s| s.field_open).cloned();
     let highlights = search.clone().filter(|s| !s.needle.is_empty());
 
@@ -975,7 +978,7 @@ pub(super) fn CodeViewer(
                             div { class: "cv-note", "Loading {shown_path}\u{2026}" }
                         },
                         (FileStateView::Failed, _) => rsx! {
-                            {note_body("The server did not answer. The file could not be loaded.", Some(&finding.snippet), false, on_open_modal)}
+                            {note_body("The server did not answer. The file could not be loaded.", floor, false, on_open_modal)}
                         },
                         (FileStateView::Loaded(v), Some(SourceOutcome::Code)) => rsx! {
                             {code_body(v, &shown_path, &finding.severity, hit, block.as_ref(), &marks, scroll_top, viewport_px, line_cursor, highlights.as_ref(), on_scroll, on_scroll_ready, on_mark, on_line, on_hover)}
@@ -985,12 +988,12 @@ pub(super) fn CodeViewer(
                             {note_body(text, None, false, on_open_modal)}
                         },
                         (_, Some(SourceOutcome::TooLarge(text))) => rsx! {
-                            {note_body(text, Some(&finding.snippet), true, on_open_modal)}
+                            {note_body(text, floor, own_file, on_open_modal)}
                         },
                         (_, Some(SourceOutcome::NotUtf8(text)))
                         | (_, Some(SourceOutcome::FileMissing(text)))
                         | (_, Some(SourceOutcome::Unavailable(text))) => rsx! {
-                            {note_body(text, Some(&finding.snippet), false, on_open_modal)}
+                            {note_body(text, floor, false, on_open_modal)}
                         },
                         _ => rsx! {},
                     }
@@ -1144,6 +1147,18 @@ fn focus_viewer() {
     dioxus::document::eval(&format!(
         "var el=document.getElementById('{VIEWER_ID}');if(el)el.focus();"
     ));
+}
+
+/// Script that brings the selected reference into view (the minimum scroll, so a selection already
+/// on screen does not jump). Two animation frames: the first lets Dioxus apply the new selection
+/// class, the second runs after the browser has laid it out.
+pub(super) const SCROLL_SELECTED_REF_JS: &str = "requestAnimationFrame(function(){\
+requestAnimationFrame(function(){var e=document.querySelector('.cv-ref-sel');\
+if(e){e.scrollIntoView({block:'nearest'});}});});";
+
+/// Keep the selected reference on screen after an arrow key moved it.
+fn follow_selected_ref() {
+    dioxus::document::eval(SCROLL_SELECTED_REF_JS);
 }
 
 /// Set the scroll container's `scrollTop`.
@@ -1952,13 +1967,18 @@ pub(super) fn CodeViewerHost(
         move |()| {
             let path = reference_path(&own_path, (*viewing.peek()).as_ref())
                 .unwrap_or_else(|| own_path.clone());
+            // A permalink names a place in a commit. When the code on screen is the working tree
+            // (the commit is not in this clone, or none was recorded) its line numbers are not
+            // that commit's, so there is nothing true to link to.
+            let Some(read) = loaded_view.as_ref().filter(|v| v.source == "git") else {
+                status.set(Some(
+                    "No inspected commit was recorded, so there is no permalink.".to_string(),
+                ));
+                return;
+            };
             // The commit the viewer actually read when it was not given one.
             let sha = if sha.is_empty() {
-                loaded_view
-                    .as_ref()
-                    .filter(|v| v.source == "git")
-                    .map(|v| v.commit.clone())
-                    .unwrap_or_default()
+                read.commit.clone()
             } else {
                 sha.clone()
             };
@@ -2159,6 +2179,7 @@ pub(super) fn CodeViewerHost(
                         }
                     }
                     refs.set(state);
+                    follow_selected_ref();
                 }
                 ViewerCommand::RefsOpen => {
                     let hit = refs.peek().as_ref().and_then(|s| match &s.load {
@@ -3339,6 +3360,53 @@ mod render_tests {
         assert!(html.contains("The server did not answer"));
     }
 
+    #[test]
+    fn a_search_that_did_not_run_is_a_failure_never_no_references() {
+        for (status, reason) in [
+            ("unavailable", "the search could not run"),
+            (
+                "too_large",
+                "the search took too long; try a more specific symbol",
+            ),
+        ] {
+            let html = render(Case {
+                file: FileStateView::Loaded(view(4, |_| {})),
+                refs: Some(RefsProps {
+                    symbol: "zzz".into(),
+                    load: RefsLoad::Loaded(refs_view(serde_json::json!({
+                        "status": status, "reason": reason, "symbol": "zzz",
+                        "hits": [], "more": false
+                    }))),
+                    selected: 0,
+                }),
+                ..Case::default()
+            });
+            assert!(
+                html.contains("Could not search for zzz"),
+                "{status}: {html}"
+            );
+            assert!(html.contains(reason), "{status}: {html}");
+            assert!(!html.contains("No references"), "{status}: {html}");
+            assert!(
+                !html.contains("cv-banner-amber"),
+                "no working-tree banner for a search that never ran"
+            );
+        }
+        // Zero listed with the output cut short is not "none" either.
+        let html = render(Case {
+            file: FileStateView::Loaded(view(4, |_| {})),
+            refs: Some(RefsProps {
+                symbol: "zzz".into(),
+                load: RefsLoad::Loaded(refs_view(serde_json::json!({
+                    "status": "ok", "source": "git", "symbol": "zzz", "hits": [], "more": true
+                }))),
+                selected: 0,
+            }),
+            ..Case::default()
+        });
+        assert!(html.contains("cut short"), "{html}");
+    }
+
     fn popover(extra: impl FnOnce(&mut serde_json::Value)) -> PopoverView {
         let mut f = serde_json::json!({
             "repo": "acme/app", "path": "src/db.rs", "line": 3, "rule_id": "SQL-INJECTION-1",
@@ -4288,16 +4356,27 @@ mod host_tests {
     }
 
     async fn serve() -> MockServer {
+        serve_with("git").await
+    }
+
+    /// The fixture server, with `src/x.rs` read from `source` (`git` or `working_tree`).
+    async fn serve_with(source: &str) -> MockServer {
         let server = MockServer::start().await;
         let ok = |body: serde_json::Value| ResponseTemplate::new(200).set_body_json(body);
         Mock::given(method("GET"))
             .and(path("/api/onboard/source-file"))
             .and(query_param("path", "src/x.rs"))
-            .respond_with(ok(file_body(
-                "here",
-                14,
-                &[(4, "    let q = build_sql(x);")],
-            )))
+            .respond_with(ok({
+                let mut body = file_body("here", 14, &[(4, "    let q = build_sql(x);")]);
+                body["source"] = source.into();
+                if source != "git" {
+                    body["status"] = "commit_unavailable".into();
+                    body["reason"] =
+                        "Inspected commit not available in this clone; showing the working tree"
+                            .into();
+                }
+                body
+            }))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -4736,5 +4815,162 @@ mod host_tests {
             "{page}"
         );
         assert!(page.contains("cv-panel"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn y_refuses_when_the_code_on_screen_is_the_working_tree() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let server = serve_with("working_tree").await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(
+            page.contains("cv-banner-amber"),
+            "the working tree is shown: {page}"
+        );
+        keydown(&vdom, seen.last("keydown"), "y", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(
+            page.contains("No inspected commit was recorded, so there is no permalink."),
+            "{page}"
+        );
+        assert!(!page.contains("Copied the permalink."));
+        assert!(
+            !page.contains("Could not copy the permalink."),
+            "nothing was attempted"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_reference_that_cannot_load_shows_no_evidence_line_of_the_finding() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let server = MockServer::start().await;
+        let ok = |body: serde_json::Value| ResponseTemplate::new(200).set_body_json(body);
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .and(query_param("path", "src/x.rs"))
+            .respond_with(ok(file_body(
+                "here",
+                14,
+                &[(4, "    let q = build_sql(x);")],
+            )))
+            .mount(&server)
+            .await;
+        // The referenced file is gone, and a third is too big to view.
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/source-file"))
+            .and(query_param("path", "src/other.rs"))
+            .respond_with(ok(serde_json::json!({
+                "status": "too_large", "source": "git",
+                "reason": "file is too large to view here (over 4 MB, or too slow to prepare)"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/finding-context"))
+            .respond_with(ok(serde_json::json!({"status": "file_missing"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/symbol-refs"))
+            .respond_with(ok(serde_json::json!({
+                "status": "ok", "source": "git", "symbol": "build_sql", "more": false,
+                "hits": [{"path": "src/other.rs", "line": 3, "text": "build_sql(y)"}]
+            })))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        settle(&mut vdom, &mut seen).await;
+        let panel = seen.last("keydown");
+        keydown(&vdom, panel, "s", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        keydown(&vdom, seen.last("keydown"), "Enter", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        keydown(&vdom, panel, "Enter", Modifiers::empty());
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("cv-refchip"), "{page}");
+        assert!(page.contains("too large to view here"), "{page}");
+        // The finding's stored line (`s4`) and the way to its enclosing block belong to its own
+        // file: neither is offered under another file's refusal.
+        assert!(!page.contains("pane-snippet"), "{page}");
+        assert!(!page.contains("Show the enclosing block"), "{page}");
+    }
+    thread_local! {
+        static HUB_CLOSED: RefCell<Option<Signal<usize>>> = const { RefCell::new(None) };
+    }
+
+    fn hub_app() -> Element {
+        let mut closed = use_signal(|| 0_usize);
+        HUB_CLOSED.with(|c| *c.borrow_mut() = Some(closed));
+        let hub = camerata_ui_core::triage::rule_hub(&[finding(4)], "me/api", "SQL-INJECTION-1")
+            .expect("the finding's rule has a hub");
+        rsx! {
+            super::super::scan::RuleHubModal {
+                hub,
+                on_jump: Callback::default(),
+                on_close: Callback::new(move |()| closed += 1),
+            }
+        }
+    }
+
+    /// Esc closes the Rule Hub when the key goes to the hub itself, as it does after a click
+    /// inside it (which used to leave Esc with nowhere to go).
+    #[test]
+    fn escape_closes_the_rule_hub_and_nothing_else_does() {
+        dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+        let mut vdom = VirtualDom::new(hub_app);
+        let mut seen = Listeners::default();
+        seen.take(&vdom.rebuild_to_vec());
+        let page = html(&vdom);
+        assert!(page.contains("tabindex=\"0\"") && page.contains(super::super::scan::RULE_HUB_ID));
+        let modal = seen.last("keydown");
+        let closed = HUB_CLOSED.with(|c| c.borrow().expect("signal"));
+        for key in ["a", "Enter", "ArrowDown", " ", "h", "Backspace"] {
+            keydown(&vdom, modal, key, Modifiers::empty());
+        }
+        assert_eq!(*closed.peek(), 0, "only Escape closes it");
+        keydown(&vdom, modal, "Escape", Modifiers::empty());
+        assert_eq!(*closed.peek(), 1);
+    }
+
+    #[test]
+    fn the_selected_reference_is_scrolled_into_view_with_the_minimum_scroll() {
+        let js = SCROLL_SELECTED_REF_JS;
+        assert!(js.contains(".cv-ref-sel"), "{js}");
+        assert!(js.contains("scrollIntoView({block:'nearest'})"), "{js}");
+        assert_eq!(js.matches("requestAnimationFrame").count(), 2);
+        // The class it looks for is the one the list puts on the selected row.
+        fn panel() -> Element {
+            let v = Arc::new(SymbolRefsView {
+                status: "ok".into(),
+                symbol: "s".into(),
+                hits: vec![RefHit::default(); 3],
+                ..SymbolRefsView::default()
+            });
+            refs_panel(
+                &RefsProps {
+                    symbol: "s".into(),
+                    load: RefsLoad::Loaded(v),
+                    selected: 2,
+                },
+                Callback::default(),
+            )
+        }
+        let mut vdom = VirtualDom::new(panel);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert_eq!(html.matches("cv-ref-sel").count(), 1, "{html}");
     }
 }

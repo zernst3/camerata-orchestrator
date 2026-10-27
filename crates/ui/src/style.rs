@@ -6714,7 +6714,7 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 }
 .cv-refs-head { padding: 8px 10px; color: var(--ink); font-weight: 700; border-bottom: 1px solid var(--line); }
 .cv-refs-note { padding: 10px; color: var(--ink-soft); }
-.cv-refs-list { flex: 1 1 auto; overflow: auto; }
+.cv-refs-list { flex: 1 1 auto; min-height: 0; overflow: auto; }
 .cv-ref { padding: 4px 10px; cursor: pointer; border-bottom: 1px solid var(--line); }
 .cv-ref:hover { background: var(--accent-wash); }
 .cv-ref-sel { background: var(--accent-wash); box-shadow: inset 3px 0 0 var(--accent); }

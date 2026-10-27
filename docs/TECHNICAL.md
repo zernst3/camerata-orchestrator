@@ -3060,21 +3060,42 @@ blocking pool under timeouts; if the block and highlight stage is slow the lines
 -e <symbol> <sha> --` in the repo dir (no shell; the symbol follows `-e`, so a leading `-` is a
 pattern character, and `-F` makes a `.` a dot). It goes through the same `source_for_read` as
 source-file (exact `owner/name` a project owns, 40-hex sha, a deleted source answers
-`source_deleted` before any process is started) and the same status words and source labels. The
+`source_deleted` before any process is started) and the same status words and source labels. It
+runs through the one shared `workspace::git_command` builder (below) and the read gate. The
 symbol rule (`camerata_api_types::symbol::is_valid_symbol`, shared with the UI) is 1 to 128 bytes of
 letters, digits and `_ $ - . :` with at least one letter, digit or `_`; anything else is a 400
-`invalid_symbol` before anything is read. Response: `{status, source, commit?, head_differs?,
+`invalid_symbol` before anything is read. Response: `{status, source?, commit?, head_differs?,
 reason?, symbol, hits: [{path, line, text}], more}`. `ok` is a search at the inspected commit
 (`source: "git"`) or, when the inspection recorded no commit, of the working tree
-(`source: "working_tree"`); `commit_unavailable` (object missing) searches the working tree and
-says so, and for a folder that is not a git checkout returns no hits; `source_deleted`;
-`file_missing` (no project owns the repo or no folder); `too_large` (the search ran over 15 s).
-Noise paths (`is_noise_path`: vendored, build and generated directories, lockfiles, minified
-bundles) are dropped, every hit line is redacted (`redact_block`, then cut at 240 characters; a
-line that is only base64 characters is shown as `[redacted]` because the per-line redactor cannot
-see the `-----BEGIN` line above a key body), and at most 200 hits are returned with `more: true`
-when there were others. The output is read up to 8 MB and the process is killed beyond that;
-`kill_on_drop`, `GIT_OPTIONAL_LOCKS=0`, `grep.fallbackToNoIndex=false`. Read-only; `no-store`.
+(`source: "working_tree"`); `commit_unavailable` (object missing) means the working tree WAS
+searched in its place and says so; `source_deleted`; `file_missing` (no project owns the repo or
+no folder); `unavailable` (`FindingContextOutcome::SearchFailed`: git would not start, not a
+repository, an error exit; or `Busy`: no read slot freed in 3 s; no `source`, `hits: []`);
+`too_large` (`SearchTooSlow`: over 15 s; no `source`, `hits: []`). The UI treats `unavailable`
+and `too_large` as a failure heading ("Could not search for ..."), never as an empty list. Noise
+paths (`is_noise_path` with the operator's `CAMERATA_SCAN_EXCLUDE_DIRS`, as the scan applies
+them: vendored, build and generated directories, lockfiles, minified bundles) are dropped, every
+hit line is redacted (`redact_block`, then cut at 240 characters; a line that is key body, plain or
+behind list decoration, is shown as `[redacted]` because the per-line redactor cannot see the
+`-----BEGIN` line above it: `camerata_secrets::is_key_body_line`, built on the block detector's own
+body-line shape), and at most 200 hits are returned with `more: true` when there were others. The
+output is read up to 8 MB (`SearchLimits::max_output`) and the process is killed beyond that; only
+whole records before the last line feed are parsed, so a half line is never redacted and shown.
+`-c grep.column=false --no-column` keep an operator's `grep.column` from breaking the `-z` parse.
+The endpoint is an existence oracle (`path:line` even for a `[redacted]` hit); that is accepted for
+a search surface. Read-only; `no-store`.
+
+**Starting git for code reads** (`workspace::git_command`, `GitEnv`, `GitReadGate`): the one
+builder for every `git` this crate starts (`workspace::git`, `read_git_blob`, `ls-tree`, the symbol
+search). It removes `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+`GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR`, `GIT_NAMESPACE` and `GIT_CEILING_DIRECTORIES`
+from the environment and sets `GIT_OPTIONAL_LOCKS=0`; reads of client code (`GitEnv::Isolated`)
+also remove every `GIT_CONFIG*`, while network steps (`GitEnv::Network`) keep the indexed
+`GIT_CONFIG_COUNT` / `_KEY_n` / `_VALUE_n` pairs the tests use to rewrite the authenticated remote.
+`GIT_READS` bounds object reads and symbol searches to 4 at once with a 3 second wait for a slot,
+then the shared `Busy` outcome (`unavailable`). It is a process-wide static rather than a field
+of `AppState` so `read_git_blob`, which has no state, shares it. `tests/git_env_isolation.rs`
+sets `GIT_DIR` and `GIT_CONFIG_*` in a process of its own and checks the builder ignores them.
 
 **The code viewer UI** (`crates/ui/src/cockpit/viewer.rs`; every judgment in
 `camerata_ui_core::viewer`). `CodeViewer` is props-only and SSR-tested; `CodeViewerHost` owns the

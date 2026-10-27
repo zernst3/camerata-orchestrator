@@ -430,7 +430,8 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    works. While a reason prompt, the go-to-line field, the search field or the symbol prompt is
    open, every key is text. While the references list has the keyboard, only `Up` `Down` `J` `K`
    (move), `Enter` (open) and `Esc` (back to the code) do anything. While the Rule Hub is open
-   above the viewer, `Esc` closes it and every other key does nothing.
+   above the viewer, `Esc` closes it (also after you click inside it) and every other key does
+   nothing.
 
    - **The popover.** Rest the pointer on the finding's line, or on any gutter dot, for a quarter of
      a second and a card shows at most eight lines: the rule id (click to open the Rule Hub), the
@@ -448,14 +449,19 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    - **References.** `S` opens a prompt pre-filled with the symbol the rule captured, else the
      longest identifier on the finding's line. Enter lists every whole-word use of it at the
      inspected commit, at most 200 (the heading says when there are more), skipping vendored and
-     generated paths, with every line redacted. `Up` `Down` choose, `Enter` opens the hit and `Esc`
-     goes back to the code. A hit is a place in the code, not a finding: opening one in another file
+     generated paths (and any folder in `CAMERATA_SCAN_EXCLUDE_DIRS`, as in the scan), with every
+     line redacted; a line of key material is shown as `[redacted]` but keeps its `path:line`.
+     `Up` `Down` choose (the list scrolls to keep the choice on screen), `Enter` opens the hit and
+     `Esc` goes back to the code. If the search could not run, or took too long, or the server was
+     busy with other code reads, the heading says `Could not search for <symbol>` and why; it never
+     says there are no references when nothing was searched. A hit is a place in the code, not a finding: opening one in another file
      shows that file with a `reference` tag, never moves the Queue's cursor, and the decision keys
      do nothing until you press `Backspace` to come back to the finding. Without a recorded commit
      (or when it is not in this clone) the search runs on the working tree and an amber line says so.
    - **Permalink.** `Y` copies `owner/repo@abc1234:path:line` and, when the repo's origin is GitHub, a
      second line with the `https://github.com/.../blob/<commit>/<path>#L<line>` URL. A toast
-     confirms. The link names a place; it contains no code.
+     confirms. The link names a place; it contains no code. When the code on screen is the working
+     tree (the amber banner), there is no commit to link to and `Y` says so instead of copying.
 
    **Scan-time deterministic preview.** For each **mechanical** rule you selected that maps to a tool
    Camerata can drive (clippy, ruff, eslint, semgrep), the deterministic scan **runs that tool itself**

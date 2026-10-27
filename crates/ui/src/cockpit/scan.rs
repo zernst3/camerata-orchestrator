@@ -2884,6 +2884,9 @@ pub(super) fn RuleHubStrip(
 /// The hub is therefore its own overlay over core's `rule_hub` derivation, which needs nothing
 /// but the scan's own rows; where a `ProposedRuleView` does exist, the full rule detail stays
 /// one further click away, the same relationship the detail pane has with the finding modal.
+/// The DOM id of the Rule Hub modal, which takes keyboard focus when it opens.
+pub(super) const RULE_HUB_ID: &str = "camerata-rule-hub";
+
 #[component]
 pub(super) fn RuleHubModal(
     hub: RuleHubView,
@@ -2895,7 +2898,26 @@ pub(super) fn RuleHubModal(
 ) -> Element {
     rsx! {
         div { class: "rule-modal-overlay", onclick: move |_| on_close.call(()),
-            div { class: "rule-modal rule-hub-modal", onclick: move |e| e.stop_propagation(),
+            // Focusable, and focused on open, so Esc closes it: while it was the only overlay
+            // without a key handler, a click inside it left Esc with nowhere to go. The tab stop
+            // also means a click on any text inside keeps focus here rather than dropping to the
+            // page.
+            div {
+                class: "rule-modal rule-hub-modal",
+                id: RULE_HUB_ID,
+                tabindex: "0",
+                onclick: move |e| e.stop_propagation(),
+                onmounted: move |e| {
+                    spawn(async move {
+                        let _ = e.set_focus(true).await;
+                    });
+                },
+                onkeydown: move |e: KeyboardEvent| {
+                    if e.key() == Key::Escape {
+                        e.stop_propagation();
+                        on_close.call(());
+                    }
+                },
                 div { class: "rule-modal-head",
                     span { class: "rule-modal-id", "{hub.rule_id}" }
                     button {

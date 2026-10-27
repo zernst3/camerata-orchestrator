@@ -359,6 +359,7 @@ impl SymbolRefsView {
             }
             "file_missing" => RefsOutcome::Note(self.reason_or("The repo was not found")),
             "too_large" => RefsOutcome::Note(self.reason_or("The search took too long")),
+            "unavailable" => RefsOutcome::Note(self.reason_or("The search could not run")),
             _ => RefsOutcome::Note(self.reason_or("The references could not be loaded")),
         }
     }
@@ -378,11 +379,20 @@ impl SymbolRefsView {
     }
 
     /// The list's heading: `14 references to foo`, `200 references to foo (more not shown)`.
+    /// A search that did not run says so; it is never "No references". Zero hits with `more` set
+    /// means the output was cut before a hit could be listed, which is not "none".
     pub fn summary(&self) -> String {
+        if self.outcome() != RefsOutcome::List {
+            return format!("Could not search for {}", self.symbol);
+        }
         let n = self.hits.len();
         let plural = if n == 1 { "reference" } else { "references" };
         match (n, self.more) {
-            (0, _) => format!("No references to {}", self.symbol),
+            (0, true) => format!(
+                "No references to {} could be listed (the search output was cut short)",
+                self.symbol
+            ),
+            (0, false) => format!("No references to {}", self.symbol),
             (_, true) => format!("{n} {plural} to {} (more not shown)", self.symbol),
             _ => format!("{n} {plural} to {}", self.symbol),
         }
@@ -945,6 +955,13 @@ mod tests {
             ..ok.clone()
         };
         assert_eq!(none.summary(), "No references to foo");
+        // Zero listed with the output cut is not "none".
+        let cut = SymbolRefsView {
+            hits: vec![],
+            more: true,
+            ..ok.clone()
+        };
+        assert!(cut.summary().contains("cut short"), "{}", cut.summary());
 
         let wt = SymbolRefsView {
             status: "commit_unavailable".into(),
@@ -962,6 +979,7 @@ mod tests {
             ("source_deleted", "Source deleted"),
             ("file_missing", "The repo was not found"),
             ("too_large", "The search took too long"),
+            ("unavailable", "The search could not run"),
             ("anything else", "could not be loaded"),
         ] {
             let v = SymbolRefsView {
@@ -974,6 +992,16 @@ mod tests {
                 other => panic!("{status}: {other:?}"),
             }
             assert_eq!(v.banner(), None);
+        }
+        // A search that did not run is a failure heading, never "No references".
+        for status in ["unavailable", "too_large", "source_deleted", "file_missing"] {
+            let v = SymbolRefsView {
+                status: status.into(),
+                symbol: "foo".into(),
+                ..SymbolRefsView::default()
+            };
+            assert_eq!(v.summary(), "Could not search for foo", "{status}");
+            assert!(v.hits.is_empty());
         }
         // A server reason wins over the fallback.
         let deleted = SymbolRefsView {

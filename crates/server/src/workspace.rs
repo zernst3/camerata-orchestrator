@@ -79,18 +79,107 @@ pub(crate) fn authed_url(repo: &str, token: &str) -> String {
     format!("https://x-access-token:{token}@github.com/{repo}.git")
 }
 
+/// Environment variables that point git at a repository, index, object store or configuration
+/// other than the one in the working directory. A server started from a shell with one of them
+/// set (a hook, a CI step, a developer's `GIT_DIR`) would otherwise read the wrong repository,
+/// or none.
+pub const REPO_REDIRECTING_VARS: [&str; 8] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+];
+
+/// How much of the ambient git configuration environment a command keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitEnv {
+    /// Reads of client code: every `GIT_CONFIG*` variable is removed, so no operator setting
+    /// (`grep.column`, a diff driver, a textconv) can change what is read or how it is printed.
+    Isolated,
+    /// Everything else (clone, fetch, probes): the indexed `GIT_CONFIG_COUNT` / `_KEY_n` /
+    /// `_VALUE_n` pairs stay, because the tests rewrite the authenticated remote with them so no
+    /// network step leaves the machine. The other `GIT_CONFIG*` variables are removed.
+    Network,
+}
+
+/// The ambient variable names to remove for `mode`, given the names present in the environment.
+pub fn git_vars_to_remove(mode: GitEnv, ambient: impl Iterator<Item = String>) -> Vec<String> {
+    let mut out: Vec<String> = REPO_REDIRECTING_VARS
+        .iter()
+        .map(|v| (*v).to_string())
+        .collect();
+    for name in ambient {
+        if !name.starts_with("GIT_CONFIG") {
+            continue;
+        }
+        let indexed = name == "GIT_CONFIG_COUNT"
+            || name.starts_with("GIT_CONFIG_KEY_")
+            || name.starts_with("GIT_CONFIG_VALUE_");
+        if mode == GitEnv::Isolated || !indexed {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// THE ONE way this crate starts `git`: in `cwd`, killed if the future is dropped
+/// (ARCH-RESOURCE-LIFECYCLE-1), with the repository-redirecting variables removed
+/// ([`REPO_REDIRECTING_VARS`], and `GIT_CONFIG*` per [`GitEnv`]) and `GIT_OPTIONAL_LOCKS=0` so a
+/// read never takes the index lock.
+pub fn git_command(cwd: Option<&Path>, mode: GitEnv) -> Command {
+    let mut cmd = Command::new("git");
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    for name in git_vars_to_remove(mode, std::env::vars().map(|(k, _)| k)) {
+        cmd.env_remove(name);
+    }
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    cmd.kill_on_drop(true);
+    cmd
+}
+
+/// Bounds how many `git` processes read client code at once (the symbol search and the object
+/// reads behind source-file and finding-context). A viewer that fires searches faster than they
+/// finish would otherwise start one process each. When no slot frees within `wait`, the caller
+/// answers the shared `busy` outcome instead of queueing without limit.
+#[derive(Debug)]
+pub struct GitReadGate {
+    slots: tokio::sync::Semaphore,
+    wait: std::time::Duration,
+}
+
+impl GitReadGate {
+    pub const fn new(permits: usize, wait: std::time::Duration) -> Self {
+        Self {
+            slots: tokio::sync::Semaphore::const_new(permits),
+            wait,
+        }
+    }
+
+    /// A slot, or `None` when none freed within the wait. Hold the permit for the process's life.
+    pub async fn enter(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        tokio::time::timeout(self.wait, self.slots.acquire())
+            .await
+            .ok()
+            .and_then(Result::ok)
+    }
+}
+
+/// The process-wide gate for reads of client code: 4 at once, 3 seconds to get a slot.
+pub static GIT_READS: GitReadGate = GitReadGate::new(4, std::time::Duration::from_secs(3));
+
 /// Run a git command (optionally in `cwd`) and capture its output.
 pub(crate) async fn git(
     cwd: Option<&Path>,
     args: &[&str],
 ) -> std::io::Result<std::process::Output> {
-    let mut cmd = Command::new("git");
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
+    let mut cmd = git_command(cwd, GitEnv::Network);
     cmd.args(args);
-    // ARCH-RESOURCE-LIFECYCLE-1: reap git if our future is dropped.
-    cmd.kill_on_drop(true);
     cmd.output().await
 }
 

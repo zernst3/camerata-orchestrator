@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use camerata_checks::extract::enclosing::{enclosing_block, slice_lines};
 
 use super::files::MAX_FILE_BYTES;
+use crate::workspace::{git_command, GitEnv, GIT_READS};
 
 /// The result of one finding-context lookup. Serializes straight to the endpoint's JSON body
 /// via [`to_json`](FindingContextOutcome::to_json) — see the design doc §3 for the wire shape.
@@ -66,6 +67,13 @@ pub enum FindingContextOutcome {
         deleted_at: String,
         record_id: String,
     },
+    /// A search could not run at all (git missing, not a repository, an error exit). Nothing was
+    /// searched, so no answer, empty or otherwise, may be drawn from it.
+    SearchFailed,
+    /// A search ran past its time limit and was stopped.
+    SearchTooSlow,
+    /// Too many reads of client code were already running; try again in a moment.
+    Busy,
 }
 
 /// Where a lookup reads the file from.
@@ -140,6 +148,18 @@ impl FindingContextOutcome {
                 "status": "commit_unavailable",
                 "reason": "Inspected commit not available in this clone; showing the working tree",
             }),
+            FindingContextOutcome::SearchFailed => serde_json::json!({
+                "status": "unavailable",
+                "reason": "the search could not run",
+            }),
+            FindingContextOutcome::SearchTooSlow => serde_json::json!({
+                "status": "too_large",
+                "reason": "the search took too long; try a more specific symbol",
+            }),
+            FindingContextOutcome::Busy => serde_json::json!({
+                "status": "unavailable",
+                "reason": "too many code reads are running; try again in a moment",
+            }),
             FindingContextOutcome::SourceDeleted {
                 deleted_at,
                 record_id,
@@ -203,6 +223,7 @@ pub async fn lookup_at(
                 }
                 Err(GitReadError::NotFound) => return FindingContextOutcome::FileMissing,
                 Err(GitReadError::TooLarge) => return FindingContextOutcome::TooLarge,
+                Err(GitReadError::Busy) => return FindingContextOutcome::Busy,
             }
         }
     };
@@ -240,13 +261,14 @@ pub(crate) enum GitReadError {
     NotFound,
     /// The blob is larger than the caller's cap.
     TooLarge,
+    /// Every slot for reading client code was busy for too long ([`crate::workspace::GIT_READS`]).
+    Busy,
 }
 
 /// Whether `rel_path` at commit `sha` is a regular file (tree entry mode 100644 or 100755), by
 /// the read-only `git ls-tree`. The path follows `--`, so it can never be read as an option.
 async fn is_regular_file_at(dir: &Path, sha: &str, rel_path: &str) -> bool {
-    let Ok(output) = tokio::process::Command::new("git")
-        .current_dir(dir)
+    let Ok(output) = git_command(Some(dir), GitEnv::Isolated)
         .args([
             "-c",
             "core.quotepath=off",
@@ -258,7 +280,6 @@ async fn is_regular_file_at(dir: &Path, sha: &str, rel_path: &str) -> bool {
         ])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
         .output()
         .await
     else {
@@ -292,6 +313,10 @@ pub(crate) async fn read_git_blob(
     if !crate::client_source::git::commit_exists(dir, sha).await {
         return Err(GitReadError::CommitUnavailable);
     }
+    // From here a process runs: one of a bounded number at once.
+    let Some(_slot) = GIT_READS.enter().await else {
+        return Err(GitReadError::Busy);
+    };
     // Only a regular file is shown. A symlink's blob is its target path and a submodule is a
     // commit, neither of which is the code a reader expects; a directory is not a file either.
     if !is_regular_file_at(dir, sha, rel_path).await {
@@ -299,13 +324,11 @@ pub(crate) async fn read_git_blob(
     }
     // `sha:` makes the argument an object name; nothing in `rel_path` can be read as an option.
     let spec = format!("{sha}:{rel_path}");
-    let mut child = tokio::process::Command::new("git")
-        .current_dir(dir)
+    let mut child = git_command(Some(dir), GitEnv::Isolated)
         .args(["-c", "core.quotepath=off", "cat-file", "blob", &spec])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
         .spawn()
         .map_err(|_| GitReadError::NotFound)?;
     let Some(stdout) = child.stdout.take() else {
