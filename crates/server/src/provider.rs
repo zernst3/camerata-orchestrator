@@ -23,6 +23,37 @@ pub struct ProviderHandle {
     pub live: bool,
 }
 
+/// The live, swappable provider slot shared by every clone of `AppState`.
+///
+/// The GitHub provider carries its token, so it must be re-selected when the `github_token`
+/// credential is saved or removed in the app; otherwise the UI would say "saved" while the
+/// running app kept using the old (or no) token until a restart. Readers take a cheap snapshot
+/// with [`ProviderCell::current`]; the credential endpoints call [`ProviderCell::reselect`].
+#[derive(Clone)]
+pub struct ProviderCell(Arc<std::sync::RwLock<ProviderHandle>>);
+
+impl ProviderCell {
+    pub fn new(handle: ProviderHandle) -> Self {
+        Self(Arc::new(std::sync::RwLock::new(handle)))
+    }
+
+    /// A snapshot of the active provider.
+    pub fn current(&self) -> ProviderHandle {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Replace the active provider.
+    pub fn replace(&self, handle: ProviderHandle) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = handle;
+    }
+
+    /// Re-select the provider from the credential store (token saved in the app first,
+    /// `CAMERATA_GITHUB_TOKEN` fallback).
+    pub fn reselect(&self, creds: &dyn crate::credentials::CredentialStore) {
+        self.replace(ProviderHandle::from_credentials(creds));
+    }
+}
+
 impl ProviderHandle {
     /// The in-process native provider (no credentials).
     pub fn native() -> Self {

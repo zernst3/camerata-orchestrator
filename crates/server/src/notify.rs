@@ -118,12 +118,26 @@ fn describe_event(ev: &InboundWorkItemEvent) -> String {
 /// flood the feed with every pre-existing item. Poll errors (e.g. a GitHub
 /// token-only connection with no default repo to poll) are swallowed so a
 /// misconfiguration doesn't spam the feed; the connection probe surfaces those.
-pub fn spawn_tracker_poller(provider: Arc<dyn WorkItemProvider>, notifications: NotificationStore) {
+///
+/// The provider is read from the shared [`crate::provider::ProviderCell`] on EVERY tick, so a
+/// GitHub token saved (or removed) in the app takes over without a restart. When the active
+/// provider changes, the old cursor means nothing to the new one: start a fresh baseline.
+pub fn spawn_tracker_poller(
+    provider_cell: crate::provider::ProviderCell,
+    notifications: NotificationStore,
+) {
     let secs = interval_secs("CAMERATA_POLL_TRACKER_SECS", 45);
     tokio::spawn(async move {
         let mut cursor: Option<String> = None;
         let mut baseline = true;
+        let mut last: Option<Arc<dyn WorkItemProvider>> = None;
         loop {
+            let provider = provider_cell.current().provider;
+            if !last.as_ref().is_some_and(|l| Arc::ptr_eq(l, &provider)) {
+                cursor = None;
+                baseline = true;
+                last = Some(provider.clone());
+            }
             if let Ok((events, next)) = provider.poll(cursor.as_deref()).await {
                 if baseline {
                     // First poll: adopt the cursor without emitting historical items.

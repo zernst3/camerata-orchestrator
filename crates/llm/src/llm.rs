@@ -160,6 +160,9 @@ fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::
     // nothing (shell tests were fast only because their stdin was a TTY/closed).
     // Redirecting stdin to /dev/null gives an immediate EOF so claude uses the -p arg
     // and responds at once.
+    // The Cli backend is the SUBSCRIPTION path: it must never silently bill the API because an
+    // `ANTHROPIC_API_KEY` from `.env` was inherited into this subprocess.
+    crate::credentials::scrub_anthropic_key_env(&mut cmd);
     cmd.kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .arg("-p")
@@ -4006,6 +4009,21 @@ exit 1
         assert_eq!(args[at + 1], "11111111-2222-4333-8444-555555555555");
         // The prompt rides in the same command, so the id really does name its session.
         assert!(args.iter().any(|a| a == "hello"));
+    }
+
+    /// The Cli (subscription) backend must never inherit the Anthropic API key: a `.env` key in
+    /// the parent would otherwise silently make `claude -p` bill the API.
+    #[test]
+    fn cli_command_removes_the_inherited_anthropic_key_from_the_child_env() {
+        let cmd = build_cli_command(&LlmRequest::new("hi"), "claude-haiku-4-5", "sid");
+        let removed = cmd
+            .as_std()
+            .get_envs()
+            .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v.is_none());
+        assert!(
+            removed,
+            "the child env must explicitly remove ANTHROPIC_API_KEY"
+        );
     }
 
     /// The id the sink records is the id the child process actually received, the cwd is

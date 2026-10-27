@@ -2028,12 +2028,20 @@ impl LlmPort for AnthropicNoopCompleter {
 /// chat) [`crate::llm::ProjectBackend`] setting. No env read at all — the setting is the
 /// caller's entire input, already resolved from `project.backend` by the gov-dev agent driver
 /// factories below.
+///
+/// ONE credential read: the key is resolved once and that same value both decides the
+/// resolution and is returned for the `Api` arm (`Ok(Some(key))`), so no path reads the
+/// keychain twice. `Ok(None)` is the `Cli` resolution; `Err` is `Blocked`.
 fn resolve_claude_backend(
     creds: &dyn crate::credentials::CredentialStore,
     backend: crate::llm::ProjectBackend,
-) -> crate::llm::BackendResolution {
-    let has_api_key = crate::anthropic_api_key_present(creds);
-    crate::llm::resolve_backend(backend, has_api_key)
+) -> anyhow::Result<Option<String>> {
+    let key = crate::credentials::anthropic_api_key(creds);
+    match crate::llm::resolve_backend(backend, key.is_some()) {
+        crate::llm::BackendResolution::Blocked { message } => anyhow::bail!(message),
+        crate::llm::BackendResolution::Api => Ok(key),
+        crate::llm::BackendResolution::Cli => Ok(None),
+    }
 }
 
 /// Build a `claude`-provider driver: an Anthropic-shape [`ApiAgentDriver`] when the resolved
@@ -2076,13 +2084,7 @@ fn build_claude_driver(
     // The calling project's (or chat's) resolved backend setting. See the fn doc.
     backend: crate::llm::ProjectBackend,
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
-    let key = match resolve_claude_backend(creds, backend) {
-        crate::llm::BackendResolution::Blocked { message } => {
-            anyhow::bail!(message);
-        }
-        crate::llm::BackendResolution::Api => crate::credentials::anthropic_api_key(creds),
-        crate::llm::BackendResolution::Cli => None,
-    };
+    let key = resolve_claude_backend(creds, backend)?;
     if let Some(key) = key {
         // Anthropic Messages API agent. Same gate surface as every other ApiAgentDriver:
         // gated_write-only, worktree-jailed, delegate/fan_out only when orchestrator=true.
@@ -2600,16 +2602,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
             // `Blocked` refuses to build the lead at all (propagates as `Err`, so the run
             // never starts).
             _ => {
-                let resolution = resolve_claude_backend(self.creds.as_ref(), self.backend);
-                let key = match resolution {
-                    crate::llm::BackendResolution::Blocked { message } => {
-                        return Err(anyhow::anyhow!(message));
-                    }
-                    crate::llm::BackendResolution::Api => {
-                        crate::credentials::anthropic_api_key(self.creds.as_ref())
-                    }
-                    crate::llm::BackendResolution::Cli => None,
-                };
+                let key = resolve_claude_backend(self.creds.as_ref(), self.backend)?;
                 if let Some(key) = key {
                     // Native Anthropic-shape orchestrator. Mirrors the OpenRouter arm: a
                     // ServerChildDriverFactory resolves each delegate/fan_out child to ITS
@@ -2672,6 +2665,40 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
 
 #[cfg(test)]
 mod tests {
+    /// One credential read per driver build: the key that decides the resolution is the key
+    /// that is returned (no second keychain read, so no second prompt).
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn resolve_claude_backend_reads_the_store_exactly_once() {
+        use crate::credentials::{CredentialError, CredentialStore};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Counting(AtomicUsize);
+        impl CredentialStore for Counting {
+            fn set(&self, _: &str, _: &str) -> Result<(), CredentialError> {
+                Ok(())
+            }
+            fn get(&self, _: &str) -> Result<Option<String>, CredentialError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Some("sk-ant-once".to_string()))
+            }
+            fn delete(&self, _: &str) -> Result<(), CredentialError> {
+                Ok(())
+            }
+        }
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let store = Counting(AtomicUsize::new(0));
+        let key = resolve_claude_backend(&store, crate::llm::ProjectBackend::Api).unwrap();
+        assert_eq!(key.as_deref(), Some("sk-ant-once"));
+        assert_eq!(store.0.load(Ordering::SeqCst), 1, "one store read, not two");
+        // Cli resolves to no key (still one read).
+        store.0.store(0, Ordering::SeqCst);
+        assert_eq!(
+            resolve_claude_backend(&store, crate::llm::ProjectBackend::Cli).unwrap(),
+            None
+        );
+        assert_eq!(store.0.load(Ordering::SeqCst), 1);
+    }
+
     use super::*;
     use crate::credentials::CredentialStore as _;
     use camerata_core::Role;

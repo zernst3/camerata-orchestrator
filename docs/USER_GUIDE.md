@@ -82,6 +82,17 @@ paths you use:
      in-process and works with any provider the model registry discovers (Claude, and every
      OpenRouter-listed model flagged for tool use).
 
+   Each saved credential row has a **Remove** button. A value saved in the app takes precedence
+   over its environment variable, so remove it there to hand the credential back to the
+   environment. A GitHub token saved or removed in Settings is used immediately, with no restart.
+
+   **macOS Keychain prompt.** The first time Camerata reads a saved credential after you launch
+   it, macOS may ask whether the app may use your confidential information. Choose **Always
+   Allow** so it does not ask again. The app reads the Keychain once per launch and then keeps
+   the values in memory (saving or removing a credential updates both). A build that is not
+   code-signed looks like a new app to macOS after every rebuild, so the prompt returns after
+   each rebuild; a signed build avoids that.
+
    These credentials are global (one keychain entry each, shared by every project); which path is
    actually **active** is a separate choice made **per project**, described in the next section.
 
@@ -1952,7 +1963,9 @@ scopes.
   `camerata` command line, with no restart. The `ANTHROPIC_API_KEY` environment variable is only a
   fallback when no key is saved here.
 - **GitHub token**: for push, PR, and Issues operations. Stored in the system keychain; shown masked.
-- **Chat backend**: a CLI/API toggle for the project-less **chat assistant only**. It has no effect
+- **Chat backend**: a CLI/API toggle for the project-less **chat assistant only**. API makes the
+  chat call the Anthropic API with your saved key (with no key it refuses rather than falling back
+  to the CLI). It has no effect
   on any project's scan, alternative recommendations, rescans, or governed dev loop: those always
   read that project's own Backend setting, described next.
 - **Bombe animation**: a global ON/OFF toggle and a Play/Pause preview control. ON by default;

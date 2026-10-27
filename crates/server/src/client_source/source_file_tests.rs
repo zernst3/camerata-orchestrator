@@ -658,10 +658,6 @@ async fn a_slow_render_degrades_instead_of_hanging() {
     let fx = fixture();
     fx.inspect_at(&fx.head);
 
-    use crate::onboard::source_file::TEST_STAGE_DELAY_MS;
-    use std::sync::atomic::Ordering;
-    TEST_STAGE_DELAY_MS.store(400, Ordering::SeqCst);
-
     let degraded = get_with_limits(
         &fx,
         "src/main.rs",
@@ -669,6 +665,7 @@ async fn a_slow_render_degrades_instead_of_hanging() {
         RenderLimits {
             prepare: Duration::from_secs(30),
             decorate: Duration::from_millis(100),
+            stage_delay: Duration::from_millis(400),
         },
     )
     .await;
@@ -687,10 +684,10 @@ async fn a_slow_render_degrades_instead_of_hanging() {
         RenderLimits {
             prepare: Duration::from_millis(100),
             decorate: Duration::from_secs(30),
+            stage_delay: Duration::from_millis(400),
         },
     )
     .await;
-    TEST_STAGE_DELAY_MS.store(0, Ordering::SeqCst);
     assert_eq!(refused["status"], "too_large", "{refused}");
     assert!(refused.get("lines").is_none());
 }

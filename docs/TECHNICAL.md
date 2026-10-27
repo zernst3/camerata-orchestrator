@@ -2910,14 +2910,37 @@ key). Row parity does not re-run `req_d2`'s count reconciliation at runtime.
 
 Camerata is local-first. All state lives on the user's machine.
 
-### Anthropic key resolution (one rule)
+### Credential resolution (one rule)
 
-`camerata_llm::credentials::anthropic_api_key(store)` is the single rule for which Anthropic API
-key any model call uses: the key saved in the credential store (the OS keychain, written by the
-Settings UI) first, the `ANTHROPIC_API_KEY` env var only as a fallback (CI, existing `.env`
-setups). Blank values count as absent. It is read at the moment a client is built and never
-cached, and nothing copies the key into process env (the old startup `set_var` hydration is
-gone), so a key saved or replaced in the UI takes effect on the next call with no restart.
+`camerata_llm::credentials::resolve_credential(store, name)` is the single rule for the three
+credentials the app saves (Anthropic key, OpenRouter key, GitHub token); `anthropic_api_key`,
+`openrouter_api_key` and `github_token` are thin wrappers. The value saved in the credential
+store (the OS keychain, written by the Settings UI) wins; the credential's env var
+(`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `CAMERATA_GITHUB_TOKEN`) is only a fallback (CI,
+existing `.env` setups). Blank values count as absent. The env-var names are private to
+`credentials.rs`, so only the resolver can name them (compiler-enforced). Resolution happens at
+the moment a client is built, and nothing copies a credential into process env (the old startup
+`set_var` hydration is gone), so a credential saved or replaced in the UI takes effect on the
+next call with no restart.
+
+Because a saved value beats the env var, there is a way to remove one:
+`CredentialStore::delete` / `DELETE /api/credentials/:name` / the Remove button on a saved
+credential row. `API_KEY_FIX_HINT`, the one shared "missing key" hint, states the precedence.
+
+`KeyringCredentialStore` reads through a PROCESS-WIDE cache (`CachedCredentialStore`): the
+Keychain is read once per credential on first use, `set` and `delete` write through and update
+the cache, so later reads (including on handler threads) never touch the Keychain and macOS
+prompts at most once per launch. A change made outside the app (Keychain Access) is seen on the
+next launch.
+
+The GitHub provider carries its token, so `ProviderCell` (the swappable provider slot in
+`AppState`) is re-selected whenever the `github_token` credential is saved or deleted, and the
+tracker poller reads the cell on every tick; a token saved after launch is used immediately.
+
+The project-less chat assistant builds its `Llm` with `AppState::chat_llm()`, which follows
+`settings.chat_backend` (Api builds an Api `Llm` with the key resolved now; Api with no key is an
+error, never a silent downgrade to the CLI). The `claude -p` subprocess has `ANTHROPIC_API_KEY`
+removed from its environment so the subscription backend can never silently bill the API.
 
 Call sites: the gate (`anthropic_api_key_present`), the audit and rescan `Llm`
 (`onboard::build_llm` -> `Llm::for_backend[_and_ledger]`, which take the key explicitly and read

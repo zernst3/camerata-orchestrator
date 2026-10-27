@@ -84,6 +84,11 @@ pub struct RenderLimits {
     pub prepare: Duration,
     /// Enclosing block and highlighting. Over this the lines are returned plain.
     pub decorate: Duration,
+    /// Test seam: how long each CPU stage sleeps before working, so a test can prove the
+    /// timeouts degrade the response without a genuinely slow input. It travels WITH the limits
+    /// of the one call that sets it (production is always zero), so it cannot slow any other
+    /// test, unlike the process-global it replaces.
+    pub stage_delay: Duration,
 }
 
 impl Default for RenderLimits {
@@ -91,6 +96,7 @@ impl Default for RenderLimits {
         Self {
             prepare: Duration::from_secs(5),
             decorate: Duration::from_secs(2),
+            stage_delay: Duration::ZERO,
         }
     }
 }
@@ -258,7 +264,10 @@ pub(crate) async fn read_rendered(
         let path = path.clone();
         tokio::time::timeout(
             limits.prepare,
-            tokio::task::spawn_blocking(move || prepare(bytes, &path, around)),
+            tokio::task::spawn_blocking(move || {
+                stage_sleep(limits.stage_delay);
+                prepare(bytes, &path, around)
+            }),
         )
         .await
     };
@@ -271,7 +280,10 @@ pub(crate) async fn read_rendered(
     let shared = Arc::new(prepared);
     let job = {
         let (shared, path) = (Arc::clone(&shared), path);
-        tokio::task::spawn_blocking(move || decorate(&shared, &path, around, DEFAULT_BUDGET))
+        tokio::task::spawn_blocking(move || {
+            stage_sleep(limits.stage_delay);
+            decorate(&shared, &path, around, DEFAULT_BUDGET)
+        })
     };
     let decorated = match tokio::time::timeout(limits.decorate, job).await {
         Ok(Ok(decorated)) => decorated,
@@ -307,17 +319,10 @@ pub(crate) struct Decorated {
     lines: Vec<Vec<Segment>>,
 }
 
-/// Test seam: milliseconds each CPU stage sleeps before working, so a test can prove the
-/// timeouts degrade the response without needing a genuinely slow input.
-#[cfg(test)]
-pub(crate) static TEST_STAGE_DELAY_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-#[cfg(test)]
-fn test_stage_delay() {
-    let ms = TEST_STAGE_DELAY_MS.load(std::sync::atomic::Ordering::SeqCst);
-    if ms > 0 {
-        std::thread::sleep(Duration::from_millis(ms));
+/// Sleep `delay` on the blocking-pool thread before a CPU stage works (zero in production).
+fn stage_sleep(delay: Duration) {
+    if !delay.is_zero() {
+        std::thread::sleep(delay);
     }
 }
 
@@ -350,8 +355,6 @@ pub(crate) fn prepare(
     rel_path: &str,
     around: Option<usize>,
 ) -> Result<Prepared, Refused> {
-    #[cfg(test)]
-    test_stage_delay();
     let whole = bytes.len() <= MAX_FILE_BYTES;
     let lines = redacted_lines(bytes, MAX_VIEWER_BYTES)?;
 
@@ -382,8 +385,6 @@ pub(crate) fn decorate(
     around: Option<usize>,
     highlight_budget: Duration,
 ) -> Decorated {
-    #[cfg(test)]
-    test_stage_delay();
     let Prepared {
         lines, from, to, ..
     } = prepared;

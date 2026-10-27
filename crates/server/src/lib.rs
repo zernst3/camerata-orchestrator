@@ -180,7 +180,7 @@ pub struct AppState {
     /// endpoint consumes it to resume. Persisted alongside the clarify store so a pause
     /// point survives a restart.
     clarify_resume: crate::clarify_resume::ClarifyResumeStore,
-    provider: ProviderHandle,
+    provider: crate::provider::ProviderCell,
     decompositions: DecompositionStore,
     routines: RoutineStore,
     notifications: crate::notify::NotificationStore,
@@ -314,7 +314,7 @@ impl AppState {
             runs: RunStore::new(),
             clarifications: ClarificationStore::new(),
             clarify_resume: crate::clarify_resume::ClarifyResumeStore::new(),
-            provider: ProviderHandle::native(),
+            provider: crate::provider::ProviderCell::new(ProviderHandle::native()),
             decompositions: DecompositionStore::new(),
             routines: RoutineStore::new(),
             notifications: crate::notify::NotificationStore::new(),
@@ -376,6 +376,26 @@ impl AppState {
     /// themselves.
     pub fn llm(&self) -> crate::llm::Llm {
         crate::llm::Llm::from_env_with_ledger(self.usage_ledger.clone())
+    }
+
+    /// The `Llm` for the project-less CHAT assistant, built on the transport the user chose in
+    /// Settings (`settings.chat_backend`): `Api` calls the Anthropic Messages API with the key
+    /// resolved RIGHT NOW (`credentials::anthropic_api_key`, store first), `Cli` drives the
+    /// logged-in Claude Code CLI. `Api` with no key is `Err(message)`, never a silent downgrade
+    /// to the CLI (same compliance-safety rule as every project-scoped seam).
+    pub fn chat_llm(&self) -> Result<crate::llm::Llm, String> {
+        let key = crate::credentials::anthropic_api_key(self.credential_store.as_ref());
+        let backend = match crate::llm::resolve_backend(self.settings.chat_backend(), key.is_some())
+        {
+            crate::llm::BackendResolution::Blocked { message } => return Err(message),
+            crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
+            crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
+        };
+        Ok(crate::llm::Llm::for_backend_and_ledger(
+            backend,
+            key,
+            self.usage_ledger.clone(),
+        ))
     }
 
     /// Record one governance event to the audit trail (Phase H1 foundation).
@@ -994,7 +1014,9 @@ impl AppState {
         // The real credential store is installed FIRST so the provider is selected from the
         // GitHub token saved in the app (env only as the fallback), not from env alone.
         state.credential_store = Arc::new(crate::credentials::KeyringCredentialStore);
-        state.provider = ProviderHandle::from_credentials(state.credential_store.as_ref());
+        state.provider = crate::provider::ProviderCell::new(ProviderHandle::from_credentials(
+            state.credential_store.as_ref(),
+        ));
         // Projects (their configs + pointers, NOT repo contents) persist across
         // launches in the per-user data dir, so an architect's projects survive a
         // restart. Falls back to an in-memory store if the data dir can't be
@@ -1595,9 +1617,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/product-export", post(export_product))
         // ── App-wide credential manager ───────────────────────────────────────
         // POST /api/credentials/:name  — store a credential (body: { "value": "…" })
+        // DELETE /api/credentials/:name — remove a saved credential
         // GET  /api/credentials        — list all known credentials with masked values
         .route("/api/credentials", get(list_credentials))
-        .route("/api/credentials/:name", post(set_credential))
+        .route(
+            "/api/credentials/:name",
+            post(set_credential).delete(delete_credential),
+        )
         .with_state(state)
 }
 
@@ -1748,10 +1774,7 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // Background event-ingest pollers (tracker events -> notification feed -> UI
     // toasts). Cadences are env-configurable; see crate::notify. Spawned here, not
     // in `router`, so unit tests that build the router don't start background work.
-    crate::notify::spawn_tracker_poller(
-        state.provider.provider.clone(),
-        state.notifications.clone(),
-    );
+    crate::notify::spawn_tracker_poller(state.provider.clone(), state.notifications.clone());
     crate::notify::spawn_deploy_poller(state.notifications.clone());
 
     // Auto-fire scheduler: runs provisioned + enabled routines when their schedule
@@ -3673,12 +3696,13 @@ async fn post_clarification(
         req.allow_free_text,
     );
 
-    if state.provider.live {
+    if state.provider.current().live {
         if let Ok(Some(story)) = state.stories.get(&story_id).await {
             if let Some(reference) = story.external_ref.as_ref() {
                 let questions = [req.question.clone()];
                 if let Err(e) = state
                     .provider
+                    .current()
                     .provider
                     .post_clarifying_questions(reference, &questions)
                     .await
@@ -3760,8 +3784,8 @@ async fn answer_clarification(
 /// Which work-tracker provider is active, and whether it is a live external tracker.
 async fn provider_info(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "provider": state.provider.label,
-        "live": state.provider.live,
+        "provider": state.provider.current().label,
+        "live": state.provider.current().live,
     }))
 }
 
@@ -9752,7 +9776,7 @@ async fn adopt_story(
     Json(req): Json<AdoptReq>,
 ) -> Result<Json<CanonicalStory>, AppError> {
     let reference = ExternalRef {
-        provider: state.provider.provider.kind(),
+        provider: state.provider.current().provider.kind(),
         external_id: req.external_id.clone(),
         container: req.container.clone(),
         url: String::new(),
@@ -9760,6 +9784,7 @@ async fn adopt_story(
     };
     let story = state
         .provider
+        .current()
         .provider
         .ingest_story(&reference)
         .await
@@ -10225,15 +10250,18 @@ async fn chat_escalation(
         None => crate::escalation::chat_system_prompt(&esc),
     };
     let user = crate::escalation::chat_user_prompt(&esc, &req.message);
+    // The chat assistant runs on the transport chosen in Settings (Chat backend), not on the
+    // keyless CLI floor; `Api` with no key refuses rather than downgrading.
+    let chat_llm = state.chat_llm().map_err(|m| AppError(anyhow::anyhow!(m)))?;
     let completer = crate::llm::build_completer(
         &req.model,
         &state.model_registry,
         state.credential_store.as_ref(),
-        std::sync::Arc::new(state.llm()),
+        std::sync::Arc::new(chat_llm.clone()),
         state.rate_limiter.clone(),
         &state.settings.provider_policy(),
     )
-    .unwrap_or_else(|_| std::sync::Arc::new(state.llm()));
+    .unwrap_or_else(|_| std::sync::Arc::new(chat_llm));
     let reply = match completer
         .complete(
             crate::llm::LlmRequest::new(user)
@@ -10750,11 +10778,14 @@ async fn chat(
     let model = resolve_chat_model(Some(&req.model), state.settings.get().chat_model.as_deref());
     // Route to the right LlmPort: OpenRouter for openrouter-provider models, Anthropic for all
     // others. Returns an error when the model is OpenRouter-provider but no key is set.
+    // The Anthropic side runs on the transport chosen in Settings (Chat backend), with the key
+    // resolved now; `Api` with no key refuses rather than silently downgrading to the CLI.
+    let chat_llm = state.chat_llm().map_err(|m| AppError(anyhow::anyhow!(m)))?;
     let completer = crate::llm::build_completer(
         &model,
         &state.model_registry,
         state.credential_store.as_ref(),
-        std::sync::Arc::new(state.llm()),
+        std::sync::Arc::new(chat_llm),
         state.rate_limiter.clone(),
         &state.settings.provider_policy(),
     )
@@ -10998,7 +11029,9 @@ async fn set_credential(
             })),
         );
     }
-    if req.value.is_empty() {
+    // Whitespace-only counts as empty: the resolver treats a blank value as absent, so saving
+    // one would show "set" in the UI while no model call could ever use it.
+    if req.value.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -11033,6 +11066,8 @@ async fn set_credential(
         &state.model_registry,
         state.credential_store.clone(),
     );
+    // The GitHub provider carries its token: re-select it so a token saved now is used now.
+    reselect_provider_if_github(&name, &state);
     // ROUTES-9: this handler used to `std::env::set_var("ANTHROPIC_API_KEY", ...)` so a
     // freshly-saved key took effect for the `api` backend without a restart. That mutated
     // process-global env from a request-handler thread while worker threads read the same var
@@ -11054,6 +11089,46 @@ async fn set_credential(
         StatusCode::OK,
         Json(serde_json::json!({ "ok": true, "masked": masked })),
     )
+}
+
+/// Re-select the work-tracker provider when the `github_token` credential changed (saved or
+/// removed), so the running app uses the new token with no restart. No-op for every other name.
+fn reselect_provider_if_github(name: &str, state: &AppState) {
+    if name == crate::credentials::GITHUB_TOKEN {
+        state.provider.reselect(state.credential_store.as_ref());
+    }
+}
+
+/// `DELETE /api/credentials/:name` — remove a saved credential from the OS keychain.
+///
+/// A credential saved in the app takes precedence over its env var, so this is the way to hand
+/// a credential back to the env fallback (or to remove it entirely). Removing one that is not
+/// set succeeds. Response: `{ "ok": true }`.
+async fn delete_credential(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    use crate::credentials::ALL_CREDENTIALS;
+    if !ALL_CREDENTIALS.contains(&name.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": format!("unknown credential name: {name}")
+            })),
+        );
+    }
+    if let Err(e) = state.credential_store.delete(&name) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": format!("failed to remove credential: {e}")
+            })),
+        );
+    }
+    reselect_provider_if_github(&name, &state);
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
 }
 
 /// `GET /api/credentials` — list all known credentials with their set-status and
@@ -28261,6 +28336,166 @@ mod tests {
             assert!(anthropic_api_key_present(state.credential_store.as_ref()));
             assert_eq!(llm_key(&state).as_deref(), Some(key));
         }
+    }
+
+    /// Send one credentials request through the real router and return (status, body).
+    async fn credential_request(
+        state: &AppState,
+        method: &str,
+        name: &str,
+        body: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(format!("/api/credentials/{name}"));
+        if body.is_some() {
+            b = b.header("content-type", "application/json");
+        }
+        let resp = router(state.clone())
+            .oneshot(b.body(Body::from(body.unwrap_or("").to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    /// A key saved in the app beats the env var, so there must be a way to REMOVE it: DELETE
+    /// clears the store and the env fallback takes over again; deleting what is not set is fine.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn delete_credential_removes_the_saved_key_and_hands_back_to_env() {
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let (status, _) = credential_request(
+            &state,
+            "POST",
+            "anthropic_api_key",
+            Some(r#"{"value":"sk-ant-saved"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            crate::credentials::anthropic_api_key(state.credential_store.as_ref()).as_deref(),
+            Some("sk-ant-saved")
+        );
+
+        let (status, json) = credential_request(&state, "DELETE", "anthropic_api_key", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ok"], true);
+        assert!(!state.credential_store.is_set("anthropic_api_key").unwrap());
+        assert_eq!(
+            crate::credentials::anthropic_api_key(state.credential_store.as_ref()).as_deref(),
+            Some("sk-ant-env"),
+            "with the saved key removed the env fallback applies again"
+        );
+
+        // Removing a credential that is not set succeeds; an unknown name is refused.
+        let (status, _) = credential_request(&state, "DELETE", "anthropic_api_key", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, json) = credential_request(&state, "DELETE", "not_a_credential", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["ok"], false);
+    }
+
+    /// A whitespace-only value is not a credential: the resolver would treat it as absent, so
+    /// saving one must be refused instead of showing "set" in the UI.
+    #[tokio::test]
+    async fn set_credential_rejects_whitespace_only_values() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        for body in [r#"{"value":"   "}"#, "{\"value\":\"\\n\\t \"}"] {
+            let (status, json) =
+                credential_request(&state, "POST", "anthropic_api_key", Some(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(json["ok"], false);
+        }
+        assert!(!state.credential_store.is_set("anthropic_api_key").unwrap());
+    }
+
+    /// The same defect class as the Anthropic key: the work-tracker provider carries the GitHub
+    /// token, so a token saved (or removed) in the app must re-select it with no restart.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn saving_or_removing_the_github_token_reselects_the_provider_without_a_restart() {
+        let _t = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
+        let _r = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_REPO");
+        let _o = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_OWNER");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(!state.provider.current().live, "no token: native provider");
+
+        let (status, _) = credential_request(
+            &state,
+            "POST",
+            "github_token",
+            Some(r#"{"value":"ghp_saved_after_launch"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let live = state.provider.current();
+        assert!(
+            live.live,
+            "a token saved now must wire the GitHub provider now"
+        );
+        assert!(live.label.contains("github"), "{}", live.label);
+
+        let (status, _) = credential_request(&state, "DELETE", "github_token", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !state.provider.current().live,
+            "removing the token (no env fallback) goes back to the native provider"
+        );
+
+        // A credential that is not the GitHub token never touches the provider.
+        let before = state.provider.current().label;
+        credential_request(
+            &state,
+            "POST",
+            "openrouter_api_key",
+            Some(r#"{"value":"sk-or-x"}"#),
+        )
+        .await;
+        assert_eq!(state.provider.current().label, before);
+    }
+
+    /// The Chat backend setting must DO what the UI says: `api` builds an Api `Llm` carrying the
+    /// key resolved now (store first); `cli` builds a Cli `Llm`; `api` with no key refuses
+    /// instead of silently downgrading to the CLI.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn chat_llm_follows_the_chat_backend_setting_and_the_stored_key() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+
+        // Default (Cli): a Cli Llm, no key needed.
+        let llm = state.chat_llm().expect("cli chat needs no key");
+        assert_eq!(llm.backend_label(), "anthropic/cli");
+
+        // Api with no key anywhere: refused, not downgraded.
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        assert!(state.chat_llm().is_err());
+
+        // Key saved after startup: the next chat Llm is Api and carries exactly that key.
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-chat")
+            .unwrap();
+        let llm = state.chat_llm().expect("api chat with a stored key");
+        assert_eq!(llm.backend_label(), "anthropic/api");
+        assert_eq!(llm.api_key(), Some("sk-ant-chat"));
+
+        // Replaced key: the next one carries the new key.
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-chat-2")
+            .unwrap();
+        assert_eq!(state.chat_llm().unwrap().api_key(), Some("sk-ant-chat-2"));
+
+        // Back to Cli: a Cli Llm again (the CLI transport carries the key but never uses it).
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Cli);
+        assert_eq!(state.chat_llm().unwrap().backend_label(), "anthropic/cli");
     }
 
     /// `AppState::github_token()` prefers the credential store over the env var.

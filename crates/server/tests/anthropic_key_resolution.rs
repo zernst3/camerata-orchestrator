@@ -94,18 +94,148 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Production source of one file: everything before the first column-0 `#[cfg(test)]`, with
-/// comment lines dropped. Test-only files (`*tests.rs`, anything under a `tests/` dir) are skipped
-/// by the caller.
+/// Lexer state carried across lines, so braces inside strings, raw strings, char literals and
+/// comments are never mistaken for structure.
+#[derive(Clone, Copy, PartialEq)]
+enum Lex {
+    Code,
+    Str,
+    Raw(usize),
+    Block(usize),
+}
+
+/// The structural characters (`{`, `}`, `;`) of one line that sit in real code, updating the
+/// lexer state for the next line.
+fn structural(line: &str, st: &mut Lex) -> Vec<char> {
+    let b: Vec<char> = line.chars().collect();
+    let at = |i: usize| b.get(i).copied().unwrap_or('\0');
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match *st {
+            Lex::Code => {
+                let c = b[i];
+                if c == '/' && at(i + 1) == '/' {
+                    break;
+                }
+                if c == '/' && at(i + 1) == '*' {
+                    *st = Lex::Block(1);
+                    i += 2;
+                    continue;
+                }
+                if c == '"' {
+                    *st = Lex::Str;
+                    i += 1;
+                    continue;
+                }
+                if c == 'r' {
+                    let mut h = 0;
+                    while at(i + 1 + h) == '#' {
+                        h += 1;
+                    }
+                    if at(i + 1 + h) == '"' {
+                        *st = Lex::Raw(h);
+                        i += h + 2;
+                        continue;
+                    }
+                }
+                if c == '\'' {
+                    if at(i + 1) == '\\' {
+                        // Escaped char literal: skip to the closing quote.
+                        let mut j = i + 2;
+                        while j < b.len() && b[j] != '\'' {
+                            j += 1;
+                        }
+                        i = j + 1;
+                    } else if at(i + 2) == '\'' {
+                        i += 3;
+                    } else {
+                        i += 1; // a lifetime
+                    }
+                    continue;
+                }
+                if matches!(c, '{' | '}' | ';') {
+                    out.push(c);
+                }
+                i += 1;
+            }
+            Lex::Str => {
+                match b[i] {
+                    '\\' => i += 1,
+                    '"' => *st = Lex::Code,
+                    _ => {}
+                }
+                i += 1;
+            }
+            Lex::Raw(h) => {
+                if b[i] == '"' && (1..=h).all(|k| at(i + k) == '#') {
+                    *st = Lex::Code;
+                    i += h;
+                }
+                i += 1;
+            }
+            Lex::Block(d) => {
+                if b[i] == '/' && at(i + 1) == '*' {
+                    *st = Lex::Block(d + 1);
+                    i += 1;
+                } else if b[i] == '*' && at(i + 1) == '/' {
+                    *st = if d == 1 { Lex::Code } else { Lex::Block(d - 1) };
+                    i += 1;
+                }
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Production source of one file: every line EXCEPT comment lines and `#[cfg(test)]` items.
+///
+/// A column-0 `#[cfg(test)]` removes only the ITEM it annotates (an inline `mod tests { .. }`
+/// through its matching `}`, a `mod tests;`, a `use ..;`, a helper `fn`), never the rest of the
+/// file. (An earlier version stopped at the first `#[cfg(test)]`, which hid most of the
+/// production code in files that declare a test module near the top.) Braces are matched with a
+/// small lexer that ignores strings, raw strings, char literals and comments, so test fixtures
+/// holding unbalanced braces cannot end the skip early. Test-only files (`*tests.rs`, anything
+/// under a `tests/` dir) are skipped by the caller.
 fn production_lines(path: &Path) -> Vec<(usize, String)> {
     let text = fs::read_to_string(path).unwrap();
     let mut out = Vec::new();
+    let mut st = Lex::Code;
+    // While skipping a test item: (brace depth, whether its body has opened).
+    let mut skip: Option<(i32, bool)> = None;
     for (i, line) in text.lines().enumerate() {
-        if line.starts_with("#[cfg(test)]") {
-            break;
+        let before = st;
+        let events = structural(line, &mut st);
+        if let Some((depth, opened)) = skip.as_mut() {
+            for ev in events {
+                match ev {
+                    '{' => {
+                        *depth += 1;
+                        *opened = true;
+                    }
+                    '}' => {
+                        *depth -= 1;
+                        if *depth <= 0 && *opened {
+                            skip = None;
+                            break;
+                        }
+                    }
+                    _ => {
+                        if *depth == 0 && !*opened {
+                            skip = None;
+                            break;
+                        }
+                    }
+                }
+            }
+            continue;
         }
-        let t = line.trim_start();
-        if t.starts_with("//") {
+        if before == Lex::Code && line.starts_with("#[cfg(test)]") {
+            skip = Some((0, false));
+            continue;
+        }
+        if before == Lex::Code && line.trim_start().starts_with("//") {
             continue;
         }
         out.push((i + 1, line.to_string()));
@@ -143,26 +273,58 @@ const CREDENTIAL_ENV_VARS: [&str; 3] = [
     "CAMERATA_GITHUB_TOKEN",
 ];
 
+/// Lines the scan MUST have seen. If a change to `production_lines` (or a moved file) makes it
+/// stop short again, the scan would pass vacuously over code it never read; these canaries turn
+/// that into a loud failure. They span the places that matter: the CLI entry point, the audit
+/// `Llm` constructor, the agent driver builders, the resolver, and a late function in the
+/// largest file.
+const CANARIES: [(&str, &str); 7] = [
+    ("cli/src/inspect_cmd.rs", "pub async fn run_inspect("),
+    ("server/src/onboard.rs", "pub fn build_llm("),
+    ("server/src/api_agent_driver.rs", "fn build_claude_driver("),
+    (
+        "server/src/api_agent_driver.rs",
+        "fn resolve_claude_backend(",
+    ),
+    ("llm/src/credentials.rs", "pub fn anthropic_api_key("),
+    ("server/src/lib.rs", "fn check_github_release("),
+    ("server/src/lib.rs", "async fn delete_credential("),
+];
+
+fn assert_canaries_seen(scanned: &[(PathBuf, Vec<(usize, String)>)]) {
+    for (file, needle) in CANARIES {
+        let seen = scanned
+            .iter()
+            .filter(|(p, _)| p.ends_with(file))
+            .any(|(_, lines)| lines.iter().any(|(_, l)| l.contains(needle)));
+        assert!(
+            seen,
+            "the scan never saw `{needle}` in {file}: it is truncating files or the code moved"
+        );
+    }
+}
+
+fn scan_all() -> Vec<(PathBuf, Vec<(usize, String)>)> {
+    let scanned: Vec<_> = production_sources()
+        .into_iter()
+        .map(|p| {
+            let lines = production_lines(&p);
+            (p, lines)
+        })
+        .collect();
+    assert_canaries_seen(&scanned);
+    scanned
+}
+
 #[test]
 fn no_production_code_reads_a_saved_credential_from_env_directly() {
     let mut offenders = Vec::new();
-    let sources = production_sources();
-    // The scan must actually see the code (a wrong path would make it vacuously pass).
-    for must_see in [
-        "llm/src/llm.rs",
-        "server/src/onboard.rs",
-        "cli/src/inspect_cmd.rs",
-    ] {
-        assert!(
-            sources.iter().any(|p| p.ends_with(must_see)),
-            "scan did not find {must_see}"
-        );
-    }
-    for path in sources {
+    for (path, lines) in scan_all() {
+        // The resolver itself is the one place allowed to name them.
         if path.ends_with("llm/src/credentials.rs") {
             continue;
         }
-        for (n, line) in production_lines(&path) {
+        for (n, line) in lines {
             for var in CREDENTIAL_ENV_VARS {
                 if line.contains(&format!("\"{var}\"")) {
                     offenders.push(format!("{}:{n}: {}", path.display(), line.trim()));
@@ -185,8 +347,7 @@ fn no_production_code_reads_a_saved_credential_from_env_directly() {
 #[test]
 fn every_production_llm_build_gets_its_key_from_the_resolver() {
     let mut offenders = Vec::new();
-    for path in production_sources() {
-        let lines = production_lines(&path);
+    for (path, lines) in scan_all() {
         for (idx, (n, line)) in lines.iter().enumerate() {
             if line.contains("from_env_with_backend") {
                 offenders.push(format!(
@@ -198,7 +359,7 @@ fn every_production_llm_build_gets_its_key_from_the_resolver() {
             let is_call = (line.contains("Llm::for_backend(")
                 || line.contains("Llm::for_backend_and_ledger("))
                 && !line.contains("fn ");
-            if is_call && !path.ends_with("llm/src/llm.rs") {
+            if is_call {
                 let lo = idx.saturating_sub(8);
                 let hi = (idx + 6).min(lines.len());
                 let near_resolver = lines[lo..hi]

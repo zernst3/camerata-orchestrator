@@ -8,7 +8,7 @@
 //!   [`llm::OpenRouterCompleter`], the provider-selecting [`llm::build_completer`]
 //!   factory, and the [`llm::call_with_fallback`] chain walker.
 //! - [`credentials`] — the [`credentials::CredentialStore`] trait + the keychain and
-//!   in-memory implementations + the store-then-env [`credentials::resolve`] helper.
+//!   in-memory implementations + the store-then-env [`credentials::resolve_credential`] helper.
 //! - [`model_registry`] — the app-wide [`model_registry::ModelRegistry`] (static Claude
 //!   catalog + OpenRouter discovery/cache).
 //! - [`rate_limit`] — the per-provider [`rate_limit::ProviderRateLimiter`] token bucket.
@@ -38,7 +38,9 @@ pub mod usage_ledger;
 
 // Flat crate-root re-exports for the most-referenced types, so cross-crate callers can
 // write `camerata_llm::Llm` / `camerata_llm::LlmPort` without the module hop.
-pub use credentials::{CredentialStore, KeyringCredentialStore, MemoryCredentialStore};
+pub use credentials::{
+    CachedCredentialStore, CredentialStore, KeyringCredentialStore, MemoryCredentialStore,
+};
 pub use llm::{
     build_completer, call_with_fallback, Llm, LlmPort, LlmRequest, LlmResponse,
     OpenRouterCompleter, ProjectBackend,
