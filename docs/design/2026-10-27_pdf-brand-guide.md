@@ -39,10 +39,9 @@ vivid-mist (vivid on vivid-mist passes AA at 11 pt bold).
 ## Type
 
 The site uses the Apple system font stack (SF Pro, SF Mono). SF fonts may not be embedded in a
-PDF sent to clients, so the PDF needs an embeddable equivalent. **Open choice for Zach:** Inter
-(body and headings) plus JetBrains Mono or IBM Plex Mono (file locations, ids), all under the SIL
-Open Font License and close to SF in shape. Until Zach picks, the builder uses Inter + JetBrains
-Mono.
+PDF sent to clients, so the PDF needs an embeddable equivalent. **Decided (Zach, 2026-10-27):**
+Inter for body and headings, JetBrains Mono for file locations, ids and code. Both are under the
+SIL Open Font License (embedding allowed); ship the license files with the fonts.
 
 | Element | Size | Weight | Tracking | Colour |
 |---|---|---|---|---|
