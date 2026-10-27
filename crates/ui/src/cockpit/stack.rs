@@ -1025,9 +1025,18 @@ mod tests {
         static VIEW: std::cell::Cell<TriageState> =
             const { std::cell::Cell::new(TriageState::Unresolved) };
         static INITIAL: RefCell<HashMap<String, Disposition>> = RefCell::new(HashMap::new());
+        /// The review timer the harness mounts the table with (step 7a).
+        static REVIEW: RefCell<Option<super::super::review::ReviewHandle>> =
+            const { RefCell::new(None) };
+    }
+
+    fn review() -> super::super::review::ReviewHandle {
+        REVIEW.with(|r| r.borrow().clone().expect("the harness stored its timer"))
     }
 
     fn app() -> Element {
+        let review = super::super::review::use_review_handle();
+        REVIEW.with(|r| *r.borrow_mut() = Some(review.clone()));
         let toasts = use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
         use_context_provider(|| Signal::new(None::<FindingView>));
         use_context_provider(|| Signal::new(ViewerCache::new()));
@@ -1060,6 +1069,7 @@ mod tests {
                 order_preset,
                 triage_view: VIEW.with(std::cell::Cell::get),
                 audited_shas: shas,
+                review: Some(review),
             }
             StackRoot {}
             ViewerRoot {}
@@ -2956,6 +2966,115 @@ mod tests {
         assert_eq!(field_text(&page, "queue-reason-input"), "", "{page}");
     }
 
+    // ── The review timer (step 7a, INTERNAL): it observes, it never decides ──────────────
+
+    /// A decision made through `apply_rows` (the pane's key) is recorded as reviewed by the
+    /// operator, in a group the cursor opened; the timer wrote no disposition of its own (the
+    /// map holds exactly the one the key wrote); and the undo takes the reviewed record away.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_pane_decision_is_recorded_as_reviewed_and_an_undo_unrecords_it() {
+        let rows: Vec<FindingView> = (1..=3).map(defect).collect();
+        let (mut vdom, mut seen, _server, _env) =
+            mount(rows.clone(), OrderPreset::CriticalFirst, "ok").await;
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        // The cursor landed on a row: its rule group is open and the timer is running.
+        let group = camerata_ui_core::review_timer::group_key("me/api", "SQL-1");
+        assert!(
+            review().log().review_groups.contains_key(&group),
+            "opening a group is the cursor entering it: {:?}",
+            review().log()
+        );
+        assert!(review().log().review_rows.is_empty(), "no decision yet");
+
+        key(&vdom, pane, "c");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(state_count(TriageState::Confirmed), 1, "one key, one write");
+        let log = review().log();
+        assert_eq!(log.review_rows.len(), 1);
+        let (row_key, record) = log.review_rows.iter().next().unwrap();
+        assert!(
+            rows.iter().any(|f| &finding_key(f) == row_key),
+            "the record is keyed by the decided finding"
+        );
+        assert_eq!(
+            record.reviewed_by,
+            camerata_ui_core::review_timer::LOCAL_OPERATOR
+        );
+        assert!(record.reviewed_at_ms > 0);
+
+        click(&vdom, seen.element(super::super::scan::PANE_UNDO_ID));
+        settle(&mut vdom, &mut seen).await;
+        assert!(probe().dispositions.peek().is_empty());
+        assert!(
+            review().log().review_rows.is_empty(),
+            "an undone row is not reviewed"
+        );
+    }
+
+    /// Every toolbar door is `apply_rows`, so the batch is recorded too, split across its rows.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_toolbar_batch_is_recorded_row_by_row() {
+        let rows: Vec<FindingView> = (1..=3).map(defect).collect();
+        let (mut vdom, mut seen, _server, _env) =
+            mount(rows, OrderPreset::CriticalFirst, "ok").await;
+        select_and_press(&mut vdom, &mut seen, &[0, 1], TriageState::Confirmed).await;
+        assert_eq!(state_count(TriageState::Confirmed), 2);
+        assert_eq!(review().log().review_rows.len(), 2);
+    }
+
+    /// Opening a group's stacked view is opening the group.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn opening_the_stacked_view_opens_the_group_for_the_timer() {
+        let (mut vdom, mut seen, _server, _env) =
+            mount(deviations(4), OrderPreset::Curated, "ok").await;
+        // Nothing is open yet: all groups start collapsed and the cursor has no visible row.
+        assert!(review().log().review_groups.is_empty());
+        open_from_bar(&mut vdom, &mut seen).await;
+        let log = review().log();
+        assert_eq!(log.review_groups.len(), 1, "{log:?}");
+        assert!(log.review_groups.keys().next().unwrap().ends_with("API-1"));
+    }
+
+    /// The strip draws the timer's state and an always-present button; pressing it pauses, and the
+    /// button then offers Resume. The pane gets the keyboard back.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_strip_button_pauses_and_resumes_and_hands_the_keys_back_to_the_pane() {
+        let rows: Vec<FindingView> = (1..=2).map(defect).collect();
+        let (mut vdom, mut seen, _server, _env) =
+            mount(rows, OrderPreset::CriticalFirst, "ok").await;
+        let _pane = arm_pane(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("Review timer running"), "{page}");
+        assert!(page.contains("camerata-review-timer-toggle"), "{page}");
+        assert!(page.contains("data-review-no-activity"), "{page}");
+
+        let button = seen.element(super::super::review::REVIEW_TIMER_BUTTON_ID);
+        click(&vdom, button);
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(page.contains("Review timer paused"), "{page}");
+        assert!(!page.contains("Review timer running"), "{page}");
+        assert_eq!(
+            last_focus(),
+            Some(super::super::scan::DETAIL_PANE_ID.to_string()),
+            "the pane's keys stay armed"
+        );
+        // A decision while manually paused is still recorded, and does not resume the timer.
+        let pane = seen.element(super::super::scan::DETAIL_PANE_ID);
+        key(&vdom, pane, "c");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(review().log().review_rows.len(), 1);
+        assert!(html(&vdom).contains("Review timer paused"));
+
+        click(&vdom, button);
+        settle(&mut vdom, &mut seen).await;
+        assert!(html(&vdom).contains("Review timer running"));
+    }
+
     /// B.7: the strip is above the table, equals `TriageCounts` for every table, and moves with a
     /// decision and an undo.
     #[tokio::test(flavor = "current_thread")]
@@ -3003,7 +3122,7 @@ mod tests {
                 !page.contains("aria-live"),
                 "the strip does not announce itself"
             );
-            // The ETA waits for the timer: nothing is drawn for it.
+            // Fewer than 20 measured decisions: no time-left estimate is drawn.
             assert!(!page.contains("progress-eta"), "{page}");
         }
 

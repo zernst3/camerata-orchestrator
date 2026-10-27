@@ -201,3 +201,65 @@ fn set_every_snippet(value: &mut Value, raw: &str) {
         _ => {}
     }
 }
+
+// ── Internal-only review-time data (code viewer step 7a) ─────────────────────────────────────
+
+/// Every internal-only name and phrase found in `text` or in `text` with its line breaks removed
+/// (Typst wraps long tokens).
+fn internal_terms_in(text: &str) -> Vec<&'static str> {
+    use camerata_api_types::review_timing::{INTERNAL_ONLY_KEYS, INTERNAL_ONLY_PHRASES};
+    let joined: String = text.chars().filter(|c| *c != '\n').collect();
+    INTERNAL_ONLY_KEYS
+        .iter()
+        .chain(INTERNAL_ONLY_PHRASES)
+        .copied()
+        .filter(|term| text.contains(term) || joined.contains(term))
+        .collect()
+}
+
+/// The compiled PDF's rendered text names none of the internal review-time data. The same check
+/// as `release_gate::internal_only_tests` makes over the PDF's data, from the rendered side.
+#[tokio::test]
+async fn the_rendered_pdf_text_names_no_review_time_data() {
+    if !typst_on_path() {
+        eprintln!("skipping the_rendered_pdf_text_names_no_review_time_data: no typst");
+        return;
+    }
+    let sealed = report_with_one_finding_per_shape();
+    let package = build_product_package(&sealed, &HashMap::new(), None, &ReportOptions::default())
+        .await
+        .expect("the package assembles");
+    let text = pdf_extract::extract_text_from_mem(&package.pdf).expect("the PDF's text extracts");
+    assert!(
+        text.len() > 200,
+        "the extraction must actually read the PDF: {text:?}"
+    );
+    let found = internal_terms_in(&text);
+    assert!(
+        found.is_empty(),
+        "internal-only review-time data in the rendered PDF: {found:?}"
+    );
+}
+
+/// The check CAN fail: a name put into a rendered string shows up in the extracted text and is
+/// found, so a clean result above means something.
+#[tokio::test]
+async fn the_rendered_pdf_text_check_finds_a_name_that_is_there() {
+    if !typst_on_path() {
+        eprintln!("skipping the_rendered_pdf_text_check_finds_a_name_that_is_there: no typst");
+        return;
+    }
+    let sealed = report_with_one_finding_per_shape();
+    let json = build_report_json(&sealed, &HashMap::new(), None, &ReportOptions::default());
+    let mut data: Value =
+        serde_json::from_str(&render_data_json(&json).expect("renders")).expect("parses");
+    set_every_snippet(&mut data, "reviewed_by");
+    let pdf = compile_pdf_from_data(&data.to_string())
+        .await
+        .expect("typst compiles the hand-built data");
+    let text = pdf_extract::extract_text_from_mem(&pdf).expect("the PDF's text extracts");
+    assert!(
+        internal_terms_in(&text).contains(&"reviewed_by"),
+        "a listed name rendered into the PDF must be found in its text"
+    );
+}

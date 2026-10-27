@@ -45,6 +45,10 @@
 //!   `camerata_server::suppression` so the review UI's decision memory and the suppression
 //!   baseline call one implementation.
 //!
+//! - [`review_timing`]: the INTERNAL-ONLY review-time field names (the timer, the per-row
+//!   reviewed record, the stats) as a deny-list the export tests check every client artifact
+//!   against. Names only, no shapes: the shapes live in `camerata-ui-core`.
+//!
 //! Every relocated module's origin re-exports everything below so existing call sites
 //! (`camerata_app_core::uow::X`, `crate::llm::LlmResponse`, etc.) resolve unchanged.
 
@@ -57,6 +61,7 @@ pub mod lifecycle;
 pub mod llm;
 pub mod model_registry;
 pub mod project;
+pub mod review_timing;
 pub mod run;
 pub mod snippet;
 pub mod stories;

@@ -85,7 +85,7 @@ fn scan_report() -> ScanReport {
 }
 
 /// A clean package, built by the production assembly around a stand-in PDF.
-fn package() -> ProductPackage {
+pub(super) fn package() -> ProductPackage {
     let sealed = sealed_report();
     let options = ReportOptions::default();
     let json = build_report_json(&sealed, &HashMap::new(), None, &options);
@@ -146,7 +146,7 @@ fn blocked(package: ProductPackage) -> GateFailure {
 // ---- planting a secret on each client-visible surface --------------------------------------
 
 #[derive(Debug, Clone, Copy)]
-enum Surface {
+pub(super) enum Surface {
     DataJson,
     FindingsJson,
     DatasetJson,
@@ -156,7 +156,7 @@ enum Surface {
     Stem,
 }
 
-const ALL_SURFACES: [Surface; 7] = [
+pub(super) const ALL_SURFACES: [Surface; 7] = [
     Surface::DataJson,
     Surface::FindingsJson,
     Surface::DatasetJson,
@@ -209,7 +209,7 @@ fn set_dataset(package: &mut ProductPackage, name: &str, text: &str) {
 }
 
 /// Plant `text` on `surface` of an otherwise clean package.
-fn plant(package: &mut ProductPackage, surface: Surface, text: &str) {
+pub(super) fn plant(package: &mut ProductPackage, surface: Surface, text: &str) {
     match surface {
         Surface::DataJson => {
             // A BRAND NEW top-level field nobody ever listed: the walk must still find it.

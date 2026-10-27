@@ -7,7 +7,8 @@
 //! reads an unknown name, or a value of an unexpected shape, as the type's default instead.
 //!
 //! Used by `#[serde(default, deserialize_with = "camerata_ui_core::lenient::deserialize")]` on
-//! every such field of the draft.
+//! every such field of the draft. [`deserialize_or_default`] is the same idea for a saved STRUCT
+//! (the review timer's log): a shape this build cannot read is the default, not a failed draft.
 
 use serde::{Deserialize, Deserializer};
 
@@ -32,6 +33,27 @@ where
     }
     Ok(match Wire::deserialize(deserializer)? {
         Wire::Name(name) => T::from_wire(&name).unwrap_or_default(),
+        Wire::Other(_) => T::default(),
+    })
+}
+
+/// `deserialize_with` for a STRUCT field that is saved data and not a view setting (the review
+/// log): the value when it reads as `T`, else `T::default()`. The sibling of [`deserialize`] for
+/// shapes that are not a [`WireEnum`]: a newer build may have changed the shape, and the draft's
+/// scan, dispositions and view settings must still load.
+pub fn deserialize_or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire<T> {
+        Value(T),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Wire::<T>::deserialize(deserializer)? {
+        Wire::Value(value) => value,
         Wire::Other(_) => T::default(),
     })
 }
@@ -86,6 +108,36 @@ mod tests {
             let doc = read(json);
             assert_eq!(doc.mode, Mode::Plain, "{json}");
             assert_eq!(doc.kept, 7, "{json}");
+        }
+    }
+
+    #[derive(Debug, Default, Deserialize, PartialEq)]
+    struct Saved {
+        #[serde(default)]
+        n: u32,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Holder {
+        #[serde(default, deserialize_with = "deserialize_or_default")]
+        saved: Saved,
+        kept: u32,
+    }
+
+    #[test]
+    fn a_struct_that_reads_is_kept_and_one_that_does_not_is_the_default() {
+        let read = |json: &str| -> Holder { serde_json::from_str(json).expect("never fails") };
+        assert_eq!(read(r#"{"saved":{"n":4},"kept":7}"#).saved, Saved { n: 4 });
+        for json in [
+            r#"{"saved":"future","kept":7}"#,
+            r#"{"saved":[1,2],"kept":7}"#,
+            r#"{"saved":{"n":"not a number"},"kept":7}"#,
+            r#"{"saved":null,"kept":7}"#,
+            r#"{"kept":7}"#,
+        ] {
+            let holder = read(json);
+            assert_eq!(holder.saved, Saved::default(), "{json}");
+            assert_eq!(holder.kept, 7, "{json}");
         }
     }
 }

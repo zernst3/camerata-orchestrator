@@ -559,10 +559,26 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    `Undecided 187 of 612 · Confirmed 310 · Ignored 71 · FP 29 · Tech debt 15` (FP is false
    positive). It counts the whole Queue, so it reads the same whichever table (Unresolved,
    Confirmed, Ignored, Tech debt, False positive) is open, and it changes the moment you decide
-   something or undo it. A time estimate ("about 3h 10m left at your pace") is planned but not
-   shown: it needs the review timer, which is not built yet, and the strip will not guess a number.
-   The strip is plain text; it is not read out automatically after every decision, because a run
-   of single-key decisions would have a screen reader repeating the whole line each time.
+   something or undo it. The strip is plain text; it is not read out automatically after every
+   decision, because a run of single-key decisions would have a screen reader repeating the whole
+   line each time.
+
+   **Review timer (internal).** Beside the counts, the strip shows `Review timer running` (or why
+   it is paused) and a **Pause** / **Resume** button, which Tab reaches and which takes no key of
+   its own, so the decision keys keep working (after you use it the detail pane gets the keyboard
+   back). The timer starts by itself when you open a group or decide a finding. It pauses by itself
+   after 3 minutes with no key or click, and while the Camerata window is not the focused window;
+   the idle stretch before the pause is not counted. The next key or click after an idle pause
+   resumes it; a pause you made yourself with the button stays until you press **Resume**. While
+   the code viewer or the stacked view is open it covers the strip, so the button is not visible
+   then; the automatic pauses still apply. The timer records how long you spent on each group and,
+   for each finding you decide, that the local operator reviewed it and when. This is for your own
+   planning and pricing: it is saved in your in-progress review, it is never in a report, a
+   workbook, `findings.json` or any other file a client receives, and the **Review time** button
+   beside the strip opens a plain stats view (hours per repo, per group type and per severity)
+   with a **Save stats JSON** button. After 20 decisions the strip adds `about 3h 10m left at your
+   pace` (the median of your last 50 decisions' active time times the findings still undecided);
+   before that it shows nothing rather than guess.
 
    **Order of the Queue.** The **Order** select above the table cuts the Queue four ways.
    **Curated** (the default) is severity, then kind, then the cheapest deviations first, grouped by

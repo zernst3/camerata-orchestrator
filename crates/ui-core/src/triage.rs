@@ -1627,6 +1627,12 @@ impl UndoEntry {
     pub fn row_count(&self) -> usize {
         self.prior.len()
     }
+
+    /// The [`finding_key`] of every row this entry touched. The review timer reads it to forget
+    /// the "reviewed" record of a row an undo has just put back to Unresolved.
+    pub fn row_keys(&self) -> impl Iterator<Item = &str> {
+        self.prior.iter().map(|(key, _)| key.as_str())
+    }
 }
 
 /// What [`TriageModel::undo`] did.

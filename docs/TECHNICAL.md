@@ -3393,8 +3393,8 @@ are `progress::progress_text` (`Undecided` is `TriageCounts::outstanding`, `of N
 `of(state)`; `STRIP_ORDER` plus `Unresolved` is pinned to `TriageState::all()` by a test). Nothing is
 recounted. `counts` is over every Queue row whatever `triage_view` is, so the strip is the same above
 all five tables; it re-renders when the results view's tally changes, so a decision and an undo both move it. The
-ETA is the named, empty `eta: Option<String>` prop: nothing is drawn for it until the review timer
-(`WORK_ORDER_REVIEW_TIME.md` item 2) supplies text, and no estimate is computed. *Accessibility:* the
+ETA is the `eta: Option<String>` prop, filled by the review timer (next section) once 20 decisions
+carry measured time and drawn as `about 3h 10m left at your pace`; `None` draws nothing. *Accessibility:* the
 strip is plain text in `role="group"` with an `aria-label`; it is deliberately not `aria-live`,
 because a run of single-key decisions would queue a re-reading of the whole line after every press.
 
@@ -3407,6 +3407,121 @@ Enter is what is stored, a different fingerprint has no chip, Esc stores nothing
 Tech debt give no chip, undo removes it, markup in a reason is escaped, the viewer's prompt and the
 stack's pre-fill rule, and the strip against `TriageCounts` for all five tables plus a decision and
 an undo.
+
+**The review timer, the reviewed record, the stats view and the time-left estimate** (code viewer
+step 7a; work orders `WORK_ORDER_REVIEW_TIME.md` item 2 and `WORK_ORDER_REVIEW_SPEED.md` B.7, as
+ruled on by Zach on 2026-10-23, item 2 of the protected-area answers in `OVERNIGHT_DECISIONS.md`,
+which overrides the work order where they differ). **INTERNAL ONLY**: none of this is in any client
+export. Pure logic in `camerata_ui_core::review_timer` and `::review_stats`, the name deny-list in
+`camerata_api_types::review_timing`, the window side in `cockpit/review.rs`, hooks in `scan.rs`.
+
+*The clock is passed in.* Nothing in `review_timer` reads a clock. Every event takes a `Moment`
+(`mono_ms`, a monotonic count the idle rule and the accounting use, so a system clock change can
+neither add nor remove time; `wall_ms`, which only stamps `opened_at_ms` and `reviewed_at_ms`), so
+the tests drive a fake clock. `ReviewHandle::now` (`review.rs`) is the one place a clock is read.
+
+*States and rules.* `TimerState` is `Running` or `Paused(Manual | Idle | Unfocused)`, derived from
+three flags (`manual`, `focused`, `idle`) with the precedence Manual, then Unfocused, then Idle, so
+a manual pause is never overridden. It starts by itself when a group is opened
+(`ReviewTimer::open_group`: the Queue cursor entering a new rule group, or a group's stacked view
+opening) or a finding is acted on (`ReviewTimer::decided`), and until then it is `Paused(Idle)`
+with nothing to resume (a stray key or click is not a review). After `IDLE_LIMIT_MS` (3 minutes)
+with no key or click it pauses, and the idle stretch is NOT counted. That is by construction and
+not by a correction: time is credited only as the gap between one activity and the next, and only
+when the gap is under the limit, so the three minutes before the pause are never in the total and
+the once-a-second tick (`needs_tick`, `tick`) only flips the state, crediting nothing. The tests
+pin the boundary (a gap of limit minus 1 ms is counted whole, a gap of the limit is not) and the
+case where no tick ran between the last key and the next. Unfocused counts what ran up to the
+loss and nothing after, and on return counts from the return. A manual Pause credits up to the
+press; activity, a decision, opening a group and a focus round trip never resume it, only
+`ReviewTimer::resume` (the strip's button, via `toggle`) does. Decision: **activity resumes an
+idle pause by itself** (Zach: "automatic as much as it can, with overriding buttons"), provided a
+group has been opened; regaining focus resumes an unfocused pause unless the timer was idle before
+it lost focus. The button offers Resume when `resume_offered` (manually paused, or idle with a
+group open) and Pause otherwise (including before the first group, where it arms a manual pause so
+the first group does not start the timer).
+
+*What is recorded* (`ReviewLog`, saved with the draft). Per rule group (`group_key(repo, rule_id)`,
+independent of the Queue's order preset so a group's time does not move when the Queue is re-cut):
+`opened_at_ms` (first opened), `active_ms`, `group_reviewed` (no Queue row of the group is
+Unresolved, refreshed from the dispositions by `ReviewLog::sync_groups` in the draft's save effect,
+the one place the log is written out, so it cannot be stale in the draft). Per decided row, keyed
+by `finding_key`: `reviewed_by`, `reviewed_at_ms` and `review_decision_ms`. **`reviewed_by` is the
+fixed string `operator` (`LOCAL_OPERATOR`)**: the app has no sign-in and no operator identity
+anywhere, and inventing a name would put a made-up value in the data. `review_decision_ms` is the
+active time since the previous decision, split evenly across the rows of a batch decision (a
+50-row Confirm that took 40 s is 0.8 s a row), so the per-row figure is the reviewer's pace
+whichever door he used. Time credited goes to the group that was current BEFORE the event (the
+reading that preceded a move belongs to the group read). An undo, or a move back to Unresolved,
+removes the row's record (the time stays spent in the group). The timer OBSERVES decisions: it has
+no access to the dispositions, `apply_rows` writes them and then calls `ReviewHandle::decided`
+(every door, the pane, the viewer, the stack and the toolbar, is already `apply_rows`; the undo calls
+`undone` for the rows it put back to Unresolved, using `UndoEntry::row_keys`).
+
+*Persistence.* `OnboardingDraft.review_log`, `serde(default)` and read through the new
+`lenient::deserialize_or_default` (the sibling of `lenient::deserialize` for a struct that is saved
+data rather than a `WireEnum`): an old draft has an empty log, and a log of a shape this build does
+not know is an empty log with the scan, dispositions and view settings intact. The log goes to the
+draft through `ReviewHandle`'s `saved` signal, written on decisions, group changes, pauses and
+resumes, and every 30 s of work, not on every key (the draft is the whole scan, and a key arrives
+about once a second); the timer itself is behind a `RefCell` so a key does not re-render its
+readers. Restore replaces the log and keeps the session state (running or paused).
+
+*The window.* `REVIEW_BRIDGE_JS` (the clipboard bridge's pattern: an eval that `dioxus.send`s and
+reinstalls if its channel dies) listens in the capture phase for `keydown` and `pointerdown` (sent at
+most once a second) and for the window's `focus`, `blur` and the document's `visibilitychange`,
+reporting `document.hasFocus() && visibilityState === "visible"`. It never prevents, stops or
+consumes an event, so it cannot take a key from the pane, and it ignores a press inside an element
+marked `data-review-no-activity`, which the Pause / Resume button is, so its own press does not
+first resume an idle timer and then have its action undo that. `ClockEvent` (`Activity`,
+`Focus(bool)`) is the pure interface and `ReviewTimer::apply` the pure reaction, tested with no
+window; that wry actually delivers the focus and blur events on a real window switch is a manual
+check.
+
+*The strip.* `ProgressStrip` gained `eta`, `timer` (`TimerStripView`: the state text and the
+button's word), `on_toggle_timer` and `on_open_stats`; `LiveProgressStrip` (`review.rs`) is the
+component that reads the timer's signals, so the table does not. The button is a native `<button>`
+(in the Tab order, no key of its own, so the pane keeps every key), and after it is used the pane
+gets DOM focus back. While the code viewer or the stacked view is open it covers the strip, so the
+button is not on screen then; the idle and unfocused rules still apply.
+
+*The estimate* (`eta(undecided, recent_active_ms) -> Option<Duration>`): `None` until
+`ETA_MIN_DECISIONS` (20) decisions exist; else the median (mean of the middle two for an even
+count) of the last `ETA_WINDOW` (50) times the undecided rows. A decision with no measured active
+time (made while the timer was paused) is not a sample, since it says nothing about pace; samples
+are ordered by `reviewed_at_ms`. The text is `eta_text`: `about 3h 10m left at your pace`, to the
+nearest minute, or `less than a minute left at your pace`. Nothing is drawn when no row is left.
+It reads past decisions only, so it shows whether or not the timer is running. Caveat: a batch
+decision contributes one sample per row at the amortised figure, so a run of bulk decisions pulls
+the median down; that is the reviewer's pace if he keeps bulk-deciding and optimistic if the rest
+are single judgment rows.
+
+*The stats view* (`review_stats::ReviewStats::compute(log, queue_findings, dispositions)`, the
+`ReviewStatsModal`, opened by the strip's "Review time" button). Per repo and per group type
+(`defect`, `deviation`, `unspecified`, from the group's findings) it sums the groups' `active_ms`;
+per severity it sums the per-row `review_decision_ms` by the row's severity, because a group can
+hold several severities and only a row knows its own. Time on a group not yet ended in a decision
+is in the first two tables and not the third, and `unattributed_ms` says how much, so they
+reconcile. "Save stats JSON" writes `{ "review_stats": { ... } }` to a place the operator picks
+(`save_csv`); that file and the draft are the only internal places the data lives. Group type
+is the kind only (no deterministic-vs-advisory split: that distinction is in the `ui` crate's
+`is_enforced_floor`, not in core).
+
+*Internal only: how it is enforced.* Three layers. (1) `camerata_api_types::review_timing` lists
+every field name the internal shapes serialize (`INTERNAL_ONLY_KEYS`) and the phrases the stats
+view shows (`INTERNAL_ONLY_PHRASES`); the names are distinctive (`review_*`, `reviewed_*`,
+`*_active_ms`) so a scan has no false positives. `camerata-ui-core` tests that every key the log
+and the stats JSON write is on that list and every listed key is written, so a field added to the
+internal shapes and not listed fails there. (2) The server's `release_gate::internal_only_tests`
+build a real package (workbook, `findings.json`, `manifest.json`, README, every CSV and JSON
+dataset, the PDF member, the PDF's data and the shipped Typst template) and assert none of those
+names or phrases appears anywhere in it, including every part of the workbook, and
+`the_scan_reaches_every_surface` plants a listed name on each surface to prove the scan finds it
+there. (3) By construction: the export request (`export_product_zip`) carries `dispositions` and
+`options` only (a test asserts the body's keys), and `FindingView` and the Queue CSV carry no such
+field (tested). The PDF is checked through its data (the template's only input) and, when Typst is
+installed, through its rendered text (`tests/release_gate_pdf_text.rs`: a clean package's extracted
+text names none of it, and a name put into a rendered string is found, so the check can fail).
 
 **Order presets** (work order B.4; `camerata_ui_core::order_preset`, `recut_table` and
 `group_columns` in `scan.rs`, `table::apply_grouping`). `OrderPreset` is `Curated` (default),

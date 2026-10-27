@@ -20,6 +20,8 @@ pub mod pane_context;
 pub mod progress;
 pub mod provider_safety;
 pub mod readiness;
+pub mod review_stats;
+pub mod review_timer;
 pub mod rules;
 pub mod run;
 pub mod scan;
