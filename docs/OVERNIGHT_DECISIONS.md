@@ -12,8 +12,14 @@
 > (see Disk note below); (4) review the Firebase "merge invariant" call in DECISIONS MADE.
 > **NEXT V1 WORK (no approval needed):** review speed-ups (WORK_ORDER_REVIEW_SPEED; timer
 > internal-only with auto-pause and manual override). Build-order step 1 (source-file endpoint +
-> highlighter) and step 2 (viewer overlay, navigation, in-viewer dispositions) MERGED 2026-10-26;
-> next is step 3 (A.5 popover, A.6 search / symbol refs / permalink). **Viewer manual check for
+> highlighter), step 2 (viewer overlay, navigation, in-viewer dispositions) and step 3 (A.5
+> popover, A.6 search / symbol refs / permalink, Rule Hub key; Fable review fixed: honest search
+> failure status, one isolated git command builder, a 4-slot git read gate, shared key-body
+> redaction) MERGED 2026-10-26; next is step 4 (B.3 pane context + B.4 order presets), then 5
+> (B.2 stacked groups), 6 (B.5 decision memory + B.7 counts strip), 7 (B.6 notes + ETA, then B.8
+> palette). Step-3 manual checks: `Down` past the visible rows of a long references list keeps
+> the selection in view; the Rule Hub opened from the pane, closed with `Esc`, leaves `C` and the
+> arrows working without a click; `Esc` closes the hub after clicking inside it. **Viewer manual check for
 > Zach** (only a real window can confirm; add to the delete/re-fetch session): `O` and the three
 > click doors open it; Esc returns focus to the pane on the last-viewed finding; a row click after
 > closing lands (ghost-click); scroll feel and the upper-third landing; sticky gutter, minimap, look;
@@ -22,7 +28,16 @@
 > `feat/audit-report-export` first. Then W29 Wave D + 22e, corpus text work
 > (items 5, 11, 12, 19) + 22g, engine follow-ups (22c, 22d, 22f, KEV/EPSS + data-as-of stamp, model
 > registry, CI-gate severity bounds, staleness nag, W30 residuals), W27 PDF rebuild (needs Zach's
-> brand assets), 19f grader revision, then the graded accuracy run (item 20).
+> brand assets), 19f grader revision, then a **whole-workspace mutation run** (Zach, 2026-10-26:
+> after all dev work, every crate, not just checks; machine time only), then the graded accuracy
+> run (item 20). Mutation run: `cargo mutants --workspace --jobs 4` from a clean merged checkout,
+> detached with `nohup caffeinate -i`, log to `~/Library/Logs/cargo-mutants-workspace.log`. About
+> 24,600 mutants (server 8.7k, checks 8.3k, ui 1.9k, ui-core 1.3k, rest 4.4k); the checks run did
+> 6,380 in 6 h, so plan on roughly 24 to 36 h, no cargo builds in the main checkout meanwhile.
+> Each mutant runs its own crate's tests (the default), not all 8,100: `--test-workspace=true`
+> would take weeks for few extra catches (Zach confirmed 2026-10-26: own-crate tests now; maybe a
+> full cross-crate run after V2). Then triage `missed.txt`: each
+> real gap gets a test (or a fix if it hides a bug), equivalent mutants get ledgered.
 >
 > (History) Branch `feat/audit-report-export` is pushed. No agent worktrees are in flight.
 > **Disk:** Full Disk Access granted 2026-10-22 to `/bin/bash` and `cargo-sweep`; the 30-minute
