@@ -28,6 +28,7 @@ pub(crate) mod redact;
 pub mod report;
 pub mod self_ref;
 pub mod source_file;
+pub mod symbol_refs;
 
 // ── Re-exports (keep crate::onboard::X paths stable) ────────────────────────────
 pub use architectural::{arch_violation_to_finding, audit_architectural, ARCH_PREVIEW_TOOL};

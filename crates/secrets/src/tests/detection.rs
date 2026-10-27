@@ -482,3 +482,50 @@ fn string_concatenation_of_the_markers_is_not_key_material() {
     let list = "[\"-----BEGIN PRIVATE KEY-----\", \"-----END PRIVATE KEY-----\"]";
     assert!(detect_secrets(list).is_empty());
 }
+
+// ---- a body line seen alone ------------------------------------------------------------------
+
+#[test]
+fn every_body_line_of_a_generated_key_is_a_key_body_line_plain_or_decorated() {
+    let block = crate::fixtures::pem_block("RSA ", 5);
+    let body: Vec<&str> = block.lines().filter(|l| !l.starts_with("-----")).collect();
+    assert!(!body.is_empty());
+    for line in body {
+        for shown in [
+            line.to_string(),
+            format!("  {line}  "),
+            format!("\"{line}\","),
+            format!("  - {line}"),
+            format!("  - \"{line}\""),
+            format!("    '{line}',"),
+        ] {
+            assert!(crate::is_key_body_line(&shown), "{shown}");
+        }
+    }
+}
+
+#[test]
+fn a_short_padded_final_line_is_a_key_body_line_but_words_and_code_are_not() {
+    for yes in [
+        "kQ==",
+        "  - \"Zm9v+A==\",",
+        "AbCd+/12=",
+        "\"abcdEFGH1234ijkl\",",
+    ] {
+        assert!(crate::is_key_body_line(yes), "{yes}");
+    }
+    for no in [
+        "",
+        "foo",
+        "build_sql",
+        "let q = build_sql(x);",
+        "fn main() {",
+        "somethingLongButOnlyLetters",
+        "shortword",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "AB",
+        "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p",
+    ] {
+        assert!(!crate::is_key_body_line(no), "{no:?}");
+    }
+}

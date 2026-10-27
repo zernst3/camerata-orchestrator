@@ -417,12 +417,51 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    | `}` `{` | Next or previous file in this rule group, on its first undecided finding |
    | `.` | Back to the line of this finding |
    | `G` | Go to a line (Enter jumps, Esc cancels) |
-   | `Backspace` `Alt+Left` | Back to where you were before the last go-to-line |
+   | `/` | Search this file (the field opens; Enter next match, Shift+Enter previous, Esc closes the field) |
+   | `S` | Where else is this symbol used (the symbol prompt opens pre-filled; Enter runs the search) |
+   | `Y` | Copy a permalink to the line on screen |
+   | `Space` | Pin or unpin the finding popover |
+   | `H` | Open the Rule Hub for this rule; closing it returns here |
+   | `Backspace` `Alt+Left` | Back to where you were before the last go-to-line or reference jump |
    | `PgUp` `PgDn` `Home` `End` | Scroll; the cursor stays |
    | `?` | Show or hide this list |
 
    Keys that hold Ctrl, Alt or Cmd are left alone (except `Alt+Left`), so copying code with Cmd-C
-   works. While a reason prompt or the go-to-line field is open, every key is text.
+   works. While a reason prompt, the go-to-line field, the search field or the symbol prompt is
+   open, every key is text. While the references list has the keyboard, only `Up` `Down` `J` `K`
+   (move), `Enter` (open) and `Esc` (back to the code) do anything. While the Rule Hub is open
+   above the viewer, `Esc` closes it (also after you click inside it) and every other key does
+   nothing.
+
+   - **The popover.** Rest the pointer on the finding's line, or on any gutter dot, for a quarter of
+     a second and a card shows at most eight lines: the rule id (click to open the Rule Hub), the
+     kind and authority badges, the headline (the first sentence of the detail for a defect, the
+     deviation claim for a deviation), the rule directive cut at 160 characters, severity,
+     confidence and effort, the needs-review reason in bold, the current disposition, the other
+     findings in this file (click one to go to it), and the other rules violated at the same
+     place. It never shows the fix. `Space` pins it so it stays while you scroll.
+   - **Search.** `/` opens a find field. Matches are highlighted as you type (plain text, ignoring
+     case), the current match is stronger, and the field shows `3 of 12`. Enter steps to the next
+     match and Shift+Enter to the previous one; stepping past either end wraps and the count says
+     `(wrapped)`. `Esc` closes the field and leaves the highlights until your next move (a
+     navigation key, go-to-line or opening a reference). In a file longer than 400 KB only the
+     loaded 800 lines are searched, and the count says which lines.
+   - **References.** `S` opens a prompt pre-filled with the symbol the rule captured, else the
+     longest identifier on the finding's line. Enter lists every whole-word use of it at the
+     inspected commit, at most 200 (the heading says when there are more), skipping vendored and
+     generated paths (and any folder in `CAMERATA_SCAN_EXCLUDE_DIRS`, as in the scan), with every
+     line redacted; a line of key material is shown as `[redacted]` but keeps its `path:line`.
+     `Up` `Down` choose (the list scrolls to keep the choice on screen), `Enter` opens the hit and
+     `Esc` goes back to the code. If the search could not run, or took too long, or the server was
+     busy with other code reads, the heading says `Could not search for <symbol>` and why; it never
+     says there are no references when nothing was searched. A hit is a place in the code, not a finding: opening one in another file
+     shows that file with a `reference` tag, never moves the Queue's cursor, and the decision keys
+     do nothing until you press `Backspace` to come back to the finding. Without a recorded commit
+     (or when it is not in this clone) the search runs on the working tree and an amber line says so.
+   - **Permalink.** `Y` copies `owner/repo@abc1234:path:line` and, when the repo's origin is GitHub, a
+     second line with the `https://github.com/.../blob/<commit>/<path>#L<line>` URL. A toast
+     confirms. The link names a place; it contains no code. When the code on screen is the working
+     tree (the amber banner), there is no commit to link to and `Y` says so instead of copying.
 
    **Scan-time deterministic preview.** For each **mechanical** rule you selected that maps to a tool
    Camerata can drive (clippy, ruff, eslint, semgrep), the deterministic scan **runs that tool itself**

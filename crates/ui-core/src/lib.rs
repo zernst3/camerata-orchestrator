@@ -22,3 +22,4 @@ pub mod schedule;
 pub mod source;
 pub mod triage;
 pub mod viewer;
+pub mod viewer_find;

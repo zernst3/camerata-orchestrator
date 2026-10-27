@@ -54,5 +54,6 @@ pub mod model_registry;
 pub mod project;
 pub mod run;
 pub mod stories;
+pub mod symbol;
 pub mod uow;
 pub mod workitems;

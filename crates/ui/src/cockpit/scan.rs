@@ -289,6 +289,23 @@ pub(super) fn audited_shas(
     )
 }
 
+/// The origin remote each repo was scanned from, from the scan's and the audit's `audited_refs`
+/// (the audit's wins where both recorded one). Repos with no recorded origin are left out.
+pub(super) fn audited_origins(
+    report: &ScanReportView,
+    audited: Option<&ScanReportView>,
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for r in [Some(report), audited].into_iter().flatten() {
+        for a in &r.provenance.audited_refs {
+            if let Some(url) = a.origin_url.as_ref().filter(|u| !u.is_empty()) {
+                out.insert(a.repo.clone(), url.clone());
+            }
+        }
+    }
+    out
+}
+
 /// The "Code context" section of the finding-detail modal. Fetches ON-DEMAND every time it
 /// mounts; the caller keys this component by `repo`/`path`/`line` (see the finding-detail
 /// modal) so opening a DIFFERENT finding remounts it fresh rather than showing stale content
@@ -2867,6 +2884,9 @@ pub(super) fn RuleHubStrip(
 /// The hub is therefore its own overlay over core's `rule_hub` derivation, which needs nothing
 /// but the scan's own rows; where a `ProposedRuleView` does exist, the full rule detail stays
 /// one further click away, the same relationship the detail pane has with the finding modal.
+/// The DOM id of the Rule Hub modal, which takes keyboard focus when it opens.
+pub(super) const RULE_HUB_ID: &str = "camerata-rule-hub";
+
 #[component]
 pub(super) fn RuleHubModal(
     hub: RuleHubView,
@@ -2878,7 +2898,26 @@ pub(super) fn RuleHubModal(
 ) -> Element {
     rsx! {
         div { class: "rule-modal-overlay", onclick: move |_| on_close.call(()),
-            div { class: "rule-modal rule-hub-modal", onclick: move |e| e.stop_propagation(),
+            // Focusable, and focused on open, so Esc closes it: while it was the only overlay
+            // without a key handler, a click inside it left Esc with nowhere to go. The tab stop
+            // also means a click on any text inside keeps focus here rather than dropping to the
+            // page.
+            div {
+                class: "rule-modal rule-hub-modal",
+                id: RULE_HUB_ID,
+                tabindex: "0",
+                onclick: move |e| e.stop_propagation(),
+                onmounted: move |e| {
+                    spawn(async move {
+                        let _ = e.set_focus(true).await;
+                    });
+                },
+                onkeydown: move |e: KeyboardEvent| {
+                    if e.key() == Key::Escape {
+                        e.stop_propagation();
+                        on_close.call(());
+                    }
+                },
                 div { class: "rule-modal-head",
                     span { class: "rule-modal-id", "{hub.rule_id}" }
                     button {
@@ -2908,9 +2947,7 @@ pub(super) const DETAIL_PANE_ID: &str = "camerata-finding-pane";
 /// signal directly would let the pane report its keys armed while the keydown handler — which
 /// lives on the pane element — received nothing.
 fn focus_detail_pane() {
-    dioxus::document::eval(&format!(
-        "var el=document.getElementById('{DETAIL_PANE_ID}');if(el)el.focus();"
-    ));
+    super::viewer::focus_element(DETAIL_PANE_ID);
 }
 
 /// One ABSORBED evidence site as the detail pane lists it (design §6).
@@ -3446,6 +3483,10 @@ pub(super) fn FindingsTable(
     /// Repos whose scan and audit recorded different commits: the viewer says so.
     #[props(default)]
     sha_conflicts: std::collections::HashSet<String>,
+    /// The origin remote each repo was scanned from (`audited_refs[repo].origin_url`), so the
+    /// viewer's permalink can add a GitHub URL when the origin is GitHub.
+    #[props(default)]
+    audited_origins: std::collections::HashMap<String, String>,
     /// The project the findings belong to, passed to the code viewer's requests.
     #[props(default)]
     project_id: String,
@@ -3985,6 +4026,9 @@ pub(super) fn FindingsTable(
             apply_disposition,
             on_close: viewer_close,
             on_open_modal: viewer_open_modal,
+            origins: std::sync::Arc::new(audited_origins.clone()),
+            descriptions: std::sync::Arc::new(descriptions.clone()),
+            on_open_hub,
         });
         use_effect(move || {
             if let Some(mut slot) = viewer_slot {
@@ -6915,6 +6959,12 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // can perform. Both session-local lenses like `kind_view`, and deliberately not persisted
     // for the same reason: an open modal is not a decision.
     let mut hub_open = use_signal(|| Option::<RuleHubRequest>::None);
+    // The code viewer opens the hub with `H`, disarms its keys while it is up and takes the
+    // keyboard back when it closes, so it needs to see this signal.
+    use_context_provider(|| super::viewer::ViewerHubOpen(hub_open));
+    // Closing it gives the keyboard back to where it was opened from: the viewer (which does
+    // that itself) or the detail pane.
+    super::viewer::use_hub_focus_return(hub_open, try_use_context::<super::viewer::ViewerSlot>());
     let mut queue_rule_filter = use_signal(|| Option::<String>::None);
     let mut processing = use_signal(|| false);
     // ── THE GATED CONVENTION COMMIT (design §3; Q3 + Q4) ──────────────────────
@@ -8119,6 +8169,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 queue_rule_filter,
                                 audited_shas: sha_choice.shas.clone(),
                                 sha_conflicts: sha_choice.conflicts.clone(),
+                                audited_origins: audited_origins(&report, audited.as_ref()),
                                 project_id: project_id.clone(),
                             }
                         }

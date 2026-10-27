@@ -199,6 +199,35 @@ pub(crate) fn is_decor(c: char) -> bool {
     c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '-')
 }
 
+/// Whether `line`, seen ALONE, is a line of key body: a base64 run, optionally behind list
+/// decoration (a YAML `- `, a JSON `"` and trailing `",`). A caller that holds one line of a
+/// file (a search hit) cannot see the `-----BEGIN` line above it, so the block detector cannot
+/// vouch for it; this is the same line shape that detector accepts below a header
+/// ([`re_pem_body_line`] with [`is_decor`] trimming), plus enough plausibility that a plain
+/// identifier is not mistaken for one.
+///
+/// True when the decoration-trimmed run is all base64 characters and either 40 or more of them (a
+/// full body line is 64 or 76), or 16 or more containing `+`, `/` or `=` or a mix of upper case,
+/// lower case and digits, or 4 or more ending in `=` padding (a short final line). A short final
+/// line with no padding is indistinguishable from a word and is not claimed.
+pub fn is_key_body_line(line: &str) -> bool {
+    let core = line.trim_matches(is_decor);
+    if core.len() < 4 || !re_pem_body_line().is_match(core) {
+        return false;
+    }
+    let punct = core.bytes().any(|b| matches!(b, b'+' | b'/' | b'='));
+    if core.len() >= 40 {
+        return true;
+    }
+    if core.len() >= 16 {
+        let upper = core.bytes().any(|b| b.is_ascii_uppercase());
+        let lower = core.bytes().any(|b| b.is_ascii_lowercase());
+        let digit = core.bytes().any(|b| b.is_ascii_digit());
+        return punct || (upper && lower && digit);
+    }
+    core.ends_with('=')
+}
+
 /// The largest index `<= index` that is a char boundary of `text`.
 fn floor_boundary(text: &str, index: usize) -> usize {
     let mut index = index.min(text.len());

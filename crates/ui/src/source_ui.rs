@@ -371,7 +371,7 @@ pub(crate) fn copy_script(text: &str) -> Option<String> {
 }
 
 /// Copy `text` to the clipboard; `true` when something took it.
-async fn copy_to_clipboard(text: &str) -> bool {
+pub(crate) async fn copy_to_clipboard(text: &str) -> bool {
     let Some(script) = copy_script(text) else {
         return false;
     };

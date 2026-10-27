@@ -124,6 +124,8 @@ pub(crate) enum Refused {
     PathTraversal,
     /// Git only: the commit is not in this clone.
     CommitUnavailable,
+    /// Too many reads of client code were running.
+    Busy,
 }
 
 impl From<Refused> for FindingContextOutcome {
@@ -134,6 +136,7 @@ impl From<Refused> for FindingContextOutcome {
             Refused::TooLarge => FindingContextOutcome::TooLargeToView,
             Refused::PathTraversal => FindingContextOutcome::PathTraversal,
             Refused::CommitUnavailable => FindingContextOutcome::CommitUnavailable,
+            Refused::Busy => FindingContextOutcome::Busy,
         }
     }
 }
@@ -204,6 +207,7 @@ pub(crate) async fn read_rendered(
                     GitReadError::CommitUnavailable => Refused::CommitUnavailable,
                     GitReadError::NotFound => Refused::FileMissing,
                     GitReadError::TooLarge => Refused::TooLarge,
+                    GitReadError::Busy => Refused::Busy,
                 })?
         }
     };
@@ -699,6 +703,7 @@ mod tests {
             (Refused::TooLarge, "too_large"),
             (Refused::PathTraversal, "path_traversal"),
             (Refused::CommitUnavailable, "commit_unavailable"),
+            (Refused::Busy, "unavailable"),
         ] {
             let json = FindingContextOutcome::from(refused).to_json();
             assert_eq!(json["status"], status);
