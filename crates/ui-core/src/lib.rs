@@ -9,6 +9,7 @@
 
 pub mod adopt;
 pub mod backend;
+pub mod decision_memory;
 pub mod designs;
 pub mod git;
 pub mod govdev;
@@ -16,6 +17,7 @@ pub mod lenient;
 pub mod models;
 pub mod order_preset;
 pub mod pane_context;
+pub mod progress;
 pub mod provider_safety;
 pub mod readiness;
 pub mod rules;

@@ -3183,7 +3183,7 @@ long as the viewer stays open. The viewer is hosted at the results root (`Viewer
 that (`finish_disposition`).
 
 The reading aids (work order A.5 and A.6; pure logic in `camerata_ui_core::viewer_find`): the
-popover (`popover_view`, at most eight lines, with an empty `previously` seam for decision memory),
+popover (`popover_view`, at most eight lines; `previously` carries the decision-memory chip, see below),
 in-file search (`search_lines`, `cycle_match`, `mark_matches`; case-insensitive, char columns, wrap
 announced), symbol references (`symbol_prefill`, `SymbolRefsView`) and the permalink (`permalink`,
 GitHub URL only when the scan's `audited_refs[].origin_url` is on github.com; copied through the
@@ -3328,6 +3328,85 @@ group: one batch request, 30 cards, all checked; Space/C with the count in the u
 reason refused then Enter; Enter into the viewer and Esc back to the same card; paging past 200;
 a refused batch showing snippets only; `B` and focus return to the pane and to the bar button;
 rows leaving the table and one undo restoring them).
+
+**Decision memory and the progress strip** (work order B.5 and B.7; pure logic in
+`camerata_ui_core::decision_memory` and `::progress`, wiring in `scan.rs`, `viewer.rs`, `stack.rs`).
+
+*One fingerprint.* The shape of a finding is `(rule_id, fingerprint(rule_id, snippet))`, and
+`fingerprint` (with its `fnv1a`) now lives in `camerata_api_types::fingerprint`, the leaf crate both
+sides already depend on. `camerata_server::suppression` re-exports it (`pub use` for `fingerprint`,
+`pub(crate) use` for `fnv1a`, which the scan cache and the clone-advisory cache still call by the
+old path), so there is one implementation: the baseline that COMMITS these values to
+`.camerata/baseline.json` and the UI that recognises a repeated shape cannot disagree. Two things
+pin it: `api-types` asserts literal fingerprints (and the published FNV-1a vectors), and
+`suppression::tests::suppression_results_are_unchanged_by_moving_the_fingerprint` classifies against a
+baseline written with those literals.
+
+*`prior_decisions(rows, dispositions, focused) -> Option<PriorDecision>`.* A thin wrapper over
+`DecisionIndex::build(rows, dispositions).prior(focused)`. The index buckets every DECIDED row by
+`(rule_id, fingerprint)` once (the fingerprint is computed for decided rows only), so a question is a
+lookup minus the focused row; a caller with several questions (`shared_prefill`) builds one index.
+The pane builds one per render. Derived from the draft's
+disposition map every time it is asked; nothing is stored, so an undo (which restores the map) removes
+the memory with no bookkeeping, and the memory is scoped to this draft (cross-inspection memory would
+need the durable record the Q2 ruling did not create). A row counts when it is in `rows`, is not the
+focused row, has the same rule id, is decided, and has the same fingerprint. A blank snippet is not a
+shape and gives `None`. The repo is deliberately NOT part of the shape: the same rule on the same
+line across one client's repositories is usually one answer, and memory only pre-fills text the
+reviewer must still confirm with Enter (`memory_is_shared_across_repos` pins it). Only reason-carrying decisions (`TriageState::requires_reason`: Ignored, False
+positive) can be the primary, so Confirmed and Tech debt alone never produce a chip.
+
+*Disagreement rule (decided here).* Reason-carrying decisions are grouped by `(state, reason)` with
+the reason compared whitespace-collapsed and case-folded (so "Test fixture" and "test  fixture" are
+one decision; the first wording seen in `rows` is what is shown and pre-filled); the primary is the
+largest group, ties broken by state (Ignored before False positive) and then by the folded reason
+text, so the answer never depends on map or slice order. `others` counts every other
+decided row on the shape: other groups, and Confirmed or Tech debt rows. The chip is
+`Previously on this shape: Ignored, 'reason' (3 rows)` plus `, and N other rows decided
+differently` when `others > 0`; the reason is whitespace-collapsed and cut at 120 characters for the
+chip (`cut_chars`, the viewer's), while the pre-fill carries all of it.
+
+*Pre-fill, never apply.* `PriorDecision::reason_for(state)` is the most common reason the draft gave
+for THAT state on the shape, else nothing (no cross-state fallback: an Ignored reason is a false
+statement under False positive, so `F` after an Ignored-only shape starts empty while the chip still
+shows the prior); `prefill_reason` is its `Option`-flattening form. The pane (`PaneCommand::PromptFor` and the pane's Ignore/False positive
+buttons) and the viewer (`ViewerCommand::PromptFor`) call it only as the initial text of the existing
+reason field (`prompt_reason`); the key still opens the prompt and Enter still goes through
+`apply_disposition` and `apply_rows`, so the required-reason refusal and the undo are unchanged and
+no disposition is written from memory. `C` and `T` open nothing and take no reason. The stack's
+`begin_prompt` calls `shared_prefill(checked_rows, all_rows, dispositions, state)`, which is the
+common reason only when every checked card is offered the same one and empty otherwise, into the
+existing `QueueReasonPrompt` (no new prompt). `StackLink` gained `all_findings` for it. The toolbar's
+selection prompts (Ignore, False positive and "Move to Ignored") and the rule-level bar's "False
+positive all N" call the same `shared_prefill`. An undo while the pane's prompt is open cancels it
+first (`cancel_pane_prompt`, shared with Esc), because the undo moves the cursor to the restored
+row and the prompt would otherwise write its reason there; the viewer host cancels its own prompt
+the same way (`cancel_prompt`, shared with Esc). The chip is a text node in the pane (`.pane-previously`, prop `previously`) and in the
+popover's disposition line (`cv-pop-prev`); the reason is the reviewer's own text from the draft and
+leaves the app through nothing here.
+
+*Progress strip.* `ProgressStrip` (props-only, `scan.rs`) is drawn at the top of `FindingsTable`,
+above the toolbar, from the `counts` prop, which the results view fills with the `triage_counts` it
+already takes (`TriageModel::counts` over the Queue rows) for the sub-tabs and the Process gate, so
+the table does not clone the disposition map to recount; `None` draws no strip. The words
+are `progress::progress_text` (`Undecided` is `TriageCounts::outstanding`, `of N` is `total`, the rest
+`of(state)`; `STRIP_ORDER` plus `Unresolved` is pinned to `TriageState::all()` by a test). Nothing is
+recounted. `counts` is over every Queue row whatever `triage_view` is, so the strip is the same above
+all five tables; it re-renders when the results view's tally changes, so a decision and an undo both move it. The
+ETA is the named, empty `eta: Option<String>` prop: nothing is drawn for it until the review timer
+(`WORK_ORDER_REVIEW_TIME.md` item 2) supplies text, and no estimate is computed. *Accessibility:* the
+strip is plain text in `role="group"` with an `aria-label`; it is deliberately not `aria-live`,
+because a run of single-key decisions would queue a re-reading of the whole line after every press.
+
+*Tests.* Pure: `decision_memory` (shape matching, whitespace, other rule, Confirmed and Tech debt,
+disagreement, tie order, undo, blank snippet, `shared_prefill`) and `progress` (the strip text, the
+order covering every state, counts equal to `TriageCounts` for each table after decisions and an
+undo). Mounted in `cockpit::stack::tests` against the real `FindingsTable` with real events: the
+chip on the twin after deciding the first, the twin still Unresolved, `I` pre-fills, an edit before
+Enter is what is stored, a different fingerprint has no chip, Esc stores nothing, Confirmed and
+Tech debt give no chip, undo removes it, markup in a reason is escaped, the viewer's prompt and the
+stack's pre-fill rule, and the strip against `TriageCounts` for all five tables plus a decision and
+an undo.
 
 **Order presets** (work order B.4; `camerata_ui_core::order_preset`, `recut_table` and
 `group_columns` in `scan.rs`, `table::apply_grouping`). `OrderPreset` is `Curated` (default),

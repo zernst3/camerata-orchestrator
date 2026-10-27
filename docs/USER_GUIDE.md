@@ -529,6 +529,41 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    Clicking another row of the table while the prompt is open does nothing but say so; commit or
    press Esc first, then pick the next row.
 
+   **Previously on this shape (decision memory).** When you have already ignored or marked as a
+   false positive another finding of the same rule whose offending line is the same code (spacing
+   does not matter, an edit to the code does), the detail pane shows a quiet line under the tags,
+   for example `Previously on this shape: Ignored, 'test fixture, not shipped' (3 rows)`, and the
+   code viewer's hover card shows it on its disposition line. Pressing `I` or `F` (or clicking
+   Ignore or False positive) then opens the reason prompt with that reason already typed in. It is
+   only a starting point: nothing is decided until you have pressed the key **and** pressed Enter,
+   you can edit the text first (what is stored is what is in the box when you press Enter), and
+   Esc throws it away. Nothing is ever applied from memory, and the line never appears for a shape
+   you only confirmed or saved as tech debt, because those carry no reason to reuse. It only looks
+   at decisions made in this review (it is not carried across inspections), and an undo removes the
+   memory along with the decision. If your earlier decisions on the shape disagree, the line says
+   so instead of choosing quietly: it shows the most common one and adds `, and 2 other rows
+   decided differently` (other reasons, a different disposition, or Confirmed and Tech debt rows).
+   The same words typed with different spacing or capitals count as one decision. A reason is only
+   ever offered for the same disposition it was given for: if you had only ever ignored the shape,
+   `F` starts with an empty box (an "accepted risk" reason is not an answer to "the tool was
+   wrong"), though the line still shows the earlier decision. The same code in another repository
+   of the same review counts as the same shape. In the stacked view and for the toolbar's Ignore and
+   False positive buttons (and "False positive all N"), the prompt starts with a reason only when
+   **every** checked or selected finding would be offered the same one; if one has no earlier
+   decision, or two have different ones, the box starts empty. If you press Undo while a reason box
+   is open, the box closes (the undo moves you to the restored finding, and a reason typed for
+   another one must not follow you there). The reason text is your own words from this
+   review and is shown as plain text.
+
+   **Progress strip.** Above the table, one line says where the review stands, for example
+   `Undecided 187 of 612 · Confirmed 310 · Ignored 71 · FP 29 · Tech debt 15` (FP is false
+   positive). It counts the whole Queue, so it reads the same whichever table (Unresolved,
+   Confirmed, Ignored, Tech debt, False positive) is open, and it changes the moment you decide
+   something or undo it. A time estimate ("about 3h 10m left at your pace") is planned but not
+   shown: it needs the review timer, which is not built yet, and the strip will not guess a number.
+   The strip is plain text; it is not read out automatically after every decision, because a run
+   of single-key decisions would have a screen reader repeating the whole line each time.
+
    **Order of the Queue.** The **Order** select above the table cuts the Queue four ways.
    **Curated** (the default) is severity, then kind, then the cheapest deviations first, grouped by
    rule then file. **By file** groups by file (in path order) then rule, with the rows in line order,

@@ -28,6 +28,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use camerata_ui_core::decision_memory::{prefill_reason, prior_decisions};
 use camerata_ui_core::triage::{
     finding_key, finding_state, Disposition, FindingView, KeyMods, RowCursor, TriageState,
     UndoEntry,
@@ -56,6 +57,8 @@ use super::scan::{kind_chip_parts, undo_banner_of, RuleHubRequest};
 
 /// The DOM id of the viewer's focusable root. The keydown handler lives here.
 pub(super) const VIEWER_ID: &str = "camerata-code-viewer";
+/// The DOM id of the viewer's Undo button (the pane has its own Undo beside it).
+pub(super) const VIEWER_UNDO_ID: &str = "camerata-viewer-undo";
 /// The DOM id of the scroll container.
 pub(super) const SCROLL_ID: &str = "camerata-code-scroll";
 
@@ -2078,6 +2081,22 @@ pub(super) fn CodeViewerHost(
         }
     });
 
+    // CANCEL THE VIEWER'S REASON PROMPT: Esc, and an undo. An undo moves the Queue's cursor to the
+    // restored row, and a prompt left open (possibly pre-filled by decision memory) would then be
+    // one Enter from writing its reason onto whichever finding the viewer ends up on. One helper
+    // so the two cannot differ.
+    let cancel_prompt = use_callback(move |()| {
+        prompt.set(None);
+        prompt_reason.set(String::new());
+        focus_viewer();
+    });
+    let undo_here = use_callback(move |()| {
+        if prompt.peek().is_some() {
+            cancel_prompt.call(());
+        }
+        on_undo.call(());
+    });
+
     let on_key = Callback::new({
         let key = key.clone();
         let finding = finding.clone();
@@ -2121,8 +2140,12 @@ pub(super) fn CodeViewerHost(
                 }
                 ViewerCommand::Dispose(state) => dispose.call((state, String::new())),
                 ViewerCommand::PromptFor(state) => {
+                    // Decision memory (B.5): the prompt opens holding the reason this draft
+                    // already gave for the same shape, if it has one. The reviewer still presses
+                    // Enter, and what is stored is whatever the field holds then.
+                    let prior = prior_decisions(&all_for_keys, &dispositions.peek(), &finding);
                     prompt.set(Some(state));
-                    prompt_reason.set(String::new());
+                    prompt_reason.set(prefill_reason(prior.as_ref(), state));
                 }
                 ViewerCommand::MoveRow(dir) => {
                     let next = cursor.peek().moved(&visible_keys.peek(), dir);
@@ -2406,8 +2429,8 @@ pub(super) fn CodeViewerHost(
                 descriptions.get(&f.rule_id).map(String::as_str),
                 Authority::of(f, super::rules::is_enforced_floor(&f.rule_id)),
                 related_from,
-                // Decision memory (B.5) is not built: the popover has the seam and no data yet.
-                None,
+                // Decision memory (B.5): what this draft already decided about this shape.
+                prior_decisions(&all_findings, &dispositions.peek(), f).map(|p| p.chip_text()),
             ))
         })
         .flatten();
@@ -2507,17 +2530,18 @@ pub(super) fn CodeViewerHost(
                     dispose.call((state, prompt_reason.peek().clone()));
                 }
             }),
-            on_prompt_cancel: Callback::new(move |()| {
-                prompt.set(None);
-                prompt_reason.set(String::new());
-                focus_viewer();
-            }),
+            on_prompt_cancel: cancel_prompt,
             on_mark: Callback::new(move |t: String| {
                 goto_finding.call(t);
             }),
             on_line: Callback::new(move |n: usize| line_cursor.set(Some(n))),
             on_open_modal,
-            ViewerUndoBar { undo_entry, now_ms, on_undo }
+            ViewerUndoBar {
+                undo_entry,
+                now_ms,
+                on_undo: undo_here,
+                button_id: VIEWER_UNDO_ID.to_string(),
+            }
         }
     }
 }
@@ -3524,9 +3548,39 @@ mod render_tests {
         assert!(html.contains("2 more in this file"));
         assert!(html.contains("L88 XSS-1"));
         assert!(html.contains("Also violates here: ARCH-NO-RAW-SQL-1"));
-        assert!(!html.contains("Previously"), "the memory seam is empty");
+        assert!(
+            !html.contains("Previously"),
+            "no chip when the caller has none"
+        );
         assert!(!html.contains("Fix"), "no fix text in the popover");
         assert!(!html.contains("cv-popover-pinned"));
+    }
+
+    /// B.5: the popover's disposition line carries the decision-memory chip as TEXT (a reason is
+    /// the reviewer's own words and may contain markup), and it adds no line.
+    #[test]
+    fn the_popover_shows_the_previously_chip_on_the_disposition_line_as_text() {
+        let mut p = popover(|_| {});
+        let without = p.line_count();
+        p.previously =
+            Some("Previously on this shape: Ignored, '<b>fixture</b>' (3 rows)".to_string());
+        let html = render(Case {
+            file: FileStateView::Loaded(view(6, |_| {})),
+            popover: Some(p.clone()),
+            ..Case::default()
+        });
+        assert!(html.contains("cv-pop-prev"), "{html}");
+        assert!(
+            html.contains("Previously on this shape: Ignored,"),
+            "{html}"
+        );
+        assert!(
+            html.contains("&#60;b&#62;fixture&#60;/b&#62;"),
+            "escaped text: {html}"
+        );
+        assert!(!html.contains("<b>fixture</b>"), "never markup: {html}");
+        assert_eq!(p.line_count(), without, "it shares the disposition line");
+        assert_eq!(count(&html, "cv-pop-line"), p.line_count(), "{html}");
     }
 
     #[test]

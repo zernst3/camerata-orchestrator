@@ -620,8 +620,9 @@ pub struct PopoverView {
     pub needs_review: Option<String>,
     /// Line 6: the disposition, and the "previously" line when decision memory has one.
     pub disposition: String,
-    /// THE SEAM FOR B.5 (decision memory): set by the caller once `prior_decisions` exists.
-    /// Until then it is always `None` and the line is simply absent.
+    /// Decision memory (B.5): `PriorDecision::chip_text` for this finding's shape, set by the
+    /// caller. `None` is no chip, and the line is then simply absent. It shares line 6 with the
+    /// disposition, so it never adds a line.
     pub previously: Option<String>,
     /// Line 7: other findings in this file.
     pub related: Vec<RelatedFinding>,
@@ -646,7 +647,7 @@ impl PopoverView {
 
 /// The popover for `f`. `items` is [`crate::viewer::file_findings`] for the finding's file;
 /// `directive` is the rule's text from the descriptions already loaded; `previously` is the
-/// decision-memory line (B.5), `None` until that exists.
+/// decision-memory line (B.5), `None` when the draft has nothing on this shape.
 pub fn popover_view(
     f: &FindingView,
     state: TriageState,
@@ -1288,7 +1289,7 @@ mod tests {
     }
 
     #[test]
-    fn the_popover_is_never_more_than_eight_lines_and_previously_is_a_clean_seam() {
+    fn the_popover_is_never_more_than_eight_lines_and_previously_adds_no_line() {
         let full = finding(serde_json::json!({
             "detail": "It is bad. [needs review: maybe fine]",
             "effort": "low", "also_matches": ["A-1", "B-2"],
@@ -1307,8 +1308,8 @@ mod tests {
         assert_eq!(p.disposition, "Ignored (suppressed-baseline)");
         assert_eq!(p.effort.as_deref(), Some("low"));
         assert_eq!(p.also_matches, vec!["A-1", "B-2"]);
-        assert_eq!(p.previously, None, "decision memory is not built yet");
-        // The seam: a caller that has a line sets it, and no line is added.
+        assert_eq!(p.previously, None, "no chip when the caller has none");
+        // A caller that has a memory line sets it, and no line is added.
         let with = popover_view(
             &full,
             TriageState::Ignored,
