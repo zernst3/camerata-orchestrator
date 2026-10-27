@@ -419,3 +419,61 @@ fn an_unrecorded_backend_is_null_in_the_manifest_and_absent_from_the_readme() {
     assert!(!readme.contains("Model backend"), "{readme}");
     assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
 }
+
+// ---- the spend limit: the export states THAT the run was capped, never how much ----
+
+#[test]
+fn a_capped_run_is_stated_in_the_manifest_and_the_readme_and_they_agree() {
+    let mut provenance = provenance_with(None);
+    provenance.cost_cap_reached = true;
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    assert_eq!(manifest["inspection"]["cost_cap_reached"], true);
+    assert!(readme.contains("Spend limit: reached"), "{readme}");
+    assert!(readme.contains("INCOMPLETE"), "{readme}");
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+    assert!(!manifest.to_string().contains("usd") && !readme.contains('$'));
+}
+
+#[test]
+fn an_uncapped_run_says_false_in_the_manifest_and_nothing_in_the_readme() {
+    let provenance = provenance_with(None);
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    assert_eq!(manifest["inspection"]["cost_cap_reached"], false);
+    assert!(!readme.contains("Spend limit"), "{readme}");
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+}
+
+#[test]
+fn the_gate_catches_a_readme_that_hides_or_invents_the_spend_limit() {
+    let mut capped = provenance_with(None);
+    capped.cost_cap_reached = true;
+    let (manifest, readme) = manifest_and_readme(&capped);
+    // A README with the incompleteness line removed disagrees with the manifest.
+    let hidden: String = readme
+        .lines()
+        .filter(|l| !l.starts_with("Spend limit"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let problems = camerata_server::release_gate::verify_readme_provenance(&hidden, &manifest);
+    assert!(
+        problems
+            .iter()
+            .any(|p| format!("{p:?}").contains("Spend limit")),
+        "{problems:?}"
+    );
+
+    // And one that claims a cap the manifest does not record.
+    let (clean_manifest, clean_readme) = manifest_and_readme(&provenance_with(None));
+    let invented = clean_readme.replace(
+        "Release checks:",
+        &format!("{}\nRelease checks:", camerata_server::COST_CAP_README_LINE),
+    );
+    let problems =
+        camerata_server::release_gate::verify_readme_provenance(&invented, &clean_manifest);
+    assert!(
+        problems
+            .iter()
+            .any(|p| format!("{p:?}").contains("Spend limit")),
+        "{problems:?}"
+    );
+}

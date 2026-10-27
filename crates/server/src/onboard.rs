@@ -1287,6 +1287,72 @@ pub fn build_llm(
 /// takes effect on the next audit with no restart. The server passes its live store and the
 /// CLI passes the real Keychain store.
 #[allow(clippy::too_many_arguments)]
+pub async fn audit_repos_controlled(
+    creds: &dyn crate::credentials::CredentialStore,
+    sources: &[(String, std::path::PathBuf)],
+    selected: &[SelectedRule],
+    extra_notes: Vec<String>,
+    model: Option<&str>,
+    calibration_model: Option<&str>,
+    mode: crate::ai_audit::ScanMode,
+    thorough: bool,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    job: Option<(&crate::jobs::JobStore, &str)>,
+    incremental_prior: Option<&crate::scan_cache::ScanManifest>,
+    deep: bool,
+    soc2_enabled: bool,
+    run_ai_review: bool,
+    run_deterministic: bool,
+    ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
+    backend_resolution: crate::llm::BackendResolution,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_options: &std::collections::HashMap<String, String>,
+    // How this run executes: efficiency switches and the spend cap (see
+    // [`crate::cost_cap::RunControls`]).
+    controls: crate::cost_cap::RunControls,
+) -> (ScanReport, crate::scan_cache::ScanManifest) {
+    // The transport this run's `Llm` is built with: EXACTLY the resolution's Cli/Api choice,
+    // never re-derived from env. `Blocked` never reaches a model call (`run_ai_review` is forced
+    // off for it inside); `Cli` is supplied defensively so the `Llm` still constructs.
+    let llm_backend = match &backend_resolution {
+        crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
+        crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
+        crate::llm::BackendResolution::Blocked { .. } => crate::llm::Backend::Cli,
+    };
+    // Every `claude -p` this run spawns persists its prompt (client source) in a Claude Code
+    // session file; the sink remembers each session id so source deletion can remove exactly
+    // those files. The Api backend never spawns `claude`, so it records nothing.
+    let sessions = crate::llm::SessionSink::new();
+    let llm = build_llm(creds, llm_backend, ledger).with_session_sink(sessions.clone());
+    let (mut report, manifest) = audit_repos_with_llm_controlled(
+        &llm,
+        sources,
+        selected,
+        extra_notes,
+        model,
+        calibration_model,
+        mode,
+        thorough,
+        feedback,
+        job,
+        incremental_prior,
+        deep,
+        soc2_enabled,
+        run_ai_review,
+        run_deterministic,
+        backend_resolution,
+        corpus,
+        chosen_options,
+        controls,
+    )
+    .await;
+    report.provenance.model_sessions = sessions.snapshot();
+    (report, manifest)
+}
+
+/// [`audit_repos_controlled`] with the default controls: every efficiency measure on unless the
+/// environment ([`crate::efficiency::EFFICIENCY_ENV`]) says otherwise, and no spend cap.
+#[allow(clippy::too_many_arguments)]
 pub async fn audit_repos(
     creds: &dyn crate::credentials::CredentialStore,
     sources: &[(String, std::path::PathBuf)],
@@ -1308,21 +1374,55 @@ pub async fn audit_repos(
     corpus: Option<&camerata_rules::RuleSet>,
     chosen_options: &std::collections::HashMap<String, String>,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
-    // The transport this run's `Llm` is built with: EXACTLY the resolution's Cli/Api choice,
-    // never re-derived from env. `Blocked` never reaches a model call (`run_ai_review` is forced
-    // off for it inside); `Cli` is supplied defensively so the `Llm` still constructs.
-    let llm_backend = match &backend_resolution {
-        crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
-        crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
-        crate::llm::BackendResolution::Blocked { .. } => crate::llm::Backend::Cli,
-    };
-    // Every `claude -p` this run spawns persists its prompt (client source) in a Claude Code
-    // session file; the sink remembers each session id so source deletion can remove exactly
-    // those files. The Api backend never spawns `claude`, so it records nothing.
-    let sessions = crate::llm::SessionSink::new();
-    let llm = build_llm(creds, llm_backend, ledger).with_session_sink(sessions.clone());
-    let (mut report, manifest) = audit_repos_with_llm(
-        &llm,
+    audit_repos_controlled(
+        creds,
+        sources,
+        selected,
+        extra_notes,
+        model,
+        calibration_model,
+        mode,
+        thorough,
+        feedback,
+        job,
+        incremental_prior,
+        deep,
+        soc2_enabled,
+        run_ai_review,
+        run_deterministic,
+        ledger,
+        backend_resolution,
+        corpus,
+        chosen_options,
+        crate::cost_cap::RunControls::from_env(),
+    )
+    .await
+}
+
+/// [`audit_repos_with_llm_controlled`] with the default controls (see [`audit_repos`]).
+#[allow(clippy::too_many_arguments)]
+pub async fn audit_repos_with_llm(
+    llm: &dyn crate::llm::LlmPort,
+    sources: &[(String, std::path::PathBuf)],
+    selected: &[SelectedRule],
+    extra_notes: Vec<String>,
+    model: Option<&str>,
+    calibration_model: Option<&str>,
+    mode: crate::ai_audit::ScanMode,
+    thorough: bool,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    job: Option<(&crate::jobs::JobStore, &str)>,
+    incremental_prior: Option<&crate::scan_cache::ScanManifest>,
+    deep: bool,
+    soc2_enabled: bool,
+    run_ai_review: bool,
+    run_deterministic: bool,
+    backend_resolution: crate::llm::BackendResolution,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_options: &std::collections::HashMap<String, String>,
+) -> (ScanReport, crate::scan_cache::ScanManifest) {
+    audit_repos_with_llm_controlled(
+        llm,
         sources,
         selected,
         extra_notes,
@@ -1340,10 +1440,9 @@ pub async fn audit_repos(
         backend_resolution,
         corpus,
         chosen_options,
+        crate::cost_cap::RunControls::from_env(),
     )
-    .await;
-    report.provenance.model_sessions = sessions.snapshot();
-    (report, manifest)
+    .await
 }
 
 /// The brownfield audit over an injected model. [`audit_repos`] is this with the real `Llm`; a
@@ -1351,7 +1450,7 @@ pub async fn audit_repos(
 /// checkers, the clone advisory seam, the semantic pass, calibration) runs with no network and
 /// no spend. Everything about the audit is documented on the parameters below and in the body.
 #[allow(clippy::too_many_arguments)]
-pub async fn audit_repos_with_llm(
+pub async fn audit_repos_with_llm_controlled(
     llm: &dyn crate::llm::LlmPort,
     sources: &[(String, std::path::PathBuf)],
     selected: &[SelectedRule],
@@ -1401,6 +1500,8 @@ pub async fn audit_repos_with_llm(
     // `RuleSelection.chosen_option` by the caller. Used as the "currently selected" marker in
     // the recommendation prompt and as the fallback when the model's answer can't be trusted.
     chosen_options: &std::collections::HashMap<String, String>,
+    // How this run executes: efficiency switches and the spend cap.
+    controls: crate::cost_cap::RunControls,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
     // The live preview streams findings into the job as passes complete, BEFORE the final dedup,
     // calibration and bounds. Hand the job the corpus up front so every streamed batch (the
@@ -1482,7 +1583,11 @@ pub async fn audit_repos_with_llm(
         calibration_model,
         selected,
     );
-    let effective_prior = incremental_prior.filter(|m| m.is_reusable_baseline(&rules_fp, &ai_key));
+    // Rank 5 `result_cache`: OFF forces a full AI re-scan (the same as `--full`), whatever the
+    // prior manifest holds.
+    let effective_prior = incremental_prior
+        .filter(|_| controls.efficiency.result_cache)
+        .filter(|m| m.is_reusable_baseline(&rules_fp, &ai_key));
     let mut manifest_builder = crate::scan_cache::ManifestBuilder::new()
         .with_rules_fingerprint(rules_fp.clone())
         .with_ai_key(ai_key.clone());
@@ -1537,7 +1642,7 @@ pub async fn audit_repos_with_llm(
     let mut first_ai_error: Option<String> = None;
     // Aggregates REAL usage across every repo's audit (passes + calibration) for the
     // actual-vs-estimated readout.
-    let meter = crate::ai_audit::UsageMeter::default();
+    let meter = crate::ai_audit::UsageMeter::with_controls(controls);
     // Wave C: the clone-candidate judge's verdict cache. Seeded from the prior manifest even when
     // that manifest is not usable as an AI baseline (verdicts are keyed by the content of the
     // question, so a changed rule set or an AI-off prior scan does not invalidate them); a
@@ -1910,11 +2015,20 @@ pub async fn audit_repos_with_llm(
                     if !clone_armed.is_empty() {
                         let set = camerata_checks::clone_rules::candidates(&files, &clone_armed);
                         let judge_model = clone_advisory::resolve_clone_judge_model(None);
-                        let unavailable = ai_blocked_reason
-                            .clone()
-                            .unwrap_or_else(|| "deterministic-only scan".to_string());
+                        // SPEND CAP: the judge is a stage like any other; past the cap it does not
+                        // start and is recorded as NOT RUN.
+                        let clone_blocked =
+                            run_ai_review && meter.stage_blocked(spec, "clone-advisory judge");
+                        let unavailable = if clone_blocked {
+                            "the spend limit set for this run was reached before the judge ran"
+                                .to_string()
+                        } else {
+                            ai_blocked_reason
+                                .clone()
+                                .unwrap_or_else(|| "deterministic-only scan".to_string())
+                        };
                         let outcome = clone_advisory::judge_clone_candidates(
-                            run_ai_review.then_some(llm),
+                            (run_ai_review && !clone_blocked).then_some(llm),
                             clone_advisory::JudgeRequest {
                                 repo: spec,
                                 files: &files,
@@ -2011,7 +2125,9 @@ pub async fn audit_repos_with_llm(
                     // differs is the question it answered (model, prompt, rule wording).
                     let question_changed =
                         prior.is_current() && prior.matches_rules(&rules_fp) && prior.ai_covered;
-                    notes.push(if question_changed {
+                    notes.push(if !controls.efficiency.result_cache {
+                        format!("{spec}: result cache switched off — full re-scan")
+                    } else if question_changed {
                         format!(
                             "{spec}: model, prompt or rule wording changed since last scan — full re-scan"
                         )
@@ -2128,8 +2244,30 @@ pub async fn audit_repos_with_llm(
                                         );
                                     }
                                 }
+                                // SPEND CAP: a rule the cap left unchecked on part of the code
+                                // is NOT recorded as having run, so the integrity ledger cannot
+                                // read "ran, found nothing" for code that was never looked at.
+                                let unchecked = meter
+                                    .cost_cap_record()
+                                    .map(|c| c.unchecked_rule_ids(spec))
+                                    .unwrap_or_default();
                                 for (rid, _) in &semantic {
                                     let emitted = ai_counts.remove(rid).unwrap_or(0);
+                                    if unchecked.contains(rid) {
+                                        pipeline_ledger.record_rule(
+                                            rid.clone(),
+                                            crate::scan_ledger::RuleTier::Semantic,
+                                            false,
+                                            Some(
+                                                "not run on all of the code: the spend limit set \
+                                                 for this run was reached"
+                                                    .to_string(),
+                                            ),
+                                            0,
+                                            emitted,
+                                        );
+                                        continue;
+                                    }
                                     pipeline_ledger.record_rule(
                                         rid.clone(),
                                         crate::scan_ledger::RuleTier::Semantic,
@@ -2273,7 +2411,10 @@ pub async fn audit_repos_with_llm(
                 // already-resolved `llm` (built from `backend_resolution` above) and folds
                 // usage into the SAME `meter` as calibration/audit, so its spend is never
                 // invisible to the actual-vs-estimated readout.
-                if run_ai_review && !repo_findings.is_empty() {
+                if run_ai_review
+                    && !repo_findings.is_empty()
+                    && !meter.stage_blocked(spec, "fix-specific generation")
+                {
                     let (fixed_findings, fix_failed_passes) =
                         crate::ai_audit::generate_fix_specifics(
                             llm,
@@ -2313,6 +2454,9 @@ pub async fn audit_repos_with_llm(
     let deep_report = if run_ai_review && deep && !deep_inputs.is_empty() {
         let mut per_repo = Vec::new();
         for (spec, files) in &deep_inputs {
+            if meter.stage_blocked(spec, "deep compliance tier") {
+                continue;
+            }
             let dr = crate::ai_audit::run_deep_tier(
                 llm,
                 spec,
@@ -2400,6 +2544,14 @@ pub async fn audit_repos_with_llm(
     // The question this scan's AI findings answered, kept on the (persisted) inspection so the
     // delta rescan can prove its carried findings are still current. See `ScanLedger::ai_key`.
     report.ledger.record_ai_key(ai_key);
+    // Which efficiency measures were on, so any two runs can be compared knowing what differed.
+    report.ledger.record_efficiency(controls.efficiency);
+    // The spend cap: what it stopped is disclosed through the same failed-pass list every other
+    // incomplete pass uses, and the amounts stay on the operator ledger.
+    if let Some(cap) = meter.cost_cap_record() {
+        all_failed_passes.extend(cap.failed_passes());
+        report.ledger.record_cost_cap(cap);
+    }
     // Operator telemetry: the per-stage split of the spend, joined to the SAME counted-line
     // total `camerata count` prints (it comes from the same file filter). Lives on the ledger,
     // never on a client export. Skipped when no model ran, so a deterministic-only scan carries

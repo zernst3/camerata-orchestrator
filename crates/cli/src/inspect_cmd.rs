@@ -38,6 +38,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod preflight;
+
 use camerata_server::ai_audit::{ActualUsage, FailedPass, ScanMode};
 use camerata_server::llm::{resolve_backend, BackendResolution, ProjectBackend};
 use camerata_server::onboard::{ProposedRule, SelectedRule};
@@ -87,6 +89,35 @@ pub struct InspectArgs {
     /// line per rule. Default output stays at the concise stage/family/not-run/failed-passes
     /// summary.
     pub verbose: bool,
+    /// `--max-cost-usd`: stop between passes once actual spend reaches this many dollars. See
+    /// [`camerata_server::cost_cap`].
+    pub max_cost_usd: Option<f64>,
+    /// `--efficiency name=on|off` entries (applied over `CAMERATA_EFFICIENCY`). See
+    /// [`camerata_server::efficiency`].
+    pub efficiency: Vec<String>,
+}
+
+impl InspectArgs {
+    /// The run's controls: the environment's efficiency switches, then the flags over them, and
+    /// the validated cap. `Err` on an unknown measure, a malformed entry or a bad cap, before
+    /// anything is read or spent.
+    pub fn run_controls(&self) -> Result<camerata_server::cost_cap::RunControls, String> {
+        let mut efficiency = camerata_server::efficiency::EfficiencyConfig::from_env()?;
+        for entry in &self.efficiency {
+            efficiency
+                .apply_entry(entry)
+                .map_err(|e| format!("--efficiency: {e}"))?;
+        }
+        let max_cost_usd = self
+            .max_cost_usd
+            .map(camerata_server::cost_cap::RunControls::validate_cap)
+            .transpose()?;
+        Ok(camerata_server::cost_cap::RunControls {
+            efficiency,
+            max_cost_usd,
+            estimate_hint_usd: None,
+        })
+    }
 }
 
 /// What [`run_inspect`] reports back to its caller. `main.rs`'s handler prints this; tests
@@ -123,11 +154,31 @@ pub struct InspectOutcome {
     /// ledger at [`ledger_path`]). Printed as a table at the end of the run; deliberately NOT
     /// part of the export. `None` when no model call ran.
     pub stage_telemetry: Option<camerata_server::stage_telemetry::StageTelemetry>,
+    /// The pre-flight estimate that was printed before the first model call (`None` when no
+    /// model call was going to be made).
+    pub preflight: Option<String>,
+    /// Which token-efficiency measures were on for this run.
+    pub efficiency: camerata_server::efficiency::EfficiencyConfig,
+    /// What the spend limit did, when one was set. Operator-only: it carries dollar figures.
+    pub cost_cap: Option<camerata_server::cost_cap::CostCapRecord>,
+}
+
+impl InspectOutcome {
+    /// True when the spend limit stopped part of the run, so the export is incomplete.
+    pub fn cost_capped(&self) -> bool {
+        self.cost_cap
+            .as_ref()
+            .is_some_and(camerata_server::cost_cap::CostCapRecord::stopped_the_run)
+    }
 }
 
 /// The exit code `camerata inspect` uses when the release gate refuses the export (the
 /// integrity gate's is 2). The zip is never written.
 pub const EXIT_RELEASE_BLOCKED: i32 = 3;
+
+/// The exit code when the spend limit (`--max-cost-usd`) stopped the run. The export WAS
+/// written, marked incomplete.
+pub const EXIT_COST_CAPPED: i32 = 4;
 
 /// Why an inspection produced no export.
 #[derive(Debug)]
@@ -176,6 +227,7 @@ impl From<String> for InspectError {
 /// production caller, and it passes the presence the shared resolver finds (the key saved in
 /// the app first, `ANTHROPIC_API_KEY` as the fallback; see [`api_key_present`]).
 pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String> {
+    args.run_controls()?;
     if !args.repo.is_dir() {
         return Err(format!(
             "--repo {} does not exist or is not a directory",
@@ -498,7 +550,36 @@ async fn run_inspect_pipeline(
     has_api_key: bool,
     creds: &dyn camerata_server::credentials::CredentialStore,
 ) -> Result<InspectOutcome, InspectError> {
+    run_inspect_pipeline_with(
+        args,
+        has_api_key,
+        creds,
+        Seams {
+            llm: None,
+            preflight_sink: &|text| print!("{text}"),
+        },
+    )
+    .await
+}
+
+/// The test seams of the pipeline. Production passes no model (the real `Llm` is built from the
+/// credential store) and prints the pre-flight estimate to stdout the moment it is ready.
+pub struct Seams<'a> {
+    /// A scripted model to run the audit over instead of the real `Llm` (no network).
+    pub llm: Option<&'a dyn camerata_server::llm::LlmPort>,
+    /// Receives the pre-flight estimate text BEFORE the first model call is made.
+    pub preflight_sink: &'a (dyn Fn(&str) + Sync),
+}
+
+/// [`run_inspect_pipeline`] with its seams explicit.
+pub async fn run_inspect_pipeline_with(
+    args: InspectArgs,
+    has_api_key: bool,
+    creds: &dyn camerata_server::credentials::CredentialStore,
+    seams: Seams<'_>,
+) -> Result<InspectOutcome, InspectError> {
     validate_args(&args, has_api_key)?;
+    let mut controls = args.run_controls()?;
 
     // A headless run has no `owner/repo` spec — the scanned directory's own name stands in
     // for it (tags every finding/provenance entry, same role `spec` plays in `resolve_local_sources`).
@@ -559,34 +640,106 @@ async fn run_inspect_pipeline(
         load_prior_manifest(&args.repo)
     };
 
+    // ── Pre-flight: the estimate, printed BEFORE the first model call ──────────────────────
+    // Skipped when no model call will be made (the compliance gate blocked the AI review).
+    let mut preflight_text: Option<String> = None;
+    if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
+        let facts =
+            camerata_server::preflight::gather_scan_facts(&sources, &selected, corpus.as_ref())
+                .await;
+        // The exact size of one pass: API backend only, and never for a scripted model.
+        let exact = if seams.llm.is_none() && matches!(backend_resolution, BackendResolution::Api) {
+            let llm = camerata_server::onboard::build_llm(
+                creds,
+                camerata_server::llm::Backend::Api,
+                None,
+            );
+            camerata_server::preflight::exact_sample_tokens(
+                &llm,
+                &facts,
+                mode,
+                model,
+                controls.efficiency,
+            )
+            .await
+        } else {
+            None
+        };
+        let audit_model = camerata_server::ai_audit::resolve_audit_model(model);
+        let pf = preflight::build(&preflight::PreflightInputs {
+            backend: args.backend,
+            batch: args.batch,
+            calibration_model: calibration_model
+                .map(str::to_string)
+                .unwrap_or_else(|| audit_model.clone()),
+            model: audit_model,
+            repos: &facts,
+            incremental: incremental_prior.is_some(),
+            cap_usd: controls.max_cost_usd,
+            exact,
+        });
+        (seams.preflight_sink)(&pf.text);
+        controls.estimate_hint_usd = pf.estimate_usd;
+        preflight_text = Some(pf.text);
+    }
+
     // ── Phase 3: the two-tier scan (deterministic floor + AI review), calibration, and
     // per-rule alternative recommendation (when the corpus resolves a rule's alternatives —
     // the "investigation" of which option actually applies) — ALL inside `audit_repos`, the
     // exact function `onboard_audit`'s HTTP handler calls. `chosen_options` stays empty: no
     // project-level override exists headlessly, so the model recommends fully automatically —
     // the curation-default state. ──
-    let (mut report, manifest) = camerata_server::onboard::audit_repos(
-        creds,
-        &sources,
-        &selected,
-        Vec::new(),
-        model,
-        calibration_model,
-        mode,
-        false, // thorough — not exposed on Step 0's flag surface; matches AuditReq's default
-        None,  // feedback — no live transcript sink headlessly
-        None,  // job — no job store headlessly (this call blocks until done, like `onboard_audit`)
-        incremental_prior.as_ref(),
-        false, // deep — the opt-in compliance tier; not exposed on Step 0's flag surface
-        true,  // soc2_enabled — irrelevant with `deep` off
-        true,  // run_ai_review
-        true,  // run_deterministic
-        Some(ledger.clone()),
-        backend_resolution,
-        corpus.as_ref(),
-        &HashMap::new(),
-    )
-    .await;
+    let (mut report, manifest) = match seams.llm {
+        Some(llm) => {
+            camerata_server::onboard::audit_repos_with_llm_controlled(
+                llm,
+                &sources,
+                &selected,
+                Vec::new(),
+                model,
+                calibration_model,
+                mode,
+                false,
+                None,
+                None,
+                incremental_prior.as_ref(),
+                false,
+                true,
+                true,
+                true,
+                backend_resolution,
+                corpus.as_ref(),
+                &HashMap::new(),
+                controls,
+            )
+            .await
+        }
+        None => {
+            camerata_server::onboard::audit_repos_controlled(
+                creds,
+                &sources,
+                &selected,
+                Vec::new(),
+                model,
+                calibration_model,
+                mode,
+                false, // thorough — not exposed on Step 0's flag surface; matches AuditReq's default
+                None,  // feedback — no live transcript sink headlessly
+                None, // job — no job store headlessly (this call blocks until done, like `onboard_audit`)
+                incremental_prior.as_ref(),
+                false, // deep — the opt-in compliance tier; not exposed on Step 0's flag surface
+                true,  // soc2_enabled — irrelevant with `deep` off
+                true,  // run_ai_review
+                true,  // run_deterministic
+                Some(ledger.clone()),
+                backend_resolution,
+                corpus.as_ref(),
+                &HashMap::new(),
+                controls,
+            )
+            .await
+        }
+    };
 
     save_manifest(&args.repo, &manifest);
     report.excluded_mechanical_rules = excluded_mechanical;
@@ -689,6 +842,9 @@ async fn run_inspect_pipeline(
         ledger_path: ledger_path(&args.repo),
         release_gate,
         stage_telemetry: report.ledger.stage_telemetry().cloned(),
+        preflight: preflight_text,
+        efficiency: controls.efficiency,
+        cost_cap: report.ledger.cost_cap().cloned(),
     })
 }
 
@@ -932,17 +1088,50 @@ pub fn format_outcome_report(outcome: &InspectOutcome) -> String {
         .as_ref()
         .map(|t| format!("\n{}", t.render_table()))
         .unwrap_or_default();
+    let cap = outcome
+        .cost_cap
+        .as_ref()
+        .map(render_cost_cap)
+        .unwrap_or_default();
     format!(
         "camerata inspect: wrote {} ({} bytes) — backend: {backend_label}, findings: {}\n\
-         {}\nintegrity ledger: {}\n{}\n\n{}{telemetry}",
+         {}\nintegrity ledger: {}\n{}\nefficiency measures: {}\n{cap}\n{}{telemetry}",
         outcome.export_path.display(),
         outcome.export_zip_bytes,
         outcome.findings_count,
         outcome.release_gate,
         outcome.ledger_path.display(),
         format_usage_report(outcome.actual_usage.as_ref(), outcome.batch),
+        outcome.efficiency.render(),
         outcome.ledger_summary,
     )
+}
+
+/// The spend-limit block of the final report: what was set, what was spent, and, when the limit
+/// stopped the run, that the export is incomplete and what was not run. Operator-only (dollar
+/// figures live here, never in the export).
+fn render_cost_cap(cap: &camerata_server::cost_cap::CostCapRecord) -> String {
+    let mut out = format!(
+        "spend limit: ${:.2}, spent ${:.2}",
+        cap.cap_usd, cap.spent_usd
+    );
+    if cap.stopped_the_run() {
+        write!(
+            out,
+            " -- REACHED. This inspection is INCOMPLETE: {} scan pass(es) and {} stage(s) were NOT RUN \
+             (listed under FAILED PASSES). A run can finish up to one pass over the limit.",
+            cap.not_run_passes.len(),
+            cap.not_run_stages.len()
+        )
+        .ok();
+    } else {
+        out.push_str(" (not reached)");
+    }
+    for note in &cap.notes {
+        write!(out, "\n  {note}").ok();
+    }
+    out.push('\n');
+    out
 }
 
 #[cfg(test)]
@@ -963,7 +1152,104 @@ mod tests {
             calibration_model: None,
             full: false,
             verbose: false,
+            max_cost_usd: None,
+            efficiency: Vec::new(),
         }
+    }
+
+    // ── run controls: --efficiency and --max-cost-usd ───────────────────────────────
+
+    #[test]
+    fn efficiency_flags_switch_exactly_the_named_measures() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = base_args(dir.path().to_path_buf(), dir.path().join("o.zip"));
+        args.efficiency = vec![
+            "warm_schedule=off".to_string(),
+            "truncation_retry=off".to_string(),
+            "warm_schedule=on".to_string(),
+        ];
+        let controls = args.run_controls().unwrap();
+        assert_eq!(controls.efficiency.disabled(), vec!["truncation_retry"]);
+        assert_eq!(controls.max_cost_usd, None);
+    }
+
+    #[test]
+    fn an_unknown_measure_or_a_bad_cap_is_refused_before_anything_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = base_args(dir.path().to_path_buf(), dir.path().join("o.zip"));
+        args.efficiency = vec!["warm_shedule=off".to_string()];
+        let err = validate_args(&args, false).expect_err("a typo must not silently leave it on");
+        assert!(
+            err.contains("--efficiency") && err.contains("warm_schedule"),
+            "{err}"
+        );
+
+        args.efficiency.clear();
+        for bad in [0.0, -3.0, f64::NAN] {
+            args.max_cost_usd = Some(bad);
+            let err = validate_args(&args, false).expect_err("a non-positive cap");
+            assert!(err.contains("--max-cost-usd"), "{err}");
+        }
+        args.max_cost_usd = Some(12.5);
+        validate_args(&args, false).unwrap();
+        assert_eq!(args.run_controls().unwrap().max_cost_usd, Some(12.5));
+    }
+
+    #[test]
+    fn the_final_report_states_the_efficiency_set_and_the_spend_limit() {
+        use camerata_server::cost_cap::{CostCapRecord, NotRunPass};
+        let mut efficiency = camerata_server::efficiency::EfficiencyConfig::default();
+        efficiency.set("result_cache", false).unwrap();
+        let mut outcome = InspectOutcome {
+            export_path: PathBuf::from("/tmp/out.zip"),
+            export_zip_bytes: 1,
+            backend: ProjectBackend::Api,
+            batch: false,
+            actual_usage: None,
+            findings_count: 0,
+            ledger_summary: String::new(),
+            ledger_path: PathBuf::from("/tmp/l.json"),
+            release_gate: "release gate: passed (6 checks)".to_string(),
+            stage_telemetry: None,
+            preflight: None,
+            efficiency,
+            cost_cap: Some(CostCapRecord {
+                cap_usd: 5.0,
+                spent_usd: 5.4,
+                not_run_passes: vec![NotRunPass {
+                    repo: "r".into(),
+                    group: "pass[all]".into(),
+                    chunk: 1,
+                    n_chunks: 1,
+                    rule_batch: 2,
+                    n_rule_batches: 2,
+                    rule_ids: vec!["A-1".into()],
+                }],
+                not_run_stages: Vec::new(),
+                notes: Vec::new(),
+            }),
+        };
+        let text = format_outcome_report(&outcome);
+        assert!(
+            text.contains("result_cache=off") && text.contains("warm_schedule=on"),
+            "{text}"
+        );
+        assert!(
+            text.contains("spend limit: $5.00, spent $5.40 -- REACHED"),
+            "{text}"
+        );
+        assert!(
+            text.contains("INCOMPLETE") && text.contains("NOT RUN"),
+            "{text}"
+        );
+        assert!(outcome.cost_capped());
+
+        outcome.cost_cap.as_mut().unwrap().not_run_passes.clear();
+        assert!(
+            !outcome.cost_capped(),
+            "a cap that stopped nothing is not a capped run"
+        );
+        assert!(format_outcome_report(&outcome).contains("(not reached)"));
     }
 
     // ── validate_args ────────────────────────────────────────────────────────────────
@@ -1340,6 +1626,9 @@ mod tests {
             ledger_path: PathBuf::from("/tmp/state/out-deadbeef.ledger.json"),
             release_gate: "release gate: passed (6 checks)".to_string(),
             stage_telemetry: None,
+            preflight: None,
+            efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
+            cost_cap: None,
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("/tmp/out.zip"), "{text}");
@@ -1387,6 +1676,9 @@ mod tests {
             ledger_path: PathBuf::from("/tmp/state/x.ledger.json"),
             release_gate: String::new(),
             stage_telemetry: Some(meter.snapshot(8_000)),
+            preflight: None,
+            efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
+            cost_cap: None,
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("STAGE TELEMETRY"), "{text}");

@@ -1254,6 +1254,7 @@ pub(super) async fn audit_against(
     deep: bool,
     run_ai_review: bool,
     run_deterministic: bool,
+    max_cost_usd: Option<f64>,
 ) -> Option<ScanReportView> {
     // Loading guard: the Bombe machine runs for the full audit round-trip.
     let _guard = crate::loading::LoadingGuard::new();
@@ -1271,6 +1272,7 @@ pub(super) async fn audit_against(
             "deep": deep,
             "run_ai_review": run_ai_review,
             "run_deterministic": run_deterministic,
+            "max_cost_usd": max_cost_usd,
         }))
         .send()
         .await
@@ -1760,6 +1762,7 @@ pub(super) async fn audit_job_start(
     deep: bool,
     run_ai_review: bool,
     run_deterministic: bool,
+    max_cost_usd: Option<f64>,
 ) -> Option<String> {
     let rule_json = audit_rules_json(rules);
     let v: serde_json::Value = reqwest::Client::new()
@@ -1775,6 +1778,7 @@ pub(super) async fn audit_job_start(
             "deep": deep,
             "run_ai_review": run_ai_review,
             "run_deterministic": run_deterministic,
+            "max_cost_usd": max_cost_usd,
         }))
         .send()
         .await
@@ -7266,6 +7270,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // (so re-scans are incremental — only changed files cost AI tokens). The first scan of a
     // project is full regardless (no cache yet).
     let mut audit_full_scan = use_signal(|| false);
+    // Spend limit (USD): blank = none. The run stops between passes once actual spend reaches
+    // it and lists what it did not run (the server twin of `camerata inspect --max-cost-usd`).
+    let mut audit_spend_limit = use_signal(String::new);
     // Deep compliance & security tier (#55): opt-in, the most expensive tier.
     // Runs three extra whole-repo passes (SOC-2 gap analysis, deep security audit,
     // threat model) after the standard audit and attaches the results as `report.deep`.
@@ -8183,6 +8190,15 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             // Full scan forces a clean pass; otherwise the scan is incremental
                             // (only files changed since the last scan cost AI tokens).
                             let incremental = !audit_full_scan();
+                            // A spend limit that is not a positive number stops the scan from
+                            // starting (and says why) rather than silently running unlimited.
+                            let max_cost = match camerata_ui_core::scan::parse_spend_limit(&audit_spend_limit()) {
+                                Ok(v) => v,
+                                Err(msg) => {
+                                    job_failed_message.set(Some(msg));
+                                    return;
+                                }
+                            };
                             // Deterministic-only is fast, but its PROGRESS is only pollable on
                             // the async job path (the sync path holds one request and returns
                             // the final report). So route a deterministic-ONLY scan through the
@@ -8223,7 +8239,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 let loading_count = loading_count;
                                 spawn(async move {
                                     let _guard = crate::loading::LoadingGuard::from_count(loading_count);
-                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough, incremental, deep, ai, det).await else {
+                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough, incremental, deep, ai, det, max_cost).await else {
                                         auditing.set(false);
                                         job_failed_message.set(Some(
                                             "Could not start the background scan (the request \
@@ -8249,7 +8265,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             } else {
                                 // Synchronous: hold the request until the (shorter) run finishes.
                                 spawn(async move {
-                                    let result = audit_against(&repos, &rules, &model, &calib, &mode, thorough, incremental, deep, ai, det).await;
+                                    let result = audit_against(&repos, &rules, &model, &calib, &mode, thorough, incremental, deep, ai, det, max_cost).await;
                                     if result.is_none() {
                                         // The sync request itself failed (network error, server
                                         // unreachable) — the server-side crash path already
@@ -8428,6 +8444,20 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                     }
                     span { class: "audit-model-hint",
                         "By default a re-scan is INCREMENTAL: only files whose content changed since the last scan of this project are sent to the AI, and findings for unchanged files are reused from cache — so re-running after a small edit costs a fraction of the tokens. The first scan of a project is always full (no cache yet). Tick this to ignore the cache and re-audit the whole codebase from scratch (e.g. after changing your rule selection, or to refresh every finding)."
+                    }
+                }
+                // Spend limit: optional hard stop on the scan's AI spend, checked between passes.
+                div { class: "audit-model-row",
+                    label { class: "audit-model-label", "Spend limit (USD)" }
+                    input {
+                        r#type: "text",
+                        placeholder: "no limit",
+                        value: "{audit_spend_limit}",
+                        disabled: auditing(),
+                        oninput: move |e| audit_spend_limit.set(e.value()),
+                    }
+                    span { class: "audit-model-hint",
+                        "Optional. The scan stops between passes once its actual AI spend reaches this amount, lists every pass it did not run, and marks the result incomplete. It can finish up to one pass over the limit. Leave blank for no limit."
                     }
                 }
                 // Deep compliance & security tier (#55): opt-in, ADVISORY, expensive.
@@ -10676,6 +10706,7 @@ mod tests {
                 "deep": false,
                 "run_ai_review": true,
                 "run_deterministic": true,
+                "max_cost_usd": null,
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "files_scanned": 4, "findings": [], "proposed_rules": [], "gated": false
@@ -10702,6 +10733,7 @@ mod tests {
             false,
             true,
             true,
+            None,
         )
         .await;
 
@@ -10772,6 +10804,7 @@ mod tests {
                 "deep": false,
                 "run_ai_review": true,
                 "run_deterministic": true,
+                "max_cost_usd": null,
             })))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -10799,6 +10832,7 @@ mod tests {
             false,
             true,
             true,
+            None,
         )
         .await;
 

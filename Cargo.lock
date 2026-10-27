@@ -692,6 +692,7 @@ dependencies = [
  "camerata-secrets",
  "camerata-server",
  "camerata-test-env",
+ "camerata-ui-core",
  "camerata-worktracker",
  "chrono",
  "clap",

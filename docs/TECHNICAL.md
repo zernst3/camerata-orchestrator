@@ -2610,8 +2610,110 @@ Flags: `--backend cli|api` (the same compliance-safety setting a project's
 `backend` field carries; `cli` is the default), `--batch` (the Anthropic Message
 Batches path, roughly 50% cheaper, latency not returned until the whole batch
 completes, requires `--backend api`), `--model` and `--calibration-model`
-overrides, `--full` to ignore the on-disk incremental-scan cache, and `--verbose`
-to print the ledger's per-rule detail alongside the default concise summary.
+overrides, `--full` to ignore the on-disk incremental-scan cache, `--verbose`
+to print the ledger's per-rule detail alongside the default concise summary,
+`--max-cost-usd <USD>` (the spend limit) and `--efficiency <name>=on|off`
+(repeatable). Those last two, the pre-flight estimate and the cost arithmetic are
+described in "Token efficiency: switches, cost arithmetic, estimate and spend
+limit" below.
+
+#### Token efficiency: switches, cost arithmetic, estimate and spend limit
+
+`SPIKE_TOKEN_EFFICIENCY_RESULTS.md` ranks the savings; this is how the product
+exposes them. Everything here is operator-side. None of it changes what a scan
+finds, and none of it puts a cost figure in the client export.
+
+**Per-measure switches** (`crates/server/src/efficiency.rs`). One
+`EfficiencyConfig`, one boolean per built measure, default ON. A later measure adds
+one line to the `efficiency_measures!` list and reads
+`meter.efficiency().<name>` at its code path.
+
+| Name | Measure | When off |
+|---|---|---|
+| `warm_schedule` | rank 3: a chunk's first pass warms the prompt cache before its siblings start | every pass is dispatched as soon as a slot is free (`warm_schedule::run_unscheduled`) |
+| `label_after_prefix` | rank 3: the group label stays out of the cached prefix | the label leads the digest segment again (`build_pass_prompt_with`) |
+| `batch_long_cache` | rank 3: batch items ask for the 1-hour cache | they ask for the 5-minute cache |
+| `result_cache` | rank 5: unchanged files reuse the previous scan's AI findings | a full AI re-scan, like `--full` |
+| `truncation_retry` | rank 6: a reply cut off at the output limit is retried once | the cut-off reply is used as it came |
+| `fix_prefilter` | rank 6: findings with no code context skip the fix model when the rule has an authored fix | they go to the fix model |
+
+Set with `CAMERATA_EFFICIENCY=name=off,other=off` or `camerata inspect --efficiency
+name=off` (repeatable; the flag wins). An unknown name or a malformed entry is an
+error, never ignored: a typo that leaves a measure on while the operator believes it
+is off would defeat the switch. The server's own scans read the environment variable
+only (a bad value is logged and every measure stays on). The resolved set is
+recorded on the operator ledger (`ScanLedger::efficiency`), carried in the per-stage
+telemetry snapshot and printed above its table, and printed in the `camerata inspect`
+summary, so any two runs can be compared knowing what differed. The key rank 5 fix
+(the AI findings are keyed by model, prompt version and rule wording) is a
+correctness fix, not a switch.
+
+The controls travel on the run's `UsageMeter` (`UsageMeter::with_controls`), which
+every model-calling stage already receives, so no stage signature grew. The
+`audit_repos*` entry points keep their signatures and read the environment; the
+`*_controlled` variants take an explicit `RunControls`.
+
+**Cost arithmetic** (`camerata_llm::llm::compute_cost_usd`, the one function every
+dollar figure comes from: the printed cost, the telemetry, the spend limit). The
+caller states how the call was billed (`PriceBasis { batch, cache_ttl }`) and the
+function applies the published ratios: cache read 0.1x input, cache write 1.25x
+(5-minute TTL) or 2x (1-hour TTL), and a Message Batch item 0.5x on everything.
+Real-time calls use `CacheTtl::from_env()`, the TTL the request carried; batch rows
+are priced at the TTL the batch was submitted with (`BATCH_CACHE_TTL` unless
+`batch_long_cache` is off). Per-model cache-read prices are a later change to the
+model registry; the 0.1x here is the default.
+
+**Pre-flight estimate** (`camerata inspect`, before the first model call). The
+arithmetic is `camerata_ui_core::scan::estimate_audit_cost`, the cockpit's
+estimator; there is no second one. `camerata_server::preflight` gathers the facts
+it needs with the scan's own functions (the same file collection, the same rule
+selection and alternatives join). On the API backend the exact input size of one
+representative scan pass is counted through `count_tokens` (free, not billed), built
+by the same `representative_scan_sample` the batch path samples with. The output
+states it is an estimate and gives its basis; an unpriced model prints "unavailable"
+rather than $0; a run that will make no model call (the compliance gate blocked the
+AI review) prints none.
+
+**Spend limit** (`--max-cost-usd`, `crates/server/src/cost_cap.rs`). A guard
+against a runaway bill, not a saving, so it fails loudly:
+
+- Before each (chunk, rule-batch) pass starts, the run asks
+  `UsageMeter::admit`. A pass is admitted only while
+  `spent + in_flight * reserve < cap`, where `reserve` is the most any single call
+  has cost so far. An admitted pass always finishes (its truncation retry
+  included), so nothing is cut off mid-response. A refused pass is recorded as a
+  `NotRunPass`.
+- Later stages (alternative recommendation, calibration, fix generation, the clone
+  judge, the deep tier) check at their boundary (`stage_blocked`) and are recorded
+  as not run. Findings the scan produced are never dropped; they continue
+  uncalibrated.
+- **Overshoot bound.** If passes cost about the same, the run ends at most ONE
+  pass's cost over the limit (the pass that crosses it). A pass larger than every
+  earlier pass can add the difference. The first pass is always admitted, so a
+  limit smaller than one pass still lets that pass finish. The limit must be a
+  positive finite number; the server treats an unreadable one as the tightest
+  possible limit, never as none.
+- **Batch mode** checks before every submission (`batch_refusal_reason`), against
+  spend so far plus the larger of the pre-flight estimate and the exact-token input
+  projection at the batch price. A submitted batch is not cancelled, so the check
+  cannot be later. A refused batch records every pair as not run.
+- **Reporting.** The ledger carries a `CostCapRecord` (limit, spend, the not-run
+  pairs and stages, notes). `CostCapRecord::failed_passes` turns it into the
+  existing failed-pass list, one entry per (repo, group, chunk) naming its
+  rule-batches, text "NOT RUN ... This inspection is incomplete" with no dollar
+  figure, so it reaches the client report like any other incomplete pass. A rule left
+  unchecked on part of the code is recorded in the rule ledger as not run, never as
+  "ran, found nothing". `camerata inspect` prints the limit block and exits **4**
+  after writing the (incomplete) export.
+- **Export.** The manifest's `inspection` block gains one boolean,
+  `cost_cap_reached` (always present), and the README gains one line
+  (`COST_CAP_README_LINE`) only when it is true. The release gate checks the two
+  agree (`verify_readme_provenance`). No cost number is exported;
+  `tests/stage_telemetry_not_exported.rs` pins that the efficiency set and the cap
+  record change nothing in `report.json` or `findings.json`.
+- **Desktop app.** The scan settings have a "Spend limit (USD)" field (blank = none),
+  sent as `max_cost_usd` on the audit request. A value that is not a positive number
+  stops the scan from starting and says why.
 
 The ZIP holds four entries, and they are deliberately not three views of the same
 thing:

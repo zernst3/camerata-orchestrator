@@ -369,6 +369,16 @@ pub struct ScanLedger {
     /// then re-scans in full. Operator-only, like [`Self::stage_telemetry`].
     #[serde(default)]
     ai_key: Option<crate::scan_cache::AiScanKey>,
+    /// Which token-efficiency measures were on for this scan ([`crate::efficiency`]), so a cost
+    /// or behavior change between two runs can be traced to a switch. Operator-only. `None`
+    /// for a ledger written before the switches existed.
+    #[serde(default)]
+    efficiency: Option<crate::efficiency::EfficiencyConfig>,
+    /// What the `--max-cost-usd` spend cap did, when one was set: actual spend and everything
+    /// it stopped. Operator-only (it carries dollar figures); the export gets only a
+    /// "capped" fact. See [`crate::cost_cap`].
+    #[serde(default)]
+    cost_cap: Option<crate::cost_cap::CostCapRecord>,
 }
 
 /// The facts about a scan's INPUT, recorded so the integrity gate can judge them.
@@ -573,6 +583,33 @@ impl ScanLedger {
     /// Record the question this scan's AI findings answered. See [`Self::ai_key`].
     pub fn record_ai_key(&mut self, key: crate::scan_cache::AiScanKey) {
         self.ai_key = Some(key);
+    }
+
+    /// Record which efficiency measures were on. Overwrites: one scan, one record.
+    pub fn record_efficiency(&mut self, efficiency: crate::efficiency::EfficiencyConfig) {
+        self.efficiency = Some(efficiency);
+    }
+
+    /// The efficiency measures that were on, when the scan recorded them.
+    pub fn efficiency(&self) -> Option<&crate::efficiency::EfficiencyConfig> {
+        self.efficiency.as_ref()
+    }
+
+    /// Record what the spend cap did. Overwrites: one scan, one record.
+    pub fn record_cost_cap(&mut self, record: crate::cost_cap::CostCapRecord) {
+        self.cost_cap = Some(record);
+    }
+
+    /// What the spend cap did, when one was set.
+    pub fn cost_cap(&self) -> Option<&crate::cost_cap::CostCapRecord> {
+        self.cost_cap.as_ref()
+    }
+
+    /// True when the spend cap stopped part of this scan, so the inspection is incomplete.
+    pub fn is_cost_capped(&self) -> bool {
+        self.cost_cap
+            .as_ref()
+            .is_some_and(crate::cost_cap::CostCapRecord::stopped_the_run)
     }
 
     /// The question this scan's AI findings answered, when it recorded one.

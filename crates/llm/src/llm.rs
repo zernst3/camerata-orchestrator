@@ -877,7 +877,12 @@ pub use camerata_api_types::llm::LlmResponse;
 ///
 /// `text` concatenates the content's text blocks; cost is computed from usage times the model's
 /// list price (the API reports no dollar figure); `truncated` is `stop_reason == "max_tokens"`.
-fn messages_response(msg: &serde_json::Value, model: &str, backend: &str) -> LlmResponse {
+fn messages_response(
+    msg: &serde_json::Value,
+    model: &str,
+    backend: &str,
+    basis: PriceBasis,
+) -> LlmResponse {
     let text = msg["content"]
         .as_array()
         .map(|blocks| {
@@ -895,6 +900,7 @@ fn messages_response(msg: &serde_json::Value, model: &str, backend: &str) -> Llm
         output_tokens,
         cache_read,
         cache_creation,
+        basis,
     );
     LlmResponse {
         text,
@@ -949,25 +955,88 @@ fn price_for(model_id: &str) -> Option<(f64, f64)> {
         .map(|m| (m.price_in, m.price_out))
 }
 
+/// How a call was billed, which decides the multipliers [`compute_cost_usd`] applies on top of
+/// the list price. Both facts are properties of the REQUEST, known when it is built, so the
+/// caller states them rather than the arithmetic guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriceBasis {
+    /// The call was an item of a Message Batch: every token (input, output, cache write and
+    /// cache read) is billed at [`BATCH_MULT`] of the real-time price.
+    pub batch: bool,
+    /// The prompt-cache TTL the request asked for; it sets the cache-WRITE multiplier.
+    pub cache_ttl: CacheTtl,
+}
+
+impl PriceBasis {
+    /// A real-time `/v1/messages` call with the TTL the transport will request
+    /// ([`CacheTtl::from_env`]).
+    pub fn realtime() -> Self {
+        Self {
+            batch: false,
+            cache_ttl: CacheTtl::from_env(),
+        }
+    }
+
+    /// A Message Batch item with the TTL its request carried.
+    pub fn batch(cache_ttl: CacheTtl) -> Self {
+        Self {
+            batch: true,
+            cache_ttl,
+        }
+    }
+}
+
+/// Anthropic's published price ratios, applied on top of the list input price. ONE definition:
+/// every dollar figure in the product (the printed cost, the telemetry, the `--max-cost-usd`
+/// cap) comes from [`compute_cost_usd`], so they cannot disagree with each other.
+/// A 5-minute cache write is 1.25x input.
+pub const CACHE_WRITE_5M_MULT: f64 = 1.25;
+/// A 1-hour cache write is 2x input.
+pub const CACHE_WRITE_1H_MULT: f64 = 2.0;
+/// A cache read is 0.1x input.
+pub const CACHE_READ_MULT: f64 = 0.1;
+/// A Message Batch item is billed at half the real-time price, on input and output alike.
+pub const BATCH_MULT: f64 = 0.5;
+
+/// Dollars for `input_tokens` of plain (uncached) input on `model_id` under `basis`, or `None`
+/// for an unpriced model. For projections (the batch spend-cap gate); the actual cost of a call
+/// always comes from [`compute_cost_usd`] with its real usage.
+pub fn input_cost_usd(model_id: &str, input_tokens: u64, basis: PriceBasis) -> Option<f64> {
+    compute_cost_usd(model_id, Some(input_tokens), Some(0), 0, 0, basis)
+}
+
+impl CacheTtl {
+    /// The cache-write multiplier this TTL is billed at.
+    pub fn write_multiplier(self) -> f64 {
+        match self {
+            CacheTtl::FiveMinutes => CACHE_WRITE_5M_MULT,
+            CacheTtl::OneHour => CACHE_WRITE_1H_MULT,
+        }
+    }
+}
+
 /// Compute the dollar cost from token usage and list price. `input` folds in cache-read and
-/// cache-creation tokens, which are NOT billed at the full input rate: cache reads are ~0.1×
-/// and cache writes ~1.25×. Price the three input components separately so cached reads are
-/// not over-billed ~10×. Returns `None` unless the model is priced and both token counts are
-/// present.
+/// cache-creation tokens, which are NOT billed at the full input rate: cache reads are 0.1x
+/// and cache writes 1.25x (5-minute TTL) or 2x (1-hour TTL). Price the three input components
+/// separately so cached reads are not over-billed ~10x, then halve the whole figure for a
+/// Message Batch item ([`PriceBasis::batch`]). Returns `None` unless the model is priced and
+/// both token counts are present.
 fn compute_cost_usd(
     model_id: &str,
     input: Option<u64>,
     output: Option<u64>,
     cache_read: u64,
     cache_creation: u64,
+    basis: PriceBasis,
 ) -> Option<f64> {
     price_for(model_id).and_then(|(pin, pout)| match (input, output) {
         (Some(i), Some(o)) => {
             let fresh_input = i.saturating_sub(cache_read).saturating_sub(cache_creation);
             let input_cost = fresh_input as f64 * pin
-                + cache_read as f64 * pin * 0.1
-                + cache_creation as f64 * pin * 1.25;
-            Some((input_cost + o as f64 * pout) / 1_000_000.0)
+                + cache_read as f64 * pin * CACHE_READ_MULT
+                + cache_creation as f64 * pin * basis.cache_ttl.write_multiplier();
+            let list = (input_cost + o as f64 * pout) / 1_000_000.0;
+            Some(if basis.batch { list * BATCH_MULT } else { list })
         }
         _ => None,
     })
@@ -1012,7 +1081,7 @@ pub(crate) fn shared_http_client() -> &'static reqwest::Client {
 /// minutes apart (large sequential scans, slow batch-mode turnaround) — the default stays
 /// at 5m so a typical fast-parallel scan isn't paying the 2x write premium for no benefit.
 /// Message Batches are the exception: their items run minutes to hours apart, so
-/// [`build_batch_item`] always requests 1h.
+/// [`build_batch_item`] is given [`BATCH_CACHE_TTL`] (1h).
 ///
 /// NEEDS LIVE-KEY VERIFICATION: confirm against the current Anthropic API docs that a bare
 /// `"ttl": "1h"` field (no beta header) is accepted now that extended cache TTL has GA'd —
@@ -1022,6 +1091,9 @@ pub enum CacheTtl {
     FiveMinutes,
     OneHour,
 }
+
+/// The TTL every Message Batch item asks for (see [`build_batch_item`]).
+pub const BATCH_CACHE_TTL: CacheTtl = CacheTtl::OneHour;
 
 impl CacheTtl {
     /// Resolve from `CAMERATA_ANTHROPIC_CACHE_TTL_1H` (truthy -> 1h; anything else,
@@ -1503,12 +1575,9 @@ impl Llm {
             )
         })?;
 
-        let user_content = cached_user_content(
-            &req.prompt,
-            &req.cache_breakpoints,
-            true,
-            CacheTtl::from_env(),
-        );
+        let basis = PriceBasis::realtime();
+        let user_content =
+            cached_user_content(&req.prompt, &req.cache_breakpoints, true, basis.cache_ttl);
 
         let mut body = serde_json::json!({
             "model": model,
@@ -1535,7 +1604,7 @@ impl Llm {
         }
         let v: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse API JSON: {e}"))?;
-        Ok(messages_response(&v, model, "api"))
+        Ok(messages_response(&v, model, "api", basis))
     }
 }
 
@@ -1649,12 +1718,19 @@ pub async fn exact_input_token_count(llm: &Llm, req: &LlmRequest, model: &str) -
 /// is forwarded verbatim (the batch API accepts the same `system` field as the messages
 /// API).
 ///
-/// Batch items always use the 1-hour cache TTL ([`CacheTtl::OneHour`]): Anthropic processes a
-/// batch over minutes to hours, so the 5-minute default would have expired before most items
-/// ran and every item would re-write the prefix it was meant to read. Real-time requests keep
-/// the 5-minute default (see [`CacheTtl::from_env`]).
-pub fn build_batch_item(custom_id: impl Into<String>, req: &LlmRequest, model: &str) -> BatchItem {
-    let content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, CacheTtl::OneHour);
+/// `cache_ttl` is the TTL the cached blocks ask for. The product passes
+/// [`BATCH_CACHE_TTL`] (1 hour): Anthropic processes a batch over minutes to hours, so the
+/// 5-minute default would have expired before most items ran and every item would re-write the
+/// prefix it was meant to read. Real-time requests keep the 5-minute default (see
+/// [`CacheTtl::from_env`]). The same TTL must be given to [`parse_batch_results_jsonl`] so the
+/// cost is priced at the matching write multiplier.
+pub fn build_batch_item(
+    custom_id: impl Into<String>,
+    req: &LlmRequest,
+    model: &str,
+    cache_ttl: CacheTtl,
+) -> BatchItem {
+    let content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, cache_ttl);
     BatchItem {
         custom_id: custom_id.into(),
         params: BatchItemParams {
@@ -1816,7 +1892,11 @@ impl Llm {
     /// RETRY: same policy as [`Self::complete_api`] — losing the results fetch after a
     /// batch has already run to completion (tokens spent) would be a pure waste, so this
     /// retries transient failures rather than surfacing immediately.
-    pub async fn fetch_batch_results(&self, batch_id: &str) -> anyhow::Result<Vec<BatchResultRow>> {
+    pub async fn fetch_batch_results(
+        &self,
+        batch_id: &str,
+        cache_ttl: CacheTtl,
+    ) -> anyhow::Result<Vec<BatchResultRow>> {
         let key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "batch result fetch requires an Anthropic API key; {}",
@@ -1835,7 +1915,7 @@ impl Llm {
         if !status.is_success() {
             anyhow::bail!("batch results HTTP {status}: {text}");
         }
-        parse_batch_results_jsonl(&text)
+        parse_batch_results_jsonl(&text, cache_ttl)
     }
 
     /// Convenience accessor for the API key (needed by the batch polling loop to confirm
@@ -1895,8 +1975,12 @@ fn parse_request_counts(v: &serde_json::Value) -> BatchRequestCounts {
 /// Parse the JSONL results body (one JSON object per line) into a vec of `BatchResultRow`.
 /// Robust: malformed lines are skipped (logged at debug), so one bad item never aborts
 /// the whole result set. The caller converts this vec into a `custom_id -> response` map
-/// via [`reassemble_batch_results`].
-pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultRow>> {
+/// via [`reassemble_batch_results`]. `cache_ttl` is the TTL the batch was SUBMITTED with (see
+/// [`build_batch_item`]); it prices the cache writes in each row.
+pub fn parse_batch_results_jsonl(
+    jsonl: &str,
+    cache_ttl: CacheTtl,
+) -> anyhow::Result<Vec<BatchResultRow>> {
     let mut rows = Vec::new();
     for line in jsonl.lines() {
         let line = line.trim();
@@ -1925,7 +2009,12 @@ pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultR
             let model_id = msg["model"].as_str().unwrap_or("");
             rows.push(BatchResultRow {
                 custom_id,
-                response: Some(messages_response(msg, model_id, "api/batch")),
+                response: Some(messages_response(
+                    msg,
+                    model_id,
+                    "api/batch",
+                    PriceBasis::batch(cache_ttl),
+                )),
                 error: None,
             });
         } else {
@@ -2723,8 +2812,8 @@ mod tests {
         // opus: price_in 5, price_out 25 ($/Mtok) — the registry's live Anthropic list price
         // (see crate::model_registry::CLAUDE_REGISTRY_MODELS). input folds cache fields
         // (base 100, read 200, creation 30 -> 330); fresh input is 100.
-        let cost =
-            compute_cost_usd("claude-opus-5", Some(330), Some(50), 200, 30).expect("priced model");
+        let cost = compute_cost_usd("claude-opus-5", Some(330), Some(50), 200, 30, five_min())
+            .expect("priced model");
         // 100*5 (fresh) + 200*5*0.1 (read) + 30*5*1.25 (creation) + 50*25 (out) = 1837.5
         let expected =
             (100.0 * 5.0 + 200.0 * 5.0 * 0.1 + 30.0 * 5.0 * 1.25 + 50.0 * 25.0) / 1_000_000.0;
@@ -2740,12 +2829,101 @@ mod tests {
         );
 
         // No cache tokens -> matches the plain input*price formula.
-        let plain = compute_cost_usd("claude-opus-5", Some(100), Some(50), 0, 0).unwrap();
+        let plain =
+            compute_cost_usd("claude-opus-5", Some(100), Some(50), 0, 0, five_min()).unwrap();
         assert!((plain - (100.0 * 5.0 + 50.0 * 25.0) / 1_000_000.0).abs() < 1e-12);
 
         // Unknown model or missing counts -> None.
-        assert!(compute_cost_usd("nope", Some(1), Some(1), 0, 0).is_none());
-        assert!(compute_cost_usd("claude-opus-5", None, Some(1), 0, 0).is_none());
+        assert!(compute_cost_usd("nope", Some(1), Some(1), 0, 0, five_min()).is_none());
+        assert!(compute_cost_usd("claude-opus-5", None, Some(1), 0, 0, five_min()).is_none());
+    }
+
+    fn five_min() -> PriceBasis {
+        PriceBasis {
+            batch: false,
+            cache_ttl: CacheTtl::FiveMinutes,
+        }
+    }
+
+    /// The published ratios, each pinned on its own so a wrong constant cannot hide behind a
+    /// sum: opus is $5 in / $25 out per Mtok. One million of each token kind makes the
+    /// expected dollars read straight off the price.
+    #[test]
+    fn compute_cost_applies_the_published_price_ratios() {
+        const M: u64 = 1_000_000;
+        let cost = |input: u64, output: u64, read: u64, write: u64, basis: PriceBasis| {
+            compute_cost_usd(
+                "claude-opus-5",
+                Some(input + read + write),
+                Some(output),
+                read,
+                write,
+                basis,
+            )
+            .expect("priced model")
+        };
+        let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-9, "{a} != {b}");
+        let hour = PriceBasis {
+            batch: false,
+            cache_ttl: CacheTtl::OneHour,
+        };
+
+        // 5-minute cache write: 1.25x input.
+        close(cost(0, 0, 0, M, five_min()), 5.0 * 1.25);
+        // 1-hour cache write: 2x input.
+        close(cost(0, 0, 0, M, hour), 5.0 * 2.0);
+        // Cache read: 0.1x input, at either TTL.
+        close(cost(0, 0, M, 0, five_min()), 5.0 * 0.1);
+        close(cost(0, 0, M, 0, hour), 5.0 * 0.1);
+        // Plain input and output are at list price; the TTL does not touch them.
+        close(cost(M, 0, 0, 0, hour), 5.0);
+        close(cost(0, M, 0, 0, hour), 25.0);
+
+        // A batch item is half price on EVERYTHING: input, output, cache write, cache read.
+        let batch_5m = PriceBasis::batch(CacheTtl::FiveMinutes);
+        let batch_1h = PriceBasis::batch(CacheTtl::OneHour);
+        close(cost(M, 0, 0, 0, batch_5m), 5.0 * 0.5);
+        close(cost(0, M, 0, 0, batch_5m), 25.0 * 0.5);
+        close(cost(0, 0, 0, M, batch_5m), 5.0 * 1.25 * 0.5);
+        close(cost(0, 0, 0, M, batch_1h), 5.0 * 2.0 * 0.5);
+        close(cost(0, 0, M, 0, batch_1h), 5.0 * 0.1 * 0.5);
+
+        // The same usage, every basis: batch is exactly half of real-time at the same TTL.
+        let real = cost(3 * M, 2 * M, 4 * M, M, hour);
+        let batch = cost(3 * M, 2 * M, 4 * M, M, batch_1h);
+        close(batch, real * 0.5);
+    }
+
+    /// A batch row is priced as a batch row, at the TTL the batch was submitted with: the
+    /// number the product prints must be what the API bills.
+    #[test]
+    fn a_batch_result_row_is_priced_at_the_batch_discount_and_its_submitted_ttl() {
+        let line = serde_json::json!({
+            "custom_id": "c0-b0",
+            "result": {"type": "succeeded", "message": {
+                "model": "claude-opus-5",
+                "content": [{"type": "text", "text": "{}"}],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 1_000_000u64,
+                    "output_tokens": 1_000_000u64,
+                    "cache_creation_input_tokens": 1_000_000u64,
+                    "cache_read_input_tokens": 0u64,
+                },
+            }},
+        })
+        .to_string();
+        // fresh 1M + write 1M at the TTL + output 1M, then halved.
+        let price = |ttl| {
+            parse_batch_results_jsonl(&line, ttl).unwrap()[0]
+                .response
+                .as_ref()
+                .unwrap()
+                .cost_usd
+                .unwrap()
+        };
+        assert!((price(CacheTtl::OneHour) - (5.0 + 5.0 * 2.0 + 25.0) * 0.5).abs() < 1e-9);
+        assert!((price(CacheTtl::FiveMinutes) - (5.0 + 5.0 * 1.25 + 25.0) * 0.5).abs() < 1e-9);
     }
 
     // Regression for the stale-pricing bug: `price_for` (and everything built on it —
@@ -2841,7 +3019,7 @@ mod tests {
         let req = LlmRequest::new("audit this code")
             .with_model("claude-sonnet-5")
             .with_max_tokens(2048);
-        let item = build_batch_item("c0-b1", &req, "claude-sonnet-5");
+        let item = build_batch_item("c0-b1", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         assert_eq!(item.custom_id, "c0-b1");
         assert_eq!(item.params.model, "claude-sonnet-5");
         assert_eq!(item.params.max_tokens, 2048);
@@ -2860,7 +3038,7 @@ mod tests {
         let req = LlmRequest::new(prompt)
             .with_cache_prefix_len(split)
             .with_model("claude-sonnet-5");
-        let item = build_batch_item("c2-b0", &req, "claude-sonnet-5");
+        let item = build_batch_item("c2-b0", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
         let arr = content.as_array().expect("cached content is an array");
         assert_eq!(arr.len(), 2);
@@ -2891,7 +3069,7 @@ mod tests {
         let req = LlmRequest::new(&prompt)
             .with_cache_breakpoints(vec![bp1, bp2])
             .with_model("claude-sonnet-5");
-        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
         let arr = content.as_array().expect("cached content is an array");
         assert_eq!(arr.len(), 3, "two breakpoints -> three blocks");
@@ -2929,6 +3107,7 @@ mod tests {
             &message_with_stop(Some("max_tokens")),
             "claude-sonnet-5",
             "api",
+            PriceBasis::realtime(),
         );
         assert!(r.truncated);
         assert_eq!(r.output_tokens, Some(8192));
@@ -2943,7 +3122,12 @@ mod tests {
             Some("tool_use"),
             None,
         ] {
-            let r = messages_response(&message_with_stop(stop), "claude-sonnet-5", "api");
+            let r = messages_response(
+                &message_with_stop(stop),
+                "claude-sonnet-5",
+                "api",
+                PriceBasis::realtime(),
+            );
             assert!(!r.truncated, "{stop:?}");
         }
     }
@@ -2955,9 +3139,9 @@ mod tests {
                 r#"{{"custom_id":"c0-b0","result":{{"type":"succeeded","message":{{"model":"claude-sonnet-5","content":[{{"type":"text","text":"x"}}],"stop_reason":"{stop}","usage":{{"input_tokens":1,"output_tokens":2}}}}}}}}"#
             )
         };
-        let truncated = parse_batch_results_jsonl(&line("max_tokens")).unwrap();
+        let truncated = parse_batch_results_jsonl(&line("max_tokens"), BATCH_CACHE_TTL).unwrap();
         assert!(truncated[0].response.as_ref().unwrap().truncated);
-        let complete = parse_batch_results_jsonl(&line("end_turn")).unwrap();
+        let complete = parse_batch_results_jsonl(&line("end_turn"), BATCH_CACHE_TTL).unwrap();
         assert!(!complete[0].response.as_ref().unwrap().truncated);
         assert_eq!(complete[0].response.as_ref().unwrap().backend, "api/batch");
     }
@@ -2972,7 +3156,7 @@ mod tests {
         let req = LlmRequest::new("static prefix\ndynamic suffix")
             .with_cache_breakpoints(vec!["static prefix\n".len()])
             .with_model("claude-sonnet-5");
-        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
         let arr = content.as_array().expect("cached content is an array");
         assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
@@ -3013,7 +3197,7 @@ mod tests {
         let req = LlmRequest::new("check this")
             .with_system("you are an auditor")
             .with_model("claude-haiku-4-5-20251001");
-        let item = build_batch_item("c0-b0", &req, "claude-haiku-4-5-20251001");
+        let item = build_batch_item("c0-b0", &req, "claude-haiku-4-5-20251001", BATCH_CACHE_TTL);
         assert_eq!(item.params.system.as_deref(), Some("you are an auditor"));
         // Ensure it serialises correctly (no missing field).
         let v = serde_json::to_value(&item.params).unwrap();
@@ -3029,7 +3213,8 @@ mod tests {
 {"custom_id":"c0-b1","result":{"type":"succeeded","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"finding B"}],"usage":{"input_tokens":80,"output_tokens":40}}}}
 malformed line, not json
 "#;
-        let rows = parse_batch_results_jsonl(jsonl).expect("parse should not fail");
+        let rows =
+            parse_batch_results_jsonl(jsonl, BATCH_CACHE_TTL).expect("parse should not fail");
         // 2 succeeded + 1 errored; the malformed line is skipped.
         assert_eq!(
             rows.len(),
@@ -3115,7 +3300,8 @@ malformed line, not json
     /// never an error). Empty bodies arise when a batch has 0 items that completed.
     #[test]
     fn parse_batch_results_empty_body_is_ok() {
-        let rows = parse_batch_results_jsonl("").expect("empty body should not error");
+        let rows =
+            parse_batch_results_jsonl("", BATCH_CACHE_TTL).expect("empty body should not error");
         assert!(rows.is_empty());
     }
 
@@ -3125,7 +3311,7 @@ malformed line, not json
         let req = LlmRequest::new("hello")
             .with_model("claude-sonnet-5")
             .with_max_tokens(512);
-        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v["custom_id"], "c0-b0");
         assert!(v["params"]["model"].is_string());
