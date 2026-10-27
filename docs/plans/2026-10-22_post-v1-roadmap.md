@@ -193,6 +193,36 @@ registry). Follow the Ruby / Rails shape, which is the closest precedent (`ruby`
 - **Benchmark:** a public Laravel app plus an intentionally vulnerable PHP app (DVWA) for recall,
   before claiming PHP coverage in a proposal.
 
+## 8. Client CI gate refinement (Zach, 2026-10-27)
+
+What exists: `camerata-check` (crates/camerata-check), the standalone deterministic checker
+runner, plus the generated `.github/workflows/camerata-gates.yml` and `.camerata/checks.toml`
+committed to the client's branch from the Rules view ("Regenerate CI workflow"). V1 only adds
+the severity floor (low-severity consistency findings advisory, medium and above fail; one
+constant; `cloud/item21`). Zach: it exists but warrants refinement. Candidates, to be scoped
+with Zach before building:
+
+- **Baseline / ratchet:** a client adopting the gate on an existing codebase fails on day one
+  for every pre-existing finding. Record a baseline at install (the inspection's findings) and
+  fail only on NEW findings, with the baseline shrinking as findings are fixed (never growing
+  silently).
+- **Per-client policy:** the severity floor and which rules block versus advise, set per project
+  and written into `checks.toml`, following the `stages` target design
+  (`docs/design/2026-10-21_rule-stages-target-design.md`), instead of one global constant.
+- **Pull-request ergonomics:** check only changed files on PRs (full run on the default branch),
+  SARIF output so findings show as GitHub code-scanning annotations on the diff, and a short
+  job summary.
+- **Packaging:** a published GitHub Action (and a prebuilt binary) instead of building
+  `camerata-check` in the client's CI, so the job is fast and pinned to a version; GitLab CI and
+  Bitbucket templates if a client needs them.
+- **Corpus pinning and drift:** the workflow pins the corpus version the client agreed to;
+  upgrading is an explicit PR with a changelog of rule changes, tied to the governance retainer
+  (item 1).
+- **Waivers:** an inline or file-based waiver with a reason and an expiry date, reported in the
+  monthly governance delta, so the gate never pushes teams to delete checks.
+- **Parity check:** the gate, the Layer-2 dev loop and the inspection must agree on the same code
+  (item 3); add a test that runs all three on one fixture.
+
 ## Keep V1 forward-compatible (no extra V1 work)
 
 When V1 work touches the project data model (the deletion record, re-fetch, provenance), store
