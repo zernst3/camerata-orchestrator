@@ -1,7 +1,18 @@
 # Overnight autonomous run — decisions needed + progress log
 
 > ## ▶ RESUME HERE (paused 2026-10-26 at Zach's request, after code viewer step 4)
-> **CURRENT (newest first; older entries below are history):** code viewer steps 1 to 4 MERGED
+> **CURRENT (newest first; older entries below are history):** 2026-10-27: viewer step 5 (B.2
+> stacked group view) MERGED: `B` / "Review all N stacked", ±3-line cards from the batch
+> endpoint, J/K/Space/Enter/C/F/T/I, paging past 200. Fable's HIGH fixed (mouse doors were live
+> under an open reason prompt; paging then committed off-screen rows): every decision door is now
+> gated on one `stack_focus`. Also: one Queue write path (`apply_rows`, with the five-second undo)
+> for the pane, stack and every toolbar button (`bulk_confirm` / `bulk_false_positive` deleted);
+> a pane row click is refused while its reason prompt is open; "Move to Ignored" from Tech debt
+> now requires a reason; a debug-only Dioxus borrow panic in the pane prompt commit fixed. Step-5
+> manual checks: disabled-button look under a prompt; focus stays in the reason field when a card
+> or row is clicked; card follow-scroll on J/K; stack under the viewer; undo countdown in the
+> stack. V2 roadmap gained item 6 (pre-pen-test readiness) and item 7 (PHP / Laravel rules).
+> Next: viewer step 6 (B.5 decision memory + B.7 counts strip). Earlier: code viewer steps 1 to 4 MERGED
 > and pushed 2026-10-26 (step 4: batch finding-context endpoint, pane ±3 lines context, Queue
 > order presets; Fable's 3 medium + 13 low fixed, plus the GIT_CONFIG test race made impossible).
 > No agent worktrees are in flight. **Resume with viewer step 5** (B.2 stacked group view; the
