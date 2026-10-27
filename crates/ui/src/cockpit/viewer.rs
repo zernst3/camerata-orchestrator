@@ -57,6 +57,8 @@ use super::scan::{kind_chip_parts, undo_banner_of, RuleHubRequest};
 
 /// The DOM id of the viewer's focusable root. The keydown handler lives here.
 pub(super) const VIEWER_ID: &str = "camerata-code-viewer";
+/// The DOM id of the viewer's Undo button (the pane has its own Undo beside it).
+pub(super) const VIEWER_UNDO_ID: &str = "camerata-viewer-undo";
 /// The DOM id of the scroll container.
 pub(super) const SCROLL_ID: &str = "camerata-code-scroll";
 
@@ -2079,6 +2081,22 @@ pub(super) fn CodeViewerHost(
         }
     });
 
+    // CANCEL THE VIEWER'S REASON PROMPT: Esc, and an undo. An undo moves the Queue's cursor to the
+    // restored row, and a prompt left open (possibly pre-filled by decision memory) would then be
+    // one Enter from writing its reason onto whichever finding the viewer ends up on. One helper
+    // so the two cannot differ.
+    let cancel_prompt = use_callback(move |()| {
+        prompt.set(None);
+        prompt_reason.set(String::new());
+        focus_viewer();
+    });
+    let undo_here = use_callback(move |()| {
+        if prompt.peek().is_some() {
+            cancel_prompt.call(());
+        }
+        on_undo.call(());
+    });
+
     let on_key = Callback::new({
         let key = key.clone();
         let finding = finding.clone();
@@ -2512,17 +2530,18 @@ pub(super) fn CodeViewerHost(
                     dispose.call((state, prompt_reason.peek().clone()));
                 }
             }),
-            on_prompt_cancel: Callback::new(move |()| {
-                prompt.set(None);
-                prompt_reason.set(String::new());
-                focus_viewer();
-            }),
+            on_prompt_cancel: cancel_prompt,
             on_mark: Callback::new(move |t: String| {
                 goto_finding.call(t);
             }),
             on_line: Callback::new(move |n: usize| line_cursor.set(Some(n))),
             on_open_modal,
-            ViewerUndoBar { undo_entry, now_ms, on_undo }
+            ViewerUndoBar {
+                undo_entry,
+                now_ms,
+                on_undo: undo_here,
+                button_id: VIEWER_UNDO_ID.to_string(),
+            }
         }
     }
 }

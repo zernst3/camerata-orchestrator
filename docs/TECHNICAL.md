@@ -3342,26 +3342,34 @@ pin it: `api-types` asserts literal fingerprints (and the published FNV-1a vecto
 `suppression::tests::suppression_results_are_unchanged_by_moving_the_fingerprint` classifies against a
 baseline written with those literals.
 
-*`prior_decisions(rows, dispositions, focused) -> Option<PriorDecision>`.* Derived from the draft's
+*`prior_decisions(rows, dispositions, focused) -> Option<PriorDecision>`.* A thin wrapper over
+`DecisionIndex::build(rows, dispositions).prior(focused)`. The index buckets every DECIDED row by
+`(rule_id, fingerprint)` once (the fingerprint is computed for decided rows only), so a question is a
+lookup minus the focused row; a caller with several questions (`shared_prefill`) builds one index.
+The pane builds one per render. Derived from the draft's
 disposition map every time it is asked; nothing is stored, so an undo (which restores the map) removes
 the memory with no bookkeeping, and the memory is scoped to this draft (cross-inspection memory would
 need the durable record the Q2 ruling did not create). A row counts when it is in `rows`, is not the
-focused row, has the same rule id, is decided, and has the same fingerprint (the rule id is compared
-first so the hash is only computed for decided rows of the same rule). A blank snippet is not a shape
-and gives `None`. Only reason-carrying decisions (`TriageState::requires_reason`: Ignored, False
+focused row, has the same rule id, is decided, and has the same fingerprint. A blank snippet is not a
+shape and gives `None`. The repo is deliberately NOT part of the shape: the same rule on the same
+line across one client's repositories is usually one answer, and memory only pre-fills text the
+reviewer must still confirm with Enter (`memory_is_shared_across_repos` pins it). Only reason-carrying decisions (`TriageState::requires_reason`: Ignored, False
 positive) can be the primary, so Confirmed and Tech debt alone never produce a chip.
 
-*Disagreement rule (decided here).* Reason-carrying decisions are grouped by `(state, trimmed
-reason)`; the primary is the largest group, ties broken by state (Ignored before False positive) and
-then by reason text, so the answer never depends on map or slice order. `others` counts every other
+*Disagreement rule (decided here).* Reason-carrying decisions are grouped by `(state, reason)` with
+the reason compared whitespace-collapsed and case-folded (so "Test fixture" and "test  fixture" are
+one decision; the first wording seen in `rows` is what is shown and pre-filled); the primary is the
+largest group, ties broken by state (Ignored before False positive) and then by the folded reason
+text, so the answer never depends on map or slice order. `others` counts every other
 decided row on the shape: other groups, and Confirmed or Tech debt rows. The chip is
 `Previously on this shape: Ignored, 'reason' (3 rows)` plus `, and N other rows decided
 differently` when `others > 0`; the reason is whitespace-collapsed and cut at 120 characters for the
 chip (`cut_chars`, the viewer's), while the pre-fill carries all of it.
 
 *Pre-fill, never apply.* `PriorDecision::reason_for(state)` is the most common reason the draft gave
-for THAT state on the shape, else the chip's own reason, else nothing; `prefill_reason` is its
-`Option`-flattening form. The pane (`PaneCommand::PromptFor` and the pane's Ignore/False positive
+for THAT state on the shape, else nothing (no cross-state fallback: an Ignored reason is a false
+statement under False positive, so `F` after an Ignored-only shape starts empty while the chip still
+shows the prior); `prefill_reason` is its `Option`-flattening form. The pane (`PaneCommand::PromptFor` and the pane's Ignore/False positive
 buttons) and the viewer (`ViewerCommand::PromptFor`) call it only as the initial text of the existing
 reason field (`prompt_reason`); the key still opens the prompt and Enter still goes through
 `apply_disposition` and `apply_rows`, so the required-reason refusal and the undo are unchanged and
@@ -3369,17 +3377,22 @@ no disposition is written from memory. `C` and `T` open nothing and take no reas
 `begin_prompt` calls `shared_prefill(checked_rows, all_rows, dispositions, state)`, which is the
 common reason only when every checked card is offered the same one and empty otherwise, into the
 existing `QueueReasonPrompt` (no new prompt). `StackLink` gained `all_findings` for it. The toolbar's
-selection prompts and the rule-level bar's "False positive all N" do not pre-fill (not in the
-order). The chip is a text node in the pane (`.pane-previously`, prop `previously`) and in the
+selection prompts (Ignore, False positive and "Move to Ignored") and the rule-level bar's "False
+positive all N" call the same `shared_prefill`. An undo while the pane's prompt is open cancels it
+first (`cancel_pane_prompt`, shared with Esc), because the undo moves the cursor to the restored
+row and the prompt would otherwise write its reason there; the viewer host cancels its own prompt
+the same way (`cancel_prompt`, shared with Esc). The chip is a text node in the pane (`.pane-previously`, prop `previously`) and in the
 popover's disposition line (`cv-pop-prev`); the reason is the reviewer's own text from the draft and
 leaves the app through nothing here.
 
 *Progress strip.* `ProgressStrip` (props-only, `scan.rs`) is drawn at the top of `FindingsTable`,
-above the toolbar, from `TriageModel { dispositions, triage_view }.counts(&all_findings)`; the words
+above the toolbar, from the `counts` prop, which the results view fills with the `triage_counts` it
+already takes (`TriageModel::counts` over the Queue rows) for the sub-tabs and the Process gate, so
+the table does not clone the disposition map to recount; `None` draws no strip. The words
 are `progress::progress_text` (`Undecided` is `TriageCounts::outstanding`, `of N` is `total`, the rest
 `of(state)`; `STRIP_ORDER` plus `Unresolved` is pinned to `TriageState::all()` by a test). Nothing is
 recounted. `counts` is over every Queue row whatever `triage_view` is, so the strip is the same above
-all five tables; it re-renders on `dispositions.read()` so a decision and an undo both move it. The
+all five tables; it re-renders when the results view's tally changes, so a decision and an undo both move it. The
 ETA is the named, empty `eta: Option<String>` prop: nothing is drawn for it until the review timer
 (`WORK_ORDER_REVIEW_TIME.md` item 2) supplies text, and no estimate is computed. *Accessibility:* the
 strip is plain text in `role="group"` with an `aria-label`; it is deliberately not `aria-live`,

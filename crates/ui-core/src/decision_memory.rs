@@ -11,6 +11,10 @@
 //! the pane and the viewer popover turn into a chip, and whose [`reason_for`] pre-fills the reason
 //! prompt when the reviewer presses `I` or `F`.
 //!
+//! The work is done by a [`DecisionIndex`], built once from the rows and the disposition map (the
+//! fingerprint is computed for DECIDED rows only) and then asked per finding; [`prior_decisions`]
+//! is the one-shot form of that and [`shared_prefill`] builds one index for a whole set of cards.
+//!
 //! ## What it is not
 //!
 //! * It applies nothing. The result is text. A disposition is written only by a key press that goes
@@ -25,18 +29,35 @@
 //!   reason, so there is nothing to pre-fill, and a chip saying "you confirmed this before" would
 //!   only nudge the one decision the work order wants made on the evidence in front of the
 //!   reviewer. They are counted only to be honest about disagreement (below).
+//! * It never offers a reason across states. A reason given for Ignored ("accepted risk") is a
+//!   false statement under False positive ("the tool was wrong"), so `I` is only ever offered a
+//!   reason given for Ignored and `F` one given for False positive. The chip still SHOWS the prior
+//!   decision whatever its state.
+//!
+//! ## Across repos
+//!
+//! The shape is `(rule_id, fingerprint)` and does not include the repo, on purpose: the same rule
+//! on the same line of code across one client's repositories is usually one answer, and since the
+//! memory only pre-fills text that the reviewer must still confirm with Enter, a wrong match costs
+//! one edit, not a wrong decision. (A test pins this.)
 //!
 //! ## When prior decisions disagree
 //!
 //! The rows on a shape may have been decided differently: three ignored for one reason, one false
-//! positive, two confirmed. The memory does not pick silently. The primary is the most common
-//! reason-carrying decision (ties broken by state, Ignored before False positive, then by the
-//! reason text, so the answer never depends on iteration order); the chip names it with its row
-//! count, and says `and N other rows decided differently` for every other decided row on the
-//! shape, whether it carries another reason or is Confirmed or Tech debt. If only Confirmed or
-//! Tech debt rows exist on the shape there is no primary, so there is no chip.
+//! positive, two confirmed. The memory does not pick silently. Reasons are grouped on their
+//! whitespace-collapsed, case-folded text, so the same words typed with different spacing or
+//! capitalisation are one decision (the first one seen is kept as the text to pre-fill). The
+//! primary is the most common reason-carrying decision (ties broken by state, Ignored before False
+//! positive, then by the folded reason text, so the answer never depends on iteration order); the
+//! chip names it with its row count, and says `and N other rows decided differently` for every
+//! other decided row on the shape, whether it carries another reason or is Confirmed or Tech debt.
+//! If only Confirmed or Tech debt rows exist on the shape there is no primary, so there is no chip.
 //!
 //! The reason text is the reviewer's own, from this draft. It leaves the app through nothing here.
+//!
+//! [`reason_for`]: PriorDecision::reason_for
+
+use std::collections::{HashMap, HashSet};
 
 use camerata_api_types::fingerprint::fingerprint;
 
@@ -49,11 +70,14 @@ pub const CHIP_PREFIX: &str = "Previously on this shape: ";
 /// How much of a reason the chip shows; the pre-fill always carries the whole of it.
 pub const CHIP_REASON_CHARS: usize = 120;
 
-/// The rows on a shape that were decided with one particular `(state, reason)`.
+/// The rows on a shape that were decided with one particular state and (folded) reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ReasonGroup {
     state: TriageState,
+    /// The first-seen wording, trimmed: what the chip shows and the pre-fill carries.
     reason: String,
+    /// The grouping key: [`fold`] of the reason.
+    folded: String,
     rows: usize,
 }
 
@@ -62,10 +86,10 @@ struct ReasonGroup {
 pub struct PriorDecision {
     /// The most common reason-carrying decision on this shape: `Ignored` or `FalsePositive`.
     pub state: TriageState,
-    /// Its reason, trimmed. Empty only when the draft holds a reason-carrying state with no text
-    /// (an older draft); there is then nothing to pre-fill and the chip shows the state alone.
+    /// Its reason, trimmed, in the wording first seen. Empty only when the draft holds a
+    /// reason-carrying state with no text (an older draft); the chip then shows the state alone.
     pub reason: String,
-    /// How many rows carry exactly that `(state, reason)`.
+    /// How many rows carry that decision (the same state and the same words).
     pub rows: usize,
     /// Every OTHER decided row on the shape: a different reason, a different reason-carrying
     /// state, Confirmed or Tech debt. Zero means the draft is unanimous.
@@ -85,7 +109,7 @@ impl PriorDecision {
     /// markup.
     pub fn chip_text(&self) -> String {
         let mut text = format!("{CHIP_PREFIX}{}", self.state.label());
-        let reason = self.reason.split_whitespace().collect::<Vec<_>>().join(" ");
+        let reason = collapse(&self.reason);
         if !reason.is_empty() {
             text.push_str(&format!(", '{}'", cut_chars(&reason, CHIP_REASON_CHARS)));
         }
@@ -100,12 +124,11 @@ impl PriorDecision {
         text
     }
 
-    /// The reason to pre-fill the prompt for `state` (`Ignored` or `False positive`).
-    ///
-    /// The most common reason the draft already gave for THAT state on this shape; when there is
-    /// none (the shape was ignored and the reviewer pressed `F`), the chip's own reason, so what
-    /// is pre-filled is always the text the chip shows. `None` when there is no text to offer, or
-    /// `state` takes no reason.
+    /// The reason to pre-fill the prompt for `state` (`Ignored` or `False positive`): the most
+    /// common reason the draft already gave for THAT state on this shape. `None` when it gave none
+    /// for that state (a shape only ever ignored offers nothing under `F`: an accepted-risk reason
+    /// is a false statement about a tool error), when the reason is blank, or when `state` takes
+    /// no reason.
     pub fn reason_for(&self, state: TriageState) -> Option<&str> {
         if !state.requires_reason() {
             return None;
@@ -114,7 +137,6 @@ impl PriorDecision {
             .iter()
             .find(|g| g.state == state && !g.reason.is_empty())
             .map(|g| g.reason.as_str())
-            .or_else(|| Some(self.reason.as_str()).filter(|r| !r.is_empty()))
     }
 }
 
@@ -126,6 +148,17 @@ fn row_noun(n: usize) -> &'static str {
     }
 }
 
+/// `text` with its whitespace runs collapsed to single spaces and the ends trimmed.
+fn collapse(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// What two reasons are compared on: the collapsed text, case-folded. "Test fixture" and
+/// "test  fixture\n" are the same decision.
+fn fold(text: &str) -> String {
+    collapse(text).to_lowercase()
+}
+
 /// Ranks the reason-carrying states for a tie: Ignored before False positive.
 fn state_rank(state: TriageState) -> u8 {
     match state {
@@ -134,85 +167,116 @@ fn state_rank(state: TriageState) -> u8 {
     }
 }
 
-/// The decisions already made in this draft on `focused`'s shape, or `None` when there is nothing
-/// worth showing.
-///
-/// `rows` is the set of findings to look through (the Queue's rows); `dispositions` is the draft's
-/// map. A row counts when it is in `rows` (a disposition for a finding not in the set is not
-/// evidence about this scan), is not `focused` itself, has the same rule id, is decided, and has
-/// the same fingerprint. `None` when no reason-carrying decision exists on the shape, and for a
-/// finding with no snippet (a blank snippet is every blank-snippet finding of the rule, which is
-/// not a shape).
-pub fn prior_decisions(
-    rows: &[FindingView],
-    dispositions: &std::collections::HashMap<String, Disposition>,
-    focused: &FindingView,
-) -> Option<PriorDecision> {
-    if focused.snippet.trim().is_empty() {
-        return None;
-    }
-    let shape = fingerprint(&focused.rule_id, &focused.snippet);
-    let own = finding_key(focused);
-    let mut seen = std::collections::HashSet::new();
-    let mut groups: Vec<ReasonGroup> = Vec::new();
-    // Decided rows on the shape that carry no reason (Confirmed, Tech debt): not a primary, but
-    // part of the honest "decided differently" count.
-    let mut reasonless = 0usize;
-    for f in rows {
-        // The cheap test first: the fingerprint is only computed for rows of the same rule that
-        // have a decision, which is what keeps this fast over thousands of rows.
-        if f.rule_id != focused.rule_id {
-            continue;
-        }
-        let key = finding_key(f);
-        if key == own {
-            continue;
-        }
-        let Some(d) = dispositions.get(&key) else {
-            continue;
-        };
-        if !d.state.is_decided() || !seen.insert(key) {
-            continue;
-        }
-        if fingerprint(&f.rule_id, &f.snippet) != shape {
-            continue;
-        }
-        if !d.state.requires_reason() {
-            reasonless += 1;
-            continue;
-        }
-        let reason = d.reason.trim();
-        match groups
-            .iter_mut()
-            .find(|g| g.state == d.state && g.reason == reason)
-        {
-            Some(g) => g.rows += 1,
-            None => groups.push(ReasonGroup {
-                state: d.state,
-                reason: reason.to_string(),
-                rows: 1,
-            }),
-        }
-    }
-    groups.sort_by(|a, b| {
-        b.rows
-            .cmp(&a.rows)
-            .then(state_rank(a.state).cmp(&state_rank(b.state)))
-            .then_with(|| a.reason.cmp(&b.reason))
-    });
-    let primary = groups.first()?.clone();
-    let reasoned: usize = groups.iter().map(|g| g.rows).sum();
-    Some(PriorDecision {
-        state: primary.state,
-        reason: primary.reason,
-        rows: primary.rows,
-        others: reasoned - primary.rows + reasonless,
-        groups,
-    })
+/// One decided row on a shape.
+#[derive(Clone, Debug)]
+struct Decided {
+    key: String,
+    state: TriageState,
+    reason: String,
 }
 
-/// The reason to pre-fill for ONE focused finding pressing `I` or `F`: what its chip offers, or an
-/// empty string. The pane and the viewer call this; the stack calls [`shared_prefill`].
+/// Every decided row of a finding set, bucketed by shape, so each question about a finding is a
+/// lookup. Build it once per set of questions: the fingerprint is computed here, for decided rows
+/// only, and never again.
+#[derive(Clone, Debug, Default)]
+pub struct DecisionIndex {
+    by_shape: HashMap<(String, String), Vec<Decided>>,
+}
+
+impl DecisionIndex {
+    /// Index `rows` against `dispositions`. A row counts when it has a decision other than
+    /// Unresolved and a snippet (a blank snippet is every blank-snippet finding of the rule, not a
+    /// shape); a finding listed twice counts once; a disposition for a finding not in `rows` is not
+    /// evidence about this scan. The repo is not part of the shape (see the module comment).
+    pub fn build(rows: &[FindingView], dispositions: &HashMap<String, Disposition>) -> Self {
+        let mut seen = HashSet::new();
+        let mut by_shape: HashMap<(String, String), Vec<Decided>> = HashMap::new();
+        for f in rows {
+            let key = finding_key(f);
+            let Some(d) = dispositions.get(&key) else {
+                continue;
+            };
+            if !d.state.is_decided() || f.snippet.trim().is_empty() || !seen.insert(key.clone()) {
+                continue;
+            }
+            by_shape
+                .entry((f.rule_id.clone(), fingerprint(&f.rule_id, &f.snippet)))
+                .or_default()
+                .push(Decided {
+                    key,
+                    state: d.state,
+                    reason: d.reason.trim().to_string(),
+                });
+        }
+        Self { by_shape }
+    }
+
+    /// What was decided about `focused`'s shape, not counting `focused` itself, or `None` when no
+    /// reason-carrying decision exists on it (and for a finding with no snippet).
+    pub fn prior(&self, focused: &FindingView) -> Option<PriorDecision> {
+        if focused.snippet.trim().is_empty() {
+            return None;
+        }
+        let shape = (
+            focused.rule_id.clone(),
+            fingerprint(&focused.rule_id, &focused.snippet),
+        );
+        let own = finding_key(focused);
+        let mut groups: Vec<ReasonGroup> = Vec::new();
+        // Decided rows on the shape that carry no reason (Confirmed, Tech debt): never a primary,
+        // but part of the honest "decided differently" count.
+        let mut reasonless = 0usize;
+        for d in self.by_shape.get(&shape)?.iter().filter(|d| d.key != own) {
+            if !d.state.requires_reason() {
+                reasonless += 1;
+                continue;
+            }
+            let folded = fold(&d.reason);
+            match groups
+                .iter_mut()
+                .find(|g| g.state == d.state && g.folded == folded)
+            {
+                Some(g) => g.rows += 1,
+                None => groups.push(ReasonGroup {
+                    state: d.state,
+                    reason: d.reason.clone(),
+                    folded,
+                    rows: 1,
+                }),
+            }
+        }
+        groups.sort_by(|a, b| {
+            b.rows
+                .cmp(&a.rows)
+                .then(state_rank(a.state).cmp(&state_rank(b.state)))
+                .then_with(|| a.folded.cmp(&b.folded))
+        });
+        let primary = groups.first()?.clone();
+        let reasoned: usize = groups.iter().map(|g| g.rows).sum();
+        Some(PriorDecision {
+            state: primary.state,
+            reason: primary.reason,
+            rows: primary.rows,
+            others: reasoned - primary.rows + reasonless,
+            groups,
+        })
+    }
+}
+
+/// The decisions already made in this draft on `focused`'s shape, or `None` when there is nothing
+/// worth showing. The one-shot form of [`DecisionIndex::build`] then [`DecisionIndex::prior`]; a
+/// caller with several questions builds the index itself.
+pub fn prior_decisions(
+    rows: &[FindingView],
+    dispositions: &HashMap<String, Disposition>,
+    focused: &FindingView,
+) -> Option<PriorDecision> {
+    DecisionIndex::build(rows, dispositions).prior(focused)
+}
+
+/// The reason to pre-fill for ONE focused finding pressing `I` or `F`: what its chip offers for
+/// that state, or an empty string. The pane and the viewer call this; the stack and the toolbar
+/// call [`shared_prefill`].
 pub fn prefill_reason(prior: Option<&PriorDecision>, state: TriageState) -> String {
     prior
         .and_then(|p| p.reason_for(state))
@@ -220,27 +284,30 @@ pub fn prefill_reason(prior: Option<&PriorDecision>, state: TriageState) -> Stri
         .to_string()
 }
 
-/// The reason to pre-fill for a SET of rows (the stacked view's checked cards) deciding `state`:
-/// the reason every one of them would be offered, when they are all offered the same one, and
-/// nothing otherwise. One card with no prior, or two with different priors, empties it: pre-filling
-/// a reason that is true of some of the rows would put a sentence in the export for rows it does
-/// not describe, one Enter away.
+/// The reason to pre-fill for a SET of rows (the stacked view's checked cards, the toolbar's
+/// selection) deciding `state`: the reason every one of them would be offered, when they are all
+/// offered the same one (compared on the folded text), and nothing otherwise. One row with no
+/// prior, or two with different priors, empties it: pre-filling a reason that is true of some of
+/// the rows would put a sentence in the export for rows it does not describe, one Enter away.
 pub fn shared_prefill(
     targets: &[FindingView],
     rows: &[FindingView],
-    dispositions: &std::collections::HashMap<String, Disposition>,
+    dispositions: &HashMap<String, Disposition>,
     state: TriageState,
 ) -> String {
+    if targets.is_empty() || !state.requires_reason() {
+        return String::new();
+    }
+    let index = DecisionIndex::build(rows, dispositions);
     let mut shared: Option<String> = None;
     for t in targets {
-        let prior = prior_decisions(rows, dispositions, t);
-        let offered = prefill_reason(prior.as_ref(), state);
+        let offered = prefill_reason(index.prior(t).as_ref(), state);
         if offered.is_empty() {
             return String::new();
         }
         match &shared {
             None => shared = Some(offered),
-            Some(s) if *s == offered => {}
+            Some(s) if fold(s) == fold(&offered) => {}
             Some(_) => return String::new(),
         }
     }
@@ -515,8 +582,9 @@ mod tests {
         assert!(!text.contains('\u{2014}'));
     }
 
+    /// M1: a reason is only ever offered under the state it was given for.
     #[test]
-    fn reason_for_prefers_the_pressed_state_and_falls_back_to_the_chip() {
+    fn reason_for_is_same_state_only() {
         let rows: Vec<FindingView> = (1..=5).map(|n| finding("R-1", n, "same")).collect();
         let d = merged(vec![
             decided(&[&rows[0], &rows[1]], TriageState::Ignored, "fixture"),
@@ -528,15 +596,98 @@ mod tests {
             p.reason_for(TriageState::FalsePositive),
             Some("parser misread")
         );
-        // Only ignored so far, F pressed: the chip's own text.
+        // Only ignored so far: the chip still shows it, but F is offered nothing (an
+        // accepted-risk reason is a false statement about a tool error), and the reverse.
         let only = decided(&[&rows[0]], TriageState::Ignored, "fixture");
         let p = prior_decisions(&rows, &only, &rows[4]).unwrap();
-        assert_eq!(p.reason_for(TriageState::FalsePositive), Some("fixture"));
+        assert!(p.chip_text().contains("Ignored, 'fixture'"));
+        assert_eq!(p.reason_for(TriageState::FalsePositive), None);
+        assert_eq!(prefill_reason(Some(&p), TriageState::FalsePositive), "");
+        let only_fp = decided(&[&rows[0]], TriageState::FalsePositive, "misread");
+        let p = prior_decisions(&rows, &only_fp, &rows[4]).unwrap();
+        assert_eq!(p.reason_for(TriageState::Ignored), None);
         // States that take no reason are never pre-filled.
         assert_eq!(p.reason_for(TriageState::Confirmed), None);
         assert_eq!(p.reason_for(TriageState::TechDebt), None);
         assert_eq!(prefill_reason(None, TriageState::Ignored), "");
         assert_eq!(prefill_reason(Some(&p), TriageState::Confirmed), "");
+    }
+
+    /// L1: the repo is not part of the shape. The same rule on the same line in another repo is
+    /// remembered (it only pre-fills; the reviewer still presses Enter).
+    #[test]
+    fn memory_is_shared_across_repos() {
+        let mut other_repo = finding("R-1", 1, "same");
+        other_repo.repo = "me/web".into();
+        let here = finding("R-1", 2, "same");
+        assert_ne!(other_repo.repo, here.repo);
+        let rows = vec![other_repo.clone(), here.clone()];
+        let d = decided(&[&other_repo], TriageState::Ignored, "fixture");
+        let p = prior_decisions(&rows, &d, &here).expect("remembered across repos");
+        assert_eq!(p.reason, "fixture");
+    }
+
+    /// L4: the same words with different whitespace or capitalisation are one decision, not a
+    /// disagreement; the first wording seen is what is shown and pre-filled.
+    #[test]
+    fn reasons_group_on_collapsed_case_folded_text() {
+        let rows: Vec<FindingView> = (1..=4).map(|n| finding("R-1", n, "same")).collect();
+        let mut d = decided(&[&rows[0]], TriageState::Ignored, "Test fixture");
+        d.extend(decided(
+            &[&rows[1]],
+            TriageState::Ignored,
+            "test   fixture\n",
+        ));
+        d.extend(decided(&[&rows[2]], TriageState::Ignored, " TEST FIXTURE "));
+        let p = prior_decisions(&rows, &d, &rows[3]).unwrap();
+        assert_eq!((p.rows, p.others), (3, 0), "{p:?}");
+        assert!(!p.chip_text().contains("decided differently"));
+        assert_eq!(
+            p.reason_for(TriageState::Ignored)
+                .unwrap()
+                .to_lowercase()
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            ["test", "fixture"]
+        );
+        // A different state with the same words is still a different decision.
+        let mut d2 = decided(&[&rows[0]], TriageState::Ignored, "test fixture");
+        d2.extend(decided(
+            &[&rows[1]],
+            TriageState::FalsePositive,
+            "test fixture",
+        ));
+        let p = prior_decisions(&rows, &d2, &rows[3]).unwrap();
+        assert_eq!((p.rows, p.others), (1, 1));
+        // And the stack rule compares on the folded text too.
+        let a = finding("R-1", 10, "alpha");
+        let b = finding("R-1", 11, "beta");
+        let pa = finding("R-1", 12, "alpha");
+        let pb = finding("R-1", 13, "beta");
+        let all = vec![a.clone(), b.clone(), pa.clone(), pb.clone()];
+        let mut d3 = decided(&[&pa], TriageState::Ignored, "Test Fixture");
+        d3.extend(decided(&[&pb], TriageState::Ignored, "test  fixture"));
+        assert_eq!(
+            shared_prefill(&[a, b], &all, &d3, TriageState::Ignored).to_lowercase(),
+            "test fixture"
+        );
+    }
+
+    /// L3: an index answers per finding without rebuilding, and agrees with the one-shot form.
+    #[test]
+    fn an_index_agrees_with_the_one_shot_form_for_every_row() {
+        let rows: Vec<FindingView> = (1..=6)
+            .map(|n| finding("R-1", n, if n % 2 == 0 { "even" } else { "odd" }))
+            .collect();
+        let d = merged(vec![
+            decided(&[&rows[0]], TriageState::Ignored, "fixture"),
+            decided(&[&rows[1], &rows[3]], TriageState::FalsePositive, "misread"),
+            decided(&[&rows[2]], TriageState::Confirmed, ""),
+        ]);
+        let index = DecisionIndex::build(&rows, &d);
+        for f in &rows {
+            assert_eq!(index.prior(f), prior_decisions(&rows, &d, f));
+        }
     }
 
     #[test]

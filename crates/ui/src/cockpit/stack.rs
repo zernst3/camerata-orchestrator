@@ -1044,8 +1044,15 @@ mod tests {
         let findings = ROWS.with(|r| r.borrow().clone());
         let mut shas = HashMap::new();
         shas.insert("me/api".to_string(), SHA.to_string());
+        // What the results view hands the table: the tally over every Queue row.
+        let counts = TriageModel {
+            dispositions: dispositions.read().clone(),
+            triage_view: VIEW.with(std::cell::Cell::get),
+        }
+        .counts(&findings);
         rsx! {
             FindingsTable {
+                counts: Some(counts),
                 findings,
                 repos: vec!["me/api".to_string()],
                 descriptions: HashMap::new(),
@@ -2701,22 +2708,32 @@ mod tests {
         settle(&mut vdom, &mut seen).await;
         assert_eq!(probe().dispositions.peek().len(), 1, "Esc decided nothing");
 
-        // I on a shape that was only marked false positive: the chip's own text is offered.
+        // I on a shape that was only ever marked false positive: the chip still says so, but a
+        // "tool was wrong" reason is not offered as an "accepted risk" one, so the field is empty.
         let pane = arm_pane(&mut vdom, &mut seen).await;
         let mark = seen.mark();
         key(&vdom, pane, "i");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(field_text(&html(&vdom), "pane-reason-input"), "");
+        assert!(plain(&html(&vdom)).contains("Previously on this shape: False positive"));
+        key(&vdom, seen.first_after(mark, "keydown"), "Escape");
+        settle(&mut vdom, &mut seen).await;
+
+        // F again, and Enter with no edit: the reviewer's Enter stores exactly the remembered text.
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        let mark = seen.mark();
+        key(&vdom, pane, "f");
         settle(&mut vdom, &mut seen).await;
         assert_eq!(
             field_text(&html(&vdom), "pane-reason-input"),
             "parser misread"
         );
-        // Enter with no edit stores exactly that.
         key(&vdom, seen.first_after(mark, "keydown"), "Enter");
         settle(&mut vdom, &mut seen).await;
         let stored = probe().dispositions.peek().get(&finding_key(&b)).cloned();
         assert_eq!(
             stored.map(|d| (d.state, d.reason)),
-            Some((TriageState::Ignored, "parser misread".to_string()))
+            Some((TriageState::FalsePositive, "parser misread".to_string()))
         );
     }
 
@@ -3015,5 +3032,124 @@ mod tests {
             page.contains("Undecided 6 of 6 \u{b7} Confirmed 0"),
             "{page}"
         );
+    }
+
+    // ── Fix round: undo under an open prompt (M2) and the toolbar's pre-fill (L2) ─────────
+
+    /// Decide the first row with `fixture`, so an undo is armed and the cursor sits on its twin.
+    async fn decide_first_then_stand_on_the_twin(vdom: &mut VirtualDom, seen: &mut Seen) {
+        let pane = arm_pane(vdom, seen).await;
+        let mark = seen.mark();
+        key(vdom, pane, "i");
+        settle(vdom, seen).await;
+        typed(vdom, seen.first_after(mark, "input"), "fixture");
+        settle(vdom, seen).await;
+        key(vdom, seen.first_after(mark, "keydown"), "Enter");
+        settle(vdom, seen).await;
+        assert_eq!(state_count(TriageState::Ignored), 1);
+    }
+
+    /// M2: an undo while the pane's prompt is open (pre-filled by memory) closes the prompt before
+    /// the cursor moves to the restored row, so no Enter can write the reason onto it.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn an_undo_closes_the_panes_open_prompt_so_nothing_is_written_to_the_restored_row() {
+        let rows = vec![
+            shaped(7, "same line"),
+            shaped(8, "same line"),
+            shaped(9, "another line"),
+        ];
+        let (mut vdom, mut seen, _server, _env) =
+            mount(rows.clone(), OrderPreset::CriticalFirst, "ok").await;
+        decide_first_then_stand_on_the_twin(&mut vdom, &mut seen).await;
+
+        // On the twin, I opens the prompt holding the remembered reason.
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        let mark = seen.mark();
+        key(&vdom, pane, "i");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(field_text(&html(&vdom), "pane-reason-input"), "fixture");
+        let field_keys = seen.first_after(mark, "keydown");
+
+        // Undo while it is open: the decision is reverted AND the prompt is gone.
+        click(&vdom, seen.element(super::super::scan::PANE_UNDO_ID));
+        settle(&mut vdom, &mut seen).await;
+        let page = html(&vdom);
+        assert!(
+            !page.contains("pane-reason-input"),
+            "the prompt closed: {page}"
+        );
+        assert!(page.contains("1 of 3"), "the cursor is on the restored row");
+        // A late Enter at the old field reaches nothing.
+        key(&vdom, field_keys, "Enter");
+        settle(&mut vdom, &mut seen).await;
+        assert!(
+            probe().dispositions.peek().is_empty(),
+            "nothing was written: {:?}",
+            probe().dispositions.peek().keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// M2, viewer side: the viewer's own prompt closes on an undo too.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn an_undo_closes_the_viewers_open_prompt() {
+        let rows = vec![shaped(7, "same line"), shaped(8, "same line")];
+        let (mut vdom, mut seen, _server, _env) =
+            mount(rows, OrderPreset::CriticalFirst, "ok").await;
+        decide_first_then_stand_on_the_twin(&mut vdom, &mut seen).await;
+        let pane = arm_pane(&mut vdom, &mut seen).await;
+        key(&vdom, pane, "o");
+        settle(&mut vdom, &mut seen).await;
+        key(&vdom, seen.element(VIEWER_ID), "i");
+        settle(&mut vdom, &mut seen).await;
+        assert_eq!(field_text(&html(&vdom), "pane-reason-input"), "fixture");
+
+        click(&vdom, seen.element(super::super::viewer::VIEWER_UNDO_ID));
+        settle(&mut vdom, &mut seen).await;
+        assert!(
+            !html(&vdom).contains("pane-reason-input"),
+            "the prompt closed: {}",
+            html(&vdom)
+        );
+        assert!(probe().dispositions.peek().is_empty(), "the undo landed");
+    }
+
+    /// L2: the toolbar's Ignore and False positive prompts start with a remembered reason by the
+    /// stack's rule: only when every selected row is offered the same one.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn the_toolbar_prompt_prefills_by_the_stacks_rule() {
+        let prior = shaped(1, "same line");
+        let rows = vec![
+            prior.clone(),
+            shaped(8, "same line"),
+            shaped(9, "same line"),
+            shaped(10, "a shape nobody decided"),
+        ];
+        let initial = seeded(&[&prior], TriageState::Ignored, "test fixture");
+        let (mut vdom, mut seen, _server, _env) = mount_in(
+            rows,
+            OrderPreset::CriticalFirst,
+            "ok",
+            TriageState::Unresolved,
+            initial,
+        )
+        .await;
+        // The two twins (table rows 0 and 1): both offered the reason.
+        let mark = seen.mark();
+        select_and_press(&mut vdom, &mut seen, &[0, 1], TriageState::Ignored).await;
+        let page = html(&vdom);
+        assert!(page.contains("2 findings (required)"), "{page}");
+        assert_eq!(field_text(&page, "queue-reason-input"), "test fixture");
+        assert_eq!(state_count(TriageState::Ignored), 1, "nothing applied yet");
+
+        // Add the row with no prior: the prompt is raised again for all three and starts empty.
+        key(&vdom, seen.first_after(mark, "keydown"), "Escape");
+        settle(&mut vdom, &mut seen).await;
+        select_and_press(&mut vdom, &mut seen, &[2], TriageState::Ignored).await;
+        let page = html(&vdom);
+        assert!(page.contains("3 findings (required)"), "{page}");
+        assert_eq!(field_text(&page, "queue-reason-input"), "", "{page}");
     }
 }

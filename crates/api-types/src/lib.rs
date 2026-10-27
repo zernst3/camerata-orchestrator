@@ -41,7 +41,7 @@
 //!   `GET /api/feedback/recent`. Unlike `governance`, this is NOT a hand-mirrored DTO —
 //!   `camerata-persistence` depends on this crate and stores `DefectReport` directly.
 //!
-//! - [`fingerprint`] — the finding fingerprint (`fnv1a`, `fingerprint`), moved out of
+//! - [`fingerprint`]: the finding fingerprint (`fnv1a`, `fingerprint`), moved out of
 //!   `camerata_server::suppression` so the review UI's decision memory and the suppression
 //!   baseline call one implementation.
 //!

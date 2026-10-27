@@ -26,15 +26,14 @@ pub const STRIP_ORDER: [TriageState; 4] = [
     TriageState::TechDebt,
 ];
 
-/// The word the strip uses for a state. `Unresolved` is "Undecided" here because that is what the
-/// number means: rows nobody has decided yet.
+/// The word the strip uses for a state: the state's own label, except for two overrides.
+/// `Unresolved` is "Undecided" because that is what the number means (rows nobody has decided
+/// yet), and `FalsePositive` is "FP" to keep the line short.
 pub fn strip_label(state: TriageState) -> &'static str {
     match state {
         TriageState::Unresolved => "Undecided",
-        TriageState::Confirmed => "Confirmed",
-        TriageState::Ignored => "Ignored",
         TriageState::FalsePositive => "FP",
-        TriageState::TechDebt => "Tech debt",
+        other => other.label(),
     }
 }
 

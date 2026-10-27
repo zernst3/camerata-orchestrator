@@ -456,8 +456,9 @@ mod tests {
 
     /// B.5 moved `fingerprint` to `camerata-api-types` so the review UI shares it. A baseline file
     /// COMMITTED before the move holds literal fingerprint strings, so the suppression results must
-    /// be exactly what they were: these entries carry the pre-move values as literals (not computed
-    /// by the function under test), and a baseline written now reproduces them.
+    /// be exactly what they were: these entries carry the pre-move values as literals, computed
+    /// independently of the function under test and pinned, and a baseline written now reproduces
+    /// them.
     #[test]
     fn suppression_results_are_unchanged_by_moving_the_fingerprint() {
         let snippet = "let t = \"abc\";";

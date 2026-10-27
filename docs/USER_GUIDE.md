@@ -543,10 +543,16 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    memory along with the decision. If your earlier decisions on the shape disagree, the line says
    so instead of choosing quietly: it shows the most common one and adds `, and 2 other rows
    decided differently` (other reasons, a different disposition, or Confirmed and Tech debt rows).
-   If you press `F` and you had only ever ignored the shape, the box starts with the reason shown on
-   the line. In the stacked view, `I` and `F` start the shared reason prompt with a reason only when
-   **every** checked card would be offered the same one; if one card has no earlier decision, or
-   two cards have different ones, the box starts empty. The reason text is your own words from this
+   The same words typed with different spacing or capitals count as one decision. A reason is only
+   ever offered for the same disposition it was given for: if you had only ever ignored the shape,
+   `F` starts with an empty box (an "accepted risk" reason is not an answer to "the tool was
+   wrong"), though the line still shows the earlier decision. The same code in another repository
+   of the same review counts as the same shape. In the stacked view and for the toolbar's Ignore and
+   False positive buttons (and "False positive all N"), the prompt starts with a reason only when
+   **every** checked or selected finding would be offered the same one; if one has no earlier
+   decision, or two have different ones, the box starts empty. If you press Undo while a reason box
+   is open, the box closes (the undo moves you to the restored finding, and a reason typed for
+   another one must not follow you there). The reason text is your own words from this
    review and is shown as plain text.
 
    **Progress strip.** Above the table, one line says where the review stands, for example

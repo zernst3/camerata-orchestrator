@@ -637,7 +637,9 @@ pub(super) use camerata_ui_core::triage::bulk_reason_heading;
 
 // Work order B.5/B.7: decision memory (what the draft already decided about a shape) and the
 // progress strip's words. Both are pure and live in core; this layer draws them.
-use camerata_ui_core::decision_memory::{prefill_reason, prior_decisions, PriorDecision};
+use camerata_ui_core::decision_memory::{
+    prefill_reason, prior_decisions, shared_prefill, PriorDecision,
+};
 use camerata_ui_core::progress::{progress_text, FP_MEANING};
 
 // ── `split_needs_review` IN THE UI: what §9.3 retires, and the two uses that survive ──
@@ -3726,11 +3728,22 @@ pub(super) fn FindingsTable(
     /// The project the findings belong to, passed to the code viewer's requests.
     #[props(default)]
     project_id: String,
+    /// The tally over every Queue row (`TriageModel::counts`), taken once by the results view
+    /// (which already needs it for the sub-tabs and the Process gate) and drawn as the progress
+    /// strip above the table. `None` draws no strip.
+    #[props(default)]
+    counts: Option<TriageCounts>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     // Every queue row, before this table's triage-state filter: the viewer's gutter marks the
     // decided findings of a file too, so it needs the whole set.
-    let all_findings = findings.clone();
+    //
+    // One shared copy for the table's lifetime (its data is frozen, like its rows): the viewer's
+    // and the stack's links, decision memory and the toolbar's pre-fill all read it.
+    let all_rows: std::sync::Arc<Vec<FindingView>> = use_hook({
+        let all = findings.clone();
+        move || std::sync::Arc::new(all)
+    });
     // Filter to THIS table's triage state + apply the default triage order (enforced/new before
     // suppressed/debt, then critical → high → medium → low). Both the filter and the sort are the
     // pure `TriageModel::visible` derivation now (RUST-HEADLESS-CORE-1): a flat 200-row dump is
@@ -4012,7 +4025,7 @@ pub(super) fn FindingsTable(
     // prompt with it. It applies nothing.
     let focused_prior: Option<PriorDecision> = focused_finding
         .as_ref()
-        .and_then(|f| prior_decisions(&all_findings, &dispositions.read(), f));
+        .and_then(|f| prior_decisions(&all_rows, &dispositions.read(), f));
     let prior_for_keys = focused_prior.clone();
     let prior_for_buttons = focused_prior.clone();
 
@@ -4138,6 +4151,21 @@ pub(super) fn FindingsTable(
         true
     });
 
+    // The stacked view's open state is declared here (not beside its other wiring) because the
+    // pane prompt's cancel below needs to know whether an overlay owns the keyboard.
+    let mut stack_open = use_signal(|| Option::<super::stack::StackOpen>::None);
+    // CANCEL THE PANE'S REASON PROMPT: Esc, and an undo (which moves the cursor to the restored
+    // row, and a prompt left open would then write its reason onto THAT row). One helper so the
+    // two cannot differ. Focus goes back to the pane unless the viewer or the stack is open,
+    // which own the keyboard and must not have it taken.
+    let cancel_pane_prompt = use_callback(move |()| {
+        prompt.set(None);
+        prompt_reason.set(String::new());
+        if !*viewer_open.peek() && stack_open.peek().is_none() {
+            // Move REAL focus back, and let `focusin` set the state, never assert it.
+            focus_detail_pane();
+        }
+    });
     // THE UNDO, shared by the pane's button, the code viewer's and the stacked view's: one
     // action, three surfaces.
     let undo_action = use_callback(move |()| {
@@ -4152,6 +4180,11 @@ pub(super) fn FindingsTable(
         match model.undo(&mut entry, now) {
             UndoOutcome::Reverted(n) => {
                 dispositions.set(model.dispositions);
+                // A reason being typed in the pane was for the row the cursor was on; the
+                // restore below moves the cursor, so the prompt goes first.
+                if prompt.peek().is_some() {
+                    cancel_pane_prompt.call(());
+                }
                 // Put the rows back ON SCREEN too. Reverting only the map would
                 // leave the toast truthfully claiming a revert while the rows stayed
                 // gone from the table, which is the half-done undo this is for. In
@@ -4217,6 +4250,7 @@ pub(super) fn FindingsTable(
     // with the selection snapshotted into it; `commit_toolbar_reason` finishes it.
     let toolbar_decide = use_callback({
         let id_map = id_map.clone();
+        let all_rows = std::sync::Arc::clone(&all_rows);
         move |decided: TriageState| {
             let rows: Vec<FindingView> = handle
                 .selected_ids()
@@ -4227,7 +4261,14 @@ pub(super) fn FindingsTable(
                 return;
             }
             if decided.requires_reason() {
-                toolbar_reason.set(String::new());
+                // Decision memory (B.5): the same rule as the stack's prompt, a starting text
+                // only when every selected row is offered the same reason.
+                toolbar_reason.set(shared_prefill(
+                    &rows,
+                    &all_rows,
+                    &dispositions.peek(),
+                    decided,
+                ));
                 toolbar_prompt.set(Some(ToolbarReasonPrompt {
                     state: decided,
                     rows,
@@ -4308,7 +4349,6 @@ pub(super) fn FindingsTable(
     // viewer: the viewer's `Enter`-from-a-card door opens it above the stack, and closing it
     // gives the keyboard back to the stack when one is open (the same `focus_element` the pane's
     // return uses), else to the pane.
-    let mut stack_open = use_signal(|| Option::<super::stack::StackOpen>::None);
     let mut stack_serial = use_signal(|| 0u64);
     let viewer_close = use_callback(move |()| {
         viewer_open.set(false);
@@ -4330,7 +4370,7 @@ pub(super) fn FindingsTable(
             cursor,
             visible_keys,
             dispositions,
-            all_findings: std::sync::Arc::new(all_findings.clone()),
+            all_findings: std::sync::Arc::clone(&all_rows),
             shas: std::sync::Arc::new(audited_shas.clone()),
             sha_conflicts: std::sync::Arc::new(sha_conflicts.clone()),
             project_id: project_id.clone(),
@@ -4449,7 +4489,7 @@ pub(super) fn FindingsTable(
         let link = use_hook(|| super::stack::StackLink {
             open: stack_open,
             dispositions,
-            all_findings: std::sync::Arc::new(all_findings.clone()),
+            all_findings: std::sync::Arc::clone(&all_rows),
             shas: std::sync::Arc::new(audited_shas.clone()),
             project_id: project_id.clone(),
             undo_entry,
@@ -4559,12 +4599,8 @@ pub(super) fn FindingsTable(
         // THE PROGRESS STRIP (B.7): the same tally above whichever triage table is showing,
         // taken from `TriageModel::counts` over every Queue row. `dispositions.read()` is what
         // re-renders it on a decision and on an undo.
-        ProgressStrip {
-            counts: TriageModel {
-                dispositions: dispositions.read().clone(),
-                triage_view,
-            }
-            .counts(&all_findings),
+        if let Some(counts) = counts {
+            ProgressStrip { counts }
         }
         div { class: "findings-toolbar",
             // View-specific triage actions. A move writes the new disposition for each
@@ -4732,9 +4768,15 @@ pub(super) fn FindingsTable(
             // is still `TriageModel::dispose_with_undo`'s refusal, enforced at commit.
             on_false_positive_all: Callback::new({
                 let bulk_groups = std::rc::Rc::clone(&bulk_groups);
+                let all_rows = std::sync::Arc::clone(&all_rows);
                 move |i: usize| {
                     let Some(group) = bulk_groups.get(i) else { return };
-                    toolbar_reason.set(String::new());
+                    toolbar_reason.set(shared_prefill(
+                        &group.rows,
+                        &all_rows,
+                        &dispositions.peek(),
+                        TriageState::FalsePositive,
+                    ));
                     toolbar_prompt.set(Some(ToolbarReasonPrompt {
                         state: TriageState::FalsePositive,
                         rows: group.rows.clone(),
@@ -4891,12 +4933,7 @@ pub(super) fn FindingsTable(
                     }
                 }
             }),
-            on_prompt_cancel: Callback::new(move |()| {
-                prompt.set(None);
-                prompt_reason.set(String::new());
-                // Move REAL focus back, and let `focusin` set the state — never assert it.
-                focus_detail_pane();
-            }),
+            on_prompt_cancel: cancel_pane_prompt,
             on_undo: undo_action,
             on_dispose: Callback::new(move |state: TriageState| {
                 // The pane's own buttons. A reason-carrying state opens the prompt first,
@@ -8531,6 +8568,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 sha_conflicts: sha_choice.conflicts.clone(),
                                 audited_origins: audited_origins(&report, audited.as_ref()),
                                 project_id: project_id.clone(),
+                                counts: Some(triage_counts),
                             }
                         }
                     }
