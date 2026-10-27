@@ -530,14 +530,17 @@ pub(super) use camerata_ui_core::rules::csv_field;
 
 /// Pop a native save dialog and write `content`. Returns true on success.
 pub(super) async fn save_csv(default_name: &str, content: String) -> bool {
-    match rfd::AsyncFileDialog::new()
+    save_text(default_name, content).await == Some(true)
+}
+
+/// [`save_csv`] that tells a cancelled dialog (`None`) from a failed write (`Some(false)`), for
+/// callers that report a failure.
+pub(super) async fn save_text(default_name: &str, content: String) -> Option<bool> {
+    let file = rfd::AsyncFileDialog::new()
         .set_file_name(default_name)
         .save_file()
-        .await
-    {
-        Some(file) => file.write(content.as_bytes()).await.is_ok(),
-        None => false,
-    }
+        .await?;
+    Some(file.write(content.as_bytes()).await.is_ok())
 }
 
 /// Byte-based sibling of `save_csv` — same native-save-dialog idiom, but for raw bytes
@@ -1139,11 +1142,8 @@ pub(super) struct OnboardingDraft {
     /// report options only; the server's release-gate tests inspect every client artifact for its
     /// field names). A draft saved before it existed reads as an empty log, and a log of a shape
     /// this build does not know reads as an empty log, so the scan and the dispositions still load.
-    #[serde(
-        default,
-        deserialize_with = "camerata_ui_core::lenient::deserialize_or_default"
-    )]
-    pub review_log: camerata_ui_core::review_timer::ReviewLog,
+    #[serde(default)]
+    pub review_log: camerata_ui_core::review_timer::SavedReviewLog,
 }
 
 /// Load the saved onboarding draft, or None when nothing is in progress.
@@ -1166,6 +1166,31 @@ pub(super) async fn save_onboarding_draft(draft: &OnboardingDraft) {
         .json(draft)
         .send()
         .await;
+}
+
+/// Save the draft through `queue` so saves cannot cross: the server replaces the whole blob on
+/// every save, so with two in flight an older draft could land after a newer one and undo a
+/// decision. Only one save is out at a time; a draft submitted while one is out replaces any
+/// older one waiting, and the newest is sent when the save finishes. `after_each` runs after each
+/// completed request. THE one way the draft is auto-saved.
+pub(super) async fn save_onboarding_draft_ordered(
+    queue: &std::rc::Rc<
+        std::cell::RefCell<camerata_ui_core::save_queue::SaveQueue<OnboardingDraft>>,
+    >,
+    draft: OnboardingDraft,
+    mut after_each: impl FnMut(),
+) {
+    let first = queue.borrow_mut().submit(draft);
+    let Some(mut next) = first else { return };
+    loop {
+        save_onboarding_draft(&next).await;
+        after_each();
+        let following = queue.borrow_mut().complete();
+        match following {
+            Some(newer) => next = newer,
+            None => break,
+        }
+    }
 }
 
 /// Drop the saved draft (a fresh scan starts a new session; clearing avoids re-seeding the
@@ -7455,6 +7480,12 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // log is saved in the draft beside the dispositions. The bridge starts with it and stops when
     // this view unmounts.
     let review = super::review::use_review_handle();
+    // The draft's auto-save goes through one in-flight slot (`save_onboarding_draft_ordered`).
+    let save_queue = use_hook(|| {
+        std::rc::Rc::new(std::cell::RefCell::new(
+            camerata_ui_core::save_queue::SaveQueue::<OnboardingDraft>::default(),
+        ))
+    });
     super::review::use_review_clock(&review);
     // The viewer and the stacked view draw the timer's Pause / Resume control too (they cover the
     // strip), and find the one timer here.
@@ -7512,6 +7543,16 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
             async move {
                 if let Some(d) = load_onboarding_draft().await {
                     if d.scan.repos == report_repos {
+                        if d.review_log.just_failed {
+                            // Part of the saved review-time record could not be read. What could
+                            // be read is loaded, and the original is kept verbatim in the draft.
+                            eprintln!("[camerata-ui] part of the saved review log could not be read; the original is kept in the draft");
+                            crate::toast::push_toast(
+                                toasts,
+                                crate::toast::ToastKind::Warning,
+                                "Part of the saved review-time record could not be read. The rest was loaded, and the original is kept untouched in your saved review.",
+                            );
+                        }
                         review_restore.restore(d.review_log.clone());
                         if d.audit.is_some() {
                             audit_w.set(d.audit);
@@ -7542,6 +7583,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     {
         let report = report.clone();
         let review_save = review.clone();
+        let save_queue = save_queue.clone();
         use_effect(move || {
             // Track every persisted slice so the effect re-runs on any change.
             let audit_v = audit.read().clone();
@@ -7555,7 +7597,12 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
             // The review log as last flushed by the timer (decisions, group changes, pauses and
             // every 30 seconds of work). Reading the handle's signal is what re-runs this on a
             // flush; the timer's own state is not a signal.
-            let mut review_log = review_save.saved_log();
+            let mut review_log = camerata_ui_core::review_timer::SavedReviewLog {
+                log: review_save.saved_log(),
+                // Whatever could not be read when the draft was loaded is written back verbatim.
+                unreadable: review_save.unreadable(),
+                just_failed: false,
+            };
             if !draft_loaded() {
                 return;
             }
@@ -7565,9 +7612,11 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 .as_ref()
                 .map(|a| findings_on_surface(&a.findings, KindSurface::Queue));
             if let Some(rows) = queue_rows {
-                review_log.sync_groups(&camerata_ui_core::review_timer::undecided_by_group(
-                    &rows, &disp,
-                ));
+                review_log
+                    .log
+                    .sync_groups(&camerata_ui_core::review_timer::undecided_by_group(
+                        &rows, &disp,
+                    ));
             }
             let draft = OnboardingDraft {
                 scan: report.clone(),
@@ -7581,12 +7630,15 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 order_preset: op,
                 review_log,
             };
+            let queue = save_queue.clone();
             spawn(async move {
-                save_onboarding_draft(&draft).await;
-                // Stamp the local time so the UI can show "auto-saved at HH:MM:SS".
-                last_saved.set(Some(
-                    chrono::Local::now().format("%-I:%M:%S %p").to_string(),
-                ));
+                save_onboarding_draft_ordered(&queue, draft, || {
+                    // Stamp the local time so the UI can show "auto-saved at HH:MM:SS".
+                    last_saved.set(Some(
+                        chrono::Local::now().format("%-I:%M:%S %p").to_string(),
+                    ));
+                })
+                .await;
             });
         });
     }
@@ -7684,7 +7736,16 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         on_save: Callback::new(move |()| {
                             let json = json.clone();
                             spawn(async move {
-                                let _ = save_csv("camerata-review-time.json", json).await;
+                                // A cancelled dialog is silent; a failed write is not.
+                                if save_text("camerata-review-time.json", json).await
+                                    == Some(false)
+                                {
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Error,
+                                        "Could not save the review-time stats file. Check the folder and try again.",
+                                    );
+                                }
                             });
                         }),
                         on_close: Callback::new(move |()| {
@@ -17070,10 +17131,11 @@ mod order_preset_tests {
         });
         let old: OnboardingDraft =
             serde_json::from_value(serde_json::json!({ "scan": scan })).expect("old draft");
-        assert_eq!(old.review_log, ReviewLog::default());
+        assert_eq!(old.review_log.log, ReviewLog::default());
+        assert!(old.review_log.unreadable.is_none() && !old.review_log.just_failed);
 
         let mut draft = old.clone();
-        draft.review_log.review_groups.insert(
+        draft.review_log.log.review_groups.insert(
             "me/api\u{1f}R-A".to_string(),
             GroupTiming {
                 opened_at_ms: 5,
@@ -17099,8 +17161,19 @@ mod order_preset_tests {
                 "scan": scan, "triage_view": "TechDebt", "review_log": bad,
             }))
             .expect("a bad log never fails the draft");
-            assert_eq!(draft.review_log, ReviewLog::default());
+            assert_eq!(draft.review_log.log, ReviewLog::default());
+            assert_eq!(
+                draft.review_log.unreadable.as_ref(),
+                Some(&bad),
+                "the original is kept, not dropped"
+            );
             assert_eq!(draft.triage_view, TriageState::TechDebt);
+            // And it is written back verbatim by the next save.
+            let wire = serde_json::to_value(&draft).unwrap();
+            assert_eq!(
+                wire[camerata_api_types::review_timing::REVIEW_LOG_KEY]["review_unreadable"],
+                bad
+            );
         }
     }
 
@@ -17145,8 +17218,10 @@ mod order_preset_tests {
         }
     }
 
-    /// The Queue's own CSV button exports findings, and the findings carry no review-time field,
-    /// so it cannot leak one. Pinned against the deny-list so a column added later is checked.
+    /// TRIPWIRE, not proof. The Queue's own CSV button exports findings, which carry no
+    /// review-time field; this checks the header row (no rows) and one serialized finding against
+    /// the deny-list, so a review-time column or field added later is caught here. The structural
+    /// guard is that `FindingView` has no such field and the CSV is built from it alone.
     #[test]
     fn the_queue_csv_carries_no_review_time_field() {
         let csv = findings_csv(&[]);
@@ -17260,6 +17335,132 @@ mod order_preset_reload_tests {
             .next_back()
             .expect("the restored view saved the draft");
         assert_eq!(saved["order_preset"], "by_file", "{saved}");
+    }
+
+    /// M1: two saves queued out of order (the second submitted while the first is still on the
+    /// wire, and a third behind it) reach the server one at a time and the NEWEST lands last. The
+    /// first response is slow on purpose; without the single in-flight slot the later ones would
+    /// overtake it and the older draft would be the one the server keeps.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn queued_saves_reach_the_server_in_order_and_the_newest_wins() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let server = MockServer::start().await;
+        // The first POST answers slowly; the rest at once.
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true}))
+                    .set_delay(Duration::from_millis(300)),
+            )
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .with_priority(5)
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let draft = |mark: &str| -> OnboardingDraft {
+            let mut d: OnboardingDraft = serde_json::from_value(serde_json::json!({
+                "scan": scan_with(serde_json::json!([])),
+                "viewed_repo": mark,
+            }))
+            .expect("draft");
+            d.viewed_repo = mark.to_string();
+            d
+        };
+        let queue = Rc::new(RefCell::new(camerata_ui_core::save_queue::SaveQueue::<
+            OnboardingDraft,
+        >::default()));
+        let first = save_onboarding_draft_ordered(&queue, draft("first"), || {});
+        let later = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Both arrive while the first is still in flight; the second is superseded.
+            save_onboarding_draft_ordered(&queue, draft("second"), || {}).await;
+            save_onboarding_draft_ordered(&queue, draft("third"), || {}).await;
+        };
+        tokio::join!(first, later);
+
+        let bodies: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/onboard/draft")
+            .map(|r| {
+                serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["viewed_repo"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            bodies,
+            vec!["first", "third"],
+            "one at a time; the superseded draft is never sent; the newest is last"
+        );
+    }
+
+    /// M2, end to end: a saved review log with one unreadable entry loads (the good entries and
+    /// the time survive), the next save writes the readable log AND the original verbatim, and
+    /// the user is told.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(process_env)]
+    async fn a_draft_with_an_unreadable_review_entry_keeps_the_original_and_saves_it_back() {
+        let good = "me/api\u{1f}R-B";
+        let log = serde_json::json!({
+            "review_groups": {
+                good: { "opened_at_ms": 5, "active_ms": 72_000_000, "group_reviewed": false },
+                "me/api\u{1f}R-A": { "active_ms": "twenty hours" },
+            },
+            "review_rows": {},
+        });
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "scan": scan_with(serde_json::json!([])),
+                "audit": scan_with(findings()),
+                "review_log": log,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+
+        let mut vdom = VirtualDom::new(results);
+        vdom.rebuild_in_place();
+        pump(&mut vdom, 800).await;
+
+        let saved = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/onboard/draft")
+            .map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).unwrap())
+            .next_back()
+            .expect("the restored view saved the draft");
+        let saved_log = &saved["review_log"];
+        assert_eq!(
+            saved_log["review_groups"][good]["active_ms"], 72_000_000,
+            "the readable entry survived: {saved}"
+        );
+        assert_eq!(
+            saved_log["review_unreadable"], log,
+            "the whole original is kept verbatim: {saved}"
+        );
     }
 
     /// Step 7a: a draft's review log comes back with the review and is saved again, with each

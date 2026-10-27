@@ -6,6 +6,13 @@
 //! manifest, the CSV and JSON datasets, the README, anything a client receives). It is shown in an
 //! internal stats view as data for pricing and nowhere else.
 //!
+//! WHICH GUARD IS WHICH. The primary guard is structural: the request that asks for a client
+//! export (`export_product_zip`) carries the dispositions and the report options and nothing else
+//! (a test pins the request body's keys), `FindingView` has no such field, and the chat context
+//! strips the log from the draft it returns. The name scan below is the TRIPWIRE behind that: it
+//! cannot prove a leak is impossible, only catch the obvious one if the structure is ever
+//! bypassed (a new field, a new export path, a draft read where it should not be).
+//!
 //! This crate holds only the NAMES, as a deny-list. The shapes live in `camerata-ui-core`
 //! (`review_timer`, `review_stats`), where a test pins that every key those shapes serialize is
 //! listed here. The server's release-gate tests then inspect every client artifact for these
@@ -32,6 +39,8 @@ pub const INTERNAL_ONLY_KEYS: &[&str] = &[
     "reviewed_by",
     "reviewed_at_ms",
     "review_decision_ms",
+    "review_samples",
+    "review_unreadable",
     // The stats JSON.
     "review_stats",
     "total_active_ms",

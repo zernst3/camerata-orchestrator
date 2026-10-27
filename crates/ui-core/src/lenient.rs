@@ -7,8 +7,9 @@
 //! reads an unknown name, or a value of an unexpected shape, as the type's default instead.
 //!
 //! Used by `#[serde(default, deserialize_with = "camerata_ui_core::lenient::deserialize")]` on
-//! every such field of the draft. [`deserialize_or_default`] is the same idea for a saved STRUCT
-//! (the review timer's log): a shape this build cannot read is the default, not a failed draft.
+//! every such field of the draft. [`deserialize_or_default`] is the one fallback rule underneath
+//! (and the same idea for a saved struct); [`read_map`] is the entry-by-entry read for saved
+//! WORK (the review timer's log), where dropping the lot for one bad entry would lose hours.
 
 use serde::{Deserialize, Deserializer};
 
@@ -18,29 +19,40 @@ pub trait WireEnum: Default + Sized {
     fn from_wire(name: &str) -> Option<Self>;
 }
 
-/// `deserialize_with` for a [`WireEnum`] field: the named variant, else `T::default()`.
+/// A [`WireEnum`] read by name; anything that is not a known name is the default.
+struct Named<T>(T);
+
+impl<T: WireEnum> Default for Named<T> {
+    fn default() -> Self {
+        Named(T::default())
+    }
+}
+
+impl<'de, T: WireEnum> Deserialize<'de> for Named<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Ok(Named(T::from_wire(&name).unwrap_or_default()))
+    }
+}
+
+/// `deserialize_with` for a [`WireEnum`] field: the named variant, else `T::default()`. A number,
+/// an object, a list, null: anything a future build might write instead is the default too.
+/// Built on [`deserialize_or_default`], so there is one fallback rule.
 pub fn deserialize<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
     T: WireEnum,
 {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Wire {
-        Name(String),
-        // A number, an object, a list, null: anything a future build might write instead.
-        Other(serde::de::IgnoredAny),
-    }
-    Ok(match Wire::deserialize(deserializer)? {
-        Wire::Name(name) => T::from_wire(&name).unwrap_or_default(),
-        Wire::Other(_) => T::default(),
-    })
+    deserialize_or_default::<D, Named<T>>(deserializer).map(|named| named.0)
 }
 
-/// `deserialize_with` for a STRUCT field that is saved data and not a view setting (the review
-/// log): the value when it reads as `T`, else `T::default()`. The sibling of [`deserialize`] for
-/// shapes that are not a [`WireEnum`]: a newer build may have changed the shape, and the draft's
-/// scan, dispositions and view settings must still load.
+/// `deserialize_with` for a field that is saved data and not a view setting: the value when it
+/// reads as `T`, else `T::default()`. The one fallback rule; [`deserialize`] is this for a
+/// [`WireEnum`]. A newer build may have changed the shape, and the draft's scan, dispositions and
+/// view settings must still load.
+///
+/// Whole-value fallback is right for a view setting and WRONG for saved work: it would drop all of
+/// it for one bad entry. The review log is read with [`read_map`] instead, entry by entry.
 pub fn deserialize_or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -56,6 +68,31 @@ where
         Wire::Value(value) => value,
         Wire::Other(_) => T::default(),
     })
+}
+
+/// A JSON object read entry by entry: every entry that reads as `T` is kept, every one that does
+/// not is skipped, and the second value says whether anything was skipped (or the value was not
+/// an object at all). `None` is an absent map: empty, nothing skipped.
+pub fn read_map<T: serde::de::DeserializeOwned>(
+    value: Option<&serde_json::Value>,
+) -> (std::collections::BTreeMap<String, T>, bool) {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(value) = value else {
+        return (out, false);
+    };
+    let Some(object) = value.as_object() else {
+        return (out, true);
+    };
+    let mut skipped = false;
+    for (key, entry) in object {
+        match serde_json::from_value::<T>(entry.clone()) {
+            Ok(read) => {
+                out.insert(key.clone(), read);
+            }
+            Err(_) => skipped = true,
+        }
+    }
+    (out, skipped)
 }
 
 #[cfg(test)]
@@ -139,5 +176,23 @@ mod tests {
             assert_eq!(holder.saved, Saved::default(), "{json}");
             assert_eq!(holder.kept, 7, "{json}");
         }
+    }
+
+    #[test]
+    fn a_map_is_read_entry_by_entry_and_says_when_it_skipped() {
+        let value = serde_json::json!({ "a": { "n": 1 }, "b": "bad", "c": { "n": 3 } });
+        let (map, skipped) = read_map::<Saved>(Some(&value));
+        assert!(skipped);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["a"], Saved { n: 1 });
+        assert_eq!(map["c"], Saved { n: 3 });
+        let clean = serde_json::json!({ "a": { "n": 1 } });
+        assert!(!read_map::<Saved>(Some(&clean)).1);
+        assert_eq!(read_map::<Saved>(None), (Default::default(), false));
+        let not_a_map = serde_json::json!([1, 2]);
+        assert_eq!(
+            read_map::<Saved>(Some(&not_a_map)),
+            (Default::default(), true)
+        );
     }
 }

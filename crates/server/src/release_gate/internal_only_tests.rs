@@ -88,29 +88,66 @@ fn no_review_time_data_reaches_a_client_export() {
     );
 }
 
-/// The same, with the internal data present where it lives, to show the exporters have no way to
-/// reach it: the draft carries a populated review log, and the export is built from the report,
-/// the dispositions and the options only (the function signature is the proof; this pins that
-/// the draft's log, serialized, shares no name with the package).
-#[test]
-fn a_populated_review_log_shares_no_name_with_the_package() {
+/// THROUGH THE REAL ROUTE: a project whose server-side DRAFT carries a populated review log (the
+/// place the data really lives) is exported by `export_product`, and the zip names none of it.
+/// Skipped when Typst is not installed (the route needs it for the PDF).
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn an_export_of_a_project_whose_draft_carries_the_log_names_none_of_it() {
+    use camerata_api_types::review_timing::REVIEW_LOG_KEY;
+    use http_body_util::BodyExt;
+
+    if std::process::Command::new("typst")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .is_none()
+    {
+        eprintln!("skipping: typst is not on PATH");
+        return;
+    }
+    let state = crate::AppState::new(std::sync::Arc::new(
+        camerata_worktracker::InMemoryStoryStore::new(),
+    ));
+    let project = state
+        .projects
+        .create("Acme", vec!["acme/portal".to_string()])
+        .expect("project created");
+    state.set_last_scan(project.id.clone(), super::tests::scan_report());
     let log = serde_json::json!({
-        "review_log": {
-            "review_groups": { "g": { "opened_at_ms": 1, "active_ms": 2, "group_reviewed": true } },
-            "review_rows": { "r": { "reviewed_by": "operator", "reviewed_at_ms": 3, "review_decision_ms": 4 } },
-        }
-    })
-    .to_string();
-    assert!(
-        terms_in(&log).len() >= 8,
-        "the fixture must really carry the internal names"
+        "review_groups": { "g": { "opened_at_ms": 1, "active_ms": 72_000_000, "group_reviewed": true } },
+        "review_rows": { "r": { "reviewed_by": "operator", "reviewed_at_ms": 3, "review_decision_ms": 4 } },
+        "review_samples": [5],
+        "review_unreadable": { "kept": true },
+    });
+    state.draft.save(
+        &project.id,
+        serde_json::json!({ "scan": {}, REVIEW_LOG_KEY: log }),
     );
-    let package = package();
-    let data_json = package.data_json.clone();
-    let stem = package.stem.clone();
-    let released = release(package).expect("clear");
-    let exported = hits(&released.bytes, &data_json, &stem);
-    assert!(exported.is_empty(), "{exported:?}");
+    // The fixture is real: the draft in the store carries every internal name the scan looks for.
+    let stored = state.draft.load(&project.id).expect("the draft is stored");
+    assert!(
+        terms_in(&stored.to_string()).len() >= 10,
+        "the stored draft must really carry the internal names: {stored}"
+    );
+
+    let resp = crate::export_product(
+        axum::extract::State(state),
+        axum::extract::Path(project.id.clone()),
+        axum::Json(crate::AuditReportReq {
+            dispositions: std::collections::HashMap::new(),
+            options: ReportOptions::default(),
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+    let found = hits(&bytes, "", "");
+    assert!(
+        found.is_empty(),
+        "internal-only review-time data reached the exported zip (artifact, name): {found:?}"
+    );
 }
 
 /// The detector reaches every client surface: a listed name planted on each is found there, and

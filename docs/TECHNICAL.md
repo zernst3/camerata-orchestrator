@@ -3451,29 +3451,57 @@ fixed string `operator` (`LOCAL_OPERATOR`)**: the app has no sign-in and no oper
 anywhere, and inventing a name would put a made-up value in the data. `review_decision_ms` is the
 active time since the previous decision, split evenly across the rows of a batch decision (a
 50-row Confirm that took 40 s is 0.8 s a row), so the per-row figure is the reviewer's pace
-whichever door he used. Time credited goes to the group that was current BEFORE the event (the
-reading that preceded a move belongs to the group read). An undo, or a move back to Unresolved,
-removes the row's record (the time stays spent in the group). The timer OBSERVES decisions: it has
+whichever door he used. A row decided again ADDS the new time to its `review_decision_ms` (the row
+cost the sum). Time credited goes to the group that was current BEFORE the event (the reading that
+preceded a move, or a decision, belongs to the group read); only after crediting does `decided` move
+the current group to the decided rows' group when they all share one (a bulk-bar confirm of a group
+the cursor was not in), and a decision spanning groups moves nothing. One helper makes a group's
+entry (`ReviewLog::ensure_group(key, wall_ms)`), used by `open_group`, `decided` and the credit, so
+a group is never created with an `opened_at_ms` of 0 (a restore swaps the log under an open group).
+An undo, or a move back to Unresolved, removes the row's record (the time stays spent in the group). The timer OBSERVES decisions: it has
 no access to the dispositions, `apply_rows` writes them and then calls `ReviewHandle::decided`
 (every door, the pane, the viewer, the stack and the toolbar, is already `apply_rows`; the undo calls
 `undone` for the rows it put back to Unresolved, using `UndoEntry::row_keys`).
 
-*Persistence.* `OnboardingDraft.review_log`, `serde(default)` and read through the new
-`lenient::deserialize_or_default` (the sibling of `lenient::deserialize` for a struct that is saved
-data rather than a `WireEnum`): an old draft has an empty log, and a log of a shape this build does
-not know is an empty log with the scan, dispositions and view settings intact. The log goes to the
-draft through `ReviewHandle`'s `saved` signal, written on decisions, group changes, pauses and
-resumes, and every 30 s of work, not on every key (the draft is the whole scan, and a key arrives
-about once a second); the timer itself is behind a `RefCell` so a key does not re-render its
-readers. Restore replaces the log and keeps the session state (running or paused).
+*Persistence.* `OnboardingDraft.review_log` is a `SavedReviewLog`: the `ReviewLog` plus, when part
+of what was saved could not be read, the ORIGINAL saved value, kept verbatim as `review_unreadable`
+and written back on every later save. The log is read entry by entry (`lenient::read_map`): every
+readable group and row is kept and only an unreadable entry is skipped, so one bad entry costs
+that entry and not the log; a log of an unknown shape is an empty log for the session. In either
+case the whole original is preserved beside the new log (the first copy wins and a later failure
+does not replace it), so a build that cannot read the record never overwrites it with an empty one.
+The read that finds a problem logs to stderr and raises a warning toast. An old draft has no log
+and reads as empty. (`lenient::deserialize_or_default` remains the fallback for view settings, and
+`lenient::deserialize` for a `WireEnum` is now written on top of it: one fallback rule.)
+The log goes to the draft through `ReviewHandle`'s `saved` signal, written on decisions, group
+changes, pauses and resumes, and every 3 minutes of work (`FLUSH_EVERY_TICKS`), not on every key (the
+draft is the whole scan, and a key arrives about once a second); the timer itself is behind a
+`RefCell` so a key does not re-render its readers. Restore replaces the log and keeps the session
+state (running or paused).
+
+*Ordered draft saves.* The server replaces the whole draft blob on every save, so two saves in
+flight could land out of order and an older draft could undo a decision. The draft's auto-save now
+goes through ONE place, `save_onboarding_draft_ordered`, over `camerata_ui_core::save_queue::SaveQueue`:
+a single in-flight slot and a latest-pending draft. A draft submitted while a save is out replaces
+any older one waiting and is sent when the save completes, so at most one request is out and an
+older draft is never sent after a newer one. Tested against a server whose first response is slow.
 
 *The window.* `REVIEW_BRIDGE_JS` (the clipboard bridge's pattern: an eval that `dioxus.send`s and
-reinstalls if its channel dies) listens in the capture phase for `keydown` and `pointerdown` (sent at
-most once a second) and for the window's `focus`, `blur` and the document's `visibilitychange`,
+reinstalls if its channel dies) listens in the capture phase for `keydown`, `pointerdown` and `wheel`
+(passive: scrolling through code while reading is activity, and the 3-minute idle rule still
+applies), sent at most once a second per kind by `performance.now()` (the monotonic clock), and for
+the window's `focus`, `blur` and the document's `visibilitychange`,
 reporting `document.hasFocus() && visibilityState === "visible"`. It never prevents, stops or
 consumes an event, so it cannot take a key from the pane, and it ignores a press inside an element
 marked `data-review-no-activity`, which the Pause / Resume button is, so its own press does not
-first resume an idle timer and then have its action undo that. `ClockEvent` (`Activity`,
+first resume an idle timer and then have its action undo that. *Only review surfaces count:* each
+message says whether the target is inside an element marked `data-review-surface` (the Queue
+table with its strip and pane, the code viewer, the stacked view), per kind so a click elsewhere
+cannot use up the second of a key inside; `parse_clock_message` drops activity outside one, so a
+key on the Conventions panel neither credits time nor resumes an idle timer. (Not surfaces: the
+stats view, the rule hub, the finding-detail modal, the other panels. Time between two activities
+inside a surface is still credited whole when under the limit, so a short visit elsewhere between
+them is counted.) `ClockEvent` (`Activity`,
 `Focus(bool)`) is the pure interface and `ReviewTimer::apply` the pure reaction, tested with no
 window; that wry actually delivers the focus and blur events on a real window switch is a manual
 check.
@@ -3482,17 +3510,23 @@ check.
 button's word), `on_toggle_timer` and `on_open_stats`; `LiveProgressStrip` (`review.rs`) is the
 component that reads the timer's signals, so the table does not. The button is a native `<button>`
 (in the Tab order, no key of its own, so the pane keeps every key), and after it is used the pane
-gets DOM focus back. While the code viewer or the stacked view is open it covers the strip, so the
-button is not on screen then; the idle and unfocused rules still apply.
+gets DOM focus back. The control (`TimerControl`: the state text and the button) is ONE component:
+the strip draws it, and so do the code viewer and the stacked view, which cover the strip
+(`OverlayTimerControl` finds the one timer through a context the results view provides). Pressing it
+in an overlay toggles the same timer and returns the keyboard to that overlay with `focus_element`
+(not while the overlay's reason prompt is open: the prompt owns the keyboard). Enter and Space stop
+at the button, because the overlays claim them (Enter opens a card, Space checks one); every other
+key bubbles, so Esc and the arrows still work with the button focused.
 
 *The estimate* (`eta(undecided, recent_active_ms) -> Option<Duration>`): `None` until
 `ETA_MIN_DECISIONS` (20) decisions exist; else the median (mean of the middle two for an even
-count) of the last `ETA_WINDOW` (50) times the undecided rows. A decision with no measured active
-time (made while the timer was paused) is not a sample, since it says nothing about pace; samples
-are ordered by `reviewed_at_ms`. The text is `eta_text`: `about 3h 10m left at your pace`, to the
+count) of the last `ETA_WINDOW` (50) samples times the undecided rows. A sample is one per
+DECISION EVENT (`ReviewLog::review_samples`, the last 50 kept): the per-row figure of that event, so
+a 30-row stack confirm is one decision of the 50 and not thirty. A decision with no measured active
+time (made while the timer was paused) adds no sample, since it says nothing about pace. The text is `eta_text`: `about 3h 10m left at your pace`, to the
 nearest minute, or `less than a minute left at your pace`. Nothing is drawn when no row is left.
 It reads past decisions only, so it shows whether or not the timer is running. Caveat: a batch
-decision contributes one sample per row at the amortised figure, so a run of bulk decisions pulls
+contributes one sample at the amortised per-row figure, so a run of many bulk decisions still pulls
 the median down; that is the reviewer's pace if he keeps bulk-deciding and optimistic if the rest
 are single judgment rows.
 
@@ -3507,7 +3541,7 @@ reconcile. "Save stats JSON" writes `{ "review_stats": { ... } }` to a place the
 is the kind only (no deterministic-vs-advisory split: that distinction is in the `ui` crate's
 `is_enforced_floor`, not in core).
 
-*Internal only: how it is enforced.* Three layers. (1) `camerata_api_types::review_timing` lists
+*Internal only: how it is enforced.* Four layers. (1) `camerata_api_types::review_timing` lists
 every field name the internal shapes serialize (`INTERNAL_ONLY_KEYS`) and the phrases the stats
 view shows (`INTERNAL_ONLY_PHRASES`); the names are distinctive (`review_*`, `reviewed_*`,
 `*_active_ms`) so a scan has no false positives. `camerata-ui-core` tests that every key the log
@@ -3517,7 +3551,9 @@ build a real package (workbook, `findings.json`, `manifest.json`, README, every 
 dataset, the PDF member, the PDF's data and the shipped Typst template) and assert none of those
 names or phrases appears anywhere in it, including every part of the workbook, and
 `the_scan_reaches_every_surface` plants a listed name on each surface to prove the scan finds it
-there. (3) By construction: the export request (`export_product_zip`) carries `dispositions` and
+there. (3) The chat context (`GET /api/projects/active/context`) returns the in-progress draft as
+`draft_json`; it is built by `without_internal_review_data`, which removes the log, because that
+payload exists to be put in front of a model (tested). (4) By construction: the export request (`export_product_zip`) carries `dispositions` and
 `options` only (a test asserts the body's keys), and `FindingView` and the Queue CSV carry no such
 field (tested). The PDF is checked through its data (the template's only input) and, when Typst is
 installed, through its rendered text (`tests/release_gate_pdf_text.rs`: a clean package's extracted

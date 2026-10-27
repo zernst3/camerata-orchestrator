@@ -23,12 +23,18 @@ use std::time::Instant;
 
 use camerata_ui_core::review_stats::{ReviewStats, StatLine, STATS_NOTE, STATS_TITLE};
 use camerata_ui_core::review_timer::{
-    eta, eta_text, ClockEvent, Moment, ReviewLog, ReviewTimer, RowRef, TimerStripView,
+    eta, eta_text, ClockEvent, Moment, ReviewLog, ReviewTimer, RowRef, SavedReviewLog,
+    TimerStripView,
 };
 use camerata_ui_core::triage::{finding_key, FindingView, TriageCounts, TriageState};
 use dioxus::prelude::*;
 
 use super::scan::ProgressStrip;
+
+/// The log is also handed to the draft's auto-save every this many seconds of work, on top of the
+/// moments it changes (a decision, a group change, a pause). Minutes and not seconds: the draft is
+/// the whole scan, and the saves are ordered but still cost.
+const FLUSH_EVERY_TICKS: u64 = 180;
 
 /// The DOM id of the strip's Pause / Resume button.
 pub(super) const REVIEW_TIMER_BUTTON_ID: &str = "camerata-review-timer-toggle";
@@ -51,11 +57,14 @@ pub(super) struct ReviewHandle {
     /// undone.
     samples: Signal<Vec<u64>>,
     /// The log as last handed to the draft's auto-save. The draft effect reads THIS, not the
-    /// timer, so it fires on decisions, group changes, pauses and every 30 seconds of work, and
+    /// timer, so it fires on decisions, group changes, pauses and every few minutes of work, and
     /// not on every key press.
     saved: Signal<ReviewLog>,
     /// The zero of the monotonic clock.
     epoch: Instant,
+    /// The saved review-time value this build could not read, kept verbatim so every later save
+    /// writes it back (`SavedReviewLog::unreadable`).
+    unreadable: Rc<RefCell<Option<serde_json::Value>>>,
 }
 
 impl PartialEq for ReviewHandle {
@@ -78,6 +87,7 @@ pub(super) fn use_review_handle() -> ReviewHandle {
         samples,
         saved,
         epoch: Instant::now(),
+        unreadable: Rc::new(RefCell::new(None)),
     })
 }
 
@@ -125,9 +135,16 @@ impl ReviewHandle {
         self.timer.borrow().log().clone()
     }
 
-    /// A draft was restored: take its log, keeping the session state.
-    pub(super) fn restore(&self, log: ReviewLog) {
-        self.timer.borrow_mut().set_log(log);
+    /// The saved value that could not be read, to be written back verbatim with the log.
+    pub(super) fn unreadable(&self) -> Option<serde_json::Value> {
+        self.unreadable.borrow().clone()
+    }
+
+    /// A draft was restored: take its log (and any original it could not read, which is kept for
+    /// the saves to come), keeping the session state.
+    pub(super) fn restore(&self, saved: SavedReviewLog) {
+        *self.unreadable.borrow_mut() = saved.unreadable;
+        self.timer.borrow_mut().set_log(saved.log);
         self.refresh(true);
         self.flush();
     }
@@ -149,7 +166,7 @@ impl ReviewHandle {
             self.timer.borrow_mut().tick(now);
             self.refresh(false);
             self.flush();
-        } else if count.is_multiple_of(30) {
+        } else if count.is_multiple_of(FLUSH_EVERY_TICKS) {
             self.flush();
         }
     }
@@ -213,20 +230,24 @@ pub(super) const REVIEW_BRIDGE_JS: &str = r#"
         window.__camerataReviewBridgeInstalled = true;
         // At most one message a second FOR EACH of the two kinds, so a click outside the review
         // surfaces can never use up the second of a key inside one.
-        var lastActivity = { "true": 0, "false": 0 };
+        var lastActivity = { "true": -1e9, "false": -1e9 };
         var activity = function (e) {
             var t = e.target;
             if (t && t.closest && t.closest("[data-review-no-activity]")) return;
             // Only key and click activity inside a review surface (the Queue table, the pane,
             // the viewer, the stack) is the reviewer's; the Rust side drops the rest.
             var surface = !!(t && t.closest && t.closest("[data-review-surface]"));
-            var now = Date.now();
+            // The monotonic clock: the wall clock jumps when the system clock is changed.
+            var now = performance.now();
             if (now - lastActivity[surface] < 1000) return;
             lastActivity[surface] = now;
             window.__camerataReviewSend({ k: "activity", s: surface });
         };
         document.addEventListener("keydown", activity, true);
         document.addEventListener("pointerdown", activity, true);
+        // Scrolling through code while reading is activity too (the 3-minute idle rule still
+        // applies). Passive: the listener never blocks the scroll.
+        document.addEventListener("wheel", activity, { capture: true, passive: true });
         var focusChanged = function () {
             window.__camerataReviewSend({ k: "focus", v: reviewFocused() });
         };
@@ -588,6 +609,7 @@ mod tests {
         for event in [
             "keydown",
             "pointerdown",
+            "wheel",
             "focus",
             "blur",
             "visibilitychange",
@@ -602,11 +624,18 @@ mod tests {
         assert!(REVIEW_BRIDGE_JS.contains("[data-review-surface]"));
         assert!(REVIEW_BRIDGE_JS.contains("s: surface"));
         assert!(REVIEW_BRIDGE_JS.contains("document.hasFocus()"));
+        // The monotonic clock for the throttle, and scrolling counts as activity, passively.
+        assert!(REVIEW_BRIDGE_JS.contains("performance.now()"));
+        assert!(!REVIEW_BRIDGE_JS.contains("Date.now"));
+        assert!(REVIEW_BRIDGE_JS.contains("passive: true"));
     }
 
     /// A log of `n` decisions that each took 30 seconds of active time.
-    fn log_of(n: u64) -> ReviewLog {
-        let mut log = ReviewLog::default();
+    fn log_of(n: u64) -> SavedReviewLog {
+        let mut log = ReviewLog {
+            review_samples: vec![30_000; n as usize],
+            ..ReviewLog::default()
+        };
         for i in 0..n {
             log.review_rows.insert(
                 format!("row-{i}"),
@@ -617,7 +646,10 @@ mod tests {
                 },
             );
         }
-        log
+        SavedReviewLog {
+            log,
+            ..SavedReviewLog::default()
+        }
     }
 
     #[component]

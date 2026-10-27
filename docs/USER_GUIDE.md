@@ -570,8 +570,11 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    after 3 minutes with no key or click, and while the Camerata window is not the focused window;
    the idle stretch before the pause is not counted. The next key or click after an idle pause
    resumes it; a pause you made yourself with the button stays until you press **Resume**. While
-   the code viewer or the stacked view is open it covers the strip, so the button is not visible
-   then; the automatic pauses still apply. The timer records how long you spent on each group and,
+   the code viewer or the stacked view is open it covers the strip, so each of them shows the same
+   timer control (state and Pause / Resume) in its own header. Only keys, clicks and scrolling
+   inside the Queue table, the detail pane, the viewer and the stacked view count as activity; keys
+   and clicks elsewhere (the Conventions panel, say) neither add time nor resume an idle timer. The
+   timer records how long you spent on each group and,
    for each finding you decide, that the local operator reviewed it and when. This is for your own
    planning and pricing: it is saved in your in-progress review, it is never in a report, a
    workbook, `findings.json` or any other file a client receives, and the **Review time** button

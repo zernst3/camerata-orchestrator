@@ -14308,6 +14308,10 @@ pub struct ProjectContextResponse {
     /// The raw onboarding draft (pre-onboard: the architect's in-progress session).
     /// This is the UI-owned JSON blob; it is surfaced as-is for the chat to reference.
     /// Only populated in the PreOnboard phase so the Post-onboard prompt is not cluttered.
+    ///
+    /// INTERNAL REVIEW TIMING NEVER GOES TO A MODEL: the draft carries the reviewer's timer and
+    /// per-row reviewed record (`review_log`, internal only), so this value is built by
+    /// [`without_internal_review_data`], which removes it. Keep it that way for any new use.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_json: Option<serde_json::Value>,
     /// A compact, queryable summary of the active scan results — severity/status totals,
@@ -14500,6 +14504,15 @@ pub(crate) fn render_scan_results_for_chat(
 /// deserializes them as `Vec<Finding>` (the struct that owns the canonical field names),
 /// and delegates to `render_scan_results_for_chat`. Returns `None` when no findings section
 /// is found, when deserialization fails, or when the findings list is empty.
+/// The draft as the project chat may see it: without the review timer's log, which is internal
+/// only (`camerata_api_types::review_timing`) and must never reach a model prompt.
+fn without_internal_review_data(mut draft: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = draft.as_object_mut() {
+        object.remove(camerata_api_types::review_timing::REVIEW_LOG_KEY);
+    }
+    draft
+}
+
 fn extract_scan_results_from_draft(draft: &serde_json::Value) -> Option<String> {
     // Prefer the scan section (which contains the deterministic floor + Phase-1 findings)
     // but fall back to the audit section (Phase-2 AI findings live there in some draft shapes).
@@ -14806,7 +14819,7 @@ async fn active_project_context(State(state): State<AppState>) -> Json<ProjectCo
             findings_summary,
             scan_results_section,
             selected_rules_section,
-            draft_json: draft,
+            draft_json: draft.map(without_internal_review_data),
             message: Some(format!(
                 "Project '{}' has an in-progress onboarding (scan/audit) that has not been applied yet.",
                 project.name
@@ -26970,6 +26983,54 @@ mod tests {
         assert!(
             section_str.contains("SEC-NO-HARDCODED-SECRETS-1"),
             "scan_results_section must contain the finding rule_id, got: {section_str}"
+        );
+    }
+
+    /// The chat context returns the in-progress draft, and the draft carries the reviewer's
+    /// timer log (internal only). The log must not be in what the chat gets, and everything else
+    /// in the draft still is.
+    #[tokio::test]
+    async fn active_project_context_leaves_the_internal_review_log_out_of_the_draft() {
+        use camerata_api_types::review_timing::{INTERNAL_ONLY_KEYS, REVIEW_LOG_KEY};
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let project = state
+            .projects
+            .create("TestProj", vec!["owner/repo".to_string()])
+            .unwrap();
+        state.draft.save(
+            &project.id,
+            serde_json::json!({
+                "scan": { "findings": [], "coverage_notes": [] },
+                "viewed_repo": "owner/repo",
+                REVIEW_LOG_KEY: {
+                    "review_groups": { "g": { "opened_at_ms": 1, "active_ms": 72_000_000, "group_reviewed": true } },
+                    "review_rows": { "r": { "reviewed_by": "operator", "reviewed_at_ms": 2, "review_decision_ms": 3 } },
+                    "review_samples": [4],
+                    "review_unreadable": { "kept": true },
+                },
+            }),
+        );
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects/active/context")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = body_json(resp).await;
+        let text = body.to_string();
+        for key in INTERNAL_ONLY_KEYS {
+            assert!(
+                !text.contains(key),
+                "{key} reached the chat context: {text}"
+            );
+        }
+        assert_eq!(
+            body["draft_json"]["viewed_repo"], "owner/repo",
+            "the rest of the draft is still there: {text}"
         );
     }
 

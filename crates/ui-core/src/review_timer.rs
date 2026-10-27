@@ -123,7 +123,7 @@ pub struct RowReview {
     /// Wall-clock ms of the decision.
     #[serde(default)]
     pub reviewed_at_ms: u64,
-    /// The active milliseconds attributed to this decision.
+    /// The active milliseconds spent deciding this row (the sum, if it was decided again).
     #[serde(default)]
     pub review_decision_ms: u64,
 }
@@ -138,6 +138,104 @@ pub struct ReviewLog {
     /// moving a row back to Unresolved, removes it.
     #[serde(default)]
     pub review_rows: BTreeMap<String, RowReview>,
+    /// The pace samples behind the time-left estimate: ONE per decision event, the per-row figure
+    /// (the active time since the previous decision, divided across the rows of a batch), oldest
+    /// first, the last [`ETA_WINDOW`] kept. One per EVENT and not per row, so a 30-row stack
+    /// confirm is one decision of the last 50 and not 30 of them.
+    #[serde(default)]
+    pub review_samples: Vec<u64>,
+}
+
+/// The review log as the draft carries it: the log, and, when part of what was saved could not be
+/// read, the ORIGINAL saved value, kept and written back verbatim as `review_unreadable`.
+///
+/// A build that cannot read an entry (or the whole log: a newer build's shape) must not turn
+/// hours of pricing data into an empty log and then save that over it. So the log is read entry
+/// by entry ([`crate::lenient::read_map`]): every readable entry is kept and only unreadable ones
+/// are skipped, and if anything was skipped the whole original value is preserved beside the new
+/// log. The preserved copy is written on every later save and never replaced by a later failure
+/// (the first, fullest copy wins). `just_failed` is set on the read that found the problem, for
+/// the toast; it is not saved.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SavedReviewLog {
+    pub log: ReviewLog,
+    /// The original value, verbatim, when part of it could not be read (now or earlier).
+    pub unreadable: Option<serde_json::Value>,
+    /// This read found something it could not read.
+    pub just_failed: bool,
+}
+
+impl SavedReviewLog {
+    /// Read a saved value leniently. Never fails.
+    pub fn from_value(value: &serde_json::Value) -> Self {
+        if value.is_null() {
+            return Self::default();
+        }
+        let Some(object) = value.as_object() else {
+            return Self {
+                log: ReviewLog::default(),
+                unreadable: Some(value.clone()),
+                just_failed: true,
+            };
+        };
+        let (review_groups, bad_groups) = crate::lenient::read_map(object.get("review_groups"));
+        let (review_rows, bad_rows) = crate::lenient::read_map(object.get("review_rows"));
+        let (review_samples, bad_samples) = match object.get("review_samples") {
+            None => (Vec::new(), false),
+            Some(v) => match serde_json::from_value::<Vec<u64>>(v.clone()) {
+                Ok(samples) => (samples, false),
+                Err(_) => (Vec::new(), true),
+            },
+        };
+        let failed = bad_groups || bad_rows || bad_samples;
+        let kept = object.get(UNREADABLE_KEY).cloned();
+        let unreadable = match kept {
+            Some(earlier) => Some(earlier),
+            None if failed => {
+                let mut original = object.clone();
+                original.remove(UNREADABLE_KEY);
+                Some(serde_json::Value::Object(original))
+            }
+            None => None,
+        };
+        Self {
+            log: ReviewLog {
+                review_groups,
+                review_rows,
+                review_samples,
+            },
+            unreadable,
+            just_failed: failed,
+        }
+    }
+}
+
+/// The key the preserved original is saved under, inside the saved log.
+const UNREADABLE_KEY: &str = "review_unreadable";
+
+impl<'de> Deserialize<'de> for SavedReviewLog {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_value(&serde_json::Value::deserialize(
+            deserializer,
+        )?))
+    }
+}
+
+impl Serialize for SavedReviewLog {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            #[serde(flatten)]
+            log: &'a ReviewLog,
+            #[serde(rename = "review_unreadable", skip_serializing_if = "Option::is_none")]
+            unreadable: &'a Option<serde_json::Value>,
+        }
+        Wire {
+            log: &self.log,
+            unreadable: &self.unreadable,
+        }
+        .serialize(serializer)
+    }
 }
 
 /// The key of the rule group a row belongs to: repo and rule id. Independent of the Queue's order
@@ -185,17 +283,31 @@ impl ReviewLog {
         self.review_groups.values().map(|g| g.active_ms).sum()
     }
 
-    /// The decision times that carry measured time, oldest first. A decision with no measured
-    /// active time (made while the timer was paused) says nothing about pace, so it is left out.
+    /// The group's entry, created (opened at `wall_ms`) if the log has none. THE ONE place a group
+    /// entry is made, so a group is never created with an opened-at of 0.
+    pub fn ensure_group(&mut self, key: &str, wall_ms: u64) -> &mut GroupTiming {
+        self.review_groups
+            .entry(key.to_string())
+            .or_insert_with(|| GroupTiming {
+                opened_at_ms: wall_ms,
+                ..GroupTiming::default()
+            })
+    }
+
+    /// The decision pace samples, oldest first. A decision with no measured active time (made
+    /// while the timer was paused) says nothing about pace and was never recorded.
     pub fn decision_samples(&self) -> Vec<u64> {
-        let mut rows: Vec<(&u64, &String, u64)> = self
-            .review_rows
-            .iter()
-            .filter(|(_, r)| r.review_decision_ms > 0)
-            .map(|(k, r)| (&r.reviewed_at_ms, k, r.review_decision_ms))
-            .collect();
-        rows.sort();
-        rows.into_iter().map(|(_, _, ms)| ms).collect()
+        self.review_samples.clone()
+    }
+
+    /// Record one decision event's pace, keeping the last [`ETA_WINDOW`].
+    fn push_sample(&mut self, per_row_ms: u64) {
+        if per_row_ms == 0 {
+            return;
+        }
+        self.review_samples.push(per_row_ms);
+        let extra = self.review_samples.len().saturating_sub(ETA_WINDOW);
+        self.review_samples.drain(..extra);
     }
 
     /// The estimate for `undecided` rows left, from this log's decisions.
@@ -387,18 +499,20 @@ impl ReviewTimer {
 
     /// Credit the gap since the last activity to the current group, when the timer is running and
     /// the gap is under the limit. The caller has applied the idle rule first.
-    fn credit(&mut self, now: u64) {
+    fn credit(&mut self, now: Moment) {
         if !self.running() {
             return;
         }
-        let gap = now.saturating_sub(self.last_activity_ms);
+        let gap = now.mono_ms.saturating_sub(self.last_activity_ms);
         if gap < IDLE_LIMIT_MS {
             if let Some(group) = self.current_group.clone() {
-                self.log.review_groups.entry(group).or_default().active_ms += gap;
+                // The entry normally exists; it does not after `set_log` swapped in a log that
+                // lacks the open group, and then it is made here, stamped now and not with 0.
+                self.log.ensure_group(&group, now.wall_ms).active_ms += gap;
             }
             self.since_decision_ms += gap;
         }
-        self.last_activity_ms = now;
+        self.last_activity_ms = now.mono_ms;
     }
 
     /// Begin counting from `now`, unless a manual pause or an unfocused window forbids it.
@@ -415,7 +529,7 @@ impl ReviewTimer {
         let before = self.state();
         self.tick(now);
         if self.running() {
-            self.credit(now.mono_ms);
+            self.credit(now);
         } else if self.idle && self.started() {
             // The idle stretch is not counted: counting restarts from this key or click.
             self.start_running(now.mono_ms);
@@ -428,14 +542,8 @@ impl ReviewTimer {
     pub fn open_group(&mut self, key: &str, now: Moment) -> bool {
         let before = self.state();
         self.tick(now);
-        self.credit(now.mono_ms);
-        self.log
-            .review_groups
-            .entry(key.to_string())
-            .or_insert_with(|| GroupTiming {
-                opened_at_ms: now.wall_ms,
-                ..GroupTiming::default()
-            });
+        self.credit(now);
+        self.log.ensure_group(key, now.wall_ms);
         self.current_group = Some(key.to_string());
         self.start_running(now.mono_ms);
         self.state() != before
@@ -452,7 +560,7 @@ impl ReviewTimer {
     /// The manual Pause. Counts what ran up to now, then stops until [`ReviewTimer::resume`].
     pub fn pause(&mut self, now: Moment) {
         self.tick(now);
-        self.credit(now.mono_ms);
+        self.credit(now);
         self.manual = true;
     }
 
@@ -486,7 +594,7 @@ impl ReviewTimer {
             self.focused = true;
             self.last_activity_ms = now.mono_ms;
         } else {
-            self.credit(now.mono_ms);
+            self.credit(now);
             self.focused = false;
         }
         self.state() != before
@@ -495,34 +603,43 @@ impl ReviewTimer {
     /// Rows were just decided (the dispositions are already written; the timer only observes).
     /// Starts the timer, records each row as reviewed by the operator, and attributes the active
     /// time since the previous decision to them, split evenly across the batch.
+    ///
+    /// The stretch BEFORE the decision is credited first, to the group that was being read (the
+    /// one the cursor was in), however far the decided rows are from it. Only after that does the
+    /// current group move to the decided rows' group, when they all share one (a bulk-bar
+    /// confirm of a group the cursor was not in), so the time that follows is theirs. A decision
+    /// that spans several groups leaves the current group alone. A row decided again adds this
+    /// decision's time to its `review_decision_ms` (the row cost the sum), while the pace sample
+    /// for the estimate is this event's figure alone.
     pub fn decided(&mut self, rows: &[RowRef], now: Moment) {
         if rows.is_empty() {
             return;
         }
         self.tick(now);
-        self.credit(now.mono_ms);
+        self.credit(now);
         for row in rows {
-            self.log
-                .review_groups
-                .entry(row.group_key.clone())
-                .or_insert_with(|| GroupTiming {
-                    opened_at_ms: now.wall_ms,
-                    ..GroupTiming::default()
-                });
+            self.log.ensure_group(&row.group_key, now.wall_ms);
         }
-        if self.current_group.is_none() {
-            self.current_group = Some(rows[0].group_key.clone());
+        let first = &rows[0].group_key;
+        if self.current_group.is_none() || rows.iter().all(|r| &r.group_key == first) {
+            self.current_group = Some(first.clone());
         }
         self.start_running(now.mono_ms);
         let each = self.since_decision_ms / rows.len() as u64;
         self.since_decision_ms = 0;
+        self.log.push_sample(each);
         for row in rows {
+            let earlier = self
+                .log
+                .review_rows
+                .get(&row.row_key)
+                .map_or(0, |r| r.review_decision_ms);
             self.log.review_rows.insert(
                 row.row_key.clone(),
                 RowReview {
                     reviewed_by: LOCAL_OPERATOR.to_string(),
                     reviewed_at_ms: now.wall_ms,
-                    review_decision_ms: each,
+                    review_decision_ms: earlier + each,
                 },
             );
         }
@@ -564,7 +681,7 @@ impl ReviewTimer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camerata_api_types::review_timing::{GENERIC_KEYS, INTERNAL_ONLY_KEYS};
+    use camerata_api_types::review_timing::INTERNAL_ONLY_KEYS;
 
     /// A fake clock: milliseconds from a fixed start, wall time a fixed offset later.
     fn at(mono_ms: u64) -> Moment {
@@ -961,79 +1078,114 @@ mod tests {
         assert_eq!(back, ReviewLog::default());
     }
 
-    /// The draft field reads through the lenient helper: a log of an unexpected shape is an empty
-    /// log and the rest of the draft survives.
+    fn saved(json: &str) -> SavedReviewLog {
+        serde_json::from_str(json).expect("a saved log never fails to read")
+    }
+
     #[test]
-    fn a_log_of_the_wrong_shape_in_a_draft_is_an_empty_log() {
-        #[derive(Deserialize)]
-        struct Draft {
-            #[serde(default, deserialize_with = "crate::lenient::deserialize_or_default")]
-            review_log: ReviewLog,
-            kept: u32,
+    fn a_clean_saved_log_reads_whole_and_writes_back_identically() {
+        let log = populated();
+        let wire = serde_json::to_value(SavedReviewLog {
+            log: log.clone(),
+            ..SavedReviewLog::default()
+        })
+        .expect("writes");
+        assert!(wire.get("review_unreadable").is_none());
+        let back: SavedReviewLog = serde_json::from_value(wire.clone()).expect("reads");
+        assert_eq!(back.log, log);
+        assert!(back.unreadable.is_none() && !back.just_failed);
+        assert_eq!(serde_json::to_value(&back).expect("writes"), wire);
+        // Absent and null are an empty log, not a failure.
+        for json in ["null", "{}"] {
+            let read = saved(json);
+            assert_eq!(read.log, ReviewLog::default());
+            assert!(read.unreadable.is_none() && !read.just_failed, "{json}");
         }
-        for json in [
-            r#"{"review_log":"later","kept":3}"#,
-            r#"{"review_log":[1],"kept":3}"#,
-            r#"{"review_log":{"review_groups":{"g":{"active_ms":"x"}}},"kept":3}"#,
-            r#"{"kept":3}"#,
-        ] {
-            let d: Draft = serde_json::from_str(json).expect(json);
-            assert_eq!(d.review_log, ReviewLog::default(), "{json}");
-            assert_eq!(d.kept, 3);
+    }
+
+    /// M2: a log whose whole shape is unreadable is an empty log for this session, and the
+    /// original is kept and written back verbatim; the next save does not destroy it.
+    #[test]
+    fn a_log_of_an_unknown_shape_is_kept_verbatim_and_never_overwritten_by_an_empty_one() {
+        for json in [r#""later""#, r#"[1,2]"#, r#"7"#, r#"true"#] {
+            let read = saved(json);
+            assert_eq!(read.log, ReviewLog::default(), "{json}");
+            assert!(read.just_failed, "{json}");
+            let original: serde_json::Value = serde_json::from_str(json).unwrap();
+            assert_eq!(read.unreadable.as_ref(), Some(&original), "{json}");
+            // The next save writes the (new, empty) log AND the original, verbatim.
+            let written = serde_json::to_value(&read).expect("writes");
+            assert_eq!(written["review_unreadable"], original, "{json}");
         }
-        let d: Draft = serde_json::from_str(
-            r#"{"review_log":{"review_groups":{"g":{"active_ms":9}}},"kept":3}"#,
-        )
-        .expect("good");
-        assert_eq!(d.review_log.review_groups["g"].active_ms, 9);
+    }
+
+    /// M2: ONE bad entry costs that entry and nothing else. Every readable entry is kept, the
+    /// whole original is preserved verbatim beside them, and the preserved copy survives later
+    /// saves (the first copy wins; a later failure does not replace it).
+    #[test]
+    fn one_bad_entry_loses_only_itself_and_the_original_is_preserved() {
+        let json = r#"{
+            "review_groups": {
+                "good": {"opened_at_ms": 1, "active_ms": 72000000, "group_reviewed": true},
+                "bad": {"active_ms": "twenty hours"}
+            },
+            "review_rows": {"r1": {"reviewed_by": "operator", "reviewed_at_ms": 2, "review_decision_ms": 9}},
+            "review_samples": [10, 20]
+        }"#;
+        let read = saved(json);
+        assert!(read.just_failed);
+        assert_eq!(read.log.review_groups.len(), 1);
+        assert_eq!(read.log.review_groups["good"].active_ms, 72_000_000);
+        assert_eq!(read.log.review_rows.len(), 1);
+        assert_eq!(read.log.review_samples, vec![10, 20]);
+        let original: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(read.unreadable.as_ref(), Some(&original));
+
+        // Saved, then read again by this same build: the entry that could not be read is still in
+        // `review_unreadable`, nothing new fails, and the preserved copy is untouched.
+        let written = serde_json::to_value(&read).expect("writes");
+        assert_eq!(written["review_unreadable"], original);
+        let again: SavedReviewLog = serde_json::from_value(written.clone()).expect("reads");
+        assert!(
+            !again.just_failed,
+            "the bad entry was dropped from the live log"
+        );
+        assert_eq!(again.unreadable.as_ref(), Some(&original));
+        assert_eq!(serde_json::to_value(&again).unwrap(), written);
+
+        // A bad samples list is the same story.
+        let read = saved(r#"{"review_groups":{"g":{"active_ms":5}},"review_samples":"x"}"#);
+        assert!(read.just_failed && read.unreadable.is_some());
+        assert_eq!(read.log.review_groups["g"].active_ms, 5);
     }
 
     /// Every key the log serializes is on the deny-list the server's export tests scan for (or is
-    /// one of the generic words), and every listed log key is really emitted: a field added here
-    /// without being listed fails, and a stale listing fails.
+    /// one of the generic words). (That every LISTED key is written by some internal shape is
+    /// pinned in `review_stats`, which can see both shapes.)
     #[test]
     fn every_key_the_log_writes_is_on_the_internal_only_deny_list() {
-        fn keys(v: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
-            match v {
-                serde_json::Value::Object(map) => {
-                    for (k, v) in map {
-                        out.insert(k.clone());
-                        keys(v, out);
-                    }
-                }
-                serde_json::Value::Array(items) => items.iter().for_each(|i| keys(i, out)),
-                _ => {}
-            }
-        }
-        let mut written = std::collections::BTreeSet::new();
-        // The map KEYS are group and row keys, not field names: walk the values only.
-        let value = serde_json::to_value(populated()).expect("value");
-        for (field, map) in value.as_object().expect("object") {
-            written.insert(field.clone());
-            for entry in map.as_object().expect("map").values() {
-                keys(entry, &mut written);
-            }
-        }
-        for key in &written {
-            assert!(
-                INTERNAL_ONLY_KEYS.contains(&key.as_str()) || GENERIC_KEYS.contains(&key.as_str()),
-                "the log writes `{key}`, which is not in camerata_api_types::review_timing"
-            );
-        }
-        for key in [
-            "review_groups",
-            "review_rows",
-            "opened_at_ms",
-            "active_ms",
-            "group_reviewed",
-            "reviewed_by",
-            "reviewed_at_ms",
-            "review_decision_ms",
-        ] {
-            assert!(written.contains(key), "{key} is listed but not written");
-        }
-        // And the key the draft saves it under is listed too.
+        use crate::test_support::{assert_all_listed, keys_written, LOG_ENTRY_MAPS};
+        let wire = serde_json::to_value(SavedReviewLog {
+            log: populated(),
+            unreadable: Some(serde_json::json!("kept")),
+            just_failed: false,
+        })
+        .expect("value");
+        assert_all_listed(&keys_written(&wire, LOG_ENTRY_MAPS), "the saved log");
         assert!(INTERNAL_ONLY_KEYS.contains(&camerata_api_types::review_timing::REVIEW_LOG_KEY));
+    }
+
+    /// L4: a log swapped in after a group was opened (the draft restore) lacks the open group;
+    /// the next credit makes its entry stamped now, never with an opened-at of 0.
+    #[test]
+    fn a_group_missing_after_set_log_is_recreated_with_a_real_opened_at() {
+        let mut t = ReviewTimer::default();
+        t.open_group(A, at(0));
+        t.set_log(ReviewLog::default());
+        t.activity(at(5_000));
+        let timing = &t.log().review_groups[A];
+        assert_eq!(timing.active_ms, 5_000);
+        assert_eq!(timing.opened_at_ms, at(5_000).wall_ms, "not 0");
     }
 
     // ── the estimate ──
@@ -1118,38 +1270,86 @@ mod tests {
         assert_eq!(seen_first, Some(ETA_MIN_DECISIONS));
     }
 
+    /// M3: the estimate's window is the last 50 DECISIONS, not the last 50 rows. 25 single
+    /// decisions at 30 s, then a 30-row stack confirm that took 40 s: the batch is one sample
+    /// (1.33 s a row) among 26, so the median stays 30 s and the estimate is 30 s a row left.
     #[test]
-    fn a_decision_made_while_paused_carries_no_pace_and_is_left_out_of_the_estimate() {
-        let mut log = ReviewLog::default();
-        for n in 0..30u64 {
-            log.review_rows.insert(
-                format!("r{n}"),
-                RowReview {
-                    reviewed_by: LOCAL_OPERATOR.to_string(),
-                    reviewed_at_ms: n,
-                    review_decision_ms: if n < 15 { 0 } else { 8_000 },
-                },
-            );
+    fn a_thirty_row_batch_is_one_decision_not_thirty() {
+        let mut t = ReviewTimer::default();
+        t.open_group(A, at(0));
+        let mut now = 0;
+        for n in 1..=25 {
+            now += 30_000;
+            t.decided(&[row(n, A)], at(now));
         }
-        // Only 15 samples carry time: not enough for an estimate, rather than a median of zeros.
-        assert_eq!(log.decision_samples().len(), 15);
-        assert_eq!(log.eta(100), None);
+        now += 40_000;
+        let batch: Vec<RowRef> = (100..130).map(|n| row(n, A)).collect();
+        t.decided(&batch, at(now));
+        let samples = t.log().decision_samples();
+        assert_eq!(samples.len(), 26, "25 singles and ONE batch");
+        assert_eq!(samples[25], 40_000 / 30, "the per-row figure of the batch");
+        assert_eq!(t.log().review_rows.len(), 55, "every row is still recorded");
+        let left = t.log().eta(100).expect("26 decisions");
+        assert_eq!(left, Duration::from_millis(30_000 * 100));
     }
 
     #[test]
-    fn samples_are_ordered_by_when_they_were_decided_not_by_key() {
-        let mut log = ReviewLog::default();
-        for (key, at_ms, ms) in [("z", 1u64, 100u64), ("a", 3, 300), ("m", 2, 200)] {
-            log.review_rows.insert(
-                key.to_string(),
-                RowReview {
-                    reviewed_by: LOCAL_OPERATOR.to_string(),
-                    reviewed_at_ms: at_ms,
-                    review_decision_ms: ms,
-                },
-            );
+    fn the_sample_window_keeps_only_the_last_fifty_decisions() {
+        let mut t = ReviewTimer::default();
+        t.open_group(A, at(0));
+        let mut now = 0;
+        for n in 1..=70 {
+            now += 1_000 * n as u64;
+            t.decided(&[row(n, A)], at(now));
         }
-        assert_eq!(log.decision_samples(), vec![100, 200, 300]);
+        let samples = t.log().decision_samples();
+        assert_eq!(samples.len(), ETA_WINDOW);
+        assert_eq!(samples[0], 21_000, "decisions 1 to 20 fell out");
+        assert_eq!(samples[49], 70_000);
+    }
+
+    #[test]
+    fn a_decision_made_while_paused_carries_no_pace_and_adds_no_sample() {
+        let mut t = ReviewTimer::default();
+        t.open_group(A, at(0));
+        t.pause(at(0));
+        for n in 1..=30 {
+            t.decided(&[row(n, A)], at(1_000 + n as u64));
+        }
+        assert!(t.log().decision_samples().is_empty());
+        assert_eq!(t.log().eta(100), None, "not a median of zeros");
+        assert_eq!(t.log().review_rows.len(), 30, "but every row is recorded");
+    }
+
+    /// L5: deciding a row again adds the new time to the row's total instead of replacing it.
+    #[test]
+    fn a_row_decided_again_accumulates_its_time() {
+        let mut t = ReviewTimer::default();
+        t.open_group(A, at(0));
+        t.decided(&[row(1, A)], at(10_000));
+        t.decided(&[row(1, A)], at(25_000));
+        let r = &t.log().review_rows["row-1"];
+        assert_eq!(r.review_decision_ms, 25_000, "10 s then 15 s");
+        assert_eq!(r.reviewed_at_ms, at(25_000).wall_ms, "the latest decision");
+        assert_eq!(t.log().decision_samples(), vec![10_000, 15_000]);
+    }
+
+    /// L3: the stretch before a decision stays with the group that was being read; the time after
+    /// it is the decided rows' group's (one group), and a multi-group batch moves nothing.
+    #[test]
+    fn a_decision_credits_the_group_being_read_then_moves_to_the_decided_rows_group() {
+        let mut t = ReviewTimer::default();
+        t.open_group(A, at(0));
+        // The cursor is in A; a bulk confirm of group B arrives after 20 s of reading A.
+        t.decided(&[row(1, B), row(2, B)], at(20_000));
+        assert_eq!(active(&t, A), 20_000, "the reading was A's");
+        assert_eq!(active(&t, B), 0);
+        assert_eq!(t.current_group(), Some(B));
+        t.activity(at(26_000));
+        assert_eq!(active(&t, B), 6_000, "what follows is B's");
+        // A batch across groups leaves the current group alone.
+        t.decided(&[row(3, A), row(4, B)], at(30_000));
+        assert_eq!(t.current_group(), Some(B));
     }
 
     #[test]

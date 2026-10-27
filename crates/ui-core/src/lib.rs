@@ -24,10 +24,13 @@ pub mod review_stats;
 pub mod review_timer;
 pub mod rules;
 pub mod run;
+pub mod save_queue;
 pub mod scan;
 pub mod schedule;
 pub mod source;
 pub mod stack;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod triage;
 pub mod viewer;
 pub mod viewer_find;

@@ -199,7 +199,7 @@ mod tests {
     use super::*;
     use crate::review_timer::{group_key, Moment, ReviewTimer, RowRef};
     use crate::triage::TriageState;
-    use camerata_api_types::review_timing::{GENERIC_KEYS, INTERNAL_ONLY_KEYS};
+    use camerata_api_types::review_timing::INTERNAL_ONLY_KEYS;
 
     fn at(ms: u64) -> Moment {
         Moment::new(ms, 1_700_000_000_000 + ms)
@@ -346,45 +346,42 @@ mod tests {
         );
     }
 
-    /// Every key in the stats JSON is on the deny-list (or generic), and every listed stats key
-    /// is really written.
+    /// The two internal shapes (the saved log and the stats JSON) write EXACTLY the deny-list:
+    /// every key written is listed or generic, and every listed key is written by one of them.
+    /// A field added to either without being listed fails the first half; a stale listing fails
+    /// the second. (The expected set is derived from `INTERNAL_ONLY_KEYS`, not retyped here.)
     #[test]
-    fn the_stats_json_keys_are_all_on_the_internal_only_deny_list() {
-        fn keys(v: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
-            match v {
-                serde_json::Value::Object(map) => {
-                    for (k, v) in map {
-                        out.insert(k.clone());
-                        keys(v, out);
-                    }
-                }
-                serde_json::Value::Array(items) => items.iter().for_each(|i| keys(i, out)),
-                _ => {}
-            }
-        }
+    fn the_internal_shapes_write_exactly_the_deny_list() {
+        use crate::review_timer::{ReviewTimer, SavedReviewLog};
+        use crate::test_support::{assert_all_listed, keys_written, LOG_ENTRY_MAPS};
         let (rows, disp, log) = scenario();
-        let json = ReviewStats::compute(&log, &rows, &disp).to_json();
-        let value: serde_json::Value = serde_json::from_str(&json).expect("json");
-        let mut written = std::collections::BTreeSet::new();
-        keys(&value, &mut written);
-        for key in &written {
+        let stats_json: serde_json::Value =
+            serde_json::from_str(&ReviewStats::compute(&log, &rows, &disp).to_json())
+                .expect("json");
+        let stats_keys = keys_written(&stats_json, &[]);
+        assert_all_listed(&stats_keys, "the stats JSON");
+
+        // The saved log, with the optional preserved original present so every key is written.
+        let draft = serde_json::json!({
+            camerata_api_types::review_timing::REVIEW_LOG_KEY: SavedReviewLog {
+                log: ReviewTimer::with_log(log).log().clone(),
+                unreadable: Some(serde_json::json!("kept")),
+                just_failed: false,
+            }
+        });
+        let log_keys = keys_written(&draft, LOG_ENTRY_MAPS);
+        assert_all_listed(&log_keys, "the saved log");
+
+        let written: std::collections::BTreeSet<&str> = stats_keys
+            .iter()
+            .chain(&log_keys)
+            .map(String::as_str)
+            .collect();
+        for listed in INTERNAL_ONLY_KEYS {
             assert!(
-                INTERNAL_ONLY_KEYS.contains(&key.as_str()) || GENERIC_KEYS.contains(&key.as_str()),
-                "the stats JSON writes `{key}`, which is not in camerata_api_types::review_timing"
+                written.contains(listed),
+                "{listed} is listed but nothing writes it"
             );
-        }
-        for key in [
-            "review_stats",
-            "total_active_ms",
-            "total_active_hours",
-            "unattributed_ms",
-            "by_group_type",
-            "rows_reviewed",
-            "groups_reviewed",
-            "active_hours",
-            "active_ms",
-        ] {
-            assert!(written.contains(key), "{key} is listed but not written");
         }
     }
 
