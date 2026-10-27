@@ -10508,8 +10508,27 @@ async fn delete_routine(
 
 // ── AI: model provider ────────────────────────────────────────────────────────
 
+/// The label (`anthropic/cli` or `anthropic/api`) for the backend the CHAT actually runs on, from
+/// the same selection the chat uses ([`AppState::chat_llm`]), plus the refusal reason when the
+/// setting is `Api` but no key is configured (the label then still names the SETTING, so it is
+/// never claiming a transport the chat will not use).
+fn chat_backend_label(state: &AppState) -> (String, Option<String>) {
+    match state.chat_llm() {
+        Ok(llm) => (llm.backend_label(), None),
+        Err(reason) => {
+            // `Blocked` only arises for the Api setting with no key: name the setting.
+            let transport = match state.settings.chat_backend() {
+                crate::llm::ProjectBackend::Api => "api",
+                crate::llm::ProjectBackend::Cli => "cli",
+            };
+            (format!("anthropic/{transport}"), Some(reason))
+        }
+    }
+}
+
 /// The models the UI offers in its selector.
-async fn list_models() -> Json<serde_json::Value> {
+async fn list_models(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let (backend, backend_error) = chat_backend_label(&state);
     let models: Vec<_> = crate::llm::models()
         .iter()
         .map(|m| {
@@ -10525,7 +10544,8 @@ async fn list_models() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "models": models,
         "default": crate::llm::DEFAULT_MODEL,
-        "backend": crate::llm::Llm::from_env().backend_label(),
+        "backend": backend,
+        "backend_error": backend_error,
     }))
 }
 
@@ -28673,6 +28693,56 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::CONFLICT, "{uri}");
         }
+    }
+
+    /// `GET /api/models` reports the backend the chat will actually use (the chat setting and
+    /// the resolved key), not a hard-coded CLI label.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn models_endpoint_backend_label_follows_the_chat_setting() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let fetch = |state: AppState| async move {
+            let resp = router(state)
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/models")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            body_json(resp).await
+        };
+
+        // Default Cli setting: says cli.
+        let json = fetch(state.clone()).await;
+        assert_eq!(json["backend"], "anthropic/cli");
+        assert!(json["backend_error"].is_null());
+
+        // Api setting with a key: says api.
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-label")
+            .unwrap();
+        let json = fetch(state.clone()).await;
+        assert_eq!(json["backend"], "anthropic/api");
+        assert!(json["backend_error"].is_null());
+
+        // Api setting, key removed: still names the setting, and says why it cannot run.
+        state
+            .credential_store
+            .delete(crate::credentials::ANTHROPIC_API_KEY)
+            .unwrap();
+        let json = fetch(state).await;
+        assert_eq!(json["backend"], "anthropic/api");
+        assert!(json["backend_error"]
+            .as_str()
+            .unwrap()
+            .contains("no API key"));
     }
 
     /// The Chat backend setting must DO what the UI says: `api` builds an Api `Llm` carrying the
