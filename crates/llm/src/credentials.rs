@@ -13,9 +13,11 @@
 //! - `openrouter_api_key` — OpenRouter model discovery + API driver.
 //! - `github_token`       — PAT for GitHub issues / PRs / push (replaces env-only
 //!   `CAMERATA_GITHUB_TOKEN`; env var remains as back-compat fallback).
-//! - `anthropic_api_key`  — Anthropic API key for the `api` Claude backend. Hydrated
-//!   into the `ANTHROPIC_API_KEY` env var at startup and on save; the env var remains
-//!   supported as a back-compat fallback.
+//! - `anthropic_api_key`  — Anthropic API key for the `api` Claude backend. Every model
+//!   client reads it through [`anthropic_api_key`] at the moment the client is built (never
+//!   cached, never copied into process env), so a key saved or replaced in the UI takes
+//!   effect on the next call with no restart. The `ANTHROPIC_API_KEY` env var is only the
+//!   fallback (CI and existing `.env` setups).
 //!
 //! # Extension
 //!
@@ -77,20 +79,49 @@ pub fn mask_value(v: &str) -> String {
 /// Stores credentials in the OS keychain via the `keyring` crate.
 /// Service name is fixed at `"camerata"` so all credentials live under the same
 /// keychain entry group.
+///
+/// The real platform backend is selected by `keyring` Cargo features, enabled per target in
+/// `crates/llm/Cargo.toml` (`apple-native`, `windows-native`, Secret Service on Linux). With
+/// no backend feature keyring 3 silently uses a non-persistent MOCK store, so the tests below
+/// (`production_keyring_store_is_not_the_mock*`) fail loudly if that ever regresses.
 pub struct KeyringCredentialStore;
 
 const KEYRING_SERVICE: &str = "camerata";
 
 impl CredentialStore for KeyringCredentialStore {
     fn set(&self, name: &str, value: &str) -> Result<(), CredentialError> {
-        keyring::Entry::new(KEYRING_SERVICE, name)
+        ServiceKeyringStore::new(KEYRING_SERVICE).set(name, value)
+    }
+
+    fn get(&self, name: &str) -> Result<Option<String>, CredentialError> {
+        ServiceKeyringStore::new(KEYRING_SERVICE).get(name)
+    }
+}
+
+/// The keychain-backed store for an arbitrary keychain SERVICE name. [`KeyringCredentialStore`]
+/// is this with the fixed `"camerata"` service (every production read and write goes through
+/// this one implementation); it exists separately so a test can exercise the exact same code
+/// against a throwaway service without ever touching the user's real `"camerata"` entries.
+pub struct ServiceKeyringStore {
+    service: &'static str,
+}
+
+impl ServiceKeyringStore {
+    pub const fn new(service: &'static str) -> Self {
+        Self { service }
+    }
+}
+
+impl CredentialStore for ServiceKeyringStore {
+    fn set(&self, name: &str, value: &str) -> Result<(), CredentialError> {
+        keyring::Entry::new(self.service, name)
             .map_err(|e| CredentialError::Keychain(e.to_string()))?
             .set_password(value)
             .map_err(|e| CredentialError::Keychain(e.to_string()))
     }
 
     fn get(&self, name: &str) -> Result<Option<String>, CredentialError> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, name)
+        let entry = keyring::Entry::new(self.service, name)
             .map_err(|e| CredentialError::Keychain(e.to_string()))?;
         match entry.get_password() {
             Ok(v) if !v.is_empty() => Ok(Some(v)),
@@ -164,8 +195,8 @@ pub fn validate_name(name: &str) -> Result<(), CredentialError> {
 pub fn resolve(store: &dyn CredentialStore, cred_name: &str, env_var: &str) -> Option<String> {
     // Keychain wins.
     match store.get(cred_name) {
-        Ok(Some(v)) => return Some(v),
-        Ok(None) => {}
+        Ok(Some(v)) if !v.trim().is_empty() => return Some(v),
+        Ok(_) => {}
         // A read error (locked keychain, backend failure) must not silently degrade to the
         // env fallback with no trace — that is undiagnosable. Warn, then fall back.
         Err(e) => eprintln!(
@@ -173,7 +204,29 @@ pub fn resolve(store: &dyn CredentialStore, cred_name: &str, env_var: &str) -> O
         ),
     }
     // Fall back to env var (back-compat: existing CI/dotenv setups keep working).
-    std::env::var(env_var).ok().filter(|v| !v.is_empty())
+    std::env::var(env_var).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// The env var that backs [`anthropic_api_key`] when the credential store holds no key.
+pub const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+
+/// The user-facing fix for a missing Anthropic API key, shared by every error and help text
+/// so the wording cannot drift (no em-dashes in user-facing text).
+pub const API_KEY_FIX_HINT: &str =
+    "add the key in the app (Settings, Chat backend, API) or set ANTHROPIC_API_KEY";
+
+/// THE one rule for which Anthropic API key every model call uses, in the app and the CLI:
+/// the key saved in the credential store (the macOS Keychain, set from the app's Settings)
+/// first; the `ANTHROPIC_API_KEY` env var only as a fallback (CI, existing `.env` setups).
+/// Blank / whitespace-only values count as absent at both layers.
+///
+/// Call this at the moment a client is built and never cache the result: a key saved or
+/// replaced in the UI is then picked up by the next call with no restart. Every non-test read
+/// of `ANTHROPIC_API_KEY` must go through here (a source-scan test enforces it).
+///
+/// The returned value is the secret itself: never log or print it (use [`mask_value`]).
+pub fn anthropic_api_key(store: &dyn CredentialStore) -> Option<String> {
+    resolve(store, ANTHROPIC_API_KEY, ANTHROPIC_API_KEY_ENV)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -344,5 +397,140 @@ mod tests {
         let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let token = resolve(s.as_ref(), GITHUB_TOKEN, "CAMERATA_GITHUB_TOKEN");
         assert_eq!(token, None);
+    }
+
+    // ── anthropic_api_key (the one resolver) ──────────────────────────────────
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn anthropic_key_comes_from_the_store_with_no_env() {
+        let s = store();
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        assert_eq!(anthropic_api_key(s.as_ref()), None);
+        // Saved AFTER the (hypothetical) startup: the very next read sees it.
+        s.set(ANTHROPIC_API_KEY, "sk-ant-saved").unwrap();
+        assert_eq!(
+            anthropic_api_key(s.as_ref()).as_deref(),
+            Some("sk-ant-saved")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn anthropic_key_replacement_takes_effect_on_the_next_read() {
+        let s = store();
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        s.set(ANTHROPIC_API_KEY, "sk-ant-old").unwrap();
+        assert_eq!(anthropic_api_key(s.as_ref()).as_deref(), Some("sk-ant-old"));
+        s.set(ANTHROPIC_API_KEY, "sk-ant-new").unwrap();
+        assert_eq!(anthropic_api_key(s.as_ref()).as_deref(), Some("sk-ant-new"));
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn anthropic_key_falls_back_to_env_when_store_empty() {
+        let s = store();
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env");
+        assert_eq!(anthropic_api_key(s.as_ref()).as_deref(), Some("sk-ant-env"));
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn anthropic_key_store_wins_over_env() {
+        let s = store();
+        s.set(ANTHROPIC_API_KEY, "sk-ant-store").unwrap();
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env");
+        assert_eq!(
+            anthropic_api_key(s.as_ref()).as_deref(),
+            Some("sk-ant-store")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn anthropic_key_blank_values_count_as_absent() {
+        let s = store();
+        s.set(ANTHROPIC_API_KEY, "   ").unwrap();
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        assert_eq!(anthropic_api_key(s.as_ref()), None);
+        // A blank store value does not shadow a real env key.
+        let _env2 = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env");
+        assert_eq!(anthropic_api_key(s.as_ref()).as_deref(), Some("sk-ant-env"));
+        // And a blank env value is absent too.
+        let _env3 = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "  ");
+        assert_eq!(anthropic_api_key(s.as_ref()), None);
+    }
+
+    // ── the production store must be a REAL keychain, never keyring's mock ────
+
+    /// Compile-time proof that the current platform's real backend is compiled in: these
+    /// modules only exist when the matching keyring feature is enabled. With no backend
+    /// feature keyring 3 falls back to a non-persistent mock and this fails to build.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_keychain_backend_is_compiled_in() {
+        let _: Option<keyring::macos::MacCredential> = None;
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_credential_manager_backend_is_compiled_in() {
+        let _: Option<keyring::windows::WinCredential> = None;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_secret_service_backend_is_compiled_in() {
+        let _: Option<keyring::secret_service::SsCredential> = None;
+    }
+
+    /// Always-on, cross-platform: the workspace lockfile resolves keyring WITH every platform's
+    /// real backend crate. A mock-only keyring depends on `log` and `zeroize` alone.
+    #[test]
+    fn cargo_lock_resolves_keyring_with_real_platform_backends() {
+        let lock =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"))
+                .expect("workspace Cargo.lock must be readable");
+        let block = lock
+            .split("[[package]]")
+            .find(|b| b.contains("name = \"keyring\""))
+            .expect("keyring must be in Cargo.lock");
+        for backend in ["security-framework", "windows-sys", "dbus-secret-service"] {
+            assert!(
+                block.contains(&format!("\"{backend}")),
+                "keyring resolves without `{backend}`: it is running on the non-persistent MOCK store \
+                 on that platform. Enable the platform backend features in crates/llm/Cargo.toml.\n{block}"
+            );
+        }
+    }
+
+    /// A value written through the production keychain implementation must be readable back
+    /// (keyring's mock hands every `Entry` its own empty credential, so a `get` after a `set`
+    /// returns nothing). Uses a THROWAWAY service name, never the user's real `"camerata"`
+    /// entries, and deletes what it wrote. Runs by default on macOS; elsewhere it needs a live
+    /// Secret Service / Credential Manager session, so run it with `cargo test -- --ignored`.
+    #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "needs a real OS keychain session; run with --ignored"
+    )]
+    fn production_keyring_store_is_not_the_mock_round_trip() {
+        const SERVICE: &str = "camerata-keychain-selftest-DELETE-ME";
+        let name = format!("probe-{}", std::process::id());
+        let store = ServiceKeyringStore::new(SERVICE);
+        store.set(&name, "selftest-value").unwrap();
+        let read_back = store.get(&name);
+        // Clean up first so a failed assertion cannot leave the item behind.
+        let _ = keyring::Entry::new(SERVICE, &name).and_then(|e| e.delete_credential());
+        assert_eq!(
+            read_back.unwrap().as_deref(),
+            Some("selftest-value"),
+            "a value saved to the keychain could not be read back: keyring is on its MOCK store"
+        );
+        assert_eq!(
+            store.get(&name).unwrap(),
+            None,
+            "the throwaway entry must be deleted"
+        );
     }
 }

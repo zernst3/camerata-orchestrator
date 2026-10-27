@@ -838,7 +838,8 @@ Key design points:
   gov-dev driver) resolves the transport from that project's own `Project.backend` field
   (`Cli` | `Api`, default `Cli`) via `resolve_backend_for_project` in
   `crates/server/src/lib.rs`: `Cli` always drives `claude -p` through `ClaudeCliDriver`;
-  `Api` with `ANTHROPIC_API_KEY` present (keychain or env) runs Camerata's Claude agents
+  `Api` with an Anthropic key present (the keychain-saved key, else the `ANTHROPIC_API_KEY` env
+  fallback; see "Anthropic key resolution" below) runs Camerata's Claude agents
   over the Anthropic Messages API directly with no Claude CLI installed (issue #110); `Api`
   with no key resolves to `BackendResolution::Blocked` and the AI step does not run (the
   deterministic floor still does). The project-less chat assistant resolves the same way
@@ -2908,6 +2909,32 @@ key). Row parity does not re-run `req_d2`'s count reconciliation at runtime.
 ## 7. Persistence
 
 Camerata is local-first. All state lives on the user's machine.
+
+### Anthropic key resolution (one rule)
+
+`camerata_llm::credentials::anthropic_api_key(store)` is the single rule for which Anthropic API
+key any model call uses: the key saved in the credential store (the OS keychain, written by the
+Settings UI) first, the `ANTHROPIC_API_KEY` env var only as a fallback (CI, existing `.env`
+setups). Blank values count as absent. It is read at the moment a client is built and never
+cached, and nothing copies the key into process env (the old startup `set_var` hydration is
+gone), so a key saved or replaced in the UI takes effect on the next call with no restart.
+
+Call sites: the gate (`anthropic_api_key_present`), the audit and rescan `Llm`
+(`onboard::build_llm` -> `Llm::for_backend[_and_ledger]`, which take the key explicitly and read
+no key env var themselves), the chat and fleet agent drivers (`api_agent_driver`), the live
+model-list refresh (`ModelRegistry::try_refresh_anthropic_from_store`), the connections report,
+and `camerata inspect` (`inspect_cmd::run_inspect` with the real `KeyringCredentialStore`;
+`run_inspect_with_store` injects a store for tests). `Llm::from_env()` remains only as a keyless
+`Backend::Cli` convenience (the CLI transport uses no key). A source-scan test
+(`crates/server/tests/anthropic_key_resolution.rs`) fails if non-test code reads
+`ANTHROPIC_API_KEY` from env directly or builds an `Llm` without the resolver.
+
+`KeyringCredentialStore` needs a real `keyring` backend: keyring 3 has none by default and then
+silently uses a non-persistent in-memory mock (nothing is ever stored). The workspace declares
+`keyring` once and `crates/llm/Cargo.toml` enables `apple-native` (macOS), `windows-native`
+(Windows) and Secret Service with `crypto-rust` + `vendored` (Linux) in per-target tables;
+`credentials::tests` fail if that regresses (a lockfile check, a per-platform compile-time check
+and, on macOS, a set/get/delete round trip on a throwaway keychain service).
 
 ### JSON stores
 

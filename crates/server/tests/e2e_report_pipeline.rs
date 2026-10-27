@@ -124,6 +124,7 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
 
     // ═══ STEP 1: run the REAL scan entry point (deterministic-only: zero API spend). ═══
     let (report, _manifest) = onboard::audit_repos(
+        &camerata_server::credentials::MemoryCredentialStore::new(),
         &sources,
         &selected,
         Vec::new(), // extra_notes

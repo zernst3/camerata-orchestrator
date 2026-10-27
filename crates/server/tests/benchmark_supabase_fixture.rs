@@ -178,6 +178,7 @@ async fn run_deterministic_scan(dir: &Path) -> onboard::ScanReport {
     let sources = vec![(FIXTURE_REPO_SPEC.to_string(), dir.to_path_buf())];
     let selected = recommended_selection(&sources).await;
     let (report, _manifest) = onboard::audit_repos(
+        &camerata_server::credentials::MemoryCredentialStore::new(),
         &sources,
         &selected,
         Vec::new(), // extra_notes
@@ -208,6 +209,7 @@ async fn run_full_scan(dir: &Path) -> onboard::ScanReport {
     let sources = vec![(FIXTURE_REPO_SPEC.to_string(), dir.to_path_buf())];
     let selected = recommended_selection(&sources).await;
     let (report, _manifest) = onboard::audit_repos(
+        &camerata_server::credentials::MemoryCredentialStore::new(),
         &sources,
         &selected,
         Vec::new(),

@@ -148,6 +148,7 @@ async fn run_fixture_scan(
 ) -> onboard::ScanReport {
     let sources = vec![(repo_spec.to_string(), repo_dir.to_path_buf())];
     let (report, _manifest) = onboard::audit_repos(
+        &camerata_server::credentials::MemoryCredentialStore::new(),
         &sources,
         &selected_rules(),
         Vec::new(),

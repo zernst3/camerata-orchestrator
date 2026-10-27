@@ -184,7 +184,7 @@ pub struct ApiAgentDriver {
     /// normalizer branch. It does NOT change the gate.
     shape: ApiShape,
     /// The Anthropic API key, used ONLY when `shape == ApiShape::Anthropic`. Resolved from
-    /// `ANTHROPIC_API_KEY` (mirroring `llm.rs::complete_api`) and threaded in at build time.
+    /// `credentials::anthropic_api_key` (store first, env fallback) at build time.
     /// `None` on the OpenRouter path (the OpenRouter key is read off the completer instead).
     anthropic_api_key: Option<String>,
     /// LIFECYCLE-7 liveness heartbeat. Fired once per agentic loop iteration so a healthy,
@@ -585,7 +585,7 @@ async fn call_provider(
 
     // ── Anthropic Messages API shape ───────────────────────────────────────
     // Selected explicitly via `with_shape(ApiShape::Anthropic)` AND with a key attached.
-    // The Anthropic key is carried on the driver (resolved from ANTHROPIC_API_KEY), not
+    // The Anthropic key is carried on the driver (resolved by `credentials::anthropic_api_key`), not
     // read off the completer. If the shape is Anthropic but no key is attached, fall
     // through to the schema-less LlmPort path so test stubs still work.
     if driver.shape == ApiShape::Anthropic {
@@ -2023,29 +2023,6 @@ impl LlmPort for AnthropicNoopCompleter {
     }
 }
 
-/// The Anthropic API key from the credential STORE first (env fallback for back-compat) — the
-/// key half of [`resolve_claude_backend`]'s `Api` resolution
-/// (`docs/design/2026-09-22_per-project-backend.md`).
-///
-/// ROUTES-9: store-first, env-fallback: mirrors `credentials::resolve` so a keychain-saved key
-/// wins and existing dotenv/CI setups keep working. A store read error must not silently
-/// degrade to env with no trace, so warn and fall back (matches the resolve() posture).
-fn anthropic_key_from_store_or_env(
-    creds: &dyn crate::credentials::CredentialStore,
-) -> Option<String> {
-    match creds.get(crate::credentials::ANTHROPIC_API_KEY) {
-        Ok(Some(k)) if !k.trim().is_empty() => return Some(k),
-        Ok(_) => {}
-        Err(e) => eprintln!(
-            "[camerata-server] credential-store read of ANTHROPIC_API_KEY failed ({e}); \
-             falling back to env"
-        ),
-    }
-    std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
-}
-
 /// Resolve the compliance-safety [`crate::llm::BackendResolution`] for the `claude` provider
 /// (`docs/design/2026-09-22_per-project-backend.md`), given the caller-supplied project (or
 /// chat) [`crate::llm::ProjectBackend`] setting. No env read at all — the setting is the
@@ -2103,7 +2080,7 @@ fn build_claude_driver(
         crate::llm::BackendResolution::Blocked { message } => {
             anyhow::bail!(message);
         }
-        crate::llm::BackendResolution::Api => anthropic_key_from_store_or_env(creds),
+        crate::llm::BackendResolution::Api => crate::credentials::anthropic_api_key(creds),
         crate::llm::BackendResolution::Cli => None,
     };
     if let Some(key) = key {
@@ -2252,7 +2229,7 @@ pub fn build_agent_driver(
             Ok(Arc::new(driver))
         }
         // "claude" or any unrecognised provider: CLI by default, or the Anthropic Messages
-        // API agent when the resolved backend is `Api` and `ANTHROPIC_API_KEY` is set.
+        // API agent when the resolved backend is `Api` and an Anthropic API key is configured.
         // `build_claude_driver` returns a `Result` (`Blocked` refuses to build anything), so
         // this arm doesn't wrap it in an extra `Ok(...)`.
         _ => build_claude_driver(
@@ -2634,7 +2611,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                         return Err(anyhow::anyhow!(message));
                     }
                     crate::llm::BackendResolution::Api => {
-                        anthropic_key_from_store_or_env(self.creds.as_ref())
+                        crate::credentials::anthropic_api_key(self.creds.as_ref())
                     }
                     crate::llm::BackendResolution::Cli => None,
                 };

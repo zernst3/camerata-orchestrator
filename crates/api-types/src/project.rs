@@ -56,7 +56,7 @@ pub fn default_routine_secs() -> u64 {
 ///   `backend` field in a legacy persisted file, so legacy behavior never changes) — the
 ///   Claude Code CLI, i.e. the operator's own logged-in subscription. No API key needed.
 ///   A NEW project does not start here: it starts on [`ProjectBackend::for_new_project`].
-/// - **`Api`** — the Anthropic Messages API. Needs `ANTHROPIC_API_KEY` (keychain or env). A
+/// - **`Api`** — the Anthropic Messages API. Needs an Anthropic key (saved in the app, else the `ANTHROPIC_API_KEY` env fallback). A
 ///   missing key never falls back to the CLI — `resolve_backend` reports
 ///   `BackendResolution::Blocked` and the caller must not start any model call. This is the
 ///   compliant, metered, single-party chain nameable in a client contract.

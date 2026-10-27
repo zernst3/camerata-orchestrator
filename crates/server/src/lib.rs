@@ -359,10 +359,11 @@ impl AppState {
 
     /// A clone of the shared `Llm` seam WITH the process-global usage ledger attached, so any
     /// model call made through it is recorded into the cumulative cockpit meter. Reads
-    /// vendor/key/model from the environment, same as before; the TRANSPORT is fixed to
-    /// `Backend::Cli` (`Llm::from_env`'s new default per
-    /// `docs/design/2026-09-22_per-project-backend.md` — no `CAMERATA_LLM_BACKEND` env read
-    /// exists anymore).
+    /// vendor/model from the environment; the TRANSPORT is fixed to `Backend::Cli`
+    /// (`Llm::from_env`'s default per `docs/design/2026-09-22_per-project-backend.md` — no
+    /// `CAMERATA_LLM_BACKEND` env read exists anymore). The `claude` CLI transport uses no
+    /// API key, so this carries none; anything that may run on the `api` backend builds its
+    /// `Llm` with `Llm::for_backend*` and a key from `credentials::anthropic_api_key`.
     ///
     /// This is the FLOOR constructor for call sites that have not (yet) been threaded with an
     /// explicit per-project or chat backend — today: the non-fleet AI steps driven purely by
@@ -371,7 +372,7 @@ impl AppState {
     /// loop, and misc content generation (PR title/body, HTML report rendering). The five
     /// NAMED seams (brownfield scan, alternative recommendation, rescan, the gov-dev agent
     /// driver, and the chat assistant) do NOT use this — they resolve `project.backend` /
-    /// `settings.chat_backend` explicitly and call `Llm::from_env_with_backend_and_ledger`
+    /// `settings.chat_backend` explicitly and call `Llm::for_backend_and_ledger`
     /// themselves.
     pub fn llm(&self) -> crate::llm::Llm {
         crate::llm::Llm::from_env_with_ledger(self.usage_ledger.clone())
@@ -1128,28 +1129,11 @@ impl AppState {
         // Manager, Secret Service on Linux) so credentials survive restarts without
         // living in any file on disk.
         state.credential_store = Arc::new(crate::credentials::KeyringCredentialStore);
-        // Hydrate the Anthropic API key from the keychain into the `ANTHROPIC_API_KEY`
-        // env var so the existing env-driven selection sites (the agent driver's
-        // `anthropic_api_backend_key`) honor a keychain-stored key. The keychain wins
-        // over any pre-existing env value (set_var runs after dotenv load), matching the
-        // backend-setting precedence above (keychain/setting > `.env` > default).
-        // Edition 2021, so `set_var` is safe (single-threaded startup).
-        match state
-            .credential_store
-            .get(crate::credentials::ANTHROPIC_API_KEY)
-        {
-            Ok(Some(key)) if !key.trim().is_empty() => {
-                // The one sanctioned production env write (see `clippy.toml`): single-threaded
-                // startup, before any request thread exists, so there is no concurrent reader.
-                #[allow(clippy::disallowed_methods)]
-                std::env::set_var("ANTHROPIC_API_KEY", key);
-            }
-            Ok(_) => {}
-            // A read error here silently leaves the API path keyless with no trace.
-            Err(e) => eprintln!(
-                "[camerata-server] keychain read of ANTHROPIC_API_KEY failed during startup hydration: {e}"
-            ),
-        }
+        // NOTE: the Anthropic API key is deliberately NOT copied into process env here (or
+        // anywhere). Every model client reads it through `credentials::anthropic_api_key`
+        // (credential store first, `ANTHROPIC_API_KEY` env as the fallback) at the moment it
+        // is built, so a key saved in the app takes effect on the next call with no restart
+        // and no process-global env write.
         state
     }
 }
@@ -4614,7 +4598,7 @@ struct RescanAlternativesReq {
 /// run). Routes through the SAME compliance-safety gate as the main audit
 /// (`resolve_backend_for_project` -> `Blocked` refuses with the message; `Api`/`Cli` build the
 /// `Llm` on that EXACT resolved transport) and builds its `Llm` via
-/// `from_env_with_backend_and_ledger`, so this endpoint's spend folds into the same cumulative
+/// `onboard::build_llm` (with the key from `credentials::anthropic_api_key`), so this endpoint's spend folds into the same cumulative
 /// ledger as every other model call.
 ///
 /// Also updates this project's stored `last_scan` in place: the rescanned rules' findings
@@ -4735,9 +4719,12 @@ async fn rescan_alternatives_handler(
     // Same session bookkeeping as `audit_repos`: this rescan re-reads client source into model
     // prompts, so the Claude Code sessions it spawns belong on the inspection entry too.
     let model_sessions = crate::llm::SessionSink::new();
-    let llm =
-        crate::llm::Llm::from_env_with_backend_and_ledger(llm_backend, state.usage_ledger.clone())
-            .with_session_sink(model_sessions.clone());
+    let llm = crate::onboard::build_llm(
+        state.credential_store.as_ref(),
+        llm_backend,
+        Some(state.usage_ledger.clone()),
+    )
+    .with_session_sink(model_sessions.clone());
     let (sources, source_notes) = resolve_local_sources(&state, &project.repos);
     run_notes.extend(source_notes);
 
@@ -5315,8 +5302,10 @@ async fn reconcile_project(
 /// GitHub reachability when a token is set so a 401/403/5xx surfaces as a real
 /// error; integrations being absent is reported as "not configured" (a warning,
 /// not an error, in the UI).
-async fn connections_status() -> Json<crate::connections::ConnectionsReport> {
-    Json(crate::connections::probe().await)
+async fn connections_status(
+    State(state): State<AppState>,
+) -> Json<crate::connections::ConnectionsReport> {
+    Json(crate::connections::probe(state.credential_store.as_ref()).await)
 }
 
 /// Request to scan repo(s) for the brownfield audit. Accepts a SET of repos (a
@@ -5897,6 +5886,7 @@ async fn onboard_audit(
     use futures::FutureExt;
     let outcome = std::panic::AssertUnwindSafe(async move {
         let (mut report, manifest) = crate::onboard::audit_repos(
+            state.credential_store.as_ref(),
             &sources,
             &selected,
             notes,
@@ -7075,6 +7065,7 @@ pub(crate) async fn start_audit_job(
             }
 
             let (mut report, manifest) = crate::onboard::audit_repos(
+                state.credential_store.as_ref(),
                 &sources,
                 &selected,
                 notes,
@@ -10506,8 +10497,8 @@ async fn refresh_model_registry(
 
 /// `POST /api/models/registry/refresh/anthropic` — (re-)fetch the LIVE Anthropic
 /// `/v1/models` catalog using the Anthropic key stored in the OS keychain (or its
-/// `ANTHROPIC_API_KEY` env fallback — see `try_refresh_anthropic_from_store` /
-/// `crate::credentials::ANTHROPIC_API_KEY`). Feature A's manual refresh trigger, mirroring
+/// `ANTHROPIC_API_KEY` env fallback, both via `credentials::anthropic_api_key` — see
+/// `try_refresh_anthropic_from_store`). Feature A's manual refresh trigger, mirroring
 /// [`refresh_model_registry`] for OpenRouter. Returns `{ attempted: false,
 /// anthropic_count: 0 }` when no Anthropic key is present; on any fetch error the cache is
 /// set to empty (fail-soft) and the returned registry falls back to the hardcoded
@@ -10797,23 +10788,13 @@ async fn usage(State(state): State<AppState>) -> Json<crate::usage_ledger::Usage
 
 // ── local workspace (checkouts) ───────────────────────────────────────────────
 
-/// Whether an Anthropic API key is available for the `api` backend. The key can live in
-/// EITHER the keychain (the `anthropic_api_key` credential) OR the `ANTHROPIC_API_KEY`
-/// env var. Startup + on-save hydration mirrors the keychain into the env var, so the env
-/// check usually suffices; the keychain is checked too so this is correct even before any
-/// hydration has run.
-fn anthropic_api_key_present(store: &dyn crate::credentials::CredentialStore) -> bool {
-    // Keychain-stored key.
-    if let Ok(Some(k)) = store.get(crate::credentials::ANTHROPIC_API_KEY) {
-        if !k.trim().is_empty() {
-            return true;
-        }
-    }
-    // Env var (back-compat: existing dotenv/CI setups keep working).
-    std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false)
+/// Whether an Anthropic API key is available for the `api` backend: exactly whether
+/// [`crate::credentials::anthropic_api_key`] (the one resolver every model client uses: the key
+/// saved in the app first, the `ANTHROPIC_API_KEY` env var as the fallback) finds one. The gate
+/// and the clients share that function, so "the UI says the key is present" and "the call has
+/// the key" cannot disagree.
+pub(crate) fn anthropic_api_key_present(store: &dyn crate::credentials::CredentialStore) -> bool {
+    crate::credentials::anthropic_api_key(store).is_some()
 }
 
 /// Whether the model-registry picker should be served the LIVE Anthropic `/v1/models`
@@ -11065,10 +11046,12 @@ async fn set_credential(
     // freshly-saved key took effect for the `api` backend without a restart. That mutated
     // process-global env from a request-handler thread while worker threads read the same var
     // via `getenv` — undefined behaviour on POSIX, and the concurrent writer made the
-    // credential env-fallback test flaky. The env write is gone: the driver-selection path
-    // now reads the Anthropic key from the credential store (this same store) with an env
-    // fallback for back-compat, so a freshly-saved key takes effect without a restart AND
-    // without touching process env. See `anthropic_api_backend_key`.
+    // credential env-fallback test flaky. The env write is gone, and nothing needs it:
+    // EVERY model client (audit/rescan `Llm`, chat and fleet agent drivers, the live model
+    // list, the gate) reads the key from this same store through
+    // `credentials::anthropic_api_key` when it is built (env only as the fallback), so a
+    // freshly-saved or replaced key takes effect on the next call without a restart AND
+    // without touching process env.
     // Return the masked form so the UI can confirm what was stored.
     let masked = state
         .credential_store
@@ -12429,7 +12412,8 @@ async fn uow_author(
             // Token-less / LLM-off: don't crash; record a clear note and keep the draft.
             let note = format!(
                 "AI drafting is unavailable right now ({}). Your message was saved; configure \
-                 a model (CLI or ANTHROPIC_API_KEY) and try again.",
+                 a model (the Claude Code CLI, or an Anthropic API key added in the app under \
+                 Settings, Chat backend, API, or set as ANTHROPIC_API_KEY) and try again.",
                 e
             );
             (
@@ -13251,7 +13235,8 @@ async fn design_author(
         Err(e) => {
             let note = format!(
                 "AI drafting is unavailable right now ({}). Your message was saved; \
-                 configure a model (CLI or ANTHROPIC_API_KEY) and try again.",
+                 configure a model (the Claude Code CLI, or an Anthropic API key added in the app \
+                 under Settings, Chat backend, API, or set as ANTHROPIC_API_KEY) and try again.",
                 e
             );
             (
@@ -25777,6 +25762,7 @@ mod tests {
         );
 
         let (mut report, _manifest) = crate::onboard::audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &selected,
             Vec::new(),
@@ -28245,6 +28231,45 @@ mod tests {
             Ok("sk-ant-sentinel"),
             "the handler must not mutate ANTHROPIC_API_KEY"
         );
+    }
+
+    /// The defect this guards: a key saved in the running app passed the gate but the audit /
+    /// rescan `Llm` (which read ONLY env) failed with "key unset" until a restart. Saving through
+    /// the real endpoint, with env unset, must make the gate say present AND the very next `Llm`
+    /// the server builds carry that key; replacing the key must change the next `Llm` too.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn key_saved_through_the_endpoint_reaches_the_gate_and_the_next_llm() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let llm_key = |state: &AppState| {
+            crate::onboard::build_llm(
+                state.credential_store.as_ref(),
+                crate::llm::Backend::Api,
+                Some(state.usage_ledger.clone()),
+            )
+            .api_key()
+            .map(str::to_string)
+        };
+        assert!(!anthropic_api_key_present(state.credential_store.as_ref()));
+        assert_eq!(llm_key(&state), None);
+
+        for key in ["sk-ant-first", "sk-ant-replacement"] {
+            let resp = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/credentials/anthropic_api_key")
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"value":"{key}"}}"#)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(anthropic_api_key_present(state.credential_store.as_ref()));
+            assert_eq!(llm_key(&state).as_deref(), Some(key));
+        }
     }
 
     /// `AppState::github_token()` prefers the credential store over the env var.

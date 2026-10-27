@@ -271,6 +271,7 @@ async fn scan_with_corpus(corpus_dir: &Path, repo_dir: &Path, selected: Vec<Sele
 
     let sources = vec![("e2e/w13".to_string(), repo_dir.to_path_buf())];
     let (mut report, _manifest) = onboard::audit_repos(
+        &camerata_server::credentials::MemoryCredentialStore::new(),
         &sources,
         &selected,
         Vec::new(),

@@ -55,7 +55,7 @@ pub struct Settings {
     /// The GLOBAL CHAT backend (`docs/design/2026-09-22_per-project-backend.md`): used
     /// ONLY by the project-less chatbox assistant — nothing project-related reads this.
     /// `Cli` (the default) spawns the logged-in Claude Code CLI (no API key); `Api` uses the
-    /// Anthropic Messages API (`ANTHROPIC_API_KEY`). No env fallback and no cross-setting
+    /// Anthropic Messages API (the key saved in the app, `ANTHROPIC_API_KEY` as fallback). No env fallback for the backend choice and no cross-setting
     /// override: this is the assistant's ENTIRE backend input.
     ///
     /// Renamed from the old `llm_backend: Option<String>` field, which used to ALSO govern

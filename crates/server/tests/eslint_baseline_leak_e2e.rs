@@ -82,6 +82,7 @@ async fn a_scan_that_selects_only_the_hooks_rules_reports_no_baseline_eslint_row
     ]);
     let sources = vec![("e2e/baseline".to_string(), root.to_path_buf())];
     let (mut report, _manifest) = onboard::audit_repos(
+        &camerata_server::credentials::MemoryCredentialStore::new(),
         &sources,
         &rules,
         Vec::new(),

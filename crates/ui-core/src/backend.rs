@@ -13,7 +13,7 @@
 //!   project-less chat assistant. Set via `POST /api/settings/chat-backend`.
 //!
 //! Both resolve the same way: `Cli` spawns the logged-in Claude Code CLI (no API key needed);
-//! `Api` calls the Anthropic Messages API and requires `ANTHROPIC_API_KEY`. A project (or the
+//! `Api` calls the Anthropic Messages API and requires an Anthropic key (saved in the app, or `ANTHROPIC_API_KEY` as the fallback). A project (or the
 //! chat) set to `Api` with no key configured is BLOCKED, not silently downgraded to `Cli` — so
 //! the UI must warn (not block interaction) when that combination is selected.
 

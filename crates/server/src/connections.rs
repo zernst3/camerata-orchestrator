@@ -242,7 +242,11 @@ pub(crate) fn parse_oauth_scopes_header(headers: &reqwest::header::HeaderMap) ->
 /// Probe all integrations. Does a single cheap GitHub reachability call when a
 /// token is present (`GET /user`), surfacing the authenticated login, granted
 /// scopes, and a typed error category when the token is wrong/expired/missing scope.
-pub async fn probe() -> ConnectionsReport {
+///
+/// `creds` is the credential store the Anthropic key presence is read from (the same
+/// `credentials::anthropic_api_key` resolver every model call uses, so this report never
+/// disagrees with what a call will actually find).
+pub async fn probe(creds: &dyn crate::credentials::CredentialStore) -> ConnectionsReport {
     let mut connections = Vec::new();
 
     // ── GitHub: code host (repos) + work tracker (issues/projects), one token. ──
@@ -284,7 +288,7 @@ pub async fn probe() -> ConnectionsReport {
 
     // ── Claude agent: CLI on PATH, else an API key (informational). ──
     let claude_cli = claude_on_path();
-    let api_key = env_nonempty("ANTHROPIC_API_KEY").is_some();
+    let api_key = crate::credentials::anthropic_api_key(creds).is_some();
     let (a_configured, a_mode) = if claude_cli {
         (true, Some("cli".to_string()))
     } else if api_key {

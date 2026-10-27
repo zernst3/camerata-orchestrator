@@ -1260,11 +1260,35 @@ pub async fn scan_repos(
     }
     report
 }
+/// Build the real `Llm` for an AI audit / rescan on the given transport, with the Anthropic key
+/// read from `creds` RIGHT NOW (`credentials::anthropic_api_key`: the key saved in the app
+/// first, the `ANTHROPIC_API_KEY` env var only as the fallback). Never cached: every audit
+/// builds a fresh client, so a key saved or replaced in the app is used by the next one with no
+/// restart. The one constructor both the audit and the rescan go through.
+pub fn build_llm(
+    creds: &dyn crate::credentials::CredentialStore,
+    backend: crate::llm::Backend,
+    ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
+) -> crate::llm::Llm {
+    let api_key = crate::credentials::anthropic_api_key(creds);
+    match ledger {
+        Some(l) => crate::llm::Llm::for_backend_and_ledger(backend, api_key, l),
+        None => crate::llm::Llm::for_backend(backend, api_key),
+    }
+}
+
 /// The production entry point of the brownfield audit: builds the real `Llm` for the resolved
 /// transport (with the cockpit's cumulative usage ledger attached when given) and runs
-/// [`audit_repos_with_llm`]. The signature, and so every caller, is unchanged.
+/// [`audit_repos_with_llm`].
+///
+/// `creds` is the credential store the Anthropic key is read from AT THE MOMENT the `Llm` is
+/// built here ([`crate::credentials::anthropic_api_key`]: the key saved in the app first, the
+/// `ANTHROPIC_API_KEY` env var only as the fallback), so a key saved or replaced in the app
+/// takes effect on the next audit with no restart. The server passes its live store and the
+/// CLI passes the real Keychain store.
 #[allow(clippy::too_many_arguments)]
 pub async fn audit_repos(
+    creds: &dyn crate::credentials::CredentialStore,
     sources: &[(String, std::path::PathBuf)],
     selected: &[SelectedRule],
     extra_notes: Vec<String>,
@@ -1296,11 +1320,7 @@ pub async fn audit_repos(
     // session file; the sink remembers each session id so source deletion can remove exactly
     // those files. The Api backend never spawns `claude`, so it records nothing.
     let sessions = crate::llm::SessionSink::new();
-    let llm = match ledger {
-        Some(l) => crate::llm::Llm::from_env_with_backend_and_ledger(llm_backend, l),
-        None => crate::llm::Llm::from_env_with_backend(llm_backend),
-    }
-    .with_session_sink(sessions.clone());
+    let llm = build_llm(creds, llm_backend, ledger).with_session_sink(sessions.clone());
     let (mut report, manifest) = audit_repos_with_llm(
         &llm,
         sources,
@@ -4658,6 +4678,7 @@ mod tests {
             repos: Vec::new(),
         }];
         let (report, _manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &selected,
             Vec::new(),
@@ -4711,6 +4732,7 @@ mod tests {
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, _manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &[],        // no semantic rules
             Vec::new(), // no extra notes
@@ -4758,6 +4780,7 @@ mod tests {
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, _manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &[],
             Vec::new(),
@@ -4810,6 +4833,7 @@ mod tests {
         let jobs = crate::jobs::JobStore::new();
         let jid = jobs.create("audit", None);
         let _ = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &[],
             Vec::new(),
@@ -4867,6 +4891,7 @@ mod tests {
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &[],
             Vec::new(),
@@ -4931,6 +4956,7 @@ mod tests {
     async fn blocked_resolution_ai_only_aborts_with_reason_surfaced() {
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &[],
             Vec::new(),
@@ -5000,6 +5026,7 @@ mod tests {
             .finish();
         prior.version = 1;
         let (_, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &[],
             Vec::new(),
@@ -5042,6 +5069,7 @@ mod tests {
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, _manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &[],
             Vec::new(),
@@ -5101,6 +5129,7 @@ mod tests {
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (_report, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &[],
             Vec::new(),
@@ -5146,6 +5175,7 @@ mod tests {
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &[],
             Vec::new(),
@@ -5208,6 +5238,7 @@ mod tests {
         let prior = b.finish();
 
         let (report, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &[], // matches the empty rule selection used to build `prior` above
             Vec::new(),
@@ -5285,6 +5316,7 @@ mod tests {
         let prior = b.finish();
 
         let (report, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &[],
             Vec::new(),
@@ -5358,6 +5390,7 @@ mod tests {
             let prior = b.finish();
 
             let (report, manifest) = audit_repos(
+                &crate::credentials::MemoryCredentialStore::new(),
                 &sources,
                 &[],
                 Vec::new(),
@@ -5427,6 +5460,7 @@ mod tests {
         );
 
         let (report, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &[],
             Vec::new(),
