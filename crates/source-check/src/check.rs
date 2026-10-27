@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::diff::{diff_sections, DiffLine};
 use crate::fetch::{FetchOutcome, Fetcher};
 use crate::section::{extract_section, hash_text, split_fragment, SectionLookup};
-use crate::sidecar::{cap_excerpt, LinkState, SourceHashes, SourceRecord, EXCERPT_CAP_CHARS};
+use crate::sidecar::{
+    cap_excerpt, LinkState, PendingChange, SourceHashes, SourceRecord, EXCERPT_CAP_CHARS,
+};
 
 /// Politeness and clock settings for one run.
 #[derive(Debug, Clone)]
@@ -52,16 +54,19 @@ pub struct LinkFinding {
     pub rules: Vec<String>,
 }
 
-/// A cited section whose text no longer matches the last run.
+/// A cited section whose text differs from the last ACCEPTED text and has not been reviewed. It
+/// is listed on every run until it is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SectionChange {
     /// The cited URL, anchor included.
     pub url: String,
     /// The rules that cite it, sorted.
     pub rules: Vec<String>,
-    /// Hash at the last run.
+    /// Date (YYYY-MM-DD) of the first run that saw the section differ.
+    pub first_seen: String,
+    /// Hash of the last accepted text.
     pub old_hash: String,
-    /// Hash now.
+    /// Hash of the newest text seen.
     pub new_hash: String,
     /// What was removed and added, in reading order.
     pub diff: Vec<DiffLine>,
@@ -104,7 +109,8 @@ pub struct Counts {
     pub sections_checked: usize,
     /// Sections whose text matches the last run.
     pub sections_unchanged: usize,
-    /// Sections whose text differs from the last run.
+    /// Sections whose text differs from the last accepted text and are not yet reviewed
+    /// (including ones carried over from earlier runs, or whose page did not answer this run).
     pub sections_changed: usize,
     /// Sections seen for the first time (a baseline was recorded, nothing to compare).
     pub sections_new_baseline: usize,
@@ -121,7 +127,7 @@ pub struct SourceCheckReport {
     pub counts: Counts,
     /// URLs the server says are gone.
     pub dead: Vec<LinkFinding>,
-    /// Sections that changed since the last run.
+    /// Sections changed since the last accepted text and not yet reviewed.
     pub changed: Vec<SectionChange>,
     /// Rules with no `[[sources]]` at all (ungrounded).
     pub rules_without_source: Vec<RuleRef>,
@@ -288,11 +294,7 @@ impl Judge<'_> {
                 });
                 // A page that is down today keeps its section baseline for when it returns.
                 let mut record = blank_record(self.today, LinkState::Dead);
-                if let Some(prev) = prev {
-                    record.section_hash.clone_from(&prev.section_hash);
-                    record.section_excerpt.clone_from(&prev.section_excerpt);
-                    record.last_changed.clone_from(&prev.last_changed);
-                }
+                carry_section(&mut record, prev);
                 self.next.insert(url.to_string(), record);
             }
             FetchOutcome::Ok {
@@ -321,11 +323,7 @@ impl Judge<'_> {
                 } else {
                     counts.ok += 1;
                 }
-                if let Some(prev) = prev {
-                    record.section_hash.clone_from(&prev.section_hash);
-                    record.section_excerpt.clone_from(&prev.section_excerpt);
-                    record.last_changed.clone_from(&prev.last_changed);
-                }
+                carry_section(&mut record, prev);
                 if let (Some(anchor), Some(body)) = (fragment, body) {
                     self.judge_section(url, anchor, body, &rules, prev, &mut record);
                 }
@@ -354,28 +352,31 @@ impl Judge<'_> {
             return; // the old baseline stays in `record`
         };
         let new_hash = hash_text(&text);
-        let old_hash = prev.and_then(|p| p.section_hash.clone());
-        match old_hash {
-            None => counts.sections_new_baseline += 1,
-            Some(old) if old == new_hash => counts.sections_unchanged += 1,
-            Some(old) => {
-                counts.sections_changed += 1;
-                let old_excerpt = prev
-                    .and_then(|p| p.section_excerpt.as_deref())
-                    .unwrap_or_default();
-                self.report.changed.push(SectionChange {
-                    url: url.to_string(),
-                    rules: rules.to_vec(),
-                    old_hash: old,
-                    new_hash: new_hash.clone(),
-                    diff: diff_sections(old_excerpt, &cap_excerpt(&text)),
-                    beyond_excerpt: text.chars().count() > EXCERPT_CAP_CHARS,
+        // `record` already carries the accepted baseline (and any pending change) from `prev`.
+        match record.section_hash.clone() {
+            None => {
+                counts.sections_new_baseline += 1;
+                record.section_hash = Some(new_hash);
+                record.section_excerpt = Some(cap_excerpt(&text));
+            }
+            Some(baseline) if baseline == new_hash => {
+                // Same as the accepted text, including a page that reverted a pending change.
+                counts.sections_unchanged += 1;
+                record.pending = None;
+            }
+            Some(_) => {
+                // Differs from the accepted baseline: record it as pending and leave the
+                // baseline alone. `run_check` lists it on the report.
+                let first_seen = prev
+                    .and_then(|p| p.pending.as_ref())
+                    .map_or_else(|| self.today.to_string(), |p| p.first_seen.clone());
+                record.pending = Some(PendingChange {
+                    hash: new_hash,
+                    excerpt: cap_excerpt(&text),
+                    first_seen,
                 });
-                record.last_changed = Some(self.today.to_string());
             }
         }
-        record.section_hash = Some(new_hash);
-        record.section_excerpt = Some(cap_excerpt(&text));
     }
 }
 
@@ -386,7 +387,19 @@ fn blank_record(today: &str, link: LinkState) -> SourceRecord {
         redirected_to: None,
         section_hash: None,
         section_excerpt: None,
-        last_changed: None,
+        pending: None,
+        accepted: None,
+    }
+}
+
+/// Carry the section review state (accepted baseline, pending change, acceptance) from the
+/// previous record, so a link problem or a missing anchor never erases it.
+fn carry_section(record: &mut SourceRecord, prev: Option<&SourceRecord>) {
+    if let Some(prev) = prev {
+        record.section_hash.clone_from(&prev.section_hash);
+        record.section_excerpt.clone_from(&prev.section_excerpt);
+        record.pending.clone_from(&prev.pending);
+        record.accepted.clone_from(&prev.accepted);
     }
 }
 
@@ -443,6 +456,27 @@ pub async fn run_check(
     let Judge {
         mut report, next, ..
     } = judge;
+    // Every section with an unreviewed change is listed, whether or not the page answered this
+    // run: a change stays on the report until someone accepts it.
+    for (url, record) in &next {
+        let Some(pending) = &record.pending else {
+            continue;
+        };
+        let citing = collected.urls.get(url).map(|r| r.iter().cloned().collect());
+        report.counts.sections_changed += 1;
+        report.changed.push(SectionChange {
+            url: url.clone(),
+            rules: citing.unwrap_or_default(),
+            first_seen: pending.first_seen.clone(),
+            old_hash: record.section_hash.clone().unwrap_or_default(),
+            new_hash: pending.hash.clone(),
+            diff: diff_sections(
+                record.section_excerpt.as_deref().unwrap_or_default(),
+                &pending.excerpt,
+            ),
+            beyond_excerpt: pending.excerpt.chars().count() >= EXCERPT_CAP_CHARS,
+        });
+    }
     report.dead.sort_by(|a, b| a.url.cmp(&b.url));
     report.redirected.sort_by(|a, b| a.url.cmp(&b.url));
     report.unreachable.sort_by(|a, b| a.url.cmp(&b.url));

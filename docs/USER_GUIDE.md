@@ -1506,7 +1506,7 @@ For every `[[sources]]` URL in every rule it records one of four outcomes:
   never a verdict on the page; run again before acting on it.
 
 When a rule cites an anchor (`...#section`), the section's text is normalised, hashed, and compared with
-the hash from the last run. A changed section is shown as removed and added sentences. A cited anchor the
+the last ACCEPTED text. A changed section is shown as removed and added sentences. A cited anchor the
 page no longer contains is listed separately (some pages build their content with JavaScript, so check
 before assuming the section was removed). Sources that are repo documents rather than web URLs are
 counted but not fetched. The report ends with the rules that have no source at all.
@@ -1515,6 +1515,22 @@ The hashes live in the sidecar `crates/rules/CORPUS_SOURCE_HASHES.json`, never i
 run only records baselines; changes show from the second run on. Commit the sidecar after a run so the
 next one has something to compare against. Requests are polite: one at a time per host, a pause between
 them (`--delay-ms`, default 1500), a timeout, and a user agent that names the tool.
+
+**A change does not clear itself.** The first run that sees a section differ records the new text as
+pending and keeps the old baseline, so the section is listed as "changed, not yet reviewed" on every
+later run, even if nobody read the first report (and even on a run where the page did not answer). It
+clears only when you accept it after reading the diff:
+
+```
+camerata corpus check-sources --accept "https://example.com/guide#section"   # repeatable
+camerata corpus check-sources --accept-all                                   # after reviewing the whole report
+camerata corpus check-sources --accept-all --by "Zach"                       # name recorded (default: $USER)
+```
+
+Accepting makes no requests. The pending text becomes the new baseline, and the sidecar records who
+accepted and on what date. Commit the sidecar afterward. If the page goes back to the accepted text on
+its own, the flag clears without any action. A client export that reads this data treats an unaccepted
+change as lowered confidence with no time limit; the 100-day window starts at the accept date.
 
 **Part B, quarterly: the judgment pass.** A model session with web access, run by hand, with Part A's
 latest report as its input. Steps:
@@ -1530,7 +1546,9 @@ latest report as its input. Steps:
 4. The session's output is a proposed-edits file, one entry per rule: a new source, `superseded_since`
    with `current_recommendation`, or a revised directive. It is a diff file only. Nothing is applied.
 5. Review it rule by rule and give the go for each. Apply approved edits as normal rule changes (bump
-   the rule's `version`, run `camerata corpus lock`, commit).
+   the rule's `version`, run `camerata corpus lock`, commit). For each section change you have now
+   reviewed (whether or not it led to an edit), run `camerata corpus check-sources --accept <url#anchor>`
+   so it stops being listed.
 6. When a domain is reviewed and you are confident it is current, run
    `camerata corpus confirm <domain> <date>` and commit `CORPUS_FRESHNESS.toml`. Running the check never
    advances that watermark; only your confirmation does.

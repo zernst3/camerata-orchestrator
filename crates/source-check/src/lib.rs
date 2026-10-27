@@ -33,6 +33,6 @@ pub use section::{
     extract_section, hash_text, normalise_whitespace, split_fragment, SectionLookup,
 };
 pub use sidecar::{
-    cap_excerpt, sidecar_path, LinkState, SourceHashes, SourceRecord, EXCERPT_CAP_CHARS,
-    SIDECAR_SCHEMA_VERSION,
+    cap_excerpt, sidecar_path, AcceptTarget, Acceptance, LinkState, PendingChange, SourceHashes,
+    SourceRecord, EXCERPT_CAP_CHARS, SIDECAR_SCHEMA_VERSION,
 };

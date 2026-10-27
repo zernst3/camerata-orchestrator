@@ -3,7 +3,11 @@
 //!
 //! It is also what a later export reads, so it is self-sufficient: the last definitive link state,
 //! the last time the URL was checked, and (for a URL with an anchor) the section hash, a capped
-//! excerpt of the text for the next diff, and when the hash last moved.
+//! excerpt of the text for the next diff, and the review state of a changed section.
+//!
+//! A changed section is never silently re-baselined. The old baseline stays, the new text waits
+//! in [`SourceRecord::pending`], and the section is reported as changed on every run until a
+//! person accepts it ([`SourceHashes::accept`]), which records who and when.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -46,9 +50,42 @@ pub struct SourceRecord {
     /// The section's normalised text, capped, kept so the next change can be shown as a diff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section_excerpt: Option<String>,
-    /// Date the section hash last differed from the one before it. `None` until it first moves.
+    /// A change seen since the baseline that nobody has accepted yet. While this is set the
+    /// baseline above is the last ACCEPTED text and the section stays flagged on every run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_changed: Option<String>,
+    pub pending: Option<PendingChange>,
+    /// Who accepted the most recent change, and when. `None` until a change is first accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<Acceptance>,
+}
+
+/// New section text that differs from the accepted baseline and has not been reviewed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingChange {
+    /// `sha256:<hex>` of the new normalised text.
+    pub hash: String,
+    /// The new text, capped.
+    pub excerpt: String,
+    /// Date (YYYY-MM-DD) of the first run that saw the section differ from the baseline.
+    pub first_seen: String,
+}
+
+/// A recorded acceptance of a changed section.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Acceptance {
+    /// Date (YYYY-MM-DD) the change was accepted.
+    pub on: String,
+    /// Who accepted it, as given to the accept command.
+    pub by: String,
+}
+
+/// Which changed sections to accept.
+#[derive(Debug, Clone, Copy)]
+pub enum AcceptTarget<'a> {
+    /// Exactly these cited URLs (anchor included). Each must have a pending change.
+    Urls(&'a [String]),
+    /// Every section with a pending change (for a report that was reviewed in full).
+    All,
 }
 
 /// The whole sidecar file: records keyed by the URL exactly as a rule cites it (fragment kept).
@@ -93,6 +130,54 @@ impl SourceHashes {
         }
     }
 
+    /// Accept pending changes: the pending text becomes the baseline, the pending marker clears,
+    /// and `by` / `today` are recorded. Returns the accepted URLs. For [`AcceptTarget::Urls`] it
+    /// is all or nothing: if any URL is unknown or has no pending change, nothing is accepted and
+    /// the error names each one.
+    pub fn accept(
+        &mut self,
+        target: AcceptTarget<'_>,
+        today: &str,
+        by: &str,
+    ) -> Result<Vec<String>> {
+        let urls: Vec<String> = match target {
+            AcceptTarget::All => self
+                .entries
+                .iter()
+                .filter(|(_, r)| r.pending.is_some())
+                .map(|(u, _)| u.clone())
+                .collect(),
+            AcceptTarget::Urls(list) => {
+                let bad: Vec<&str> = list
+                    .iter()
+                    .filter(|u| self.entries.get(*u).is_none_or(|r| r.pending.is_none()))
+                    .map(String::as_str)
+                    .collect();
+                if !bad.is_empty() {
+                    anyhow::bail!(
+                        "nothing to accept for: {} (not in the sidecar, or no unreviewed change). \
+                         Nothing was accepted.",
+                        bad.join(", ")
+                    );
+                }
+                list.to_vec()
+            }
+        };
+        for url in &urls {
+            if let Some(record) = self.entries.get_mut(url) {
+                if let Some(pending) = record.pending.take() {
+                    record.section_hash = Some(pending.hash);
+                    record.section_excerpt = Some(pending.excerpt);
+                    record.accepted = Some(Acceptance {
+                        on: today.to_string(),
+                        by: by.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(urls)
+    }
+
     /// Write the sidecar to `path` as pretty JSON with a trailing newline.
     pub fn save(&self, path: &Path) -> Result<()> {
         let mut text = serde_json::to_string_pretty(self)?;
@@ -129,7 +214,15 @@ mod tests {
                 redirected_to: Some("https://example.com/b".to_string()),
                 section_hash: Some("sha256:abc".to_string()),
                 section_excerpt: Some("Some text.".to_string()),
-                last_changed: Some("2026-09-01".to_string()),
+                pending: Some(PendingChange {
+                    hash: "sha256:def".to_string(),
+                    excerpt: "Some new text.".to_string(),
+                    first_seen: "2026-10-01".to_string(),
+                }),
+                accepted: Some(Acceptance {
+                    on: "2026-09-01".to_string(),
+                    by: "zach".to_string(),
+                }),
             },
         );
         s.entries.insert(
@@ -140,7 +233,8 @@ mod tests {
                 redirected_to: None,
                 section_hash: None,
                 section_excerpt: None,
-                last_changed: None,
+                pending: None,
+                accepted: None,
             },
         );
         s
@@ -167,6 +261,64 @@ mod tests {
             .expect("resave");
         assert_eq!(first, std::fs::read_to_string(&path).expect("read"));
         assert!(first.ends_with("}\n"));
+    }
+
+    #[test]
+    fn accept_promotes_pending_to_baseline_and_records_who_and_when() {
+        let mut s = sample();
+        let url = "https://example.com/a#sec".to_string();
+        let done = s
+            .accept(
+                AcceptTarget::Urls(std::slice::from_ref(&url)),
+                "2026-11-02",
+                "pat",
+            )
+            .expect("accept");
+        assert_eq!(done, vec![url.clone()]);
+        let r = &s.entries[&url];
+        assert_eq!(r.section_hash.as_deref(), Some("sha256:def"));
+        assert_eq!(r.section_excerpt.as_deref(), Some("Some new text."));
+        assert!(r.pending.is_none());
+        assert_eq!(
+            r.accepted,
+            Some(Acceptance {
+                on: "2026-11-02".to_string(),
+                by: "pat".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn accept_by_url_is_all_or_nothing() {
+        let mut s = sample();
+        let before = s.clone();
+        let err = s
+            .accept(
+                AcceptTarget::Urls(&[
+                    "https://example.com/a#sec".to_string(),
+                    "https://example.com/plain".to_string(),
+                ]),
+                "2026-11-02",
+                "pat",
+            )
+            .expect_err("plain has no pending change");
+        assert!(err.to_string().contains("https://example.com/plain"));
+        assert_eq!(s, before, "a failed accept changes nothing");
+    }
+
+    #[test]
+    fn accept_all_takes_every_pending_change_and_nothing_else() {
+        let mut s = sample();
+        let done = s
+            .accept(AcceptTarget::All, "2026-11-02", "pat")
+            .expect("accept");
+        assert_eq!(done, vec!["https://example.com/a#sec".to_string()]);
+        assert!(s.entries["https://example.com/plain"].accepted.is_none());
+        // Nothing pending any more: accept-all is now a no-op, not an error.
+        assert!(s
+            .accept(AcceptTarget::All, "2026-11-03", "pat")
+            .expect("accept")
+            .is_empty());
     }
 
     #[test]

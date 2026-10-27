@@ -479,7 +479,10 @@ Slotted RIGHT AFTER the delete/re-fetch blocker, blocking items first, all befor
   sidecar `crates/rules/CORPUS_SOURCE_HASHES.json`, text + JSON report. Part B is a runbook in
   `docs/USER_GUIDE.md` §9. NOT yet wired into exports: the export builder calls
   `camerata_source_check::source_confidence(rule, &sidecar, today, DEFAULT_CHANGED_WINDOW_DAYS)`
-  per rule (lowered confidence on `lowered`, "Source re-checked <date>" from `.line()`).
+  per rule (lowered confidence on `lowered`, "Source re-checked <date>" from `.line()`). A changed
+  section is never silently re-baselined: it stays "changed, not yet reviewed" on every run until
+  `--accept <url#anchor>` / `--accept-all` (who and when recorded in the sidecar); an unaccepted
+  change lowers confidence with no time limit, and the 100-day window runs from the accept date.
 - **22g (handoff item 16, protected: corpus, Zach already asked): clean three showcase rule files**
   of internal notes for the website overlay: SEC-NO-HARDCODED-SECRETS-1 (drop the internal
   docs/ENFORCEMENT.md source or relabel it), ARCH-IDEMPOTENCY-KEYS-1 (replace the boilerplate

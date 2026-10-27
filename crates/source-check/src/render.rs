@@ -69,7 +69,8 @@ pub fn render_text(report: &SourceCheckReport) -> String {
     );
     let _ = writeln!(
         out,
-        "  Cited sections: {} (unchanged {}, changed {}, new baseline {}, anchor not found {})",
+        "  Cited sections: {} (unchanged {}, changed and not yet reviewed {}, new baseline {}, \
+         anchor not found {})",
         c.sections_checked,
         c.sections_unchanged,
         c.sections_changed,
@@ -80,10 +81,16 @@ pub fn render_text(report: &SourceCheckReport) -> String {
     write_links(&mut out, "DEAD LINKS", &report.dead);
 
     if !report.changed.is_empty() {
-        let _ = writeln!(out, "\nCHANGED SECTIONS ({})", report.changed.len());
+        let _ = writeln!(
+            out,
+            "\nCHANGED SECTIONS, NOT YET REVIEWED ({}; listed every run until accepted with \
+             `camerata corpus check-sources --accept <url>` or `--accept-all`)",
+            report.changed.len()
+        );
         for ch in &report.changed {
             let _ = writeln!(out, "  {}", ch.url);
             let _ = writeln!(out, "    cited by: {}", ch.rules.join(", "));
+            let _ = writeln!(out, "    first seen changed: {}", ch.first_seen);
             let _ = writeln!(out, "    {} -> {}", ch.old_hash, ch.new_hash);
             if ch.diff.is_empty() {
                 let _ = writeln!(

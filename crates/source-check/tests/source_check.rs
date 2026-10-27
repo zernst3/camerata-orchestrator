@@ -10,8 +10,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use camerata_rules::{bare_rule, RuleSet, RuleSource};
 use camerata_source_check::{
-    render_json, render_text, run_check, source_confidence, CheckConfig, DiffOp, FetchOutcome,
-    Fetcher, HttpFetcher, LinkState, SourceCheckReport, SourceHashes, DEFAULT_CHANGED_WINDOW_DAYS,
+    render_json, render_text, run_check, source_confidence, AcceptTarget, CheckConfig, DiffOp,
+    FetchOutcome, Fetcher, HttpFetcher, LinkState, SourceCheckReport, SourceHashes,
+    DEFAULT_CHANGED_WINDOW_DAYS,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -411,11 +412,207 @@ async fn section_hash_is_baselined_then_unchanged_then_changed_with_a_diff() {
     assert!(removed[0].text.contains("24 hours"));
     assert!(added[0].text.contains("72 hours"));
     assert!(render_text(&r3).contains("+ Reject duplicates within 72 hours."));
+    assert_eq!(change.first_seen, "2026-12-01");
+    let record = &s3.entries[url];
     assert_eq!(
-        s3.entries[url].last_changed.as_deref(),
-        Some("2026-12-01"),
-        "the sidecar remembers when the section last moved"
+        record.section_hash.as_deref(),
+        Some(change.old_hash.as_str()),
+        "the accepted baseline is untouched by an unreviewed change"
     );
+    assert_eq!(
+        record.pending.as_ref().map(|p| p.hash.as_str()),
+        Some(change.new_hash.as_str())
+    );
+}
+
+/// Run one check against the sidecar on disk, save the result, and return the report.
+async fn run_and_save(
+    set: &RuleSet,
+    fetcher: &MapFetcher,
+    sidecar: &std::path::Path,
+    today: &str,
+) -> SourceCheckReport {
+    let (report, next) = run_check(
+        set,
+        fetcher,
+        &SourceHashes::load(sidecar).unwrap(),
+        &cfg(today),
+    )
+    .await;
+    next.save(sidecar).unwrap();
+    report
+}
+
+const GUIDE: &str = "https://docs.example/guide";
+const CITED: &str = "https://docs.example/guide#idem";
+
+/// A sidecar with the cited section baselined on PAGE_V1, then PAGE_V2 seen once (run on
+/// 2026-12-01), so the change is pending.
+async fn pending_change_fixture() -> (RuleSet, MapFetcher, tempfile::TempDir, std::path::PathBuf) {
+    let set = rules(&[("R-IDEM", &[CITED])]);
+    let fetcher = MapFetcher::new(&[(GUIDE, ok_page(PAGE_V1))]);
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar = dir.path().join("hashes.json");
+    run_and_save(&set, &fetcher, &sidecar, "2026-10-01").await;
+    fetcher.set(GUIDE, ok_page(PAGE_V2));
+    let r = run_and_save(&set, &fetcher, &sidecar, "2026-12-01").await;
+    assert_eq!(r.counts.sections_changed, 1);
+    (set, fetcher, dir, sidecar)
+}
+
+#[tokio::test]
+async fn a_change_stays_flagged_on_every_run_until_accepted() {
+    let (set, fetcher, _dir, sidecar) = pending_change_fixture().await;
+    let baseline = SourceHashes::load(&sidecar).unwrap().entries[CITED]
+        .section_hash
+        .clone();
+
+    // Two more runs with the page unchanged since the first sighting: still changed, same diff
+    // against the ORIGINAL accepted text, and the first-seen date does not move.
+    for day in ["2027-01-05", "2027-02-09"] {
+        let r = run_and_save(&set, &fetcher, &sidecar, day).await;
+        assert_eq!(r.counts.sections_changed, 1, "run on {day}");
+        assert_eq!(r.counts.sections_unchanged, 0);
+        assert_eq!(r.changed[0].first_seen, "2026-12-01");
+        assert!(r.changed[0]
+            .diff
+            .iter()
+            .any(|d| d.op == DiffOp::Removed && d.text.contains("24 hours")));
+        assert!(render_text(&r).contains("CHANGED SECTIONS, NOT YET REVIEWED"));
+        assert_eq!(
+            SourceHashes::load(&sidecar).unwrap().entries[CITED].section_hash,
+            baseline,
+            "the baseline never moves on its own"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_change_stays_flagged_while_the_page_is_unreachable_or_the_anchor_is_gone() {
+    let (set, fetcher, _dir, sidecar) = pending_change_fixture().await;
+
+    fetcher.set(
+        GUIDE,
+        FetchOutcome::Unreachable {
+            detail: "timed out".to_string(),
+        },
+    );
+    let r = run_and_save(&set, &fetcher, &sidecar, "2027-01-05").await;
+    assert_eq!(r.counts.unreachable, 1);
+    assert_eq!(
+        r.changed.len(),
+        1,
+        "still listed though the page did not answer"
+    );
+
+    fetcher.set(GUIDE, ok_page("<h1>Rewritten</h1>"));
+    let r = run_and_save(&set, &fetcher, &sidecar, "2027-02-05").await;
+    assert_eq!(r.counts.sections_anchor_missing, 1);
+    assert_eq!(r.changed.len(), 1);
+}
+
+#[tokio::test]
+async fn a_further_change_updates_the_pending_text_but_not_the_baseline_or_first_seen() {
+    let (set, fetcher, _dir, sidecar) = pending_change_fixture().await;
+    let baseline = SourceHashes::load(&sidecar).unwrap().entries[CITED]
+        .section_hash
+        .clone();
+    let v3 = PAGE_V2.replace("72 hours", "7 days");
+    fetcher.set(GUIDE, ok_page(&v3));
+    let r = run_and_save(&set, &fetcher, &sidecar, "2027-01-05").await;
+    assert_eq!(r.changed.len(), 1);
+    assert_eq!(r.changed[0].first_seen, "2026-12-01");
+    assert!(r.changed[0]
+        .diff
+        .iter()
+        .any(|d| d.op == DiffOp::Added && d.text.contains("7 days")));
+    assert_eq!(
+        SourceHashes::load(&sidecar).unwrap().entries[CITED].section_hash,
+        baseline
+    );
+}
+
+#[tokio::test]
+async fn a_page_that_reverts_to_the_accepted_text_clears_the_flag() {
+    let (set, fetcher, _dir, sidecar) = pending_change_fixture().await;
+    fetcher.set(GUIDE, ok_page(PAGE_V1));
+    let r = run_and_save(&set, &fetcher, &sidecar, "2027-01-05").await;
+    assert_eq!(r.counts.sections_unchanged, 1);
+    assert!(r.changed.is_empty());
+    assert!(SourceHashes::load(&sidecar).unwrap().entries[CITED]
+        .pending
+        .is_none());
+}
+
+#[tokio::test]
+async fn accepting_clears_the_flag_records_who_and_when_and_rebaselines() {
+    let (set, fetcher, _dir, sidecar) = pending_change_fixture().await;
+
+    let mut loaded = SourceHashes::load(&sidecar).unwrap();
+    let done = loaded
+        .accept(
+            AcceptTarget::Urls(&[CITED.to_string()]),
+            "2027-01-02",
+            "zach",
+        )
+        .unwrap();
+    assert_eq!(done, vec![CITED.to_string()]);
+    loaded.save(&sidecar).unwrap();
+
+    let record = SourceHashes::load(&sidecar).unwrap().entries[CITED].clone();
+    let acceptance = record.accepted.expect("who and when are recorded");
+    assert_eq!(
+        (acceptance.by.as_str(), acceptance.on.as_str()),
+        ("zach", "2027-01-02")
+    );
+    assert!(record.pending.is_none());
+
+    // The page still shows V2, which is now the accepted text: no longer a change.
+    let r = run_and_save(&set, &fetcher, &sidecar, "2027-02-01").await;
+    assert_eq!(r.counts.sections_unchanged, 1);
+    assert!(r.changed.is_empty());
+
+    // A change AFTER acceptance is flagged afresh against the newly accepted text.
+    fetcher.set(GUIDE, ok_page(&PAGE_V2.replace("72 hours", "7 days")));
+    let r = run_and_save(&set, &fetcher, &sidecar, "2027-03-01").await;
+    assert_eq!(r.changed.len(), 1);
+    assert_eq!(r.changed[0].first_seen, "2027-03-01");
+    assert!(r.changed[0]
+        .diff
+        .iter()
+        .any(|d| d.op == DiffOp::Removed && d.text.contains("72 hours")));
+}
+
+#[tokio::test]
+async fn accept_all_clears_every_pending_change() {
+    let set = rules(&[
+        ("R-A", &["https://docs.example/guide#idem"]),
+        ("R-B", &["https://other.example/p#sec"]),
+    ]);
+    let other_v1 = "<h2 id=sec>Sec</h2><p>One. Two.</p>";
+    let other_v2 = "<h2 id=sec>Sec</h2><p>One. Three.</p>";
+    let fetcher = MapFetcher::new(&[
+        (GUIDE, ok_page(PAGE_V1)),
+        ("https://other.example/p", ok_page(other_v1)),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar = dir.path().join("hashes.json");
+    run_and_save(&set, &fetcher, &sidecar, "2026-10-01").await;
+    fetcher.set(GUIDE, ok_page(PAGE_V2));
+    fetcher.set("https://other.example/p", ok_page(other_v2));
+    let r = run_and_save(&set, &fetcher, &sidecar, "2026-11-01").await;
+    assert_eq!(r.counts.sections_changed, 2);
+
+    let mut loaded = SourceHashes::load(&sidecar).unwrap();
+    let done = loaded
+        .accept(AcceptTarget::All, "2026-11-05", "zach")
+        .unwrap();
+    assert_eq!(done.len(), 2);
+    loaded.save(&sidecar).unwrap();
+
+    let r = run_and_save(&set, &fetcher, &sidecar, "2026-12-01").await;
+    assert_eq!(r.counts.sections_changed, 0);
+    assert_eq!(r.counts.sections_unchanged, 2);
 }
 
 #[tokio::test]
@@ -616,7 +813,7 @@ async fn the_delay_between_requests_to_one_host_is_honoured() {
 // ---------------------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn export_seam_lowers_confidence_for_dead_or_recently_changed_sources_only() {
+async fn export_seam_lowers_confidence_for_dead_unreviewed_or_recently_accepted_sources_only() {
     let set = rules(&[
         ("R-FINE", &["https://fine.example/a"]),
         ("R-DEAD", &["https://dead.example/a"]),
@@ -655,9 +852,27 @@ async fn export_seam_lowers_confidence_for_dead_or_recently_changed_sources_only
 
     let changed = get("R-CHANGED", "2026-10-27");
     assert!(changed.lowered);
-    assert!(changed.reasons[0].contains("changed"));
-    // A change older than the window stops lowering confidence.
-    assert!(!get("R-CHANGED", "2027-06-01").lowered);
+    assert!(changed.reasons[0].contains("not yet reviewed"));
+    // An unreviewed change lowers confidence however old it is: the window does not apply.
+    assert!(get("R-CHANGED", "2030-01-01").lowered);
+
+    // Once accepted, the window runs from the accept date, not from when the change was seen.
+    let mut accepted = s2.clone();
+    accepted
+        .accept(AcceptTarget::All, "2026-12-01", "zach")
+        .unwrap();
+    let after = |today: &str| {
+        source_confidence(
+            set.get_by_id("R-CHANGED").unwrap(),
+            &accepted,
+            today,
+            DEFAULT_CHANGED_WINDOW_DAYS,
+        )
+    };
+    let soon = after("2027-01-15");
+    assert!(soon.lowered, "44 days after accepting");
+    assert!(soon.reasons[0].contains("accepted 2026-12-01"));
+    assert!(!after("2027-03-15").lowered, "104 days after accepting");
 
     let mut never_checked = bare_rule("R-UNSEEN", "demo");
     never_checked.sources = vec![source("https://never-checked.example/a")];

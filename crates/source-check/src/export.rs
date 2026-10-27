@@ -11,8 +11,8 @@ use camerata_rules::{days_from_civil, parse_ymd, Rule};
 
 use crate::sidecar::{LinkState, SourceHashes};
 
-/// How long a section change keeps lowering confidence after the run that saw it. The sidecar
-/// records when a section last changed, not when someone reviewed it, so a change ages out.
+/// How long an ACCEPTED section change keeps lowering confidence, counted from the accept date.
+/// An unaccepted change lowers confidence with no time limit.
 pub const DEFAULT_CHANGED_WINDOW_DAYS: i64 = 100;
 
 /// What the sidecar says about one rule's sources.
@@ -21,8 +21,8 @@ pub struct SourceConfidence {
     /// The oldest `last_checked` among the rule's web sources (the date every one was last
     /// re-checked by). `None` when the rule has no checked web source.
     pub rechecked_on: Option<String>,
-    /// True when confidence should be lowered: a source is dead, or a cited section changed
-    /// within the window.
+    /// True when confidence should be lowered: a source is dead, a cited section has an
+    /// unreviewed change, or a change was accepted within the window.
     pub lowered: bool,
     /// Why, one short phrase per cause, for the export's detail line.
     pub reasons: Vec<String>,
@@ -58,15 +58,22 @@ pub fn source_confidence(
         if record.link == LinkState::Dead {
             reasons.push(format!("source link is dead: {url}"));
         }
-        let changed_recently = match (
-            record.last_changed.as_deref().and_then(parse_ymd),
-            today_days,
-        ) {
-            (Some((y, m, d)), Some(now)) => now - days_from_civil(y, m, d) <= changed_window_days,
-            _ => false,
-        };
-        if changed_recently {
-            reasons.push(format!("cited section changed: {url}"));
+        if record.pending.is_some() {
+            // An unreviewed change lowers confidence however old it is.
+            reasons.push(format!("cited section changed, not yet reviewed: {url}"));
+        } else if let Some(accepted) = &record.accepted {
+            let recently_accepted = match (parse_ymd(&accepted.on), today_days) {
+                (Some((y, m, d)), Some(now)) => {
+                    now - days_from_civil(y, m, d) <= changed_window_days
+                }
+                _ => false,
+            };
+            if recently_accepted {
+                reasons.push(format!(
+                    "cited section changed (accepted {}): {url}",
+                    accepted.on
+                ));
+            }
         }
     }
     SourceConfidence {
