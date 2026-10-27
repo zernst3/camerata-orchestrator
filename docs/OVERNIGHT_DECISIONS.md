@@ -1,7 +1,14 @@
 # Overnight autonomous run — decisions needed + progress log
 
 > ## ▶ RESUME HERE (paused 2026-10-26 at Zach's request, after code viewer step 4)
-> **CURRENT (newest first; older entries below are history):** 2026-10-27: viewer step 5 (B.2
+> **CURRENT (newest first; older entries below are history):** 2026-10-27: viewer step 6 (B.5
+> decision memory + B.7 counts strip) MERGED. Pre-fill is SAME-STATE only (an Ignored reason is a
+> false statement under False positive); memory is shared across repos (it only pre-fills, never
+> applies); Undo closes an open reason prompt first. Step-6 manual checks: caret position in a
+> pre-filled prompt; look of the "Previously on this shape" chip and the counts strip; screen
+> reader does not re-read the strip on each decision. Next: step 7a (internal review timer, stats
+> view, ETA), then 7b (B.6 reviewer notes into xlsx / JSON / PDF), 7c (advisory findings grouped
+> by the mapped corpus rule), 7d (B.8 palette); all approved 2026-10-23. Earlier: viewer step 5 (B.2
 > stacked group view) MERGED: `B` / "Review all N stacked", ±3-line cards from the batch
 > endpoint, J/K/Space/Enter/C/F/T/I, paging past 200. Fable's HIGH fixed (mouse doors were live
 > under an open reason prompt; paging then committed off-screen rows): every decision door is now
