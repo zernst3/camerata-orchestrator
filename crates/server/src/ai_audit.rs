@@ -7849,7 +7849,9 @@ async fn run_routed_passes(
 /// before it admits the next, and a group's `advisory_disabled` is honoured per group, which is
 /// what [`run_passes_batch`]'s own parameter is for).
 ///
-/// A batch error on any group aborts the whole call, exactly as the single batch did before.
+/// A batch error in one group (only possible with `batch_default` off; see [`run_passes_batch`])
+/// is that group's failed pass and the other groups' findings are kept. If no group completed,
+/// the first error is returned, exactly as the single batch did before.
 #[allow(clippy::too_many_arguments)]
 async fn run_routed_passes_batch(
     llm: &dyn batch_mode::BatchApi,
@@ -7897,10 +7899,12 @@ async fn run_routed_passes_batch(
     let mut all_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut total_ok: usize = 0;
     let mut failures: Vec<PassFailure> = Vec::new();
+    let mut groups_completed: usize = 0;
+    let mut first_error: Option<anyhow::Error> = None;
     for unit in &units {
         let chunks = chunk_files(&unit.files, CHUNK_DIGEST_CHARS);
         let batches: Vec<&[(String, String)]> = unit.rules.chunks(batch_size.max(1)).collect();
-        let (gf, gp, gr, gok, ge) = run_passes_batch(
+        let group = run_passes_batch(
             llm,
             repo,
             repo_map,
@@ -7913,12 +7917,38 @@ async fn run_routed_passes_batch(
             meter,
             unit.advisory_disabled,
         )
-        .await?;
-        all_findings.extend(gf);
-        all_proposed.extend(gp);
-        all_requested.extend(gr);
-        total_ok += gok;
-        failures.extend(ge);
+        .await;
+        match group {
+            Ok((gf, gp, gr, gok, ge)) => {
+                all_findings.extend(gf);
+                all_proposed.extend(gp);
+                all_requested.extend(gr);
+                total_ok += gok;
+                failures.extend(ge);
+                groups_completed += 1;
+            }
+            // With `batch_default` off a failed submit, poll or fetch is fatal to its own group
+            // (see `run_passes_batch`). Another group's replies are already paid for, so the
+            // failure is this group's failed pass, not the whole scan's: it is disclosed by name
+            // and the other groups' findings are kept. Only when NO group completed (nothing
+            // was paid for, as with the single unrouted batch) does the error propagate.
+            Err(error) => {
+                eprintln!(
+                    "[camerata-server] batch mode: group {} failed: {error:#}",
+                    unit.label
+                );
+                failures.push(PassFailure::named(
+                    format!("{} (the whole group)", unit.label),
+                    &format!("{error:#}"),
+                ));
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    if groups_completed == 0 {
+        if let Some(error) = first_error {
+            return Err(error);
+        }
     }
     Ok((
         all_findings,

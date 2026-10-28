@@ -87,6 +87,9 @@ pub(super) struct FakeBatch {
     submissions: Mutex<Vec<Vec<BatchItem>>>,
     /// The system prompt and prompt of every `count_input_tokens` request.
     counted: Mutex<Vec<(Option<String>, String)>>,
+    /// `submit` calls so far, and the 0-based call that fails (nothing is accepted).
+    submit_attempts: AtomicUsize,
+    submit_fails_on: Option<usize>,
     pending: Mutex<HashMap<String, Vec<String>>>,
     realtime: Realtime,
     cost: f64,
@@ -101,6 +104,8 @@ impl FakeBatch {
             script: Box::new(script),
             submissions: Mutex::new(Vec::new()),
             counted: Mutex::new(Vec::new()),
+            submit_attempts: AtomicUsize::new(0),
+            submit_fails_on: None,
             pending: Mutex::new(HashMap::new()),
             realtime: Realtime {
                 calls: AtomicUsize::new(0),
@@ -110,6 +115,11 @@ impl FakeBatch {
             poll_fails: false,
             polls: AtomicUsize::new(0),
         }
+    }
+    /// The `n`th (0-based) `submit` call fails outright, as a provider outage would.
+    pub(super) fn failing_submit_on(mut self, n: usize) -> Self {
+        self.submit_fails_on = Some(n);
+        self
     }
     /// Every item of every submission, in order, as `(custom id, system prompt, prompt text)`.
     pub(super) fn submitted_items(&self) -> Vec<Vec<(String, Option<String>, String)>> {
@@ -170,6 +180,10 @@ impl BatchApi for FakeBatch {
         Some(1_000)
     }
     async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
+        let attempt = self.submit_attempts.fetch_add(1, Ordering::SeqCst);
+        if self.submit_fails_on == Some(attempt) {
+            anyhow::bail!("Message Batches API HTTP 503: submission refused");
+        }
         let mut subs = self.submissions.lock().unwrap();
         let id = format!("msgbatch_{}", subs.len());
         self.pending.lock().unwrap().insert(

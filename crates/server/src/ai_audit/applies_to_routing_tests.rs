@@ -648,3 +648,77 @@ async fn advisory_disabled_reaches_the_task_line_of_every_batch_group() {
         }
     }
 }
+
+// ── batch_default off: a later group's failure keeps the earlier groups' paid replies ───────
+
+/// `run_routed_passes_batch` over [`three_group_rules`] with `batch_default` OFF (where a failed
+/// submit is fatal to its `run_passes_batch` call). Routing is on or off as asked.
+async fn run_routed_batch_default_off(
+    api: &FakeBatch,
+    applies_to_routing: bool,
+) -> anyhow::Result<PassesOut> {
+    let mut config = efficiency(applies_to_routing);
+    config.batch_default = false;
+    let m = UsageMeter::with_controls(RunControls {
+        efficiency: config,
+        max_cost_usd: None,
+        estimate_hint_usd: None,
+        fix_model: None,
+    });
+    let rules = three_group_rules();
+    let plan = plan_routes(&rules, &files(), applies_to_routing);
+    run_routed_passes_batch(
+        api,
+        REPO,
+        &files(),
+        &rules,
+        &plan,
+        "",
+        &std::collections::HashSet::new(),
+        None,
+        None,
+        15,
+        Some(&m),
+        &mut Vec::new(),
+    )
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_later_groups_batch_failure_keeps_the_earlier_groups_paid_replies() {
+    let units = routed_units(&files(), &plan_routes(&three_group_rules(), &files(), true));
+    // Group 2's submission is refused; groups 1 and 3 answer with one finding each.
+    let api = FakeBatch::new(|_, _| Reply::Ok).failing_submit_on(1);
+    let (findings, _proposed, _requested, ok, failures) = run_routed_batch_default_off(&api, true)
+        .await
+        .expect("one group failing must not discard the others");
+    assert_eq!(ok, 2, "groups 1 and 3 answered");
+    assert_eq!(
+        findings.len(),
+        2,
+        "the completed groups' findings are kept: {findings:?}"
+    );
+    assert_eq!(failures.len(), 1);
+    assert!(
+        failures[0].pass.contains(&units[1].label),
+        "the failed row names group 2 ({}): {}",
+        units[1].label,
+        failures[0].pass
+    );
+    assert!(
+        failures[0].error.contains("submission refused"),
+        "and carries the real error: {}",
+        failures[0].error
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn when_no_group_completes_the_error_still_propagates() {
+    // Routing off: one unrouted group, so its failure is every group's failure. Nothing was
+    // paid for, so there is nothing to keep, and the caller gets the error as before.
+    let api = FakeBatch::new(|_, _| Reply::Ok).failing_submit_on(0);
+    let err = run_routed_batch_default_off(&api, false)
+        .await
+        .expect_err("no group completed");
+    assert!(format!("{err:#}").contains("submission refused"), "{err:#}");
+}
