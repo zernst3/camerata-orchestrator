@@ -1033,11 +1033,17 @@ mod tests {
             Arc,
         };
 
-        let dir = std::env::temp_dir().join(format!(
+        // Canonical `<clone>/.camerata-worktrees/<name>` layout, so the shared cargo
+        // target dir the clippy and test checks derive (`<clone>/.camerata-shared-target`)
+        // lands inside this throwaway tree. A worktree placed directly in the OS temp dir
+        // derives `<tmp>/../.camerata-shared-target`: writable under macOS's
+        // `/var/folders/..`, but `/` on Linux, where those checks then cannot build.
+        let root = std::env::temp_dir().join(format!(
             "camerata-fleet-test-heartbeat-{}",
             std::process::id()
         ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = root.join(".camerata-worktrees").join("heartbeat");
+        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(dir.join("src")).unwrap();
 
         // A minimal Rust crate scaffolded in canonical format so fmt passes (and
@@ -1085,7 +1091,7 @@ mod tests {
             "a canonical Rust crate must produce no layer-2 violations, got {violations:?}"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ── emit_stage_reports (BuildEvent mapping from a finished report) ────────
