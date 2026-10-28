@@ -502,12 +502,39 @@ pub struct ReadmeProvenance {
     pub release_checks: Option<Vec<String>>,
     /// The spend-limit line is present (the inspection was stopped by the operator's limit).
     pub cost_cap_reached: bool,
+    /// 22c: `Prepared for: <client>`.
+    pub client_name: Option<String>,
+    /// 22c: `Corpus rules applied: N`.
+    pub corpus_rules_applied: Option<u64>,
+    /// 22c: `Counted lines: N`.
+    pub counted_lines: Option<u64>,
+    /// 22c: `Excluded as noise: F files[, L lines]`, as (files, lines).
+    pub excluded_noise: Option<(u64, Option<u64>)>,
+}
+
+/// `"F files, L lines"` or `"F files"` to (F, L).
+fn parse_excluded_noise(v: &str) -> Option<(u64, Option<u64>)> {
+    let (files, rest) = v.split_once(" files")?;
+    let files = files.parse().ok()?;
+    match rest.strip_prefix(", ") {
+        None if rest.is_empty() => Some((files, None)),
+        Some(lines) => Some((files, Some(lines.strip_suffix(" lines")?.parse().ok()?))),
+        None => None,
+    }
 }
 
 pub fn parse_readme_provenance(readme: &str) -> ReadmeProvenance {
     let mut p = ReadmeProvenance::default();
     for line in readme.lines() {
-        if let Some(v) = line.strip_prefix("Repos inspected: ") {
+        if let Some(v) = line.strip_prefix("Prepared for: ") {
+            p.client_name = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix("Corpus rules applied: ") {
+            p.corpus_rules_applied = v.parse().ok();
+        } else if let Some(v) = line.strip_prefix("Counted lines: ") {
+            p.counted_lines = v.parse().ok();
+        } else if let Some(v) = line.strip_prefix("Excluded as noise: ") {
+            p.excluded_noise = parse_excluded_noise(v);
+        } else if let Some(v) = line.strip_prefix("Repos inspected: ") {
             p.repos = Some(v.to_string());
         } else if let Some(v) = line.strip_prefix("Generated: ") {
             p.generated = Some(v.to_string());
@@ -600,6 +627,21 @@ pub fn verify_readme_provenance(readme: &str, manifest: &Value) -> Vec<Problem> 
     }
     if parsed.model_provider != manifest_str(manifest, "model_provider") {
         mismatch("Model provider");
+    }
+    if parsed.client_name != manifest_str(manifest, "client_name") {
+        mismatch("Prepared for");
+    }
+    let manifest_u64 = |key: &str| manifest["inspection"][key].as_u64();
+    if parsed.corpus_rules_applied != manifest_u64("corpus_rules_applied") {
+        mismatch("Corpus rules applied");
+    }
+    if parsed.counted_lines != manifest_u64("counted_lines") {
+        mismatch("Counted lines");
+    }
+    let manifest_noise = manifest_u64("excluded_noise_files")
+        .map(|files| (files, manifest_u64("excluded_noise_lines")));
+    if parsed.excluded_noise != manifest_noise {
+        mismatch("Excluded as noise");
     }
     let manifest_checks: Option<Vec<String>> = manifest["inspection"]["release_checks"]
         .as_array()

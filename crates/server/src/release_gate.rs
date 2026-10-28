@@ -152,6 +152,8 @@ pub(crate) fn assemble_package(
     let mut provenance =
         crate::client_provenance::export_provenance(report, &report_json.cover, corpus);
     provenance.model = options.model.clone();
+    let client = options.client_name.trim();
+    provenance.client_name = (!client.is_empty()).then(|| client.to_string());
     let readme = crate::product_export_readme(stem, &provenance);
 
     Ok(ProductPackage {

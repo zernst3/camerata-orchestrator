@@ -304,6 +304,7 @@ async fn regenerate_sample_report() {
         files_scanned: 214,
         test_file_count: 0,
         files_excluded: 1188,
+        excluded_noise_lines: None,
         code_chars: 486_203,
         code_lines: 18_700,
         code_lines_by_language: vec![

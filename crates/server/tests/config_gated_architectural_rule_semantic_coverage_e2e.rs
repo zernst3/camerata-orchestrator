@@ -106,6 +106,7 @@ fn minimal_report(
         files_scanned: 1,
         test_file_count: 0,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 60,
         code_lines: 1,
         code_lines_by_language: Vec::new(),

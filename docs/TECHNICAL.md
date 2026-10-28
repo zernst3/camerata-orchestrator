@@ -2772,6 +2772,16 @@ thing:
   `camerata inspect` takes `--client`. The release gate scans sheet headers and footers for
   secrets, and its `confidentiality marking` check holds every sheet footer to a line naming the
   client and equal to the PDF's.
+- **`manifest.json` `inspection` block** (22c): beyond repos and commits, engine version,
+  corpus version, rules last reviewed (null until `CORPUS_FRESHNESS.toml` has a confirmed
+  date for every domain the scan used), model backend and provider, and the spend-limit flag,
+  it carries `client_name`, `corpus_rules_applied`, `counted_lines`, `excluded_noise_files`
+  and `excluded_noise_lines`. The counts come from the scan's own record: `audit_repos` reads
+  each repo through `read_local_repo_files` and `count::excluded_noise_lines`, the functions
+  `camerata count` uses, and stores `ScanReport::excluded_noise_lines` beside `code_lines` and
+  `files_excluded`, so the export never reads the repository. Filled in
+  `client_provenance::export_provenance_with`; the README renders each line and gate 7 parses
+  it back.
 - **`findings.xlsx`** is the DETAIL surface, and a missing row there IS a fault.
 - **`findings.json`** is the machine-readable data structure. It carries the WHOLE
   non-false-positive row set, every kind included, with `provenance` and `summary`

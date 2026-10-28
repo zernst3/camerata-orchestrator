@@ -17328,6 +17328,22 @@ pub struct ManifestProvenance {
     /// INCOMPLETE. States only that fact: no dollar figure is exported (cost numbers are
     /// operator-only). What was not run is listed in the report's failed-pass section.
     pub cost_cap_reached: bool,
+    /// 22c: who the inspection was prepared for (the inspection setup's client name, the same
+    /// name the confidentiality marking prints). `None` only for a caller that set none.
+    pub client_name: Option<String>,
+    /// 22c: how many corpus rules the inspection applied (the distinct audited rule ids found
+    /// in the loaded corpus). `None` when no corpus was loaded.
+    pub corpus_rules_applied: Option<usize>,
+    /// 22c: the non-blank lines the inspection read, the figure `camerata count` reports and a
+    /// quote is priced on (same file filter, same line definition). `None` when the run read
+    /// no local files.
+    pub counted_lines: Option<usize>,
+    /// 22c: the files the noise filter excluded (build output, lockfiles, vendored and
+    /// generated code). `None` when the run read no local files.
+    pub excluded_noise_files: Option<usize>,
+    /// 22c: the non-blank lines in those excluded files. `None` for a run that did not record
+    /// it (a report from before 22c).
+    pub excluded_noise_lines: Option<usize>,
 }
 
 impl ManifestProvenance {
@@ -17389,6 +17405,11 @@ impl ManifestProvenance {
             "model_backend": self.model.as_ref().map(|m| &m.backend),
             "model_provider": self.model.as_ref().map(|m| &m.provider),
             "cost_cap_reached": self.cost_cap_reached,
+            "client_name": self.client_name,
+            "corpus_rules_applied": self.corpus_rules_applied,
+            "counted_lines": self.counted_lines,
+            "excluded_noise_files": self.excluded_noise_files,
+            "excluded_noise_lines": self.excluded_noise_lines,
             "release_checks": Self::release_checks(),
         })
     }
@@ -17410,11 +17431,15 @@ impl ManifestProvenance {
     /// manifest.
     pub fn readme_lines(&self) -> String {
         let names: Vec<&str> = self.repos.iter().map(|r| r.name.as_str()).collect();
-        let mut out = format!(
+        let mut out = String::new();
+        if let Some(client) = &self.client_name {
+            out.push_str(&format!("Prepared for: {client}\n"));
+        }
+        out.push_str(&format!(
             "Repos inspected: {}\nGenerated: {}\n",
             names.join(", "),
             self.generated_at
-        );
+        ));
         for repo in &self.repos {
             if let Some(commit) = &repo.commit {
                 let note = if repo.dirty {
@@ -17431,6 +17456,20 @@ impl ManifestProvenance {
         }
         if let Some(reviewed) = &self.rules_last_reviewed {
             out.push_str(&format!("Rules last reviewed on {reviewed}\n"));
+        }
+        if let Some(applied) = self.corpus_rules_applied {
+            out.push_str(&format!("Corpus rules applied: {applied}\n"));
+        }
+        if let Some(lines) = self.counted_lines {
+            out.push_str(&format!("Counted lines: {lines}\n"));
+        }
+        if let Some(files) = self.excluded_noise_files {
+            match self.excluded_noise_lines {
+                Some(lines) => out.push_str(&format!(
+                    "Excluded as noise: {files} files, {lines} lines\n"
+                )),
+                None => out.push_str(&format!("Excluded as noise: {files} files\n")),
+            }
         }
         if let Some(model) = &self.model {
             out.push_str(&format!("Model backend: {}\n", model.backend));
@@ -26342,6 +26381,7 @@ mod tests {
             files_scanned: 1,
             test_file_count: 0,
             files_excluded: 0,
+            excluded_noise_lines: None,
             code_chars: 100,
             code_lines: 10,
             code_lines_by_language: Vec::new(),

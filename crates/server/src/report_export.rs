@@ -5275,6 +5275,7 @@ mod tests {
             files_scanned: 10,
             test_file_count: 0,
             files_excluded: 2,
+            excluded_noise_lines: None,
             code_chars: 5000,
             code_lines: 400,
             code_lines_by_language: vec![
@@ -13626,6 +13627,7 @@ mod export_invariants_gate {
             files_scanned: 40,
             test_file_count: 5,
             files_excluded: 3,
+            excluded_noise_lines: None,
             code_chars: 20_000,
             code_lines: 1_200,
             code_lines_by_language: vec![LanguageVolume {

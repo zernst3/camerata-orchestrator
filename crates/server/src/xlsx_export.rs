@@ -2584,6 +2584,7 @@ mod tests {
             files_scanned: 10,
             test_file_count: 0,
             files_excluded: 2,
+            excluded_noise_lines: None,
             code_chars: 5000,
             code_lines: 400,
             code_lines_by_language: Vec::new(),

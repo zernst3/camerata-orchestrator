@@ -18,6 +18,7 @@ pub fn build_report(
         files_scanned,
         test_file_count: 0,
         files_excluded: 0,
+        excluded_noise_lines: None,
         excluded_mechanical_rules: Vec::new(),
         code_chars: 0,
         code_lines: 0,
