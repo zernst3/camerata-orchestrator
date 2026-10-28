@@ -14,13 +14,13 @@ fn on_disk(p: &Path) -> bool {
 }
 
 fn write(path: &Path, text: &str) {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, text).unwrap();
+    fs::create_dir_all(path.parent().expect("test setup")).expect("test setup");
+    fs::write(path, text).expect("test setup");
 }
 
 #[test]
 fn a_checkout_on_a_branch_watches_head_and_that_branchs_ref_only() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("test setup");
     let git = dir.path().join(".git");
     write(&git.join("HEAD"), "ref: refs/heads/feat/export\n");
     write(&git.join("refs/heads/feat/export"), "aaaa\n");
@@ -41,7 +41,7 @@ fn a_checkout_on_a_branch_watches_head_and_that_branchs_ref_only() {
 
 #[test]
 fn a_linked_checkout_reads_head_from_its_own_dir_and_the_ref_from_the_common_dir() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("test setup");
     let common = dir.path().join("repo/.git");
     let git = common.join("worktrees/agent");
     write(&git.join("HEAD"), "ref: refs/heads/work\n");
@@ -55,7 +55,7 @@ fn a_linked_checkout_reads_head_from_its_own_dir_and_the_ref_from_the_common_dir
 
 #[test]
 fn a_detached_head_watches_head_alone() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("test setup");
     let git = dir.path().join(".git");
     let sha = "0123456789abcdef0123456789abcdef01234567\n";
     write(&git.join("HEAD"), sha);
@@ -67,11 +67,11 @@ fn a_detached_head_watches_head_alone() {
 
 #[test]
 fn a_packed_only_branch_watches_packed_refs_and_its_own_directory() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("test setup");
     let git = dir.path().join(".git");
     write(&git.join("HEAD"), "ref: refs/heads/feat/export\n");
     write(&git.join("packed-refs"), "aaaa refs/heads/feat/export\n");
-    fs::create_dir_all(git.join("refs/heads/feat")).unwrap();
+    fs::create_dir_all(git.join("refs/heads/feat")).expect("test setup");
     let watched =
         build_script::watched_paths(&git, &git, "ref: refs/heads/feat/export\n", &on_disk);
     assert_eq!(
@@ -86,7 +86,7 @@ fn a_packed_only_branch_watches_packed_refs_and_its_own_directory() {
 
 #[test]
 fn a_path_that_does_not_exist_is_never_watched() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("test setup");
     let git = dir.path().join(".git");
     write(&git.join("HEAD"), "ref: refs/heads/gone\n");
     let watched = build_script::watched_paths(&git, &git, "ref: refs/heads/gone\n", &on_disk);
