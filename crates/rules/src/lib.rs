@@ -1437,9 +1437,25 @@ pub struct RuleSet {
     by_id: HashMap<String, usize>,
     /// Fast lookup: domain string → list of indices into `rules`.
     by_domain: HashMap<String, Vec<usize>>,
+    /// Memo for [`corpus_version`]: the digest hashes every rule's canonical form, and the set
+    /// only changes through [`RuleSet::push`], which clears it. Every report build asks for it,
+    /// so recomputing it per build dominated the export tests' runtime.
+    corpus_digest: std::sync::OnceLock<String>,
 }
 
 impl RuleSet {
+    /// The memoised corpus digest, computing it with `compute` on first use.
+    pub(crate) fn corpus_digest_or_init(&self, compute: impl FnOnce() -> String) -> &str {
+        self.corpus_digest.get_or_init(compute)
+    }
+
+    /// Whether [`corpus_version`] has already been computed for this exact set (test support
+    /// for the memo; not a production API).
+    #[doc(hidden)]
+    pub fn corpus_version_is_cached(&self) -> bool {
+        self.corpus_digest.get().is_some()
+    }
+
     /// Number of rules in this set.
     pub fn len(&self) -> usize {
         self.rules.len()
@@ -1495,6 +1511,7 @@ impl RuleSet {
     /// general escape hatch for a test that needs a rule with arbitrary fields (e.g. a
     /// `stack_exceptions` list) without going through the async file-based corpus loader.
     pub fn push(&mut self, rule: Rule) {
+        self.corpus_digest = std::sync::OnceLock::new();
         let idx = self.rules.len();
         self.by_domain
             .entry(rule.domain.clone())
