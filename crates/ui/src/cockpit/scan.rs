@@ -13494,7 +13494,10 @@ mod render_tests {
         }
         assert!(!html.contains("<button"), "read-only: {html}");
         // The panel says in a sentence that it carries no severity; it renders none.
-        assert!(!html.contains("sev-") && !html.contains("severity-chip"), "{html}");
+        assert!(
+            !html.contains("sev-") && !html.contains("severity-chip"),
+            "{html}"
+        );
     }
 
     /// An empty section states its case in a sentence, never a blank area.
