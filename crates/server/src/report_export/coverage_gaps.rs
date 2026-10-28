@@ -47,6 +47,10 @@ pub struct CoverageGapsJson {
     /// One line per failed AI scan pass over files:
     /// `"<repo>, <pass>: pass failed, N files not reviewed by the AI pass"`.
     pub failed_ai_passes: Vec<String>,
+    /// M11/M12: dependency-audit gaps, one line each: the audit did not run, or it left
+    /// manifests unaudited because no lockfile covers them. Empty when osv-scanner ran
+    /// everywhere it could.
+    pub dependency_gaps: Vec<String>,
     /// The auditable files the scan did not read, in walk order per repo: at most
     /// [`SKIPPED_FILES_LISTED_PER_REASON`] per reason.
     pub skipped_files: Vec<SkippedFileJson>,
@@ -83,6 +87,7 @@ pub struct SkippedFileJson {
 impl CoverageGapsJson {
     pub fn is_empty(&self) -> bool {
         self.failed_ai_passes.is_empty()
+            && self.dependency_gaps.is_empty()
             && self.skipped_files.is_empty()
             && self.skipped_beyond_cap_total == 0
     }
@@ -109,6 +114,7 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
             ));
         }
     }
+    let dependency_gaps = dependency_gaps(report);
     let input = report.ledger.input();
     let skipped_files = input
         .skipped_files
@@ -122,8 +128,29 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
         .collect();
     CoverageGapsJson {
         failed_ai_passes,
+        dependency_gaps,
         skipped_files,
         skipped_beyond_cap_total: input.skipped_beyond_cap_total,
         skipped_beyond_cap_note: skipped_beyond_cap_sentence(input.skipped_beyond_cap_total),
     }
+}
+
+/// The dependency-audit gaps of `report`: every osv-scanner coverage note that does not prove a
+/// clean check (see [`crate::dep_audit::note_proves_clean`]), as a sentence with its first
+/// letter capitalised. A repo with no lockfiles at all is a completed check, not a gap.
+pub fn dependency_gaps(report: &crate::onboard::ScanReport) -> Vec<String> {
+    report
+        .coverage_notes
+        .iter()
+        .filter(|n| n.tool == "osv-scanner")
+        .filter(|n| !crate::dep_audit::note_proves_clean(n))
+        .map(|n| {
+            let message = n.message.trim();
+            let mut chars = message.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
 }

@@ -80,10 +80,28 @@ const TOOL_NAME: &str = "osv-scanner";
 /// did not run); [`note_means_scanned`] tells the two apart.
 const NO_LOCKFILES: &str = "found no lockfiles";
 
-/// True when a dep-audit coverage note still means osv-scanner scanned the repo (it found no
-/// lockfiles); false for every "did not run" outcome (provisioning, spawn, timeout, parse).
+/// The phrase that opens the coverage note listing manifests osv-scanner could not audit because
+/// no lockfile sits beside or above them (M12).
+pub const MANIFESTS_UNAUDITED: &str = "Dependency manifests not audited";
+
+/// The `Finding::captures` key every dependency row carries: the advisory id (for example
+/// `GHSA-...` or `RUSTSEC-...`). Two advisories on one package version share a snippet, path
+/// and line, so the finding key needs this to tell them apart (M9).
+pub const ADVISORY_CAPTURE: &str = "advisory";
+
+/// True when a dep-audit coverage note still means osv-scanner ran (it found no lockfiles, or it
+/// ran and listed manifests it could not audit); false for every "did not run" outcome
+/// (provisioning, spawn, timeout, parse).
 pub fn note_means_scanned(note: &CoverageNote) -> bool {
-    note.message.contains(NO_LOCKFILES)
+    note.message.contains(NO_LOCKFILES) || note.message.contains(MANIFESTS_UNAUDITED)
+}
+
+/// True when a dep-audit coverage note leaves nothing unchecked, so "no known vulnerable
+/// dependencies" is a fair thing to print: osv-scanner ran and found no lockfiles to check, and
+/// there were no manifests left unaudited either. A note that says the audit did not run, or that
+/// manifests were left out, is not clean (M11).
+pub fn note_proves_clean(note: &CoverageNote) -> bool {
+    note.message.contains(NO_LOCKFILES) && !note.message.contains(MANIFESTS_UNAUDITED)
 }
 
 // ─── JSON parser (pure, unit-tested) ─────────────────────────────────────────
@@ -275,6 +293,7 @@ pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Res
                 }
                 // The advisory's CVE ids (its own id when it is a CVE, plus every CVE alias), so
                 // `vuln_intel` can match a GHSA/RUSTSEC advisory against KEV and EPSS by CVE.
+                captures.insert(ADVISORY_CAPTURE.to_string(), advisory_id.clone());
                 let cve_ids = advisory_cve_ids(&advisory_id, &aliases);
                 if !cve_ids.is_empty() {
                     captures.insert(

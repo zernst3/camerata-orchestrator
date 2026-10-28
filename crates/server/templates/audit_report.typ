@@ -789,6 +789,10 @@
 
 #if d.dependency_snapshot.clean [
   No known vulnerable dependencies detected.
+] else if d.dependency_snapshot.rows.len() == 0 [
+  // M11: no rows is not the same as clean. The audit did not run, or left manifests out, so
+  // this section cannot say that no dependency is vulnerable.
+  Dependencies were not fully checked in this scan, so this report cannot say that none are vulnerable. The notes below say what was not checked.
 ] else [
   #table(
     columns: (1fr, auto, 2fr, auto),
@@ -878,12 +882,15 @@ Not performed in this engagement:
 // skipped files and points to the full list, which itself holds the first 1,000 per reason; the
 // rest are counted ("and K more").
 #let gaps = d.coverage_gaps
-#if gaps.failed_ai_passes.len() > 0 or gaps.skipped_files.len() > 0 or gaps.skipped_beyond_cap_total > 0 [
+#if gaps.failed_ai_passes.len() > 0 or gaps.dependency_gaps.len() > 0 or gaps.skipped_files.len() > 0 or gaps.skipped_beyond_cap_total > 0 [
   #v(0.2cm)
   #card[
     #subheading[Coverage, not reviewed this scan]
     #v(0.1cm)
     #for line in gaps.failed_ai_passes [
+      - #line
+    ]
+    #for line in gaps.dependency_gaps [
       - #line
     ]
     #let shown = calc.min(gaps.skipped_files.len(), 100)

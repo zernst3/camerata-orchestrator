@@ -293,10 +293,22 @@ pub(crate) fn sanitize_report_findings(report: &ScanReport) -> ScanReport {
 /// round-trip test below (`finding_key_matches_ui_core_format`) pins the format so the two
 /// can never silently drift apart.
 pub fn finding_key(f: &Finding) -> String {
-    format!(
+    let key = format!(
         "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
         f.repo, f.rule_id, f.path, f.line, f.snippet
-    )
+    );
+    // M9: a dependency row's snippet is `package@version`, so two advisories on one package
+    // version in one lockfile share the whole key, and dispositioning one used to bury the other.
+    // The advisory id (kept for dependency rows only) tells them apart. Every other row's key
+    // is unchanged. `camerata_ui_core::triage::finding_key` appends the same suffix.
+    match f.captures.get(crate::dep_audit::ADVISORY_CAPTURE) {
+        Some(advisory)
+            if f.rule_id == crate::dep_audit::DEP_AUDIT_RULE_ID && !advisory.is_empty() =>
+        {
+            format!("{key}\u{0}{advisory}")
+        }
+        _ => key,
+    }
 }
 
 // ── Effective disposition (status + wire, reconciled) ───────────────────────────
@@ -4837,7 +4849,16 @@ pub fn build_report_json(
         .filter(|n| n.tool == "osv-scanner")
         .map(|n| n.message.clone())
         .collect();
-    let dependency_clean = dep_rows.is_empty();
+    // M11: "clean" means checked and nothing found. A dependency audit that did not run (no
+    // network, a timeout, an unreadable result) or that left manifests unaudited used to leave
+    // the rows empty and so read as clean. Only a run that proves it checked everything may say
+    // so.
+    let dependency_clean = dep_rows.is_empty()
+        && report
+            .coverage_notes
+            .iter()
+            .filter(|n| n.tool == "osv-scanner")
+            .all(crate::dep_audit::note_proves_clean);
     let dependency_snapshot = DependencySnapshotJson {
         rows: dep_rows,
         coverage_notes: dep_coverage_notes,
@@ -5413,6 +5434,9 @@ mod fix_text_tests;
 
 #[cfg(test)]
 mod fn_batch_c_adjust_tests;
+
+#[cfg(test)]
+mod fn_batch_c_dep_tests;
 
 #[cfg(test)]
 mod fn_batch_c_incremental_tests;

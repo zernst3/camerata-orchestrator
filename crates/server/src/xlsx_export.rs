@@ -1816,7 +1816,7 @@ fn write_coverage_sheet(
     if !gaps.is_empty() {
         ws.write_string_with_format(next_r, 0, "Not reviewed this scan", &fmts.section_title)?;
         next_r += 1;
-        for line in &gaps.failed_ai_passes {
+        for line in gaps.failed_ai_passes.iter().chain(&gaps.dependency_gaps) {
             ws.write_string_with_format(next_r, 0, line, &fmts.cell(None, true, false))?;
             next_r += 1;
         }
