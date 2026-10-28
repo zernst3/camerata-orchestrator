@@ -308,7 +308,11 @@ mod tests {
             in_repo("acme/b", "R-A", 3),
             in_repo("acme/a", "R-A", 4),
         ];
-        for preset in [OrderPreset::ByFile, OrderPreset::ByRule, OrderPreset::Curated] {
+        for preset in [
+            OrderPreset::ByFile,
+            OrderPreset::ByRule,
+            OrderPreset::Curated,
+        ] {
             let got = order_findings(preset, &rows);
             let repos: Vec<&str> = got.iter().map(|f| f.repo.as_str()).collect();
             assert_eq!(

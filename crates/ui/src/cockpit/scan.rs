@@ -1611,6 +1611,35 @@ impl RegistryEntryWire {
     }
 }
 
+/// One repo's size for the pre-audit estimate, from `POST /api/onboard/preflight`: what the scan
+/// will read from it, or why it cannot be read.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+pub(super) struct RepoSizeView {
+    pub repo: String,
+    #[serde(default)]
+    pub files: usize,
+    #[serde(default)]
+    pub code_chars: usize,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Ask the server how big each repo is as the scan will read it. The scan chunks and calibrates
+/// every repo on its own, so a project of several repos is estimated repo by repo, not as one
+/// stream of code. `None` when the server cannot be reached (the caller falls back to the one
+/// total it already has).
+pub(super) async fn fetch_repo_sizes(repos: &[String]) -> Option<Vec<RepoSizeView>> {
+    reqwest::Client::new()
+        .post(format!("{}/api/onboard/preflight", crate::bff_base()))
+        .json(&serde_json::json!({ "repos": repos }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct AuditModelsResp {
     pub models: Vec<AuditModelOption>,
@@ -5343,6 +5372,9 @@ pub(super) enum RepoDetect {
         repo: String,
         path: String,
         onboarded_in: Option<String>,
+        /// What is limited for a folder that is not on GitHub (it can be inspected, but push and
+        /// pull requests are GitHub-only). `None` for a GitHub repo.
+        note: Option<String>,
     },
     /// Couldn't derive one — carries a human reason for a toast.
     Failed(String),
@@ -5380,6 +5412,10 @@ pub(super) async fn detect_local_repo() -> RepoDetect {
                 onboarded_in: v
                     .get("onboarded_project")
                     .and_then(|p| p.as_str())
+                    .map(|s| s.to_string()),
+                note: v
+                    .get("note")
+                    .and_then(|n| n.as_str())
                     .map(|s| s.to_string()),
             },
             None => RepoDetect::Failed("no repo in the response".to_string()),
@@ -5628,7 +5664,7 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
                                     RepoDetect::Found { repo: found, onboarded_in: Some(project), .. } => {
                                         crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{found} is already onboarded (project \u{201c}{project}\u{201d}). Onboarding is one-time — add it to your workspace to work on it, instead of re-onboarding."));
                                     }
-                                    RepoDetect::Found { repo: found, path: folder, .. } => {
+                                    RepoDetect::Found { repo: found, path: folder, note, .. } => {
                                         let saved = set_repo_path(&found, &folder).await;
                                         let mut cur = repo();
                                         let exists = cur.split([',', '\n']).any(|s| s.trim() == found);
@@ -5641,14 +5677,15 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
                                             cur.push_str(&found);
                                             repo.set(cur);
                                             if saved {
-                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Added {found} ({folder})"));
+                                                let limit = note.map(|n| format!(" {n}")).unwrap_or_default();
+                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Added {found} ({folder}).{limit}"));
                                             } else {
                                                 crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Added {found}, but couldn't record its local path."));
                                             }
                                         }
                                     }
                                     RepoDetect::Failed(msg) => {
-                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Couldn't read that folder: {msg}. It must be a local git repo with a GitHub origin remote."));
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Couldn't read that folder: {msg}. It must be a local git repository."));
                                     }
                                 }
                             });
@@ -7643,6 +7680,20 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     use_context_provider(|| repo_selection);
     // Which repo's rule table is in view. Defaults to the first scanned repo. Provided as
     // context so the rule-detail modal + the table key the per-repo `chosen` map by it.
+    // Per-repo sizes for the estimate (several repos only): fetched once per mount.
+    let repo_sizes = {
+        let repos = report.repos.clone();
+        use_resource(move || {
+            let repos = repos.clone();
+            async move {
+                if repos.len() > 1 {
+                    fetch_repo_sizes(&repos).await
+                } else {
+                    None
+                }
+            }
+        })
+    };
     let viewed_repo = use_signal(|| report.repos.first().cloned().unwrap_or_default());
     use_context_provider(|| viewed_repo);
     let mut viewed_repo = viewed_repo;
@@ -8836,7 +8887,43 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         // alternative-recommendation pass the audit will run.
                         let multi_option_selected =
                             report.proposed_rules.iter().filter(|r| r.options.len() >= 2).count();
-                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, camerata_ui_core::scan::estimate_mode(&audit_mode(), backend), a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, multi_option_selected, true);
+                        let est_mode = camerata_ui_core::scan::estimate_mode(&audit_mode(), backend);
+                        // Several repos: one estimate per repo, summed (the scan chunks and
+                        // calibrates each repo on its own). Single repo, or sizes not back yet:
+                        // the one-stream estimate, unchanged.
+                        let sizes: Option<Vec<RepoSizeView>> = if multi_repo { (*repo_sizes.read()).clone().flatten() } else { None };
+                        let mut repo_lines: Vec<String> = Vec::new();
+                        let (toks, dollars, passes) = match sizes {
+                            Some(sizes) => {
+                                let selection = repo_selection.read().clone();
+                                let readable: Vec<&RepoSizeView> = sizes.iter().filter(|z| z.error.is_none()).collect();
+                                let fallback = sel.div_ceil(readable.len().max(1));
+                                let inputs: Vec<camerata_ui_core::scan::RepoEstimateInput> = readable
+                                    .iter()
+                                    .map(|z| {
+                                        let ids = selection.get(&z.repo);
+                                        camerata_ui_core::scan::RepoEstimateInput {
+                                            repo: z.repo.clone(),
+                                            code_chars: z.code_chars,
+                                            selected: ids.map(|v| v.len()).unwrap_or(fallback),
+                                            multi_option_selected: ids
+                                                .map(|v| report.proposed_rules.iter().filter(|r| r.options.len() >= 2 && v.contains(&r.id)).count())
+                                                .unwrap_or(multi_option_selected),
+                                        }
+                                    })
+                                    .collect();
+                                let est = camerata_ui_core::scan::estimate_audit_cost_by_repo(&inputs, est_mode, a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, true);
+                                for z in sizes.iter() {
+                                    match (&z.error, est.rows.iter().find(|r| r.repo == z.repo)) {
+                                        (Some(why), _) => repo_lines.push(camerata_ui_core::scan::unreadable_repo_line(&z.repo, why)),
+                                        (None, Some(row)) => repo_lines.push(camerata_ui_core::scan::repo_estimate_line(&z.repo, z.files, z.code_chars, row)),
+                                        (None, None) => {}
+                                    }
+                                }
+                                (est.tokens, est.dollars, est.passes)
+                            }
+                            None => estimate_audit_cost(report.code_chars, sel, est_mode, a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, multi_option_selected, true),
+                        };
                         let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
                         let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };
                         // ACTUAL, once the audit finished and the backend reported usage.
@@ -8880,6 +8967,13 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                         span { class: "audit-cost-label", "Estimated cost" }
                                         span { class: "audit-cost-val", "{dollar_str}" }
                                         span { class: "audit-cost-meta", "~{human_tokens(toks)} tokens · {passes} pass(es) · {sel} rule(s)" }
+                                    }
+                                    if !repo_lines.is_empty() {
+                                        ul { class: "audit-cost-repos",
+                                            for line in repo_lines.iter() {
+                                                li { key: "{line}", "{line}" }
+                                            }
+                                        }
                                     }
                                     p { class: "audit-cost-note",
                                         // Approximate in both directions now, not uniformly "biased high": output
@@ -13408,7 +13502,11 @@ mod render_tests {
             ]
         );
         // One repo in play: the bare path, as before.
-        let single: Vec<FindingView> = rows.iter().filter(|f| f.repo == "acme/a").cloned().collect();
+        let single: Vec<FindingView> = rows
+            .iter()
+            .filter(|f| f.repo == "acme/a")
+            .cloned()
+            .collect();
         let state = finding_table_state(sort_rows(&single), vec!["acme/a".into()], false);
         let state = set_grouping(&state, vec![ColumnId("file")]);
         let labels: Vec<String> = visible_grouped_view(&state)

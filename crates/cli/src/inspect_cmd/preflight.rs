@@ -8,7 +8,9 @@
 
 use camerata_server::llm::ProjectBackend;
 use camerata_server::preflight::{ExactSample, RepoScanFacts};
-use camerata_ui_core::scan::{estimate_audit_cost, human_tokens};
+use camerata_ui_core::scan::{
+    estimate_audit_cost_by_repo, human_tokens, RepoEstimate, RepoEstimateInput,
+};
 
 /// Everything the wording needs.
 pub struct PreflightInputs<'a> {
@@ -68,37 +70,55 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
         .unwrap_or(0);
 
     let prices = price_of(&inputs.model).zip(price_of(&inputs.calibration_model));
+    // One estimate per repo, summed: the scan reads and chunks each repo on its own. A repo
+    // that could not be read counts nothing and is named in the output instead.
+    let est_inputs: Vec<RepoEstimateInput> = inputs
+        .repos
+        .iter()
+        .filter(|r| r.read_error.is_none())
+        .map(|r| RepoEstimateInput {
+            repo: r.repo.clone(),
+            code_chars: r.code_chars,
+            selected: r.semantic.len(),
+            multi_option_selected: r.multi_option_rules,
+        })
+        .collect();
+    // Consensus runs the whole AI audit several times over the same inputs.
+    let runs = if inputs.consensus {
+        camerata_server::consensus::CONSENSUS_PASSES
+    } else {
+        1
+    };
     let estimate = prices.map(|((a_in, a_out), (c_in, c_out))| {
-        let mut tokens = 0u64;
-        let mut dollars = 0.0f64;
-        let mut passes = 0usize;
-        for repo in inputs.repos {
-            let (t, d, p) = estimate_audit_cost(
-                repo.code_chars,
-                repo.semantic.len(),
-                mode,
-                a_in,
-                a_out,
-                c_in,
-                c_out,
-                false,
-                inputs.incremental,
-                false,
-                inputs.backend,
-                repo.multi_option_rules,
-                inputs.terse_output,
-            );
-            tokens += t;
-            dollars += d;
-            passes += p;
-        }
-        // Consensus runs the whole AI audit several times over the same inputs.
-        let runs = if inputs.consensus {
-            camerata_server::consensus::CONSENSUS_PASSES
-        } else {
-            1
-        };
-        (tokens * runs as u64, dollars * runs as f64, passes * runs)
+        let e = estimate_audit_cost_by_repo(
+            &est_inputs,
+            mode,
+            a_in,
+            a_out,
+            c_in,
+            c_out,
+            false,
+            inputs.incremental,
+            false,
+            inputs.backend,
+            inputs.terse_output,
+        );
+        let rows: Vec<RepoEstimate> = e
+            .rows
+            .into_iter()
+            .map(|r| RepoEstimate {
+                tokens: r.tokens * runs as u64,
+                dollars: r.dollars * runs as f64,
+                passes: r.passes * runs,
+                ..r
+            })
+            .collect();
+        (
+            e.tokens * runs as u64,
+            e.dollars * runs as f64,
+            e.passes * runs,
+            rows,
+        )
     });
 
     let mut out = String::new();
@@ -108,7 +128,7 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
     )
     .ok();
     match estimate {
-        Some((tokens, dollars, passes)) => {
+        Some((tokens, dollars, passes, _)) => {
             writeln!(
                 out,
                 "  estimated cost: about ${dollars:.2} ({} tokens over about {passes} model calls)",
@@ -133,6 +153,47 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
         inputs.model, inputs.calibration_model
     )
     .ok();
+    if inputs.repos.len() > 1 {
+        writeln!(out, "  per repo:").ok();
+        for repo in inputs.repos {
+            match (&repo.read_error, estimate.as_ref()) {
+                (Some(why), _) => {
+                    writeln!(
+                        out,
+                        "    {}: could not be read ({why}); it is NOT in this estimate",
+                        repo.repo
+                    )
+                    .ok();
+                }
+                (None, Some((_, _, _, rows))) => {
+                    if let Some(row) = rows.iter().find(|r| r.repo == repo.repo) {
+                        writeln!(
+                            out,
+                            "    {}: {} characters of code in {} file(s), {} rule(s), about ${:.2} ({} model calls)",
+                            repo.repo,
+                            repo.code_chars,
+                            repo.files.len(),
+                            repo.semantic.len(),
+                            row.dollars,
+                            row.passes
+                        )
+                        .ok();
+                    }
+                }
+                (None, None) => {
+                    writeln!(
+                        out,
+                        "    {}: {} characters of code in {} file(s), {} rule(s)",
+                        repo.repo,
+                        repo.code_chars,
+                        repo.files.len(),
+                        repo.semantic.len()
+                    )
+                    .ok();
+                }
+            }
+        }
+    }
     if inputs.terse_output {
         writeln!(
             out,
@@ -191,7 +252,7 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
                  pass over the limit."
             )
             .ok();
-            if let Some((_, dollars, _)) = estimate {
+            if let Some((_, dollars, _, _)) = estimate {
                 if dollars > cap {
                     writeln!(
                         out,
@@ -216,7 +277,7 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
     }
     Preflight {
         text: out,
-        estimate_usd: estimate.map(|(_, d, _)| d),
+        estimate_usd: estimate.map(|(_, d, _, _)| d),
     }
 }
 
@@ -233,6 +294,14 @@ mod tests {
                 .map(|i| (format!("R-{i}"), "do it".to_string()))
                 .collect(),
             multi_option_rules: 2,
+            read_error: None,
+        }
+    }
+
+    fn named(name: &str, chars: usize, rules: usize) -> RepoScanFacts {
+        RepoScanFacts {
+            repo: name.into(),
+            ..repo(chars, rules)
         }
     }
 
@@ -350,5 +419,66 @@ mod tests {
         let mut batch = inputs(&repos, Some(5.0));
         batch.batch = true;
         assert!(build(&batch).text.contains("cannot be cancelled cheaply"));
+    }
+
+    /// M1: a project of several repos is priced per repo (each is read and chunked on its
+    /// own), with one row per repo whose dollars add up to the headline figure.
+    #[test]
+    fn several_repos_get_one_row_each_and_the_rows_sum_to_the_estimate() {
+        let repos = [
+            named("acme/api", 360_000, 10),
+            named("acme/web", 360_000, 10),
+            named("acme/jobs", 20_000, 10),
+        ];
+        let p = build(&inputs(&repos, None));
+        assert!(p.text.contains("per repo:"), "{}", p.text);
+        for name in ["acme/api", "acme/web", "acme/jobs"] {
+            assert!(p.text.contains(&format!("    {name}: ")), "{}", p.text);
+        }
+        let row_total: f64 = p
+            .text
+            .lines()
+            .filter(|l| l.starts_with("    acme/"))
+            .map(|l| {
+                let after = l.split("about $").nth(1).expect("a dollar figure");
+                after.split(' ').next().unwrap().parse::<f64>().unwrap()
+            })
+            .sum();
+        let total = p.estimate_usd.unwrap();
+        assert!(
+            (row_total - total).abs() < 0.02,
+            "rows {row_total} vs {total}"
+        );
+        // And it is more than pricing the same code as one stream.
+        let merged = [named("acme/all", 740_000, 10)];
+        assert!(total > build(&inputs(&merged, None)).estimate_usd.unwrap());
+    }
+
+    #[test]
+    fn a_single_repo_prints_no_per_repo_block() {
+        let repos = [repo(1_000, 3)];
+        assert!(!build(&inputs(&repos, None)).text.contains("per repo:"));
+    }
+
+    /// M1: an unreadable repo is named in the estimate, counts nothing, and never reads as free.
+    #[test]
+    fn an_unreadable_repo_is_named_and_left_out_of_the_total() {
+        let mut gone = named("acme/gone", 0, 0);
+        gone.read_error = Some("no such folder".into());
+        let repos = [named("acme/api", 360_000, 10), gone];
+        let p = build(&inputs(&repos, None));
+        assert!(
+            p.text.contains(
+                "acme/gone: could not be read (no such folder); it is NOT in this estimate"
+            ),
+            "{}",
+            p.text
+        );
+        let alone = [named("acme/api", 360_000, 10)];
+        let (with, without) = (
+            p.estimate_usd.unwrap(),
+            build(&inputs(&alone, None)).estimate_usd.unwrap(),
+        );
+        assert!((with - without).abs() < 1e-9, "{with} vs {without}");
     }
 }

@@ -201,7 +201,11 @@ fn shape_of(f: &FindingView) -> Shape {
     } else {
         String::new()
     };
-    (f.rule_id.clone(), fingerprint(&f.rule_id, &f.snippet), scope)
+    (
+        f.rule_id.clone(),
+        fingerprint(&f.rule_id, &f.snippet),
+        scope,
+    )
 }
 
 impl DecisionIndex {
@@ -220,14 +224,11 @@ impl DecisionIndex {
             if !d.state.is_decided() || f.snippet.trim().is_empty() || !seen.insert(key.clone()) {
                 continue;
             }
-            by_shape
-                .entry(shape_of(f))
-                .or_default()
-                .push(Decided {
-                    key,
-                    state: d.state,
-                    reason: d.reason.trim().to_string(),
-                });
+            by_shape.entry(shape_of(f)).or_default().push(Decided {
+                key,
+                state: d.state,
+                reason: d.reason.trim().to_string(),
+            });
         }
         Self { by_shape }
     }
@@ -658,8 +659,18 @@ mod tests {
     /// IS part of the shape. Identified by the server's category.
     #[test]
     fn a_secret_exposure_decision_is_not_offered_in_another_repo() {
-        let mut a = in_repo("acme/a", "SEC-NO-HARDCODED-SECRETS-1", 3, "key = [REDACTED]");
-        let mut b = in_repo("acme/b", "SEC-NO-HARDCODED-SECRETS-1", 3, "key = [REDACTED]");
+        let mut a = in_repo(
+            "acme/a",
+            "SEC-NO-HARDCODED-SECRETS-1",
+            3,
+            "key = [REDACTED]",
+        );
+        let mut b = in_repo(
+            "acme/b",
+            "SEC-NO-HARDCODED-SECRETS-1",
+            3,
+            "key = [REDACTED]",
+        );
         a.category = Some("secret-exposure".into());
         b.category = Some("secret-exposure".into());
         let rows = vec![a.clone(), b.clone()];
@@ -675,8 +686,18 @@ mod tests {
     /// carries no category.
     #[test]
     fn a_secret_rule_id_without_a_category_is_repo_scoped_too() {
-        let a = in_repo("acme/a", "SEC-NO-HARDCODED-SECRETS-1", 3, "key = [REDACTED]");
-        let b = in_repo("acme/b", "SEC-NO-HARDCODED-SECRETS-1", 3, "key = [REDACTED]");
+        let a = in_repo(
+            "acme/a",
+            "SEC-NO-HARDCODED-SECRETS-1",
+            3,
+            "key = [REDACTED]",
+        );
+        let b = in_repo(
+            "acme/b",
+            "SEC-NO-HARDCODED-SECRETS-1",
+            3,
+            "key = [REDACTED]",
+        );
         assert!(a.category.is_none());
         let rows = vec![a.clone(), b.clone()];
         let d = decided(&[&a], TriageState::FalsePositive, "fixture key");
@@ -686,8 +707,18 @@ mod tests {
     /// M9: inside ONE repo a secret decision is still remembered (two rows in the same repo).
     #[test]
     fn a_secret_exposure_decision_is_still_offered_within_its_repo() {
-        let mut a1 = in_repo("acme/a", "SEC-NO-HARDCODED-SECRETS-1", 3, "key = [REDACTED]");
-        let mut a2 = in_repo("acme/a", "SEC-NO-HARDCODED-SECRETS-1", 9, "key = [REDACTED]");
+        let mut a1 = in_repo(
+            "acme/a",
+            "SEC-NO-HARDCODED-SECRETS-1",
+            3,
+            "key = [REDACTED]",
+        );
+        let mut a2 = in_repo(
+            "acme/a",
+            "SEC-NO-HARDCODED-SECRETS-1",
+            9,
+            "key = [REDACTED]",
+        );
         a1.category = Some("secret-exposure".into());
         a2.category = Some("secret-exposure".into());
         let rows = vec![a1.clone(), a2.clone()];

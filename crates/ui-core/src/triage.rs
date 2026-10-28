@@ -2017,7 +2017,10 @@ mod tests {
             ignored: 5,
             ..TriageCounts::default()
         };
-        assert_eq!(repo_counts_line("acme/a", counts), "acme/a: 3 to review of 12");
+        assert_eq!(
+            repo_counts_line("acme/a", counts),
+            "acme/a: 3 to review of 12"
+        );
     }
 
     #[test]

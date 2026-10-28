@@ -489,6 +489,119 @@ pub async fn refresh_resolved(dir: &Path, repo: &str, token: &str) -> RepoChecko
     }
 }
 
+/// The owner segment of a repo that is NOT on GitHub (a local folder with no `origin`, or one on
+/// another git host) added for an inspection. It cannot be a real github.com owner (GitHub
+/// account names hold only letters, digits and hyphens, never an underscore), so no push, pull or
+/// pull request aimed at such a name can ever reach someone else's GitHub repository.
+pub const NON_GITHUB_OWNER: &str = "non_github";
+
+/// True for a repo name made by [`detect_inspection_repo`] for a folder that is not on GitHub.
+pub fn is_non_github_repo(repo: &str) -> bool {
+    repo.split_once('/')
+        .is_some_and(|(owner, _)| owner == NON_GITHUB_OWNER)
+}
+
+/// Refuse a GitHub-only operation (clone, fetch, pull, push, pull request) for a repo that is not
+/// on GitHub. Inspection works on any local git folder; getting code back to a host stays
+/// GitHub-only.
+pub fn require_github_repo(repo: &str) -> anyhow::Result<()> {
+    if is_non_github_repo(repo) {
+        anyhow::bail!(
+            "{repo} is not on GitHub, so it can be inspected but not pushed or opened as a pull              request from here (push and pull requests work for GitHub repositories only)"
+        );
+    }
+    Ok(())
+}
+
+/// A repo name for a folder that is not on GitHub: `non_github/<name>`, where `<name>` is the
+/// host path of its `origin` (`acme/api` on another host becomes `acme-api`) or, with no remote,
+/// the folder's own name. Characters outside letters, digits, `-`, `_` and `.` become `-`.
+fn non_github_name(origin: Option<&str>, folder: &Path) -> Option<String> {
+    let from_origin = origin.and_then(|url| {
+        let s = url.trim().trim_end_matches('/').trim_end_matches(".git");
+        split_remote(s).map(|(_, path)| {
+            path.split('/')
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join("-")
+        })
+    });
+    let raw = from_origin
+        .filter(|n| !n.is_empty())
+        .or_else(|| folder.file_name().map(|n| n.to_string_lossy().to_string()))?;
+    let clean: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let clean = clean.trim_matches(|c| c == '-' || c == '.').to_string();
+    if clean.is_empty() {
+        return None;
+    }
+    let name = format!("{NON_GITHUB_OWNER}/{clean}");
+    camerata_api_types::uow::validate_repo_name(&name).ok()?;
+    Some(name)
+}
+
+/// What a folder chosen in the cockpit's "add a repo" step is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectionRepo {
+    /// The repo's name: `owner/repo` for a GitHub origin, else a `non_github/...` name.
+    pub name: String,
+    /// The folder's `origin` is a GitHub repository.
+    pub github: bool,
+    /// Plain words about what is limited, for a repo not on GitHub.
+    pub note: Option<String>,
+}
+
+/// Identify a local folder for an inspection. A GitHub `origin` gives its `owner/repo` as ever.
+/// A git folder with no `origin`, or with one on another host, is accepted under a
+/// `non_github/...` name ([`NON_GITHUB_OWNER`]) with a note that push and pull requests are
+/// GitHub-only. A folder that is not a git repository, or where git itself fails, is refused as
+/// before.
+pub async fn detect_inspection_repo(path: &Path) -> Result<InspectionRepo, String> {
+    match detect_origin(path).await {
+        Ok(name) => Ok(InspectionRepo {
+            name,
+            github: true,
+            note: None,
+        }),
+        Err(e @ (OriginError::NoRemote | OriginError::NotGithub { .. })) => {
+            if !is_git_repo(path) {
+                return Err(format!(
+                    "{} is not a git repository (it has no .git folder)",
+                    path.display()
+                ));
+            }
+            let origin = match &e {
+                OriginError::NotGithub { url } => Some(url.as_str()),
+                _ => None,
+            };
+            let name = non_github_name(origin, path).ok_or_else(|| {
+                format!("could not make a repository name from {}", path.display())
+            })?;
+            let note = match &e {
+                OriginError::NotGithub { url } => format!(
+                    "Its origin ({}) is not on GitHub. It can be inspected; push and pull requests work for GitHub repositories only.",
+                    scrub_remote_url(url)
+                ),
+                _ => "It has no origin remote. It can be inspected; push and pull requests work for GitHub repositories only.".to_string(),
+            };
+            Ok(InspectionRepo {
+                name,
+                github: false,
+                note: Some(note),
+            })
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Read the GitHub `owner/repo` from a local git checkout's `origin` remote, so the UI
 /// can let a developer NAVIGATE to a repo folder instead of typing `owner/repo`. Returns
 /// a specific human error so the UI can tell the user exactly what went wrong.
@@ -1863,6 +1976,7 @@ pub async fn commit_merge_with_message(dir: &Path, message: &str) -> anyhow::Res
 /// the update-branch flow when the merge source is an origin branch, so the local
 /// `origin/<branch>` ref is current before the merge. No fast-forward of any local branch.
 pub async fn fetch_branch(dir: &Path, repo: &str, branch: &str, token: &str) -> anyhow::Result<()> {
+    require_github_repo(repo)?;
     let out = git(Some(dir), &["fetch", &authed_url(repo, token), branch]).await?;
     if out.status.success() {
         return Ok(());
@@ -1876,6 +1990,7 @@ pub async fn fetch_branch(dir: &Path, repo: &str, branch: &str, token: &str) -> 
 /// call, e.g. so the branch list / ahead-behind counts reflect branches other people pushed. Never
 /// touches the working tree or any local branch — a pure network refresh.
 pub async fn fetch_all(dir: &Path, repo: &str, token: &str) -> anyhow::Result<String> {
+    require_github_repo(repo)?;
     let out = git(
         Some(dir),
         &[
@@ -1987,6 +2102,7 @@ pub async fn snapshot_worktree(dir: &Path, task: &str) -> anyhow::Result<Option<
 /// in `.git/config`). This is the user-triggered push from the UI; the server never
 /// calls this on its own.
 pub async fn push_branch(dir: &Path, repo: &str, branch: &str, token: &str) -> anyhow::Result<()> {
+    require_github_repo(repo)?;
     camerata_api_types::uow::validate_repo_name(repo).map_err(|e| anyhow::anyhow!(e))?;
     let out = git(Some(dir), &["push", &authed_url(repo, token), branch]).await?;
     if out.status.success() {
@@ -2002,6 +2118,7 @@ pub async fn pull_branch(
     branch: &str,
     token: &str,
 ) -> anyhow::Result<String> {
+    require_github_repo(repo)?;
     camerata_api_types::uow::validate_repo_name(repo).map_err(|e| anyhow::anyhow!(e))?;
     let out = git(
         Some(dir),
@@ -2073,6 +2190,7 @@ pub async fn ship(
     root: &Path,
     token: &str,
 ) -> anyhow::Result<String> {
+    require_github_repo(repo)?;
     let dir = repo_dir(root, repo);
     if !is_git_repo(&dir) {
         anyhow::bail!("{repo} is not cloned yet");
@@ -2126,6 +2244,7 @@ pub async fn open_pr_with_base(
     use camerata_worktracker::{HttpTransport, ReqwestTransport};
 
     camerata_api_types::uow::validate_repo_name(repo).map_err(|e| anyhow::anyhow!(e))?;
+    require_github_repo(repo)?;
     let (owner, _name) = repo
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("repo must be owner/repo, got {repo}"))?;
@@ -3849,5 +3968,138 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── Inspecting a folder that is not on GitHub ────────────────────────────────────────
+
+    #[test]
+    fn a_non_github_name_comes_from_the_origin_path_or_the_folder() {
+        let folder = Path::new("/Users/auditor/clients/Billing Service");
+        assert_eq!(
+            non_github_name(Some("https://gitlab.com/acme/api.git"), folder).as_deref(),
+            Some("non_github/acme-api")
+        );
+        assert_eq!(
+            non_github_name(Some("git@git.example.org:team/sub/api.git"), folder).as_deref(),
+            Some("non_github/team-sub-api")
+        );
+        // No origin: the folder's own name, with the space made safe.
+        assert_eq!(
+            non_github_name(None, folder).as_deref(),
+            Some("non_github/Billing-Service")
+        );
+        // Nothing usable left.
+        assert_eq!(non_github_name(None, Path::new("/")), None);
+        // Every name it makes is a valid repository name.
+        for name in [
+            non_github_name(Some("https://gitlab.com/a/b.git"), folder),
+            non_github_name(None, folder),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(
+                camerata_api_types::uow::validate_repo_name(&name).is_ok(),
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_folder_with_no_origin_is_added_for_inspection_only() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("internal-tool");
+        std::fs::create_dir_all(&dir).unwrap();
+        let init = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["init", "-q", "-b", "main"])
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        let found = detect_inspection_repo(&dir).await.expect("accepted");
+        assert_eq!(found.name, "non_github/internal-tool");
+        assert!(!found.github);
+        let note = found.note.expect("says what is limited");
+        assert!(note.contains("GitHub repositories only"), "{note}");
+        assert!(!note.contains('\u{2014}'), "no em dash: {note}");
+    }
+
+    #[tokio::test]
+    async fn a_folder_on_another_host_is_added_for_inspection_only() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("checkout");
+        init_repo_with_origin(
+            &dir,
+            "https://x-access-token:secret@gitlab.com/acme/api.git",
+        );
+        let found = detect_inspection_repo(&dir).await.expect("accepted");
+        assert_eq!(found.name, "non_github/acme-api");
+        assert!(!found.github);
+        let note = found.note.unwrap();
+        assert!(note.contains("gitlab.com/acme/api"), "{note}");
+        assert!(
+            !note.contains("secret"),
+            "a credential in the URL is never shown: {note}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_github_folder_is_identified_as_before() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("checkout");
+        init_repo_with_origin(&dir, "git@github.com:acme/api.git");
+        let found = detect_inspection_repo(&dir).await.expect("accepted");
+        assert_eq!(found.name, "acme/api");
+        assert!(found.github);
+        assert!(found.note.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_folder_that_is_not_a_repository_is_still_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let err = detect_inspection_repo(root.path())
+            .await
+            .expect_err("not a repo");
+        assert!(err.contains("not a git repository"), "{err}");
+    }
+
+    /// Push, pull, fetch and pull requests stay GitHub-only: for a `non_github/...` repo they
+    /// refuse in plain words, before any command runs and before any token is used.
+    #[tokio::test]
+    async fn network_operations_refuse_a_repo_that_is_not_on_github() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = "non_github/acme-api";
+        assert!(is_non_github_repo(repo));
+        assert!(!is_non_github_repo("acme/api"));
+        // An owner that merely looks similar is a real GitHub owner.
+        assert!(!is_non_github_repo("non-github/acme-api"));
+        let errs = [
+            push_branch(dir.path(), repo, "main", "tok")
+                .await
+                .unwrap_err(),
+            pull_branch(dir.path(), repo, "main", "tok")
+                .await
+                .map(|_| ())
+                .unwrap_err(),
+            fetch_branch(dir.path(), repo, "main", "tok")
+                .await
+                .unwrap_err(),
+            fetch_all(dir.path(), repo, "tok")
+                .await
+                .map(|_| ())
+                .unwrap_err(),
+            open_pr_with_base(repo, "feat", None, "t", "b", "tok")
+                .await
+                .map(|_| ())
+                .unwrap_err(),
+            ship(repo, "feat", "t", "b", dir.path(), "tok")
+                .await
+                .map(|_| ())
+                .unwrap_err(),
+        ];
+        for e in errs {
+            let msg = e.to_string();
+            assert!(msg.contains("not on GitHub"), "{msg}");
+        }
     }
 }
