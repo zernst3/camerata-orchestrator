@@ -97,28 +97,18 @@ pub const AUDIT_RULES: &[&str] = &[
 /// before this existed, which the rescan then classifies by its rule's ledger tier as before.
 pub const PRODUCED_TIER_CAPTURE: &str = "produced_tier";
 
-/// The `captures` keys that are bookkeeping about a finding, not names of objects it is about:
-/// the producer ([`PRODUCED_TIER_CAPTURE`]) and the commit a carried finding came from
-/// (`report_export::CARRIED_FROM_CAPTURE`).
-///
-/// Captured VALUES are an identity signal: the merge stages treat two findings that share a
-/// captured value of three or more characters as the same root cause, even across files. A value
-/// like `semantic`, or the commit every carried finding names, would fuse unrelated findings into
-/// one row. So these keys are held aside across the merge stages ([`BookkeepingCaptures`]) and put
-/// back on the surviving rows.
-const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
-    PRODUCED_TIER_CAPTURE,
-    crate::report_export::CARRIED_FROM_CAPTURE,
-    // The sentence a severity bound or verdict leaves when it moves a severity. The AI tier writes
-    // it inside `audit_repo`, before the cross-family merge; the same sentence on two findings
-    // says the same bound applied, not that they are about the same object.
-    crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE,
-    // The templated history sentence every secret finding gets from `attach_secret_history_capture`.
-    HISTORY_STATUS_CAPTURE,
-];
+// The `captures` keys that are bookkeeping about a finding, not names of objects it is about,
+// are listed once, in `crate::ai_audit::BOOKKEEPING_CAPTURE_KEYS`.
+//
+// Captured VALUES are an identity signal: the merge stages treat two findings that share a
+// captured value of three or more characters as the same root cause, even across files. A value
+// like `semantic`, or the commit every carried finding names, would fuse unrelated findings into
+// one row. So these keys are held aside across the merge stages (`BookkeepingCaptures`) and put
+// back on the surviving rows.
+use crate::ai_audit::BOOKKEEPING_CAPTURE_KEYS;
 
 /// The `captures` key holding a secret finding's commit-history status.
-const HISTORY_STATUS_CAPTURE: &str = "history-status";
+pub const HISTORY_STATUS_CAPTURE: &str = "history-status";
 
 /// Bookkeeping captures taken off findings before the merge stages and restored after them, keyed
 /// by what identifies a row there (repo, path, rule and snippet; not the line, which a merge may

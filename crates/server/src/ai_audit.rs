@@ -7407,12 +7407,30 @@ fn structural_objects(f: &Finding) -> std::collections::HashSet<String> {
 }
 
 /// `Finding::captures` keys that are BOOKKEEPING about the row, not objects the finding is
-/// about: the severity-adjustment sentences and the carried-from commit. Two unrelated findings
-/// can carry the same such value (the same ceiling sentence, the same commit), so they are never
-/// identity evidence for a merge, a veto, a backfill or a credential-identity match.
-const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
-    crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE,
+/// about: the producer, the commit a carried finding came from, the severity-adjustment
+/// sentences and the commit-history sentence. Two unrelated findings can carry the same such
+/// value (the same ceiling sentence, the same commit, the templated history sentence), so they
+/// are never identity evidence for a merge, a veto, a backfill or a credential-identity match.
+///
+/// This is the ONE list. `onboard`'s take and restore of these keys around the merge stages
+/// reads it too, so a key added here is held aside there and ignored as an object here. The keys
+/// are put back on the surviving rows before `report_export` runs
+/// [`root_cause_credential_identities`], which is why they must be excluded here as well and not
+/// only while the merge stages run.
+pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
+    crate::onboard::PRODUCED_TIER_CAPTURE,
     crate::report_export::CARRIED_FROM_CAPTURE,
+    // The sentence a severity bound or verdict leaves when it moves a severity. The AI tier writes
+    // it inside `audit_repo`, before the cross-family merge; the same sentence on two findings
+    // says the same bound applied, not that they are about the same object.
+    crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE,
+    // The templated history sentence every secret finding gets from `attach_secret_history_capture`.
+    crate::onboard::HISTORY_STATUS_CAPTURE,
+    // The templated sentences `enrich_secret_context` puts on every secret-shaped floor finding
+    // before the cross-family merge: two different secrets in two files share them, so they
+    // would otherwise read as one object and fuse the two findings.
+    "gitignore-status",
+    "secret-kind",
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.
