@@ -1,6 +1,7 @@
 # Camerata — system overview (the human map)
 
-> **Audience & purpose.** The codebase is ~320k Rust LOC across 26 crates — too much to read.
+> **Audience & purpose.** The codebase is too large to read end to end; its current size is in
+> the README's "By the numbers" table, so this map carries no line or crate counts of its own.
 > This is the HIGH-LEVEL map a human reads to understand the whole system in one sitting: what
 > the parts are, how they fit, and the handful of concepts everything else is built on. For
 > code-level depth see `TECHNICAL.md`; for the layering/runtime view see `ARCHITECTURE.md`; for
@@ -43,7 +44,7 @@ THE CORPUS + ITS ENFORCEMENT
   camerata-check   thin check CLI
 
 THE INSPECTION ENGINE
-  server        the big one (~139k LOC): the scan pipeline, calibration, classification, the
+  server        the largest crate: the scan pipeline, calibration, classification, the
                 report/xlsx/csv/json/manifest exporters, the integrity gate, dep-audit (osv),
                 ownership derivation, the BFF HTTP API
   preview       preview-scan helpers
@@ -134,7 +135,7 @@ the cockpit banner), strictly operator-only and never in a client artifact. Auth
 `RULE_AUTHORING.md`.
 
 ## Where to go deeper
-- **Code-level HOW:** `TECHNICAL.md` (the 4k-line reference).
+- **Code-level HOW:** `TECHNICAL.md` (the full reference).
 - **Layering / runtime stack:** `ARCHITECTURE.md`.
 - **Rule schema + authoring:** `RULE_AUTHORING.md`, `RULES_REFERENCE.md`.
 - **In-flight design:** `docs/design/` (e.g. the machine-readable exports, the ownership/unfixable

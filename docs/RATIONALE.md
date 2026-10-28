@@ -132,7 +132,7 @@ Stated directly, because omitting them would make this document less useful:
   enterprise surface is the most code and the most-tested crate, but its external
   adapters run against scripted fakes and have made no live API calls yet; the consumer
   surface's data-and-flow spine runs end to end while its default experience uses a
-  deterministic stub reviewer and a timed build narrative. The README's Status section
+  deterministic stub reviewer and a timed build narrative. The Status section of `PLATFORM.md`
   draws the proven-versus-staged line in full.
 
 ---
