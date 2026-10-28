@@ -195,8 +195,14 @@ mod tests {
         let a = vec![("src/gggg.rs".to_string(), String::new())];
         let b = vec![("src/b.rs".to_string(), "// hhhh".to_string())];
         let texts = FrameNonce::file_texts(&[&a, &b]);
-        assert!(texts.iter().any(|t| t.contains("gggg")), "paths are checked");
-        assert!(texts.iter().any(|t| t.contains("hhhh")), "contents are checked");
+        assert!(
+            texts.iter().any(|t| t.contains("gggg")),
+            "paths are checked"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("hhhh")),
+            "contents are checked"
+        );
         let n = FrameNonce::generate_avoiding_files(&[&a, &b]);
         assert!(texts.iter().all(|t| !t.contains(n.as_str())));
     }

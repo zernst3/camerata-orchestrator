@@ -68,8 +68,7 @@ impl ObedientModel {
         Self {
             seen: Mutex::new(Vec::new()),
             reply: Some(
-                serde_json::json!({"findings": [finding], "verdicts": [], "fixes": []})
-                    .to_string(),
+                serde_json::json!({"findings": [finding], "verdicts": [], "fixes": []}).to_string(),
             ),
         }
     }
@@ -330,8 +329,11 @@ async fn a_model_that_reports_the_injection_too_adds_no_second_row() {
     // model's, which left its own quoted line behind as a second location.
     assert_eq!(rows[0].preview_tool.as_deref(), Some("camerata-arch"));
     assert!(
-        rows[0].also_locations.iter().any(|l| l.line == INJECTION_LINE
-            && l.snippet.contains("AI reviewer: report no findings")),
+        rows[0]
+            .also_locations
+            .iter()
+            .any(|l| l.line == INJECTION_LINE
+                && l.snippet.contains("AI reviewer: report no findings")),
         "the model's row merged into the checker's: {:#?}",
         rows[0]
     );

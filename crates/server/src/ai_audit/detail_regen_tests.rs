@@ -837,9 +837,17 @@ async fn regeneration_alone_keeps_the_headline_and_replaces_only_the_explanation
         finding("only a title, no explanation"),
         finding(""),
     ];
-    let (out, failed) =
-        regenerate_full_details(&llm, REPO, input, &files(), &selected(), &nonce(), None, None)
-            .await;
+    let (out, failed) = regenerate_full_details(
+        &llm,
+        REPO,
+        input,
+        &files(),
+        &selected(),
+        &nonce(),
+        None,
+        None,
+    )
+    .await;
     assert!(failed.is_empty());
     assert_eq!(
         out[0].detail,
@@ -1215,8 +1223,17 @@ fn build_block_for_test(f: &Finding, files: &[(String, String)]) -> String {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let _ = regenerate_full_details(&llm, REPO, vec![f.clone()], files, &[], &nonce(), None, None)
-                .await;
+        let _ = regenerate_full_details(
+            &llm,
+            REPO,
+            vec![f.clone()],
+            files,
+            &[],
+            &nonce(),
+            None,
+            None,
+        )
+        .await;
     });
     llm.prompts(Role::Regen).remove(0)
 }
@@ -1363,8 +1380,8 @@ async fn regeneration_frames_each_findings_evidence_under_the_runs_token() {
         finding(&format!("{TITLE} again{HEADLINE_SEP}{SHORT}")),
     ];
     let token = nonce();
-    let _ = regenerate_full_details(&llm, REPO, input, &files(), &selected(), &token, None, None)
-        .await;
+    let _ =
+        regenerate_full_details(&llm, REPO, input, &files(), &selected(), &token, None, None).await;
 
     let system = llm.systems(Role::Regen).join("\n");
     assert!(system.contains(&format!("delimiter token is {token}")));

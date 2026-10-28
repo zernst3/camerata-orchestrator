@@ -232,9 +232,7 @@ async fn a_failing_locator_falls_back_to_the_whole_file_prompt_and_is_recorded()
         "a failed locator sends exactly the whole-file prompts the switch-off scan sends"
     );
     assert!(failed.iter().all(|p| !p.contains("CANDIDATE SITES")));
-    assert!(
-        carrying(&failed, "SUPA-FN-1")[0].contains(&opening(MIGRATION))
-    );
+    assert!(carrying(&failed, "SUPA-FN-1")[0].contains(&opening(MIGRATION)));
 
     let t = m.stage_telemetry(0).candidates.expect("recorded");
     assert_eq!(t.rules["SUPA-FN-1"].chunks_fallback, 1);

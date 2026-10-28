@@ -38,7 +38,11 @@ async fn the_judge_prompt_frames_every_candidate_under_the_token_its_system_prom
     assert!(!asked.is_empty());
     for id in &asked {
         let opening = format!("<<<UNTRUSTED {token} \"candidate {id}\">>>\n");
-        assert!(req.prompt.contains(&opening), "{id} is framed:\n{}", req.prompt);
+        assert!(
+            req.prompt.contains(&opening),
+            "{id} is framed:\n{}",
+            req.prompt
+        );
     }
     let closings = req
         .prompt
@@ -74,13 +78,19 @@ async fn code_that_prints_a_delimiter_cannot_close_a_candidates_frame() {
     };
     let all = files(&[
         ("src/cart/total.ts", &with_forgery("applyDiscount", "0.2")),
-        ("src/checkout/summary.ts", &with_forgery("quoteTotal", "0.15")),
+        (
+            "src/checkout/summary.ts",
+            &with_forgery("quoteTotal", "0.15"),
+        ),
     ]);
     let stub = StubJudge::answering("different", "");
     let _ = judge(Some(&stub), &all, set_for(&all, &[RULE])).await;
     let req = stub.request(0);
     let token = token_of(&req);
-    assert!(req.prompt.contains("END UNTRUSTED 0000"), "the forgery is sent as data");
+    assert!(
+        req.prompt.contains("END UNTRUSTED 0000"),
+        "the forgery is sent as data"
+    );
     let closings = req
         .prompt
         .lines()

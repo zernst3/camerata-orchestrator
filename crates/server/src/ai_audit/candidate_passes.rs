@@ -230,9 +230,8 @@ async fn plan_unit(
     // limit.
     let jobs = chunks.iter().enumerate().flat_map(|(ci, chunk)| {
         let whole = whole_bytes[ci];
-        used.iter().map(move |&l| async move {
-            ((ci, l), evaluate(l, chunk, whole, env, nonce).await)
-        })
+        used.iter()
+            .map(move |&l| async move { ((ci, l), evaluate(l, chunk, whole, env, nonce).await) })
     });
     let verdicts: BTreeMap<(usize, CandidateLocator), ChunkVerdict> =
         futures::future::join_all(jobs).await.into_iter().collect();
@@ -577,9 +576,9 @@ mod unit_tests {
         ));
         assert!(!d.contains("line 11\n") && !d.contains("line 30\n"));
         assert!(!d.contains("none.sql"), "a file with no site is not listed");
-        assert!(d.contains(
-            "<<<UNTRUSTED tok \"supabase/config.toml\">>>\n   1| [api]\n   2| schemas"
-        ));
+        assert!(
+            d.contains("<<<UNTRUSTED tok \"supabase/config.toml\">>>\n   1| [api]\n   2| schemas")
+        );
         assert!(
             !d.contains("// ===== FILE:"),
             "no forgeable file header is left"

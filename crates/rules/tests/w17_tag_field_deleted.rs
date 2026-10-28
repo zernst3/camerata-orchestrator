@@ -163,8 +163,9 @@ fn req_w17_layer_is_untouched_on_every_corpus_rule() {
         // 35 plus the 13 Firebase rules (MASTER-SEQUENCE item 24), all `platform`.
         ("platform", 48),
         ("testing", 7),
-        // 136 plus UI-STATE-SHAPE-1 (W29 Wave D) and TESTING-MEANINGFUL-ASSERTION-1 (22e).
-        ("universal", 138),
+        // 136 plus UI-STATE-SHAPE-1 (W29 Wave D), TESTING-MEANINGFUL-ASSERTION-1 (22e) and
+        // SEC-NO-AI-REVIEWER-INSTRUCTIONS-1 (prompt-injection defense).
+        ("universal", 139),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v))

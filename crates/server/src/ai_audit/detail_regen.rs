@@ -609,6 +609,7 @@ async fn run_detail_round(
 /// Never drops a finding. Returns the findings, each with its regenerated detail or, when that
 /// failed, its short detail plus [`DETAIL_INCOMPLETE_MARKER`], and one `FailedPass` naming how
 /// many.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn regenerate_full_details(
     llm: &dyn LlmPort,
     repo: &str,

@@ -72,14 +72,19 @@ fn answer(req: &LlmRequest, canned: String) -> String {
     }
     let scan: serde_json::Value = serde_json::from_str(&canned).expect("the canned scan response");
     let finding = &scan["findings"][0];
-    // The block header the prompt addresses the finding by: `[<id>] rule ... - <path>:<line>`.
+    // The block header the prompt addresses the finding by (`[<id>] rule ...`), then the
+    // `Location: <path>:<line>` line that opens the finding's frame.
     let header = req
         .prompt
         .lines()
         .find(|l| l.starts_with('[') && l.contains("] rule "))
         .expect("the regeneration prompt addresses the finding by an id");
     let id = &header[1..header.find(']').expect("a closing bracket")];
-    let place = header.rsplit(" \u{2014} ").next().expect("a location");
+    let place = req
+        .prompt
+        .lines()
+        .find_map(|l| l.strip_prefix("Location: "))
+        .expect("a location");
     let (path, line) = place.rsplit_once(':').expect("path:line");
     serde_json::json!({"details": [{
         "id": id,

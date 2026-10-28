@@ -100,7 +100,8 @@ async fn scan_metered(llm: &ScriptedLlm, n_files: usize, meter: Option<&UsageMet
         1,
         "pass",
         "mal",
-        meter, false,
+        meter,
+        false,
     )
     .await
 }
