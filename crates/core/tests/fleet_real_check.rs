@@ -39,12 +39,11 @@ use camerata_core::{AgentDriver, AgentOutcome, FleetCoordinator, FleetStage, Rol
 // ─── self-cleaning temp worktree (no new crate dependency) ───────────────────
 
 struct TempWorktree {
-    /// The throwaway clone root. The worktree lives under it in the canonical
-    /// `<clone>/.camerata-worktrees/<name>` layout, so the shared cargo target dir the
-    /// checks derive (`<clone>/.camerata-shared-target`) also lands inside it. A
-    /// worktree placed directly in the OS temp dir derives `<tmp>/../.camerata-shared-target`,
-    /// which is a writable directory on macOS (`/var/folders/..`) but `/` on Linux, where
-    /// the real clippy and test checks then cannot create their target dir.
+    /// The throwaway clone root. The worktree lives under it in the production layout
+    /// `<clone>/.camerata-worktrees/<name>`, so this test exercises the real checks the way
+    /// they run in production: the shared cargo target dir they derive
+    /// (`<clone>/.camerata-shared-target`) is created inside this throwaway tree and removed
+    /// with it, never outside it.
     root: PathBuf,
     path: PathBuf,
 }

@@ -1033,11 +1033,10 @@ mod tests {
             Arc,
         };
 
-        // Canonical `<clone>/.camerata-worktrees/<name>` layout, so the shared cargo
-        // target dir the clippy and test checks derive (`<clone>/.camerata-shared-target`)
-        // lands inside this throwaway tree. A worktree placed directly in the OS temp dir
-        // derives `<tmp>/../.camerata-shared-target`: writable under macOS's
-        // `/var/folders/..`, but `/` on Linux, where those checks then cannot build.
+        // Production layout `<clone>/.camerata-worktrees/<name>`, so the checks run the way
+        // they do in production: the shared cargo target dir they derive
+        // (`<clone>/.camerata-shared-target`) is created inside this throwaway tree and
+        // removed with it, never outside it.
         let root = std::env::temp_dir().join(format!(
             "camerata-fleet-test-heartbeat-{}",
             std::process::id()

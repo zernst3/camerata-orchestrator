@@ -318,14 +318,32 @@ pub(crate) fn diagnostics_for(label: &str, combined: &str, violated: &[RuleId]) 
 // conservative fail-open choice: a mis-derived target dir that points to the wrong
 // clone would be worse than a per-worktree fallback.
 
+/// Directory that holds every UoW worktree of a clone: `<clone>/.camerata-worktrees/<branch>`.
+const WORKTREES_DIR_NAME: &str = ".camerata-worktrees";
+
+/// The clone root that owns `worktree`, but ONLY for the canonical layout
+/// `<clone>/.camerata-worktrees/<branch>`. Any other path (a worktree made by hand at an
+/// arbitrary location, a temp dir) has no known owning clone, so this returns `None`.
+///
+/// Deriving "grandparent of whatever path we were given" would be wrong: for a worktree
+/// nested under another clone's subdirectory it names that other clone, and for a path
+/// directly under a top-level directory it names the filesystem root. Both the shared
+/// target dir and the janitor's reclaim step are keyed off the clone root, so a
+/// mis-derived root points a `cargo` build, or a deletion, at another clone's data.
+fn clone_root_of(worktree: &Path) -> Option<PathBuf> {
+    let worktrees_dir = worktree.parent()?;
+    if worktrees_dir.file_name()? != WORKTREES_DIR_NAME {
+        return None;
+    }
+    worktrees_dir.parent().map(Path::to_path_buf)
+}
+
 /// Derive the shared `CARGO_TARGET_DIR` path from a UoW worktree path.
 ///
 /// Returns `Some(<clone>/.camerata-shared-target)` for the canonical layout
 /// (`<clone>/.camerata-worktrees/<branch>`), and `None` for out-of-band worktrees.
 pub fn derive_shared_target_dir(worktree: &Path) -> Option<PathBuf> {
-    // parent() → `.camerata-worktrees`, parent() → clone root
-    let clone = worktree.parent()?.parent()?;
-    Some(clone.join(".camerata-shared-target"))
+    clone_root_of(worktree).map(|clone| clone.join(".camerata-shared-target"))
 }
 
 /// Run the disk-headroom preflight check before a cargo build, using the worktree
@@ -346,17 +364,25 @@ pub fn derive_shared_target_dir(worktree: &Path) -> Option<PathBuf> {
 /// only — `off` restores the pre-janitor pure-block behavior; Zone B is unaffected
 /// either way (it is never automatic).
 fn check_build_disk_headroom(worktree: &Path) -> anyhow::Result<()> {
-    let min = disk_headroom_threshold_bytes();
-    let mode = janitor::janitor_mode();
+    check_build_disk_headroom_with(
+        worktree,
+        disk_headroom_threshold_bytes(),
+        janitor::janitor_mode(),
+    )
+}
 
+/// [`check_build_disk_headroom`] with the threshold and janitor mode passed in, so the
+/// decision and the reclaim scoping are testable without mutating process environment.
+fn check_build_disk_headroom_with(
+    worktree: &Path,
+    min: u64,
+    mode: janitor::JanitorMode,
+) -> anyhow::Result<()> {
     // The clone that owns this worktree's Zone-A scratch, when derivable (canonical
     // `<clone>/.camerata-worktrees/<branch>` layout). `None` for an out-of-band
     // worktree — reclaim is simply skipped in that case, same fail-open stance as
     // `derive_shared_target_dir`'s own doc comment.
-    let clone = worktree
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf());
+    let clone = clone_root_of(worktree);
 
     let mut reclaimed_log: Vec<janitor::ReclaimLogEntry> = Vec::new();
     let outcome = janitor::check_headroom_with_reclaim(
@@ -693,12 +719,80 @@ mod tests {
 
     #[test]
     fn derive_shared_target_dir_out_of_band_worktree_returns_none() {
-        // A worktree at root level has no grandparent — derivation returns None.
-        let worktree = Path::new("/wt");
-        let got = derive_shared_target_dir(worktree);
-        // May or may not be None depending on whether "/" has a parent; the key
-        // invariant is that it does not panic.
-        let _ = got; // just confirm no panic
+        // None of these sit directly under a `.camerata-worktrees` directory, so none has a
+        // known owning clone. A grandparent derivation would name `/`, `/tmp` or another
+        // clone's root instead.
+        for out_of_band in [
+            "/wt",
+            "/tmp/x",
+            "/home/u/repoA/sub/wt",
+            "/home/u/repoA/.camerata-worktrees/nested/wt",
+            "/home/u/repoA/.camerata-worktrees",
+        ] {
+            assert_eq!(
+                derive_shared_target_dir(Path::new(out_of_band)),
+                None,
+                "{out_of_band} is not <clone>/.camerata-worktrees/<branch>"
+            );
+            assert_eq!(clone_root_of(Path::new(out_of_band)), None, "{out_of_band}");
+        }
+    }
+
+    // ── disk-headroom reclaim is scoped to the worktree's OWN clone ──────────
+
+    /// An impossible threshold forces the reclaim path; the check then fails because no disk
+    /// has that much free space, which is what these tests expect.
+    const UNSATISFIABLE: u64 = u64::MAX;
+
+    #[test]
+    fn headroom_guard_never_prunes_a_target_derived_from_an_out_of_band_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `<tmp>/repoA/.camerata-shared-target` belongs to some clone at `<tmp>/repoA`.
+        // The worktree `<tmp>/repoA/sub/wt` is NOT under `.camerata-worktrees`, so a
+        // grandparent derivation would wrongly treat `<tmp>/repoA` as its clone.
+        let repo_a = tmp.path().join("repoA");
+        let shared = repo_a.join(".camerata-shared-target");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("artifact"), "x").unwrap();
+        let worktree = repo_a.join("sub").join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let result =
+            check_build_disk_headroom_with(&worktree, UNSATISFIABLE, janitor::JanitorMode::On);
+
+        assert!(
+            result.is_err(),
+            "the unsatisfiable threshold must still fail"
+        );
+        assert!(
+            shared.join("artifact").exists(),
+            "another clone's shared target must survive an out-of-band worktree's headroom check"
+        );
+    }
+
+    #[test]
+    fn headroom_guard_prunes_the_shared_target_of_its_own_clone() {
+        // Positive control: the same setup in the canonical layout DOES reclaim, so the
+        // test above is not passing merely because the janitor never deletes anything.
+        let tmp = tempfile::tempdir().unwrap();
+        let clone = tmp.path().join("repoA");
+        let shared = clone.join(".camerata-shared-target");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("artifact"), "x").unwrap();
+        let worktree = clone.join(".camerata-worktrees").join("story-1");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let result =
+            check_build_disk_headroom_with(&worktree, UNSATISFIABLE, janitor::JanitorMode::On);
+
+        assert!(
+            result.is_err(),
+            "the unsatisfiable threshold must still fail"
+        );
+        assert!(
+            !shared.join("artifact").exists(),
+            "the canonical worktree's own clone shared target is reclaimed under emergency pressure"
+        );
     }
 
     #[test]
