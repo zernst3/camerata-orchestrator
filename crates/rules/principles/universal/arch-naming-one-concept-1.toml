@@ -47,7 +47,7 @@ why = "A helper that exists under two names, in one module or in two, leaves eve
 [[option]]
 id = "one-concept-has-one-name"
 label = "Each helper exists once, under one name that says what it does, and modules do not carry their own copies of it"
-directive = "Give a helper that does one thing a single implementation under a single name that says what it does, and import it wherever it is needed. Do not write a second helper with the same body under a different name, and do not keep two utility modules that each hold their own copy of the same functions. When duplicates already exist, keep one, re-export it from the old location while callers move and delete the other."
+directive = "Give a helper that does one thing a single implementation under a single name that says what it does, and import it wherever it is needed. Do not write a second helper with the same body under a different name, and do not keep two utility modules that each hold their own copy of the same functions. When duplicates already exist, keep one, re-export it from the old location while callers move, and delete the other."
 remediation = """
 Keep one implementation, under the name that says what it does. Re-export it from the old location while callers move to it, then delete the other copy. Where the listed bodies already differ, decide which version is correct before merging them. Verify by searching the repository for both names: only one definition should remain, and the project should still build and its tests pass.
 """

@@ -84,7 +84,7 @@ label = "A SECURITY DEFINER function that filters rows by a caller-supplied id c
 directive = """
 A SECURITY DEFINER function runs with its creator's privileges, so the Row Level Security that would
 normally decide which rows a caller may see never runs. When such a function is granted EXECUTE to
-`anon`, `public` or `authenticated` and selects rows by matching a column against one of its own
+`anon`, `public` or `authenticated`, and selects rows by matching a column against one of its own
 parameters, the function body is the only place entitlement can be established, and it establishes
 it, before returning anything. A session or JWT identity read (`auth.uid()`, `auth.jwt()`,
 `current_user`, `session_user`, a `request.jwt` claims read) compared against the owner or tenant
@@ -102,7 +102,7 @@ remediation = """
 For `<function-name>`, add a server-side identity check as the FIRST statement in the function
 body, before returning any rows: compare `auth.uid()` (or `current_user`/`session_user`, or a
 custom JWT claim read via `current_setting('request.jwt.claims', true)`) against the row's
-owner/tenant column for the id supplied and `raise exception` on mismatch or call a role-check
+owner/tenant column for the id supplied and `raise exception` on mismatch, or call a role-check
 helper (e.g. `has_role(auth.uid(), 'admin')`) and `raise exception` when it returns false. If the
 function is only ever meant to return the CALLER's own data, consider deriving the id from
 `auth.uid()` directly instead of accepting it as a parameter, removing the substitution risk

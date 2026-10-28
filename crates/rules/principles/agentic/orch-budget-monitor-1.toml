@@ -25,7 +25,7 @@ why = "An unattended routine needs a real ceiling; per-run caps prevent runaway,
 [[option]]
 id = "rolling-window-plus-per-session-caps"
 label = "rolling-window + per-session caps, enforced by a wrapper"
-directive = "Track spend in a rolling window against a safety threshold, with per-session caps and self-check periodically during a run. A wrapper enforces hard limits before invoking the model."
+directive = "Track spend in a rolling window against a safety threshold, with per-session caps, and self-check periodically during a run. A wrapper enforces hard limits before invoking the model."
 remediation = """
 Wrap the agent invocation with a spend monitor that tracks cost in a rolling window against a configured safety threshold, and set a hard per-session cap the wrapper enforces before each model call. Have the run self-check its remaining budget periodically rather than only at the start. Verify by running past the threshold in a test session and confirming the wrapper halts the run instead of letting spend continue unbounded.
 """

@@ -11,7 +11,10 @@
 //! - a comma joining two independent clauses ("The cache is cold, and the queue is empty") is not
 //!   preceded by a list in its own clause, or has a long side, and is left alone;
 //! - a long item on either side (more than [`MAX_ITEM_WORDS`] words) is treated as a clause, not
-//!   a list item.
+//!   a list item;
+//! - a final item that opens with a verb ("..., and call jest.useRealTimers()") is a verb phrase
+//!   joined to the sentence, not a list item, so its comma is a clause join (see
+//!   [`VERB_OPENERS`]).
 //!
 //! A clause starts after the previous `. `, `; `, `: ` or ` - `, or after an unclosed `(`.
 
@@ -22,6 +25,44 @@ use common::client_facing_fields;
 
 /// A list item longer than this many words is read as a clause, not a short list item.
 const MAX_ITEM_WORDS: usize = 5;
+
+/// Words that open a verb phrase rather than a noun-phrase list item. A comma before `and`/`or`
+/// followed by one of these joins two predicates ("with per-session caps, and self-check
+/// periodically"), where the comma is a deliberate clause join. Deliberately a short list: a verb
+/// missing here only means the gate misses an ambiguous case, never that it flags a clause join.
+const VERB_OPENERS: &[&str] = &[
+    "self-check",
+    "call",
+    "remove",
+    "check",
+    "delete",
+    "move",
+    "commit",
+    "bind",
+    "keep",
+    "route",
+    "await",
+    "derive",
+    "pause",
+    "tag",
+    "let",
+    "have",
+    "export",
+    "use",
+    "pass",
+    "reject",
+    "rejects",
+    "selects",
+    "completes",
+    "is",
+    "are",
+];
+
+fn opens_with_verb(item: &str) -> bool {
+    item.split_whitespace()
+        .next()
+        .is_some_and(|w| VERB_OPENERS.contains(&w.to_lowercase().as_str()))
+}
 
 /// Byte offset where the clause containing byte `pos` of `text` begins.
 fn clause_start(text: &str, pos: usize) -> usize {
@@ -97,7 +138,11 @@ fn serial_commas(text: &str) -> Vec<String> {
             };
             let last_item = &prefix[comma + 1..];
             let (after_item, closed_by_comma) = item_after(&flat[pos + conj.len()..]);
-            if !closed_by_comma && short(last_item) && short(after_item) {
+            if !closed_by_comma
+                && !opens_with_verb(after_item)
+                && short(last_item)
+                && short(after_item)
+            {
                 let from = flat[..pos]
                     .char_indices()
                     .rev()
@@ -171,6 +216,8 @@ fn the_serial_comma_detector_flags_a_list_and_spares_clause_joins() {
         "Use a token, not a password. Rotate it, and log the rotation.",
         // Two items only.
         "Choose a vendor, or build it yourself.",
+        // A verb phrase joined to the sentence is a clause join, not a list item.
+        "Use a cache, a queue, and self-check periodically during a run.",
         // A comma inside a call is an argument separator, not a list.
         "Skip exists (e.g. it.skip('x', () => {})), and using it still trips the lint.",
         // An aside closed by its own comma is not the tail of a list.

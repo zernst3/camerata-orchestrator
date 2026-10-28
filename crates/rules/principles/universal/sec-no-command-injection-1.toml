@@ -49,7 +49,7 @@ interpolated command string) with a direct invocation of the target binary passi
 separately-passed argument list: no shell sits between your code and the argument boundary.
 For dynamic code/method dispatch, replace eval()/send() driven by a value the function did not
 construct itself with a fixed dispatch table (a hash or case/switch statement) mapping a known
-set of values to hardcoded methods or validate the value against a fixed allowlist before using
+set of values to hardcoded methods, or validate the value against a fixed allowlist before using
 it as a symbol. Verify by feeding an input containing shell metacharacters (`; rm -rf /` or
 similar) or an unexpected method name and confirming it is rejected rather than executed.
 """
