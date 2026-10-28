@@ -400,12 +400,20 @@
       #for also in site.also_sites.slice(0, calc.min(site.also_sites.len(), 10)) [
         #linebreak()
         #text(font: mono, size: 8pt, fill: ink_faint)[#also.repo / #breakable(also.path, n: 60), line #str(also.line)]
-        #if also.title != none [#text(size: 8pt, fill: ink_faint)[(#also.title)]]
+        #if also.title != none [#text(size: 8pt, fill: ink_faint)[(#also.title)]] else if also.headline != none [#text(size: 8pt, fill: ink_faint)[(#also.headline)]]
+        #if also.severity != none [#text(size: 8pt, fill: ink_faint)[(rated #also.severity)]]
         #if also.consequence [#text(size: 8pt, fill: ink_faint)[(also affected)]]
       ]
       #if site.also_sites.len() > 10 [
         #linebreak()
         #text(size: 8pt, fill: ink_faint)[and #str(site.also_sites.len() - 10) more, listed in full in the workbook and findings.json]
+      ]
+    ]
+    // Members of a merge flagged at this row's own place are the same site, not another one.
+    #if site.also_flagged_here.len() > 0 [
+      #for note in site.also_flagged_here [
+        #linebreak()
+        #text(size: 8pt, fill: ink_faint)[#note]
       ]
     ]
   ])

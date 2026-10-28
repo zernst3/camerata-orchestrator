@@ -1189,13 +1189,18 @@ pub struct CuratedSiteJson {
     /// each was flagged under (never the raw rule id). The PDF renders these as "Also found at".
     /// Empty for an un-merged row.
     pub also_sites: Vec<AlsoSiteJson>,
+    /// Members of a merge that were flagged at THIS row's own place (or at a place already
+    /// listed in `also_sites`), as finished sentences: "Also flagged here as <headline>
+    /// (<severity>)". They are the same place, so they are not counted as another site.
+    pub also_flagged_here: Vec<String>,
     /// M2/M8: one finished sentence for every bound that moved this row's severity ("Severity
     /// lowered from high to info: no file or line was identified for this finding."). The
     /// severity shown is the adjusted one; this says what it was and why it changed. Empty
     /// when nothing moved it, and the PDF then prints nothing.
     pub severity_adjustments: Vec<String>,
-    /// Pass-1 W7 (C5): total distinct evidence sites this row represents — its own
-    /// `path:line` plus every `also_locations` entry. `1` for an un-merged row.
+    /// Pass-1 W7 (C5): total DISTINCT places this row represents: its own `path:line` plus every
+    /// `also_locations` entry at a different place. A member absorbed at the row's own line is
+    /// not another site. `1` for an un-merged row.
     pub site_count: usize,
     /// Pass-1 W3 (A5.6): what this site's row IS — same flattened always-present kind wire
     /// as [`FindingRefJson::kind`], so the PDF's own data carries the taxonomy losslessly
@@ -1213,6 +1218,11 @@ pub struct AlsoSiteJson {
     /// The corpus title of the rule this site was flagged under; `None` when the id has no
     /// corpus entry (an AI-invented id), so a raw id is never printed.
     pub title: Option<String>,
+    /// The absorbed finding's own headline, when it carried one: what is printed when the rule
+    /// has no corpus title.
+    pub headline: Option<String>,
+    /// The absorbed finding's own severity, only when it outranks the row's.
+    pub severity: Option<String>,
     /// True for a site that is only a consequence of the row's root cause.
     pub consequence: bool,
 }
@@ -1230,13 +1240,76 @@ pub fn carried_from(f: &Finding) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// H6: the absorbed sites of `f`, titled from the corpus.
+/// The absorbed members of a row, split by place: those at a DIFFERENT place from the row and
+/// from each other (the "other sites"), and those at a place already named (the row's own, or
+/// an earlier member's), flagged with whether that place is the row's own.
+pub(crate) struct AbsorbedSplit<'a> {
+    pub other_sites: Vec<&'a crate::onboard::MergedLocation>,
+    pub same_place: Vec<(&'a crate::onboard::MergedLocation, bool)>,
+}
+
+/// See [`AbsorbedSplit`]. `own` is the row's own place ([`crate::onboard::site_place`]).
+pub(crate) fn split_absorbed<'a>(
+    own: crate::onboard::SitePlace,
+    locs: &'a [crate::onboard::MergedLocation],
+) -> AbsorbedSplit<'a> {
+    let mut seen: std::collections::HashSet<crate::onboard::SitePlace> =
+        std::collections::HashSet::new();
+    seen.insert(own.clone());
+    let mut split = AbsorbedSplit {
+        other_sites: Vec::new(),
+        same_place: Vec::new(),
+    };
+    for l in locs {
+        let place = l.place();
+        if seen.insert(place.clone()) {
+            split.other_sites.push(l);
+        } else {
+            split.same_place.push((l, place == own));
+        }
+    }
+    split
+}
+
+/// The sentence for a member absorbed at a place already named: "Also flagged here as
+/// <label> (<severity>)" at the row's own place, "Also flagged at path:line as ..." at another
+/// member's. `label` is the member's headline, else the rule's corpus title; with neither it
+/// reads "under another rule". Never a raw rule id.
+pub(crate) fn flagged_sentence(
+    l: &crate::onboard::MergedLocation,
+    at_own_place: bool,
+    corpus_title: Option<&str>,
+) -> String {
+    let label = Some(l.headline.trim())
+        .filter(|h| !h.is_empty())
+        .or(corpus_title.filter(|t| !t.trim().is_empty()));
+    let place = if at_own_place {
+        "here".to_string()
+    } else {
+        format!("at {}:{}", l.path, l.line)
+    };
+    let rating = if l.severity.trim().is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", l.severity.trim())
+    };
+    match label {
+        Some(h) => format!("Also flagged {place} as {h}{rating}"),
+        None => format!("Also flagged {place} under another rule{rating}"),
+    }
+}
+
+/// H6: the absorbed sites of `f` that are at a different place, titled from the corpus, with
+/// the member's own headline when the corpus has no title and its severity when it outranks the
+/// row's.
 pub(crate) fn also_sites_for(
     f: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Vec<AlsoSiteJson> {
-    f.also_locations
-        .iter()
+    let row_rank = severity_rank(&crate::severity_bounds::bounded_severity(f, corpus));
+    split_absorbed(f.place(), &f.also_locations)
+        .other_sites
+        .into_iter()
         .map(|l| AlsoSiteJson {
             repo: l.repo.clone(),
             path: l.path.clone(),
@@ -1244,7 +1317,28 @@ pub(crate) fn also_sites_for(
             title: corpus
                 .and_then(|c| c.get_by_id(&l.rule_id))
                 .map(|r| r.title.clone()),
+            headline: Some(l.headline.trim().to_string()).filter(|h| !h.is_empty()),
+            severity: Some(normalize_severity(&l.severity))
+                .filter(|_| !l.severity.trim().is_empty())
+                .filter(|s| severity_rank(s) < row_rank),
             consequence: l.consequence,
+        })
+        .collect()
+}
+
+/// The "Also flagged here" sentences of `f` (see [`flagged_sentence`]).
+pub(crate) fn also_flagged_here_for(
+    f: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<String> {
+    split_absorbed(f.place(), &f.also_locations)
+        .same_place
+        .into_iter()
+        .map(|(l, own)| {
+            let title = corpus
+                .and_then(|c| c.get_by_id(&l.rule_id))
+                .map(|r| r.title.as_str());
+            flagged_sentence(l, own, title)
         })
         .collect()
 }
@@ -3932,17 +4026,20 @@ fn apply_sites_vs_rows_check(report: &mut crate::onboard::ScanReport) {
         if already_disclosed.contains(rule_key) {
             continue;
         }
-        let represented: usize = report
-            .findings
-            .iter()
-            .map(|f| {
-                usize::from(f.rule_id.eq_ignore_ascii_case(rule_key))
-                    + f.also_locations
-                        .iter()
-                        .filter(|l| l.rule_id.eq_ignore_ascii_case(rule_key))
-                        .count()
-            })
-            .sum();
+        // DISTINCT places: a member absorbed at its row's own line is the same site.
+        let mut places: std::collections::HashSet<crate::onboard::SitePlace> =
+            std::collections::HashSet::new();
+        for f in &report.findings {
+            if f.rule_id.eq_ignore_ascii_case(rule_key) {
+                places.insert(f.place());
+            }
+            for l in &f.also_locations {
+                if l.rule_id.eq_ignore_ascii_case(rule_key) {
+                    places.insert(l.place());
+                }
+            }
+        }
+        let represented = places.len();
         if represented >= *n_claimed {
             continue;
         }
@@ -4541,10 +4638,11 @@ pub fn build_report_json(
                     // W7 (C5): the absorbed sites, verbatim — see the field's doc comment.
                     also_locations: f.also_locations.clone(),
                     also_sites: also_sites_for(f, corpus),
+                    also_flagged_here: also_flagged_here_for(f, corpus),
                     severity_adjustments: crate::severity_bounds::severity_adjustment_lines(
                         f, corpus,
                     ),
-                    site_count: 1 + f.also_locations.len(),
+                    site_count: f.distinct_site_count(),
                     kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
                 }
             })
@@ -5449,6 +5547,9 @@ mod fn_batch_c_incremental_tests;
 
 #[cfg(test)]
 mod fn_batch_c_sites_tests;
+
+#[cfg(test)]
+mod fn_batch_a_followup_tests;
 
 #[cfg(test)]
 mod fn_batch_c_tests;
@@ -7352,14 +7453,14 @@ mod tests {
     #[test]
     fn req_w23_a_rule_absorbed_into_another_rows_locations_is_never_verified_clean() {
         let mut carrier = finding("SEC-NO-VENDOR-TOKEN-1", ".env.production", 4, "critical");
-        carrier.also_locations = vec![crate::onboard::MergedLocation {
-            repo: "owner/repo".to_string(),
-            path: ".env.production".to_string(),
-            line: 1,
-            rule_id: "SEC-NO-SECRET-FILE-1".to_string(),
-            snippet: "committed secret file".to_string(),
-            consequence: false,
-        }];
+        carrier.also_locations = vec![crate::onboard::MergedLocation::site(
+            "owner/repo".to_string(),
+            ".env.production".to_string(),
+            1,
+            "SEC-NO-SECRET-FILE-1".to_string(),
+            "committed secret file".to_string(),
+            false,
+        )];
 
         // Both rules were audited. Only the carrier has a row of its own.
         let report = report_with(
@@ -15272,14 +15373,14 @@ mod export_invariants_gate {
         // absorption because its key collided with the pre-existing entry.
         let mut collision_primary = finding("SEC-COLLISION-DEMO-1", "handler.rs", 50, "medium");
         collision_primary.repo = "acme/widgets".to_string();
-        collision_primary.also_locations = vec![crate::onboard::MergedLocation {
-            repo: "acme/widgets".to_string(),
-            path: "handler.rs".to_string(),
-            line: 52,
-            rule_id: "SEC-COLLISION-DEMO-1".to_string(),
-            snippet: "already-absorbed-earlier".to_string(),
-            consequence: false,
-        }];
+        collision_primary.also_locations = vec![crate::onboard::MergedLocation::site(
+            "acme/widgets".to_string(),
+            "handler.rs".to_string(),
+            52,
+            "SEC-COLLISION-DEMO-1".to_string(),
+            "already-absorbed-earlier".to_string(),
+            false,
+        )];
         let mut collision_fresh = finding("SEC-COLLISION-DEMO-1", "handler.rs", 52, "medium");
         collision_fresh.repo = "acme/widgets".to_string();
 
@@ -15332,26 +15433,26 @@ mod export_invariants_gate {
         a.category = Some("arch-conformance".to_string());
         a.confidence = Some("needs-review".to_string());
         a.also_matches = vec!["AI-ALREADY-MERGED-A-1".to_string()];
-        a.also_locations = vec![MergedLocation {
-            repo: a.repo.clone(),
-            path: "already-merged-a.rs".to_string(),
-            line: 99,
-            rule_id: "AI-ALREADY-MERGED-A-1".to_string(),
-            snippet: "prior evidence".to_string(),
-            consequence: false,
-        }];
+        a.also_locations = vec![MergedLocation::site(
+            a.repo.clone(),
+            "already-merged-a.rs".to_string(),
+            99,
+            "AI-ALREADY-MERGED-A-1".to_string(),
+            "prior evidence".to_string(),
+            false,
+        )];
         let mut b = finding("ARCH-SOME-PREFERENCE-1", "b.rs", 2, "medium");
         b.category = Some("arch-conformance".to_string());
         b.confidence = Some("needs-review".to_string());
         b.also_matches = vec!["AI-ALREADY-MERGED-B-1".to_string()];
-        b.also_locations = vec![MergedLocation {
-            repo: b.repo.clone(),
-            path: "already-merged-b.rs".to_string(),
-            line: 199,
-            rule_id: "AI-ALREADY-MERGED-B-1".to_string(),
-            snippet: "prior evidence".to_string(),
-            consequence: false,
-        }];
+        b.also_locations = vec![MergedLocation::site(
+            b.repo.clone(),
+            "already-merged-b.rs".to_string(),
+            199,
+            "AI-ALREADY-MERGED-B-1".to_string(),
+            "prior evidence".to_string(),
+            false,
+        )];
         let structural_input = vec![a, b];
         let rows_in = structural_input.len();
         let pre = structural_input.clone();
@@ -15798,14 +15899,14 @@ mod export_invariants_gate {
             "medium",
         );
         fully_represented.kind = deviation_kind.clone();
-        fully_represented.also_locations = vec![crate::onboard::MergedLocation {
-            repo: "demo/portal".to_string(),
-            path: "src/api/users.rs".to_string(),
-            line: 7,
-            rule_id: "ARCH-API-VERSIONING-1".to_string(),
-            snippet: "router.get(\"/users\", ...)".to_string(),
-            consequence: false,
-        }];
+        fully_represented.also_locations = vec![crate::onboard::MergedLocation::site(
+            "demo/portal".to_string(),
+            "src/api/users.rs".to_string(),
+            7,
+            "ARCH-API-VERSIONING-1".to_string(),
+            "router.get(\"/users\", ...)".to_string(),
+            false,
+        )];
         let mut report = report_with(vec![fully_represented], vec!["ARCH-API-VERSIONING-1"]);
         let rows_before = report.findings.len();
         apply_evidence_gate(&mut report);

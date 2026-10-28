@@ -84,13 +84,18 @@ impl BoundedFinding for Finding {
 /// tier adds one for its own ceilings, joins in through [`recorded_adjustments`].
 pub const SEVERITY_ADJUSTMENTS_CAPTURE: &str = "severity_adjustments";
 
-/// Append `note` to the finding's recorded adjustments (never twice).
-fn record_adjustment(f: &mut Finding, note: String) {
+/// Most adjustment sentences one finding keeps (a row passes through a handful of producers).
+const MAX_RECORDED_ADJUSTMENTS: usize = 8;
+
+/// Append `note` to the finding's recorded adjustments (never twice, and at most
+/// [`MAX_RECORDED_ADJUSTMENTS`]). The ONE writer: the corpus bounds and the AI tier's ceilings
+/// both record through it.
+pub(crate) fn record_adjustment(f: &mut Finding, note: String) {
     let entry = f
         .captures
         .entry(SEVERITY_ADJUSTMENTS_CAPTURE.to_string())
         .or_default();
-    if entry.lines().any(|l| l == note) {
+    if entry.lines().any(|l| l == note) || entry.lines().count() >= MAX_RECORDED_ADJUSTMENTS {
         return;
     }
     if !entry.is_empty() {
