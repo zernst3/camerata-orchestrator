@@ -74,6 +74,10 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 23:25: 12 more cloud sessions started (H1 to H6, mutants, sources, triage, rust199, boards,
+  fn-hunt); 15 cloud sessions in all. Reviews started for w27-pdf, rank8, console-gaps. Disk was
+  50 GB; cleared rank 7's idle build folder (63 GB free). Zach asked for a recovery check at
+  04:31 in case the usage limit is hit (it resets 04:30): scheduled.
 - 23:12: rank 10 merged onto the current base with all 7 review fixes (5,083 tests green in its
   worktree); waits for the current gate, then merges with the CI branch. Corpus text (cloud)
   finished, in Fable review. Disk 66 GB.
