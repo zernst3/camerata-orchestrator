@@ -74,6 +74,30 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 00:05: Wave D merged in its worktree with all 9 review fixes (5,597 tests; 440 rules). One
+  integration builder now combines rank 4, item 21 + rank 2, rank 7 and Wave D onto the working
+  branch (resolving the overlapping ai_audit/batch/corpus conflicts once) so a single full gate
+  covers all four. Disk 78 GB.
+- 23:55: rank 4 fixes done (4,295 tests); item 21 + rank 2 merged with all review fixes in their
+  worktree (5,764 tests). Both queued to merge after the running gate. PDF rebuild and console
+  fixes builders started in the freed slots. Decision logged by the builder: a cap-refused
+  resubmission notes that the item failed once before.
+- 23:50: KEV/EPSS gated green (8,864 passed, 0 failed) and pushed. Rank 10 and the CI branch
+  merged; full gate running. Next in the merge queue: rank 7 (then rank 8), item 21 + rank 2,
+  Wave D, corpus text + Phase 0; the PDF rebuild and console fixes start when a slot frees.
+- 23:45: PDF rebuild (cloud) reviewed: content guarantees and secrets scan intact, no Typst
+  injection; 1 HIGH (PDF-proving tests silently skip without typst), 3 MEDIUM (Conventions/
+  Coverage sheets outside the kind reconciliation; client name not keyed by project; PDF
+  reconciliation checks data, not rendered groups). Brief queued (scratchpad/w27_merge_brief.md),
+  runs after the CI branch merges. Decision: a project export file redacts the client name.
+- 23:40: rank 8 (cloud) reviewed: guard structurally sound; 2 HIGH (SqlTables misses
+  SELECT INTO and materialized-view columns; tests cannot detect missed shapes), 3 MEDIUM.
+  Brief queued (scratchpad/rank8_merge_brief.md); runs after revised rank 7 merges into feat.
+  Merge order queued: rank 10, CI branch, rank 7, then rank 8.
+- 23:35: console gaps 1-2 (cloud) reviewed: 1 HIGH (branch names `.`/`..` escape the worktree
+  root; `.` would delete every unit's worktree), 3 MEDIUM, LOW notes. Merge+fix brief queued
+  (scratchpad/console_merge_brief.md); local slots full (rank 4, item21+rank2, Wave D,
+  corpus+H0).
 - 23:25: 12 more cloud sessions started (H1 to H6, mutants, sources, triage, rust199, boards,
   fn-hunt); 15 cloud sessions in all. Reviews started for w27-pdf, rank8, console-gaps. Disk was
   50 GB; cleared rank 7's idle build folder (63 GB free). Zach asked for a recovery check at
