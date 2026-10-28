@@ -74,6 +74,12 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 00:15: rank 10 + CI branch gated green (8,896 passed, 0 failed) and pushed; GitHub CI is
+  running on the working branch with the new workflow (run 40629518781). Issue triage (cloud)
+  verified: 11 closed, none wrongly; reopened #110 because its author's keep-open condition (a
+  live run of the API agent transport) has not been met. Stale-branch list (21 branches,
+  nothing deleted) is on `cloud/triage`; it goes to camerata-internal in the morning, not into
+  the public tree. Integration merge (five branches) in progress.
 - 00:10: corpus text + Phase 0 done in its worktree (190 rules bumped; 415 rules tests green);
   added as a fifth branch to the integration merge. Showcased rules final: log-consistency v3
   (approved em-dash removal changed two clauses vs the site's earlier word-for-word text, so the
