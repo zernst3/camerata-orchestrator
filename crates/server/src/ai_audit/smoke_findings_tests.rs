@@ -388,3 +388,86 @@ async fn a_full_rule_batch_is_sent_with_its_scaled_cap_and_a_small_one_with_the_
     assert_eq!(scan_caps(15).await, vec![scan_max_tokens(15)]);
     assert_eq!(scan_caps(2).await, vec![8_192]);
 }
+
+// ── 3. An example file's placeholder never outranks the real secret ─────────────────────────
+
+const PLACEHOLDER_LINE: &str = "SUPABASE_SERVICE_ROLE_KEY=sb_secret_your_service_role_key_here";
+/// The redacted form a real value takes in a finding (no secret-shaped literal in the source).
+const REAL_LINE: &str = "SUPABASE_SERVICE_ROLE_KEY=sb_secret_a1b2\u{2026}c3d4 (46 chars)";
+
+fn secret_row(rule: &str, path: &str, snippet: &str) -> Finding {
+    Finding {
+        repo: REPO.to_string(),
+        path: path.to_string(),
+        line: 1,
+        rule_id: rule.to_string(),
+        severity: "critical".to_string(),
+        snippet: snippet.to_string(),
+        detail: "SUPABASE_SERVICE_ROLE_KEY is committed in this file.".to_string(),
+        ..Finding::default()
+    }
+}
+
+fn placeholder_row() -> Finding {
+    secret_row("SEC-NO-VENDOR-TOKEN-1", ".env.example", PLACEHOLDER_LINE)
+}
+
+fn real_row() -> Finding {
+    secret_row("SEC-NO-SECRET-FILE-1", ".env.production", REAL_LINE)
+}
+
+#[test]
+fn the_real_secret_is_the_headline_row_whichever_order_the_rows_arrive_in() {
+    for rows in [
+        vec![placeholder_row(), real_row()],
+        vec![real_row(), placeholder_row()],
+    ] {
+        // The group as the cross-family merge forms it; which row leads is what is under test.
+        let out = vec![merge_semantic_group(rows)];
+        assert_eq!(out[0].path, ".env.production", "the real secret leads");
+        assert_eq!(out[0].severity, "critical");
+        let absorbed = out[0]
+            .also_locations
+            .iter()
+            .find(|l| l.path == ".env.example")
+            .expect("the placeholder is listed as another place");
+        assert_ne!(
+            absorbed.severity, "critical",
+            "an example file's placeholder is never rated critical, even absorbed"
+        );
+    }
+}
+
+#[test]
+fn a_placeholder_only_row_is_never_critical() {
+    let out = merge_semantic_groups(vec![placeholder_row()], &[]);
+    assert_eq!(out.len(), 1);
+    assert_ne!(out[0].severity, "critical", "{out:?}");
+    assert!(
+        crate::severity_bounds::recorded_adjustments(&out[0])
+            .iter()
+            .any(|a| a.contains("placeholder")),
+        "the lowering is recorded in words"
+    );
+    // Two placeholders merged are still placeholders.
+    let sample = secret_row("SEC-NO-VENDOR-TOKEN-1", ".env.sample", PLACEHOLDER_LINE);
+    let out = merge_semantic_groups(vec![placeholder_row(), sample], &[]);
+    assert!(out.iter().all(|f| f.severity != "critical"), "{out:?}");
+}
+
+#[test]
+fn a_placeholder_value_outside_an_example_file_is_also_a_placeholder() {
+    let row = secret_row("SEC-NO-VENDOR-TOKEN-1", "config/dev.env", PLACEHOLDER_LINE);
+    let out = merge_semantic_groups(vec![row], &[]);
+    assert_ne!(out[0].severity, "critical", "{out:?}");
+}
+
+#[test]
+fn a_real_secret_alone_keeps_its_rating_and_a_non_secret_rule_in_an_example_file_is_untouched() {
+    let out = merge_semantic_groups(vec![real_row()], &[]);
+    assert_eq!(out[0].severity, "critical");
+    let mut other = secret_row("ARCH-STRICT-LAYERING-1", "docs/layering.example", "x");
+    other.detail = "A layering violation.".to_string();
+    let out = merge_semantic_groups(vec![other], &[]);
+    assert_eq!(out[0].severity, "critical", "only secret rules are lowered");
+}

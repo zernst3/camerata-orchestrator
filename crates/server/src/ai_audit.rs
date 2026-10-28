@@ -7056,12 +7056,20 @@ fn kinds_merge_compatible(a: &Finding, b: &Finding) -> bool {
 /// (now only a tiebreak within one class+origin tier — e.g. two deterministic members, or two AI
 /// members); (4) confidence (a "needs-review" flag ranks last); (5) earliest appearance, the
 /// final deterministic tiebreak so output never depends on hash/iteration order.
-fn primary_rank(f: &Finding, group_len: usize, index: usize) -> (u8, u8, u8, u8, u8, u8, usize) {
+fn primary_rank(
+    f: &Finding,
+    group_len: usize,
+    index: usize,
+) -> (u8, u8, u8, u8, u8, u8, u8, usize) {
     (
         kind_actionability_rank(f),
         // Firebase review: an asserted row is never ranked beneath a held one, whatever the
         // class — see `kinds_merge_compatible`, which keeps such a group from forming at all.
         asserted_rank(f),
+        // A row about a real secret leads a row about a placeholder (smoke run: an
+        // `.env.example` placeholder took the headline and absorbed the real `.env.production`
+        // key). Ahead of class and origin, which two secret rows share anyway.
+        u8::from(!is_placeholder_secret_row(f)),
         class_rank(finding_class(f)),
         origin_rank(finding_origin(f)),
         severity_rank(&f.severity),
@@ -7070,6 +7078,63 @@ fn primary_rank(f: &Finding, group_len: usize, index: usize) -> (u8, u8, u8, u8,
         // EARLIEST appearance — see BUG-7's original comment on this idiom.
         group_len - index,
     )
+}
+
+/// The severity a row about a placeholder is held at: a committed example value is worth a row
+/// but is not a live credential.
+const PLACEHOLDER_SEVERITY_CEILING: &str = "low";
+
+/// Whether `rule_id` is one of the secret rules (the secret detectors and the secret-file rule).
+fn is_secret_rule(rule_id: &str) -> bool {
+    rule_id.starts_with("SEC-") || !camerata_secrets::shapes_for_rule(rule_id).is_empty()
+}
+
+/// Whether `path` names an example, sample or template file: `.env.example`, `.env.sample` or
+/// anything ending `.example`.
+fn is_example_file_path(path: &str) -> bool {
+    let name = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    name == ".env.example" || name == ".env.sample" || name.ends_with(".example")
+}
+
+/// Whether `snippet` holds a secret-shaped value and every one the secrets crate finds in it is a
+/// placeholder (a placeholder word or a template token), never a live credential. A redacted real
+/// value matches no shape, so it is not a placeholder.
+fn snippet_is_placeholder(snippet: &str) -> bool {
+    use camerata_secrets::Twin;
+    let found = camerata_secrets::detect_all(snippet);
+    !found.is_empty()
+        && found
+            .iter()
+            .all(|m| matches!(m.twin, Some(Twin::PlaceholderWord(_) | Twin::TemplateToken)))
+}
+
+/// Whether `f` is a secret row about a placeholder: a secret rule whose file is an example file
+/// or whose own value the secrets crate classes as a placeholder.
+fn is_placeholder_secret_row(f: &Finding) -> bool {
+    is_secret_rule(&f.rule_id)
+        && (is_example_file_path(&f.path) || snippet_is_placeholder(&f.snippet))
+}
+
+/// A placeholder row is never above [`PLACEHOLDER_SEVERITY_CEILING`], whether it stands alone,
+/// leads a merged row or is absorbed into one; the lowering is recorded in words.
+fn cap_placeholder_severity(f: &mut Finding) {
+    if severity_rank(&f.severity) <= severity_rank(PLACEHOLDER_SEVERITY_CEILING)
+        || !is_placeholder_secret_row(f)
+    {
+        return;
+    }
+    let from = f.severity.clone();
+    record_severity_adjustment(
+        f,
+        &from,
+        PLACEHOLDER_SEVERITY_CEILING,
+        "the value is a placeholder or sits in an example file, not a live secret",
+    );
+    f.severity = PLACEHOLDER_SEVERITY_CEILING.to_string();
 }
 
 /// Record that `from` became `to` on `f`, and why, as one sentence through the ONE shared
@@ -7162,7 +7227,8 @@ fn merged_severity(primary: &Finding, max_sev: String, all_same_tier: bool) -> S
 /// primacy regardless of severity, hiding the security defect. `primary_rank`'s class-first
 /// ordering fixes that while leaving same-class ties resolved exactly as before (now
 /// origin-before-severity within a class — C5-1).
-fn merge_location_group(group: Vec<Finding>) -> Finding {
+fn merge_location_group(mut group: Vec<Finding>) -> Finding {
+    group.iter_mut().for_each(cap_placeholder_severity);
     let primary_idx = group
         .iter()
         .enumerate()
@@ -7180,7 +7246,6 @@ fn merge_location_group(group: Vec<Finding>) -> Finding {
         .iter()
         .all(|f| finding_origin(f) == finding_origin(&group[0]));
 
-    let mut group = group;
     let mut primary = group.remove(primary_idx);
     // Every OTHER distinct rule id, in first-seen order, minus the primary's own.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -8286,7 +8351,8 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
 /// marked `consequence: true` there, so it folds in as an "also affects" location rather than
 /// reading as a peer, independently-actionable site. C5-1: a primary with no `fix_specific` of
 /// its own inherits the first member's (see `merge_location_group`'s matching comment).
-fn merge_semantic_group(group: Vec<Finding>) -> Finding {
+fn merge_semantic_group(mut group: Vec<Finding>) -> Finding {
+    group.iter_mut().for_each(cap_placeholder_severity);
     let primary_idx = group
         .iter()
         .enumerate()
@@ -8303,7 +8369,6 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     let all_same_tier = group
         .iter()
         .all(|f| finding_origin(f) == finding_origin(&group[0]));
-    let mut group = group;
     let mut primary = group.remove(primary_idx);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     seen.insert(primary.rule_id.clone());
