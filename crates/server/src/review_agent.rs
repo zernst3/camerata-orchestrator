@@ -530,7 +530,7 @@ Be specific: name the repo and the contract clause that is violated. Do not incl
 /// Reviewers are analysis agents, so they get [`camerata_app_core::GOVERNANCE_KERNEL_READONLY`]
 /// (ground-every-claim, enumerate-then-judge, if-unsure-say-so, exact-output-only) ahead of the
 /// review-specific instructions. See rewrite 3.3 in
-/// `docs/plans/2026-07-05_prompt-hardening-and-governance-kernel.md`.
+/// the prompt-hardening and governance-kernel notes.
 fn l3_system_prompt() -> String {
     format!(
         "{}\n\n{}",

@@ -3,7 +3,7 @@
 //! > **W5-Q2 DECIDED — a single named severity is a FLOOR, not a ceiling.**
 //! > Zach: *"Floor, it's the minimum rating."*
 //! >
-//! > — `docs/plans/2026-10-09_audit-findings-tracker.md`
+//! > — the audit findings tracker
 //!
 //! # Why this file exists separately from `report_export.rs`'s own `req_w8_*` tests
 //!

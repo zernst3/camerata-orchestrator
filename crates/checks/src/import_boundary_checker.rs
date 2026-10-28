@@ -418,7 +418,7 @@ domain       = []
 
     // ── req_a4: the config-gated checkers work on a repo with no .camerata/architecture.toml ──
     //
-    // A4 (docs/plans/2026-10-09_audit-findings-tracker.md): these rules were gated on the
+    // A4 (the audit findings tracker): these rules were gated on the
     // SCANNED repo carrying `.camerata/architecture.toml`, so `check()` returned
     // `Vec::new()` on every repo Camerata has ever audited. A brownfield client repo will never
     // carry that file — it is Camerata's own config format. Every test below returned ZERO

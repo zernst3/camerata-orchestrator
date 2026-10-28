@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-20
 **Branch:** dev5/bug-fixes
-**Source audit:** `docs/audits/2026-06-20_integration_bug_hunt.md`
+**Source audit:** the integration bug-hunt audit (private working notes)
 **Files touched:** `crates/checks/src/vcs_action.rs`, `crates/server/src/ai_audit.rs`
 
 ## Summary

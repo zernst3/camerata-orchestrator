@@ -1,5 +1,5 @@
 id = "ARCH-SHARED-CONSTANT-1"
-version = 5
+version = 6
 title = "A domain value such as a queue name, a route or a rate is defined once as a named constant and imported wherever it is used, never repeated as a bare literal across modules"
 domain = "universal"
 layer = "universal"
@@ -39,7 +39,7 @@ url = "CORPUS_WORK_ORDER_CONSISTENCY_RULES.md"
 title = "Project policy: a domain value has one named home"
 
 [[sources]]
-url = "docs/OVERNIGHT_DECISIONS.md"
+url = "docs/decisions/2026-10-28_consistency_rules_scope.md"
 title = "Decision record: only four narrow shapes count as a domain value, and two named homes with no bare copy are not a finding"
 
 [decision]

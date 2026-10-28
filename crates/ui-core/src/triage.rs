@@ -299,7 +299,7 @@ pub fn site_count(f: &FindingView) -> usize {
 }
 
 /// Which of the curator workbench's four kind surfaces a finding row belongs on
-/// (`docs/plans/2026-10-11_pass2-curator-ui-design.md` §1-§2).
+/// (the pass-2 curator UI design notes §1-§2).
 ///
 /// The split is NOT a UI taste: it is the data model's own
 /// [`FindingKind::is_informational`](camerata_api_types::audit::FindingKind::is_informational)

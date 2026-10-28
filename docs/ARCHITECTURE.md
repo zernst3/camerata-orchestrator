@@ -110,7 +110,7 @@ boundary moved.
 >    flux as of 2026-10-11:** rules are being actively reclassified by `kind`, and a corpus-wide
 >    audit of the `violates` flags is in progress. The mechanisms are settled; those data values are
 >    not, so do not quote a count of them from any document. See
->    [`docs/plans/2026-10-09_rule-kind-classification.md`](plans/2026-10-09_rule-kind-classification.md).
+>    the rule-kind classification notes (private working notes).
 > 3a. **A rule can now be EMITTED without being SCANNED.** `Rule::inspectable` (W16,
 >    2026-10-12) is a required boolean on every corpus rule. `false` means the rule still
 >    ships into the client's `AGENTS.md`/`CONVENTIONS.md` as a directive, but is removed from

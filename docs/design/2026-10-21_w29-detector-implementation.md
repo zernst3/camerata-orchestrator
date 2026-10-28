@@ -6,7 +6,7 @@ W29's nine consistency rules are only valuable when they FIND the inconsistency.
 "emit-only" (a convention in CONVENTIONS.md, never scanned) is a half-measure: it governs the
 client's future work but flags nothing in the code in front of us. This doc designs the missing
 **detector layer** so each rule is built rule + detector + safe-twin together, to the project's
-correctness bar. Companion to the build-order plan `2026-10-21_w29-execution-plan.md`.
+correctness bar. Companion to the build-order plan (private working notes).
 
 ## What already EXISTS (reuse, do not rebuild)
 
@@ -107,7 +107,7 @@ are out of scope for every `ui` rule today. Widen to `**/*.{jsx,tsx,ts,js,css}` 
 test; record the choice.
 
 ## Wiring per checker (the orphan-rule checklist)
-Reconciled with `docs/plans/2026-10-21_w29-execution-plan.md` (the plan's version was closer to
+Reconciled with the W29 execution plan, private working notes (the plan's version was closer to
 right; this replaces the earlier "arch/ui/javascript all are mapped" shortcut). For each rule:
 (1) the corpus TOML rule at `crates/rules/principles/<domain>/<id>.toml` using the domain from the
 table above, passing every corpus gate (kind, inspectable, sources, W25 voice/no-vendor, W26
@@ -119,7 +119,7 @@ test is what proves it rather than assuming it); (5) the positive + safe-twin te
 
 **Protected area.** The work order (§91) says the rule corpus "always needs Zach's go". W32 had a
 recorded go (D6); W29's nine new corpus rules did not have one as of 2026-10-21. Do not commit
-corpus TOMLs until that go is recorded in `docs/OVERNIGHT_DECISIONS.md`. Detector code and its
+corpus TOMLs until that go is recorded in the private decision log. Detector code and its
 tests may be built ahead of it.
 
 ## Build order (unchanged from the plan)
@@ -705,7 +705,7 @@ Safe twins (each expects zero findings unless stated):
   `enforcement = "architectural"`, `kind = "defect"` (one correct state, one violating option;
   same shape as ONE-IMPORT-PATH), `inspectable = true`, `max_severity = "low"`, `default = true`,
   `verification = "policy"` with internal sources only (this design section; the work order §1;
-  the owner go in `docs/OVERNIGHT_DECISIONS.md` 2026-10-21). No external authority states the
+  the owner go in the private decision log, 2026-10-21). No external authority states the
   three-language file-level rule as specified here; `knip` (unused files, JS/TS), `vulture`
   (Python) and `rustc`'s `dead_code` lint are related controls to name in a TOML comment, not
   `[[sources]]`, exactly as the ONE-IMPORT-PATH TOML names eslint-plugin-import. `qualifies` must
@@ -760,7 +760,7 @@ positive + safe-twin tests above.
 ### 7. Owner questions
 
 1. **Scope: file-level now, symbol-level later? ANSWERED 2026-10-21.** Owner ruling (recorded in
-   `docs/OVERNIGHT_DECISIONS.md`, DECISIONS MADE): ARCH-DEAD-CODE-1 ships FILE-level in v1. Unused
+   `docs/decisions/2026-10-28_consistency_rules_scope.md`): ARCH-DEAD-CODE-1 ships FILE-level in v1. Unused
    individual exports are a separate future rule with its own id (the working name was
    ARCH-DEAD-EXPORT-1), built when the member-access analysis, framework-export allowlist,
    decorator awareness and identifier-absence guard listed above exist. The checker's module doc
@@ -1259,7 +1259,7 @@ tests above, the TOML under the recorded go, `camerata corpus lock`. No server c
 ### 7. Open questions for the owner: answered
 
 Both questions were put to the owner and answered on 2026-10-21 (recorded in
-`docs/OVERNIGHT_DECISIONS.md`, DECISIONS MADE). The rule is built to these rulings.
+`docs/decisions/2026-10-28_consistency_rules_scope.md`). The rule is built to these rulings.
 
 1. **The narrow domain definition: ship the narrow rule.** Only the four shapes in section 3 (a
    separated lowercase name with `-`, `:` or `/`; a route template; a multi-word UPPER_SNAKE token;
@@ -1325,7 +1325,7 @@ the build does.
 
 An adversarial review of the built checker found false positives; each is fixed with a failing
 test first. The scope decisions below were made by the orchestrator (recorded in
-`docs/OVERNIGHT_DECISIONS.md` on the orchestrator's branch) and are built as stated.
+the private decision log on the orchestrator's branch) and are built as stated.
 
 Fixes (case ids are the review harness's):
 
@@ -2073,7 +2073,7 @@ an empty concept the clause is omitted. "Do not agree" is stated ONLY from a non
   `id = "ARCH-SINGLE-SOURCE-LOGIC-1"`, `version = 1`, `domain = "universal"`, `layer =
   "universal"`, `enforcement = "architectural"`, `kind = "defect"`, `inspectable = true`,
   `max_severity = "high"`, `default = true`, `verification = "policy"`, `[[sources]]` internal
-  only (this section; work order section 2; `docs/OVERNIGHT_DECISIONS.md` 2026-10-21 go). No
+  only (this section; work order section 2; the private decision log, 2026-10-21 go). No
   external authority states the rule as specified; related controls for a TOML comment, not
   `[[sources]]`: jscpd and PMD CPD (token clone detectors; they report any duplication, not
   decisions, and never compare copies), SonarSource "duplicated blocks". `qualifies` states, in
@@ -2746,7 +2746,7 @@ over the cap. The 20,000-file budget in section 8.8 is dominated by the detector
 tokenization per file that belongs to a family.
 
 **W.9 Adversarial review fixes (2026-10-22).** An adversarial review of Wave C found the defects
-below; the owner's decisions D1 to D7 (docs/OVERNIGHT_DECISIONS.md, DECISIONS MADE, 2026-10-22)
+below; the owner's decisions D1 to D7 (private decision log, 2026-10-22)
 ruled on them. Each probe scenario is a committed test.
 - **D1 No convention row.** Removed (section "Wiring the H rules", W.5). A zero-candidate rule is
   still credited as run in the ledger.

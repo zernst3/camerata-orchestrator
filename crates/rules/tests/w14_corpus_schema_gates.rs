@@ -260,7 +260,7 @@ Rejected: authored as a block string, which starts with a newline.
 ///
 /// This roster is PINNED rather than fixed because resolving each entry means changing a rule's
 /// `kind`, and 39 rules sit on the owner's paused A5.7 classification hold. Six of these seven
-/// rules are on that hold list (`docs/plans/2026-10-09_rule-kind-classification.md`, "NEEDS
+/// rules are on that hold list (the rule-kind classification notes, "NEEDS
 /// OWNER DECISION (58 rules)"). The seventh is not, and is the genuine finding this gate
 /// surfaced that the 244-rule audit missed:
 ///

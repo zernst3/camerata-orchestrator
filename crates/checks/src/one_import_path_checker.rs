@@ -11,7 +11,7 @@
 //!
 //! A split between a symbol's origin file and an `index` barrel IS a violation. Owner ruling,
 //! 2026-10-21 ("that is the rule working as intended"), recorded in
-//! `docs/OVERNIGHT_DECISIONS.md` under DECISIONS MADE: work order section 7's "non-index
+//! `docs/decisions/2026-10-28_consistency_rules_scope.md`: work order section 7's "non-index
 //! modules" wording does not exempt index barrels from the one-home rule.
 //!
 //! # How it decides
@@ -530,8 +530,8 @@ mod tests {
 
     // ── positives ──────────────────────────────────────────────────────────────
 
-    /// Owner ruling 2026-10-21 (docs/OVERNIGHT_DECISIONS.md, DECISIONS MADE): a split between the
-    /// origin file and an INDEX barrel is a violation, not an exemption.
+    /// Owner ruling 2026-10-21 (docs/decisions/2026-10-28_consistency_rules_scope.md): a split
+    /// between the origin file and an INDEX barrel is a violation, not an exemption.
     #[test]
     fn symbol_imported_from_origin_and_from_barrel_is_flagged() {
         let f = lib_with(

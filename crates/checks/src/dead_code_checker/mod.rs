@@ -8,7 +8,7 @@
 //!
 //! # Scope: whole files, not symbols
 //!
-//! Owner ruling, 2026-10-21 (`docs/OVERNIGHT_DECISIONS.md`, DECISIONS MADE): v1 reports a whole
+//! Owner ruling, 2026-10-21 (`docs/decisions/2026-10-28_consistency_rules_scope.md`): v1 reports a whole
 //! SOURCE FILE that nothing reaches. Unused individual exports are a separate future rule with
 //! its own id, because proving a symbol unused needs member-access analysis for namespace
 //! imports, a framework-export allowlist and decorator awareness before it can meet the

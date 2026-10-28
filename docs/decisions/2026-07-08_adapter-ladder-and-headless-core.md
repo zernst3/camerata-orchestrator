@@ -5,14 +5,14 @@
 `feat/adapter-ladder-headless-core`).
 **Deciders:** Zach (architect), Claude (architect)
 
-Companion docs: [`2026-07-05_escalation-decisions.md`](../plans/2026-07-05_escalation-decisions.md)
+Companion docs (private working notes): the escalation-decisions plan
 (where GAP-1/3/7 were greenlit, Batch 6 of the implementation order), and
-[`2026-07-01_ui-core-extraction.md`](../plans/2026-07-01_ui-core-extraction.md) (Phase 2 of the
+the UI-core extraction plan (Phase 2 of the
 headless-core UI extraction, which GAP-3 completes for the governed-dev surface).
 
 ## Context
 
-The 2026-07-04 Fable 5 audit (`docs/ARCH_AUDIT_2026-07-04_fable5-complete.md`) escalated three
+The 2026-07-04 Fable 5 audit (private working notes) escalated three
 structural gaps, all under ROUTE-1 (they change public crate boundaries, so they route to Zach rather
 than auto-applying):
 

@@ -1,6 +1,6 @@
 //! The living spec: `SPEC.md` in a scaffolded project's repo working dir.
 //!
-//! See `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`, the
+//! See the product-owner vibe-mode design notes, the
 //! "Architect-orchestrator design (decided 2026-07-10)" section: "A living spec per
 //! app (like budget-tracker's SPEC.md), updated after each accepted change: the
 //! model's memory, contradiction detector, checkpoint-diff source, and the PO's

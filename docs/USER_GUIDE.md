@@ -2445,8 +2445,7 @@ RELATIONSHIP rules that a flat label cannot.
 New projects start seeded with the common ladder (Initiative, then Epic, then Feature, then Story or
 Defect; Story then Task or Bug); edit it freely. This is the first shipped piece of a larger Design
 page: the schema itself is live today; the AI-assisted decomposition of an epic into drafted child
-stories, and publishing that tree to your tracker, are planned (see
-`docs/plans/2026-06-30_epic-design-page.md`).
+stories, and publishing that tree to your tracker, are planned.
 
 ---
 

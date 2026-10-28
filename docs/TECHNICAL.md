@@ -2542,8 +2542,8 @@ PR (catching non-Camerata changes too). See
 > corrected a large number of them. So treat any specific count of rules or flags
 > below as a dated snapshot rather than a current fact, and read the TOMLs when an
 > exact number matters. The live state of that work is tracked in
-> `docs/plans/2026-10-09_audit-findings-tracker.md` and
-> `docs/plans/2026-10-09_rule-kind-classification.md`. None of it changes the
+> the audit findings tracker and the rule-kind classification notes (both private working
+> notes). None of it changes the
 > mechanisms described here.
 >
 > **Division of authority with `docs/RULES_REFERENCE.md`.** That document is the
@@ -4321,7 +4321,7 @@ an undo.
 
 **The review timer, the reviewed record, the stats view and the time-left estimate** (code viewer
 step 7a; work orders `WORK_ORDER_REVIEW_TIME.md` item 2 and `WORK_ORDER_REVIEW_SPEED.md` B.7, as
-ruled on by Zach on 2026-10-23, item 2 of the protected-area answers in `OVERNIGHT_DECISIONS.md`,
+ruled on by Zach on 2026-10-23, item 2 of the protected-area answers in the private decision log,
 which overrides the work order where they differ). **INTERNAL ONLY**: none of this is in any client
 export. Pure logic in `camerata_ui_core::review_timer` and `::review_stats`, the name deny-list in
 `camerata_api_types::review_timing`, the window side in `cockpit/review.rs`, hooks in `scan.rs`.

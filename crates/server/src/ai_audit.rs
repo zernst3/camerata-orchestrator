@@ -73,7 +73,7 @@ pub struct RuleAlternatives {
 /// a report that never mentions the pass ran at all. `pass` is a short, stable, general name
 /// (never a fixture-specific string) — any pass this fail-soft pattern applies to can push
 /// one of these. See `ScanReport::failed_passes` and W6 in
-/// `docs/plans/2026-09-30_cycle2-queue-hardening.md`.
+/// the cycle-2 queue-hardening notes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FailedPass {
     /// The repo this pass failed for (`owner/repo`).
@@ -229,7 +229,7 @@ pub struct RuleRecommendation {
     /// assertion. `None` when the model found no such evidence (or the field was blank/absent)
     /// — see `applicable`'s doc comment: an absent evidence line FORCES `applicable = false`
     /// for a model-sourced recommendation, because an unevidenced "this codebase does/needs X"
-    /// claim is never trusted (P7, `docs/plans/2026-09-29_codebase-inspection-hardening.md`).
+    /// claim is never trusted (P7, the codebase-inspection hardening notes).
     /// Always `None` for an operator-forced pick (`operator_chosen: true`) — the operator's
     /// explicit choice needs no repo evidence to be trusted.
     #[serde(default)]
@@ -1666,7 +1666,7 @@ fn strip_dedup_pointers(reason: &str) -> String {
 /// (clear precondition phrasing, not any use of the word "if") — a finding that merely
 /// contains "if" somewhere in an unrelated sentence must not trip this.
 ///
-/// CRITICAL GUARDRAIL (calibration review, docs/plans/2026-09-30_cycle2-queue-hardening.md,
+/// CRITICAL GUARDRAIL (calibration review, the cycle-2 queue-hardening notes,
 /// extended cycle-5): this predicate is used ONLY to (a) block an upward calibration move in
 /// [`apply_verdicts`], (b) cap the deterministic D5 floor's critical escalation in
 /// [`severity_calibration_floor`], and (c) break ties in the "do now" ranking in
@@ -1851,7 +1851,7 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
 
 // ── D5: severity calibration rules of thumb ──────────────────────────────────────────────
 //
-// docs/plans/2026-09-29_codebase-inspection-hardening.md, D5. The calibration MODEL already
+// the codebase-inspection hardening notes, D5. The calibration MODEL already
 // carries these rules of thumb in its own system prompt (`verify_system_prompt`, above), but a
 // model's application of a rule of thumb is, by construction, a per-run judgment call — the same
 // finding phrased identically twice is not guaranteed the same verdict twice. This section is
@@ -4410,7 +4410,7 @@ fn apply_authored_remediation_without_model(
 /// This is a PIPELINE failure (the model never produced a validated, codebase-specific fix),
 /// not a confidence judgement about the finding itself, so it must NEVER set `needs_review`,
 /// NEVER hedge, and NEVER tag `detail` with pipeline-state text (C3-1b,
-/// `docs/plans/2026-09-30_cycle2-queue-hardening.md`) — the ONLY thing that sets
+/// the cycle-2 queue-hardening notes) — the ONLY thing that sets
 /// `needs_review`/`confidence = "needs-review"` is a calibration doubt verdict
 /// (`apply_verdicts`). A row that STILL has no fix from ANY source (no model-generated
 /// specific, no instantiated authored remediation) is never dropped and never refused here —
@@ -5975,7 +5975,7 @@ fn severity_rank(s: &str) -> u8 {
 
 // ── P1: finding_class (Security vs Hygiene) + shared primary-selection ranking ───────────────
 //
-// docs/plans/2026-09-29_codebase-inspection-hardening.md, P1. The regression this section
+// the codebase-inspection hardening notes, P1. The regression this section
 // exists to prevent: a low structural/style row (e.g. an `ARCH-MIDDLEWARE-FIRST-1`-shaped
 // layering rule) sitting at the SAME code location or defect cluster as a genuine security
 // finding (e.g. a reflected-Origin CORS-with-credentials misconfiguration) must never win
@@ -6001,7 +6001,7 @@ enum FindingClass {
 /// secrets/credentials, RLS/access policy, authn/authz, injection (SQL/XSS/SSRF/deserialization/
 /// RCE), transport security (TLS/CORS), resource exposure, open redirect, weak crypto/
 /// randomness, and CSRF concerns — exactly the families
-/// `docs/plans/2026-09-29_codebase-inspection-hardening.md` P1 names as Security. This is a
+/// the codebase-inspection hardening notes P1 names as Security. This is a
 /// CONTENT scan over the rule id's hyphen-delimited WORDS ([`security_token_matches`]), not a
 /// prefix rule: `SEC-*`/`SUPABASE-*` deterministic floor rules match via their own prefix
 /// shortcut below (belt-and-suspenders — every current one also matches a token), but so do
@@ -6231,7 +6231,7 @@ fn kinds_merge_compatible(a: &Finding, b: &Finding) -> bool {
 }
 
 /// The shared primary-selection ranking for BOTH merge passes (design point 3, reordered by
-/// C5-1 — see `docs/plans/2026-09-29_codebase-inspection-hardening.md` P1 for the original and
+/// C5-1 — see the codebase-inspection hardening notes P1 for the original and
 /// the REG-1/REG-2 work item for this reordering). Higher tuples win via `max_by_key`. Order:
 /// (0) W7: kind actionability ([`kind_actionability_rank`]) — an actionable row
 /// (Defect/Deviation/legacy) beats an informational one unconditionally, so a defect can
@@ -7095,7 +7095,7 @@ fn description_overlap_score(a: &Finding, b: &Finding) -> f64 {
 /// vocabulary.
 ///
 /// Lowered from `0.6` to `0.5` (MERGE cycle-3, observed-failure 1:
-/// `docs/plans/2026-09-30_cycle3-queue-hardening.md`): a real duplicate pair — one defect
+/// the cycle-3 queue-hardening notes): a real duplicate pair — one defect
 /// reported under two rule ids/tiers more than [`SEMANTIC_MERGE_WINDOW`] lines apart in the same
 /// file, each paraphrased in the generator's OWN words rather than copy-pasted — routinely lands
 /// in the high-0.5s on raw Jaccard once ordinary paraphrase (synonyms, reordered clauses, a
@@ -7405,7 +7405,7 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     primary
 }
 
-/// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`): drop any finding whose rule
+/// P7 (the codebase-inspection hardening notes): drop any finding whose rule
 /// carries a [`camerata_rules::StackException`] that applies to the repo's DETECTED stack +
 /// this finding's own file path — e.g. `ARCH-MONOLITH-FIRST-1` flagging a `supabase/functions/`
 /// directory on a Supabase-stack repo, where a second Edge Functions deployable is the
@@ -7439,7 +7439,7 @@ pub fn apply_stack_exceptions(
         .collect()
 }
 
-/// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`, item 4 — needs-review noise):
+/// P7 (the codebase-inspection hardening notes, item 4 — needs-review noise):
 /// a rule the calibrator flagged as a debatable STRUCTURAL/consistency preference
 /// (`category == "arch-conformance"`, `confidence == "needs-review"`) commonly fires at many
 /// unrelated locations across a repo — one row per occurrence drowns the report ("23
@@ -7605,7 +7605,7 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
 }
 
 /// The SECOND merge pass (design §1, extended by P1 — see
-/// `docs/plans/2026-09-29_codebase-inspection-hardening.md` — and by C4-P1's defect-shaped merge
+/// the codebase-inspection hardening notes — and by C4-P1's defect-shaped merge
 /// redesign): after `resolve_finding_lines` + `merge_by_location` have collapsed exact-location
 /// duplicates, fuse cross-TIER duplicates — the same defect flagged by two rule families a few
 /// lines apart (an AI RLS finding + the native RLS checker; a service-role-bypass + a
@@ -8356,7 +8356,7 @@ fn strip_authoring_token(why: &str) -> String {
     }
 }
 
-/// Pass-1 W2 (A5.4, `docs/plans/2026-10-09_audit-findings-tracker.md`): decide what happens
+/// Pass-1 W2 (A5.4, the audit findings tracker): decide what happens
 /// to `effective_selected`'s directive entry for `rule_id`, given the OPTION that was DECIDED
 /// for this rule this scan (forced by the operator, or model-recommended) — and, when that
 /// option is the degenerate/absent form of the requirement, build the finding that must be
@@ -16209,7 +16209,7 @@ mod tests {
     }
 
     // ---- Pass-1 W2 (A5.4): the alternatives pass may never silence a rule -----------------
-    // (`docs/plans/2026-10-09_audit-findings-tracker.md`)
+    // (the audit findings tracker)
 
     /// req_a5_4: selecting an option marked `violates` must NOT rewrite the rule's effective
     /// directive, and must emit a `Finding` carrying the rule's citation (`rule_id`) and
@@ -17285,7 +17285,7 @@ mod tests {
     }
 
     // ── P1: deduplication + cross-tier merge ────────────────────────────────────────────
-    // docs/plans/2026-09-29_codebase-inspection-hardening.md, P1. Synthetic findings only —
+    // the codebase-inspection hardening notes, P1. Synthetic findings only —
     // never keyed to any one benchmark's rule/file/table names.
 
     #[test]
@@ -17527,7 +17527,7 @@ mod tests {
         );
     }
 
-    // ── MERGE (cycle-2 queue-hardening, docs/plans/2026-09-30_cycle2-queue-hardening.md) ────
+    // ── MERGE (cycle-2 queue-hardening, the cycle-2 queue-hardening notes) ────
     // Gap (ii): two deterministic findings sharing a captured object (same root cause — e.g. two
     // secret-detectors naming the SAME committed secret) were blocked from ever merging by the
     // unconditional det+det guard. Synthetic findings only, fixture-independent.

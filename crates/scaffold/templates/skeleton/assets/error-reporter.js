@@ -1,5 +1,5 @@
 // Auto-capture error reporter (Camerata feedback loop — see
-// docs/plans/2026-07-09_product-owner-head-vibe-mode.md, "Feedback loop: auto-capture
+// the product-owner vibe-mode design notes, "Feedback loop: auto-capture
 // + click-to-report"). Runs entirely client-side: catches runtime errors the app
 // itself hits and POSTs a `DefectReport`-shaped JSON payload (source="auto") to the
 // capture endpoint, so defects surface to the governed dev loop before a human
